@@ -486,6 +486,67 @@ describe('idempotency', () => {
   });
 });
 
+describe('input-validation guards', () => {
+  it('permission dictionary writes are admin-only too', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/iam/roles/permissions')
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ code: 'hack:perm', type: 'ACTION' })
+      .expect(403);
+    expect(res.body).toMatchObject({ code: 'ADMIN_REQUIRED' });
+  });
+
+  it('malformed ids/fields return 400, not 500', async () => {
+    await request(app.getHttpServer())
+      .patch('/iam/roles/not-a-uuid')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'x' })
+      .expect(400);
+    await request(app.getHttpServer())
+      .put('/iam/roles/not-a-uuid/permissions')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ permissionIds: [] })
+      .expect(400);
+    await request(app.getHttpServer())
+      .patch(`/iam/staff/${STAFF_VIEWER}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ orgUnitId: '' })
+      .expect(400);
+    await request(app.getHttpServer())
+      .patch(`/iam/staff/${STAFF_VIEWER}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ roleIds: 5 })
+      .expect(400);
+    await request(app.getHttpServer())
+      .patch(`/iam/staff/${STAFF_VIEWER}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ status: 'X' })
+      .expect(400);
+    await request(app.getHttpServer())
+      .put(`/iam/roles/${ROLE_LIMITED}/permissions`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ permissionIds: 5 })
+      .expect(400);
+  });
+
+  it('scoped writer cannot promote an org to root (parentId: null → 403)', async () => {
+    const res = await request(app.getHttpServer())
+      .patch(`/iam/orgs/${ORG_BR}`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ parentId: null })
+      .expect(403);
+    expect(res.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+  });
+
+  it('org parentId must be a valid uuid when provided', async () => {
+    await request(app.getHttpServer())
+      .patch(`/iam/orgs/${ORG_BR}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ parentId: '' })
+      .expect(400);
+  });
+});
+
 describe('audit log', () => {
   it('appends an audit_log row after a mutating request', async () => {
     // The interceptor writes fire-and-forget after the response — poll briefly.

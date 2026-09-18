@@ -153,7 +153,12 @@ export class StaffController {
     const ctx = currentTenant();
     // Binding roles at creation is a grant → admin-only. Plain profile
     // creation (no roleIds) stays delegated to orgScope holders.
-    if (body.roleIds !== undefined) assertAdmin(req.user);
+    if (body.roleIds !== undefined) {
+      assertAdmin(req.user);
+      if (!Array.isArray(body.roleIds)) {
+        throw new BadRequestException({ code: 'ROLE_IDS_MUST_BE_ARRAY' });
+      }
+    }
 
     if (!key) {
       return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
@@ -187,7 +192,15 @@ export class StaffController {
     const ctx = currentTenant();
     // Rebinding roles is a grant → admin-only. Profile-only PATCH stays
     // delegated (orgScope checks on target + new org still apply below).
-    if (body.roleIds !== undefined) assertAdmin(req.user);
+    if (body.roleIds !== undefined) {
+      assertAdmin(req.user);
+      if (!Array.isArray(body.roleIds)) {
+        throw new BadRequestException({ code: 'ROLE_IDS_MUST_BE_ARRAY' });
+      }
+    }
+    if (body.status !== undefined && !['ACTIVE', 'DISABLED'].includes(body.status)) {
+      throw new BadRequestException({ code: 'INVALID_STAFF_STATUS' });
+    }
     assertUuid(id, 'id');
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.staff.findFirst({ where: { tenantId: ctx.tenantId, id } });
@@ -195,7 +208,7 @@ export class StaffController {
       // The target staff must live inside the caller's orgScope — no reaching
       // across branches — and so must any org being assigned.
       assertOrgWritable(ctx, existing.orgUnitId);
-      if (body.orgUnitId) {
+      if (body.orgUnitId !== undefined) {
         assertUuid(body.orgUnitId, 'orgUnitId');
         assertOrgWritable(ctx, body.orgUnitId);
         const org = await tx.orgUnit.findFirst({

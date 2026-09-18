@@ -23,6 +23,7 @@ import { Permissions } from '../../common/permissions.decorator.js';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { assertUuid } from '../../common/uuid.js';
 
 /**
  * Role CRUD + permission binding. `role.code === 'admin'` bypasses all
@@ -117,6 +118,7 @@ export class RolesController {
   ) {
     const ctx = currentTenant();
     assertAdmin(req.user);
+    assertUuid(id, 'id');
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
@@ -137,6 +139,7 @@ export class RolesController {
   remove(@Param('id') id: string, @Req() req: Request) {
     const ctx = currentTenant();
     assertAdmin(req.user);
+    assertUuid(id, 'id');
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
@@ -170,6 +173,10 @@ export class RolesController {
   ) {
     const ctx = currentTenant();
     assertAdmin(req.user);
+    assertUuid(id, 'id');
+    if (body.permissionIds !== undefined && !Array.isArray(body.permissionIds)) {
+      throw new BadRequestException({ code: 'PERMISSION_IDS_MUST_BE_ARRAY' });
+    }
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
@@ -215,7 +222,13 @@ export class RolesController {
 
   @Post('/permissions')
   @Permissions('iam:write')
-  createPermission(@Body() body: { code?: string; type?: 'MENU' | 'ACTION' | 'DATA' }) {
+  createPermission(
+    @Body() body: { code?: string; type?: 'MENU' | 'ACTION' | 'DATA' },
+    @Req() req: Request,
+  ) {
+    // Minting permission codes is part of the grant surface — admin-only,
+    // same as the rest of role management.
+    assertAdmin(req.user);
     if (!body?.code || !body?.type) {
       throw new BadRequestException({ code: 'PERMISSION_FIELDS_REQUIRED' });
     }
