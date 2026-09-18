@@ -49,6 +49,48 @@ async function seedTenant({ code, name }: TenantSeed) {
     roles[r.code] = role.id;
   }
 
+  // Standard permission codes — must exist for non-admin roles to be bindable
+  // via PUT /iam/roles/:id/permissions (the codes themselves are only enforced
+  // as string literals in @Permissions decorators; a missing row here leaves a
+  // freshly-seeded tenant's non-admin roles unbindable until hand-minted).
+  const permCodes = [
+    'customer:read',
+    'customer:write',
+    'metering:read',
+    'metering:write',
+    'billing:read',
+    'billing:write',
+    'payment:read',
+    'payment:write',
+    'iam:read',
+    'iam:write',
+    'report:read',
+  ];
+  const perms: Record<string, string> = {};
+  for (const code of permCodes) {
+    const p = await prisma.permission.upsert({
+      where: { tenantId_code: { tenantId, code } },
+      update: {},
+      create: { tenantId, code, type: 'ACTION' },
+    });
+    perms[code] = p.id;
+  }
+  // Sensible starter bindings for the seeded roles (admin has '*' implicitly).
+  const rolePermBindings: Record<string, string[]> = {
+    reader: ['customer:read', 'metering:read', 'metering:write'],
+    cashier: ['customer:read', 'billing:read', 'payment:read', 'payment:write'],
+    reviewer: ['metering:read', 'billing:read', 'report:read'],
+  };
+  for (const [roleCode, codes] of Object.entries(rolePermBindings)) {
+    for (const code of codes) {
+      await prisma.rolePermission.upsert({
+        where: { roleId_permissionId: { roleId: roles[roleCode], permissionId: perms[code] } },
+        update: { tenantId },
+        create: { tenantId, roleId: roles[roleCode], permissionId: perms[code] },
+      });
+    }
+  }
+
   // admin account
   const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
   const admin = await prisma.staff.upsert({

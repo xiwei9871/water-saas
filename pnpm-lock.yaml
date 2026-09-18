@@ -28,9 +28,6 @@ importers:
       '@ws/billing-core':
         specifier: workspace:*
         version: link:../../packages/billing-core
-      '@ws/types':
-        specifier: workspace:*
-        version: link:../../packages/types
       bcrypt:
         specifier: ^6.0.0
         version: 6.0.0

@@ -5,15 +5,19 @@ import {
   Delete,
   ForbiddenException,
   Get,
+  Headers,
   NotFoundException,
   Param,
   Patch,
   Post,
   Req,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import type { Request } from 'express';
+import { IdempotencyService } from '../../common/idempotency.service.js';
 import { Permissions } from '../../common/permissions.decorator.js';
-import { currentTenant, orgInScope } from '../../common/tenant-context.js';
+import { currentTenant, orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 
@@ -27,24 +31,60 @@ const outOfScope = () =>
  */
 @Controller('iam/orgs')
 export class OrgsController {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly idem: IdempotencyService,
+  ) {}
 
   @Get()
   @Permissions('iam:read')
   list() {
     const ctx = currentTenant();
+    // ALL-scope callers are not org-filtered — ctx.orgScope is frozen at
+    // login, so scoping ALL users would hide orgs created this session.
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       tx.orgUnit.findMany({
-        where: { tenantId: ctx.tenantId, id: { in: ctx.orgScope } },
+        where: {
+          tenantId: ctx.tenantId,
+          ...(ctx.scope === 'ALL' ? {} : { id: { in: ctx.orgScope } }),
+        },
         orderBy: [{ parentId: 'asc' }, { name: 'asc' }],
       }),
     );
   }
 
+  private async createOrgTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    body: { name?: string; type?: 'COMPANY' | 'BRANCH' | 'DEPT'; parentId?: string | null },
+  ) {
+    if (body.parentId) {
+      const parent = await tx.orgUnit.findFirst({
+        where: { tenantId: ctx.tenantId, id: body.parentId },
+      });
+      if (!parent) throw new NotFoundException({ code: 'ORG_PARENT_NOT_FOUND' });
+    }
+    return tx.orgUnit.create({
+      data: {
+        tenantId: ctx.tenantId,
+        name: body.name!,
+        type: body.type!,
+        parentId: body.parentId ?? null,
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+    });
+  }
+
+  /**
+   * POST /iam/orgs — honors Idempotency-Key like the sibling creates (org_unit
+   * has no name uniqueness to fall back on, so a bare retry would dup).
+   */
   @Post()
   @Permissions('iam:write')
-  create(
+  async create(
     @Body() body: { name?: string; type?: 'COMPANY' | 'BRANCH' | 'DEPT'; parentId?: string | null },
+    @Headers('idempotency-key') key?: string,
   ) {
     if (!body?.name || !body?.type) {
       throw new BadRequestException({ code: 'ORG_FIELDS_REQUIRED' });
@@ -56,24 +96,19 @@ export class OrgsController {
       assertUuid(body.parentId, 'parentId');
     }
     if (body.parentId && !orgInScope(ctx, body.parentId)) throw outOfScope();
-    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      if (body.parentId) {
-        const parent = await tx.orgUnit.findFirst({
-          where: { tenantId: ctx.tenantId, id: body.parentId },
-        });
-        if (!parent) throw new NotFoundException({ code: 'ORG_PARENT_NOT_FOUND' });
-      }
-      return tx.orgUnit.create({
-        data: {
-          tenantId: ctx.tenantId,
-          name: body.name!,
-          type: body.type!,
-          parentId: body.parentId ?? null,
-          createdBy: ctx.staffId,
-          updatedBy: ctx.staffId,
-        },
-      });
-    });
+
+    if (!key) {
+      return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+        this.createOrgTx(tx, ctx, body),
+      );
+    }
+    const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+    const result = await this.idem.runWithKey(
+      ctx.tenantId,
+      { key, method: 'POST', route: '/iam/orgs', requestHash, responseStatus: 201 },
+      (tx) => this.createOrgTx(tx, ctx, body),
+    );
+    return result.body;
   }
 
   @Patch(':id')

@@ -74,7 +74,9 @@ export class StaffController {
       tx.staff.findMany({
         where: {
           tenantId: ctx.tenantId,
-          orgUnitId: orgUnitId ?? { in: ctx.orgScope },
+          // ALL scope: no org filter — ctx.orgScope is frozen at login and
+          // would hide staff in orgs created this session.
+          orgUnitId: orgUnitId ?? (ctx.scope === 'ALL' ? undefined : { in: ctx.orgScope }),
         },
         select: SAFE_SELECT,
         orderBy: { login: 'asc' },
