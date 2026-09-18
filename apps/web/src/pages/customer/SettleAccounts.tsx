@@ -34,8 +34,8 @@ import {
   cleanPatch,
   fmtTime,
   newIdemKey,
-} from './common';
-import { AccountStatusTag } from './pickers';
+} from '../common';
+import { AccountStatusTag } from '../pickers';
 
 interface SettleFormValues {
   settleNo?: string;

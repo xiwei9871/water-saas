@@ -169,8 +169,8 @@ export class MeterReadingService {
       qcStatus?: QcStatus;
     },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.meterReading.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.meterReading.findMany({
         where: {
           tenantId: ctx.tenantId,
           planItemId: q.planItemId,
@@ -183,19 +183,45 @@ export class MeterReadingService {
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+      return this.attachSupersededBy(tx, ctx, rows);
+    });
   }
 
   async getById(ctx: TenantCtx, id: string) {
-    const row = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.meterReading.findFirst({
+    const row = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const found = await tx.meterReading.findFirst({
         where: { tenantId: ctx.tenantId, id },
         select: METER_READING_SELECT,
-      }),
-    );
-    if (!row) throw new NotFoundException({ code: 'READING_NOT_FOUND' });
+      });
+      if (!found) throw new NotFoundException({ code: 'READING_NOT_FOUND' });
+      return (await this.attachSupersededBy(tx, ctx, [found]))[0];
+    });
     return row;
+  }
+
+  /**
+   * Hydrate `supersededById` per row — a superseded parent keeps its own
+   * supersedes_reading_id NULL while the correcting child carries the link,
+   * so "was this row corrected?" needs the child-row probe (the same rule
+   * validReadings applies). Lets a client mark 已被更正 rows without a
+   * second round-trip.
+   */
+  private async attachSupersededBy<T extends { id: string }>(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    rows: T[],
+  ): Promise<(T & { supersededById: string | null })[]> {
+    if (rows.length === 0) return [];
+    const children = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        supersedesReadingId: { in: rows.map((r) => r.id) },
+      },
+      select: { id: true, supersedesReadingId: true },
+    });
+    const byParent = new Map(children.map((c) => [c.supersedesReadingId, c.id]));
+    return rows.map((r) => ({ ...r, supersededById: byParent.get(r.id) ?? null }));
   }
 
   /**

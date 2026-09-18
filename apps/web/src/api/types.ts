@@ -1,25 +1,45 @@
 import type {
   AccountStatus,
+  ComponentSourceType,
   CustType,
   DataScope,
+  EstimateMethod,
+  ExceptionCode,
   InstallReason,
   InstallationStatus,
   MeterStatus,
   OrgType,
   PermType,
+  PlanItemStatus,
+  PlanStatus,
+  QcStatus,
+  ReadResultType,
+  ReadSource,
+  ReconStatus,
+  SettlementStatus,
   StaffStatus,
 } from '@ws/types';
 
 /** Re-exported shared enums so pages can import everything from here. */
 export type {
   AccountStatus,
+  ComponentSourceType,
   CustType,
   DataScope,
+  EstimateMethod,
+  ExceptionCode,
   InstallReason,
   InstallationStatus,
   MeterStatus,
   OrgType,
   PermType,
+  PlanItemStatus,
+  PlanStatus,
+  QcStatus,
+  ReadResultType,
+  ReadSource,
+  ReconStatus,
+  SettlementStatus,
   StaffStatus,
 } from '@ws/types';
 
@@ -255,4 +275,205 @@ export interface OnboardResult {
     model: string | null;
   };
   installation: MeterInstallation;
+}
+
+/* ------------------------------------------------------------------ */
+/* metering domain (spec §2.2 抄表 / §2.3 结算水量)                      */
+/* ------------------------------------------------------------------ */
+
+/** GET /reading-books */
+export interface ReadingBook {
+  id: string;
+  tenantId: string;
+  bookNo: string;
+  name: string;
+  orgUnitId: string;
+  readerId: string | null;
+  scheduleDay: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One member row inside GET /reading-books/:id (seq_no ordered). */
+export interface BookMember {
+  waterAccountId: string;
+  seqNo: number;
+  waterAccount: {
+    id: string;
+    accountNo: string;
+    addr: string;
+    status: AccountStatus;
+  } | null;
+}
+
+/** GET /reading-books/:id — book + current members. */
+export interface ReadingBookDetail extends ReadingBook {
+  members: BookMember[];
+}
+
+/** GET /reading-plans */
+export interface ReadingPlan {
+  id: string;
+  tenantId: string;
+  bookId: string;
+  /** char(6) YYYYMM. */
+  period: string;
+  planDate: string;
+  readerId: string | null;
+  status: PlanStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** reading_plan_item — the generation-time book snapshot. */
+export interface ReadingPlanItem {
+  id: string;
+  tenantId: string;
+  planId: string;
+  waterAccountId: string;
+  seqNo: number;
+  plannedInstallationId: string | null;
+  status: PlanItemStatus;
+  completedReadingId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /reading-plans/:id — plan + all items (seq_no ordered). */
+export interface ReadingPlanDetail extends ReadingPlan {
+  items: ReadingPlanItem[];
+}
+
+/** GET /reading-plans/:id/progress — every key always present (0-filled). */
+export interface ReadingPlanProgress {
+  planId: string;
+  planStatus: PlanStatus;
+  PENDING: number;
+  READ: number;
+  NO_READ: number;
+  SKIPPED: number;
+  total: number;
+}
+
+/**
+ * GET /meter-readings — append-only fact rows. Decimal columns serialize
+ * as strings. `supersededById` is a hydrated convenience field (child-row
+ * probe): non-null when a newer correction row points at this one.
+ */
+export interface MeterReading {
+  id: string;
+  tenantId: string;
+  planItemId: string | null;
+  installationId: string;
+  meterId: string;
+  period: string;
+  readDate: string;
+  resultType: ReadResultType;
+  readingValue: string | null;
+  exceptionCode: ExceptionCode | null;
+  supersedesReadingId: string | null;
+  supersededById: string | null;
+  qcStatus: QcStatus;
+  qcBy: string | null;
+  qcAt: string | null;
+  source: ReadSource;
+  operatorId: string | null;
+  photoRef: string | null;
+  remark: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One failed row inside a 400 IMPORT_VALIDATION_FAILED body. */
+export interface ImportRowError {
+  row: number;
+  code: string;
+  error: string;
+}
+
+/** GET /consumption-settlements list + detail rows (components inline). */
+export interface ConsumptionComponent {
+  id: string;
+  tenantId: string;
+  settlementId: string;
+  installationId: string;
+  /** Decimal columns — strings on the wire. */
+  prevReadingValue: string;
+  endReadingValue: string | null;
+  usageQty: string;
+  sourceType: ComponentSourceType;
+  sourceReadingId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EstimateBasis {
+  historyUsageQtys?: string[];
+  componentBreakdown?: {
+    installationId: string;
+    sourceType: ComponentSourceType;
+    sourceReadingId: string | null;
+    prevReadingValue: string;
+    endReadingValue: string;
+    usageQty: string;
+    method?: EstimateMethod;
+    suggestedUsageQty?: string | null;
+  }[];
+}
+
+export interface ConsumptionSettlement {
+  id: string;
+  tenantId: string;
+  waterAccountId: string;
+  period: string;
+  totalUsageQty: string;
+  isEstimated: boolean;
+  estimateMethod: EstimateMethod | null;
+  estimateBasis: EstimateBasis | null;
+  estimateReason: string | null;
+  status: SettlementStatus;
+  createdAt: string;
+  updatedAt: string;
+  components: ConsumptionComponent[];
+  /** Trailing run of consecutive estimated settlements (per account). */
+  consecutiveEstimates: number;
+}
+
+/** POST /estimate/preview response. */
+export interface EstimatePreview {
+  suggestedUsage: string | null;
+  method: EstimateMethod;
+  basis: { window: number; historyUsageQtys: string[] };
+}
+
+/* ------------------------------------------------------------------ */
+/* billing domain — reconciliation 补差 (spec §2.4)                      */
+/* ------------------------------------------------------------------ */
+
+/** GET /reconciliations — append-only calibration rows. */
+export interface Reconciliation {
+  id: string;
+  tenantId: string;
+  waterAccountId: string;
+  anchorReadingId: string;
+  actualReadingId: string;
+  /** Inclusive span (fromPeriod, toPeriod] covered by the recon. */
+  fromPeriod: string;
+  toPeriod: string;
+  actualTotalUsage: string;
+  previouslySettledUsage: string;
+  remainderUsage: string;
+  absorbedSettlementId: string | null;
+  /** BigInt columns — cent amounts serialized as strings. */
+  correctChargeCent: string | null;
+  postedChargeCent: string | null;
+  adjustmentAmountCent: string | null;
+  status: ReconStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** POST /reconciliations — row + the adjustment bill it minted (if any). */
+export interface ReconciliationCreated extends Reconciliation {
+  adjustmentBill: { id: string; totalAmount: string; status: string } | null;
 }

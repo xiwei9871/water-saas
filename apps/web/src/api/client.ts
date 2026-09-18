@@ -54,12 +54,19 @@ export const session = {
 export class ApiError extends Error {
   readonly code: string;
   readonly status: number;
+  /**
+   * Raw error body when the server sent one — endpoints that return a
+   * structured payload alongside `code` (e.g. IMPORT_VALIDATION_FAILED's
+   * per-row `failed[]` report) are read from here.
+   */
+  readonly body: unknown;
 
-  constructor(code: string, status: number, message?: string) {
+  constructor(code: string, status: number, message?: string, body?: unknown) {
     super(message ?? code);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -84,7 +91,7 @@ export const toApiError = (err: unknown): ApiError => {
       : typeof body?.message === 'string'
         ? body.message
         : undefined;
-    return new ApiError(code, status, message);
+    return new ApiError(code, status, message, body);
   }
   return new ApiError(
     'UNKNOWN',
@@ -151,6 +158,76 @@ const CODE_LABELS: Record<string, string> = {
   INSTALL_REASON_INVALID: '装表原因无效',
   FINAL_READING_REQUIRED: '请填写拆除读数',
   FINAL_READING_BEFORE_INITIAL: '拆除读数不能小于装表初始读数',
+  // metering domain — books / plans
+  SCHEDULE_DAY_INVALID: '抄表日需为 1-31 的整数',
+  BOOK_FIELDS_REQUIRED: '请填写抄表册名称与所属组织',
+  BOOK_NOT_FOUND: '抄表册不存在',
+  READER_NOT_FOUND: '抄表员不存在',
+  BOOK_HAS_PLANS: '该抄表册已生成过计划，无法删除',
+  BOOK_MEMBER_FIELDS_REQUIRED: '请选择要加入的水表户',
+  SEQ_NO_INVALID: '顺序号需为正整数',
+  BOOK_MEMBER_NOT_FOUND: '该水表户不在抄表册中',
+  PERIOD_INVALID: '账期格式不正确（YYYYMM）',
+  PLAN_STATUS_INVALID: '计划状态无效',
+  PLAN_ITEM_STATUS_INVALID: '计划明细状态无效',
+  GENERATE_FIELDS_REQUIRED: '请选择抄表册并填写账期',
+  PLAN_ALREADY_EXISTS: '该抄表册本期已有进行中的计划',
+  EMPTY_BOOK: '抄表册为空（无有效成员），无法生成计划',
+  PLAN_NOT_FOUND: '抄表计划不存在',
+  INVALID_PLAN_STATUS_TRANSITION: '当前计划状态不允许该操作',
+  // metering domain — readings / QC / import
+  READING_FIELDS_REQUIRED: '请填写抄表记录必填项',
+  RESULT_TYPE_INVALID: '抄表结果类型无效',
+  READING_VALUE_REQUIRED: '请填写表码读数',
+  READING_VALUE_NOT_ALLOWED: '未抄见不允许填写表码读数',
+  EXCEPTION_CODE_REQUIRED: '请选择未抄见原因',
+  EXCEPTION_CODE_INVALID: '未抄见原因无效',
+  EXCEPTION_CODE_NOT_ALLOWED: '实抄/远传不允许填写异常代码',
+  SOURCE_INVALID: '抄表来源无效',
+  ITEMS_REQUIRED: '批量录入至少需要一条记录',
+  READING_NOT_FOUND: '抄表记录不存在',
+  PLAN_ITEM_NOT_FOUND: '计划明细不存在',
+  ITEM_ALREADY_DONE: '该明细已完成抄表，更正请走“更正读数”',
+  PLAN_NOT_OPEN: '计划已关闭或完成，无法继续抄表',
+  NO_ACTIVE_INSTALLATION: '该水表户当前无在用表计，无法录入',
+  DUPLICATE_PLAN_ITEM: '批量录入中存在重复的计划明细',
+  QC_ACTION_INVALID: '质检动作无效',
+  QC_STATUS_INVALID: '质检状态无效',
+  INVALID_QC_STATUS_TRANSITION: '当前质检状态不允许该操作',
+  READING_SUPERSEDED: '该记录已被更正，请对最新记录进行质检',
+  NOT_SUPERSEDABLE: '未抄见记录不能更正读数',
+  ALREADY_SUPERSEDED: '该记录已被更正，不能重复更正',
+  IMPORT_BODY_REQUIRED: '请提供 CSV 内容',
+  IMPORT_VALIDATION_FAILED: '导入校验失败，请按行修正后重新提交',
+  ROW_MALFORMED: '行格式不正确（应为 4-5 列）',
+  // metering domain — consumption settlements
+  SETTLEMENT_STATUS_INVALID: '结算状态无效',
+  IS_ESTIMATED_INVALID: '预估标志无效',
+  SETTLEMENT_FIELDS_REQUIRED: '请选择水表户并填写账期',
+  ESTIMATE_REASON_INVALID: '预估原因格式不正确',
+  ESTIMATE_REASON_REQUIRED: '存在预估分量时必须填写预估原因',
+  ESTIMATE_USAGE_REQUIRED: '无历史用量可预估，请手工填写用量',
+  SETTLEMENT_NOT_FOUND: '结算记录不存在',
+  SETTLEMENT_ALREADY_EXISTS: '该水表户本期已生成结算',
+  INVALID_SETTLEMENT_STATUS_TRANSITION: '当前结算状态不允许该操作',
+  NO_INSTALLATION_IN_PERIOD: '该账期内没有可用的表计安装记录',
+  OVERRIDES_INVALID: '用量覆盖格式不正确',
+  OVERRIDE_FIELDS_REQUIRED: '用量覆盖需包含安装记录与用量',
+  OVERRIDE_TARGET_INVALID: '用量覆盖只能针对预估分量',
+  USAGE_QTY_AMBIGUOUS: '存在多个预估分量，请使用 overrides 分别指定',
+  DUPLICATE_OVERRIDE: '用量覆盖存在重复的安装记录',
+  PREV_EXCEEDS_MAX_DIAL: '上期读数超出表计最大量程，请先修正读数链',
+  NEGATIVE_USAGE: '读数倒挂且无法按量程翻转解释，请先更正读数',
+  PREVIEW_FIELDS_REQUIRED: '请选择水表户并填写账期',
+  // billing domain — reconciliation
+  RECONCILIATION_STATUS_INVALID: '补差状态无效',
+  RECONCILIATION_FIELDS_REQUIRED: '请选择水表户',
+  RECONCILIATION_NOT_FOUND: '补差记录不存在',
+  RECONCILIATION_EXISTS: '该实抄记录已完成补差，不能重复发起',
+  RECONCILIATION_EMPTY_SPAN: '两次可信读数之间没有已结算水量，无需补差',
+  RECONCILIATION_UNBILLED_SPAN: '区间内存在未出账结算，不能调账（可先吸收进草稿结算）',
+  RECONCILIATION_TARIFF_MISSING: '区间内账期缺少有效资费方案，无法调账',
+  ANCHOR_NOT_FOUND: '找不到可作为锚点的上一次可信读数',
   NETWORK_ERROR: '网络异常，请检查 API 服务是否已启动',
 };
 

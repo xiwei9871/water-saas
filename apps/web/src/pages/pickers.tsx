@@ -1,15 +1,19 @@
-import { App as AntdApp, Select, Tag } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { App as AntdApp, Select, Tag, TreeSelect } from 'antd';
+import type { DataNode } from 'antd/es/tree';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api, apiErrorText } from '../api/client';
 import type {
   AccountStatus,
   Customer,
   InstallationStatus,
   Meter,
   MeterStatus,
+  OrgUnit,
+  ReadingBook,
   SettleAccount,
+  Staff,
   WaterAccount,
-} from '../../api/types';
+} from '../api/types';
 import {
   ACCOUNT_STATUS_COLORS,
   ACCOUNT_STATUS_LABELS,
@@ -343,6 +347,182 @@ export function WaterAccountSelect({
         onChange?.(v);
       }}
       notFoundContent={fetching ? '加载中…' : '该客户暂无水表户'}
+    />
+  );
+}
+
+/**
+ * 员工选择（抄表员等）：/iam/staff 需 iam:read —— 调用方应先
+ * hasPerm('iam:read') 判断，没有权限时隐藏或退化（抄表册默认取
+ * 当前用户所属组织时同样处理）。全量拉取后本地过滤。
+ */
+export function StaffSelect({ value, onChange, placeholder, disabled }: PickerProps) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => setFetching(true));
+    api
+      .get<Staff[]>('/iam/staff')
+      .then((res) => {
+        if (cancelled) return;
+        setOptions(
+          res.data
+            .filter((s) => s.status === 'ACTIVE')
+            .map((s) => ({ value: s.id, label: `${s.name}（${s.login}）` })),
+        );
+      })
+      .catch((err) => {
+        if (!cancelled) message.error(apiErrorText(err));
+      })
+      .finally(() => {
+        if (!cancelled) setFetching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [message]);
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      optionFilterProp="label"
+      placeholder={placeholder ?? '选择员工'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
+      notFoundContent={fetching ? '加载中…' : '暂无员工'}
+    />
+  );
+}
+
+/**
+ * 组织选择：/iam/orgs 需 iam:read —— 同上由调用方决定降级策略。
+ * 数据权限受限的用户拿到的列表顶部可能不是真正的根（parentId 指向
+ * 列表外），按 Staff 页的约定把这些节点当作根渲染。
+ */
+export function OrgUnitTreeSelect({
+  value,
+  onChange,
+  placeholder,
+  disabled,
+}: PickerProps) {
+  const { message } = AntdApp.useApp();
+  const [orgs, setOrgs] = useState<OrgUnit[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<OrgUnit[]>('/iam/orgs')
+      .then((res) => {
+        if (!cancelled) setOrgs(res.data);
+      })
+      .catch((err) => {
+        if (!cancelled) message.error(apiErrorText(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [message]);
+
+  const treeData = useMemo<DataNode[]>(() => {
+    const ids = new Set(orgs.map((o) => o.id));
+    const roots = orgs.filter(
+      (o) => o.parentId === null || !ids.has(o.parentId),
+    );
+    const build = (list: OrgUnit[]): DataNode[] =>
+      list.map((o) => ({
+        key: o.id,
+        value: o.id,
+        title: o.name,
+        children: build(orgs.filter((c) => c.parentId === o.id)),
+      }));
+    return build(roots);
+  }, [orgs]);
+
+  return (
+    <TreeSelect
+      allowClear
+      treeDefaultExpandAll
+      treeData={treeData}
+      placeholder={placeholder ?? '选择组织'}
+      disabled={disabled}
+      value={value}
+      onChange={(v: string | undefined) => onChange?.(v)}
+    />
+  );
+}
+
+/** 抄表册选择：?name= 远程模糊搜索（label = 名称（册号））。 */
+export function ReadingBookSelect({
+  value,
+  onChange,
+  placeholder,
+  disabled,
+}: PickerProps) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+
+  const fetch = useCallback(
+    async (kw: string) => {
+      setFetching(true);
+      try {
+        const res = await api.get<ReadingBook[]>('/reading-books', {
+          params: { take: 50, ...(kw.trim() ? { name: kw.trim() } : {}) },
+        });
+        setOptions(
+          res.data.map((b) => ({
+            value: b.id,
+            label: `${b.name}（${b.bookNo}）`,
+          })),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setFetching(false);
+      }
+    },
+    [message],
+  );
+
+  useEffect(() => {
+    queueMicrotask(() => void fetch(''));
+  }, [fetch]);
+  const onSearch = useDebounced((kw) => void fetch(kw));
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      filterOption={false}
+      placeholder={placeholder ?? '搜索抄表册名称'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
+      onSearch={onSearch}
+      notFoundContent={fetching ? '加载中…' : '无匹配抄表册'}
     />
   );
 }

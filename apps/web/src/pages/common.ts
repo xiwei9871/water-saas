@@ -1,13 +1,17 @@
 import dayjs from 'dayjs';
+import { useCallback, useEffect, useState } from 'react';
+import { api } from '../api/client';
 import type {
   AccountStatus,
   CustType,
   InstallReason,
   InstallationStatus,
   MeterStatus,
-} from '../../api/types';
+  WaterAccount,
+} from '../api/types';
+import { useAuth } from '../auth/AuthContext';
 
-/** 客户域共享的枚举中文标签 / 颜色 / 小工具。 */
+/** 跨页面共享的枚举中文标签 / 颜色 / 小工具。 */
 
 export const CUST_TYPE_LABELS: Record<CustType, string> = {
   PERSONAL: '个人',
@@ -62,6 +66,14 @@ export const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss')
 export const fmtDate = (iso?: string | null) =>
   iso ? dayjs(iso).format('YYYY-MM-DD') : '—';
 
+/** char(6) 账期 'YYYYMM' → 显示 'YYYY-MM'。 */
+export const fmtPeriod = (p?: string | null) =>
+  p && /^\d{6}$/.test(p) ? `${p.slice(0, 4)}-${p.slice(4)}` : (p ?? '—');
+
+/** 金额分 → 元 显示（BigInt 列序列化为字符串）。 */
+export const fmtCent = (v?: string | number | null) =>
+  v === null || v === undefined ? '—' : `¥${(Number(v) / 100).toFixed(2)}`;
+
 /** 水表读数等非负 Decimal 输入的表单校验（最多 4 位小数）。 */
 export const DECIMAL_RULE = {
   pattern: /^\d+(\.\d{1,4})?$/,
@@ -105,4 +117,52 @@ export const cleanPatch = <T extends Record<string, unknown>>(
     out[k] = typeof v === 'string' ? v.trim() || null : v;
   }
   return out;
+};
+
+/**
+ * 水表户 id → 户号 的批量水合 hook：结算/补差等列表只带
+ * waterAccountId，逐条 GET /water-accounts/:id 解析成户号展示。
+ * 需 customer:read —— 没有权限（或单条失败）时退化为短 uuid 显示。
+ */
+export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
+  const { hasPerm } = useAuth();
+  const canRead = hasPerm('customer:read');
+  const [labels, setLabels] = useState(() => new Map<string, string | null>());
+  const key = ids
+    .filter((i): i is string => !!i)
+    .sort()
+    .join(',');
+
+  useEffect(() => {
+    if (!canRead) return;
+    const missing = key.split(',').filter((id) => id && !labels.has(id));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      missing.map((id) =>
+        api
+          .get<WaterAccount>(`/water-accounts/${id}`)
+          .then((r) => r.data)
+          .catch(() => null),
+      ),
+    ).then((res) => {
+      if (cancelled) return;
+      setLabels((prev) => {
+        const next = new Map(prev);
+        res.forEach((a, i) => next.set(missing[i], a ? a.accountNo : null));
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, canRead, labels]);
+
+  return useCallback(
+    (id: string | null | undefined) => {
+      if (!id) return '—';
+      return labels.get(id) ?? `${id.slice(0, 8)}…`;
+    },
+    [labels],
+  );
 };

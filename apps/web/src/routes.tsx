@@ -15,6 +15,11 @@ import Meters from './pages/customer/Meters';
 import Onboard from './pages/customer/Onboard';
 import SettleAccounts from './pages/customer/SettleAccounts';
 import WaterAccounts from './pages/customer/WaterAccounts';
+import MeterReadings from './pages/metering/MeterReadings';
+import ReadingBooks from './pages/metering/ReadingBooks';
+import ReadingPlans from './pages/metering/ReadingPlans';
+import Reconciliations from './pages/settlement/Reconciliations';
+import Settlements from './pages/settlement/Settlements';
 import AuditLogs from './pages/system/AuditLogs';
 import Orgs from './pages/system/Orgs';
 import Roles from './pages/system/Roles';
@@ -97,6 +102,26 @@ export const APP_ROUTES: AppRoute[] = [
     label: '抄表管理',
     icon: <ReadOutlined />,
     perms: ['metering:read'],
+    children: [
+      {
+        key: 'metering-books',
+        path: '/metering/books',
+        label: '抄表册',
+        element: <ReadingBooks />,
+      },
+      {
+        key: 'metering-plans',
+        path: '/metering/plans',
+        label: '抄表计划',
+        element: <ReadingPlans />,
+      },
+      {
+        key: 'metering-readings',
+        path: '/metering/readings',
+        label: '抄表记录',
+        element: <MeterReadings />,
+      },
+    ],
   },
   {
     key: 'settlement',
@@ -105,6 +130,22 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <TransactionOutlined />,
     // settlement 列表归 metering，reconciliation 归 billing — 任一可读即显示。
     perms: ['metering:read', 'billing:read'],
+    children: [
+      {
+        key: 'settlement-list',
+        path: '/settlement/list',
+        label: '结算水量',
+        perms: ['metering:read'],
+        element: <Settlements />,
+      },
+      {
+        key: 'settlement-reconciliations',
+        path: '/settlement/reconciliations',
+        label: '补差管理',
+        perms: ['billing:read'],
+        element: <Reconciliations />,
+      },
+    ],
   },
   {
     key: 'billing',

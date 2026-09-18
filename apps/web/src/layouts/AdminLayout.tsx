@@ -93,7 +93,7 @@ export default function AdminLayout() {
           mode="inline"
           items={items}
           selectedKeys={[selectedKeyOf(location.pathname)]}
-          defaultOpenKeys={['/customer', '/system']}
+          defaultOpenKeys={['/customer', '/metering', '/settlement', '/system']}
           onClick={({ key }) => navigate(key)}
         />
       </Sider>

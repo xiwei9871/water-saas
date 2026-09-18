@@ -23,8 +23,8 @@ import {
   INSTALL_REASON_LABELS,
   cleanBody,
   newIdemKey,
-} from './common';
-import { CustomerSelect, MeterSelect, SettleAccountSelect } from './pickers';
+} from '../common';
+import { CustomerSelect, MeterSelect, SettleAccountSelect } from '../pickers';
 
 type CustMode = 'new' | 'existing';
 type SettleMode = 'default' | 'new' | 'existing';

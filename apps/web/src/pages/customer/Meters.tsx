@@ -40,14 +40,14 @@ import {
   fmtDate,
   fmtTime,
   newIdemKey,
-} from './common';
+} from '../common';
 import {
   CustomerSelect,
   InstallationStatusTag,
   MeterSelect,
   MeterStatusTag,
   WaterAccountSelect,
-} from './pickers';
+} from '../pickers';
 
 /**
  * PATCH /meters/:id 允许的状态流转（与服务端一致）：

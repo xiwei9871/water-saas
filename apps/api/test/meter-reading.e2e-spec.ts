@@ -572,6 +572,19 @@ describe('supersede chain', () => {
       .expect(200);
     expect(Number(orig.body.readingValue)).toBe(123.5);
     expect(orig.body.qcStatus).toBe('PASSED'); // original QC verdict kept
+    // T15b: hydrated supersededById marks the corrected parent (list + detail).
+    expect(orig.body.supersededById).toBe(corrected);
+
+    const listRows = (
+      await request(app.getHttpServer())
+        .get(`/meter-readings?planItemId=${itemOf('p1', 'A')}`)
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    const parent = listRows.find((r: { id: string }) => r.id === original);
+    const child = listRows.find((r: { id: string }) => r.id === corrected);
+    expect(parent.supersededById).toBe(corrected);
+    expect(child.supersededById).toBeNull();
 
     // item now points at the corrected fact
     const items = (

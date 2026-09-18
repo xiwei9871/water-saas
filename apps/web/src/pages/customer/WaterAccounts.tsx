@@ -34,12 +34,12 @@ import {
   cleanBody,
   fmtDate,
   newIdemKey,
-} from './common';
+} from '../common';
 import {
   AccountStatusTag,
   CustomerSelect,
   SettleAccountSelect,
-} from './pickers';
+} from '../pickers';
 
 type EventKind = 'suspend' | 'resume' | 'close';
 
