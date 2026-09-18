@@ -727,6 +727,11 @@ model Reconciliation {
   updatedAt              DateTime    @updatedAt @map("updated_at")
   updatedBy              String?     @map("updated_by") @db.Uuid
 
+  // One actual reading anchors at most ONE reconciliation (append-only
+  // calibration); created as plain SQL in migration
+  // 20260918200000_reconciliation_actual_unique, kept here so
+  // introspection matches.
+  @@unique([tenantId, actualReadingId])
   @@index([tenantId, waterAccountId])
   @@index([tenantId, status])
   @@map("reconciliation")

@@ -4,6 +4,20 @@ export { Decimal };
 export { estimateAvg3 } from './estimator.js';
 export { DomainError } from './errors.js';
 export { fromCents, toCents } from './money.js';
+export {
+  allocateUsage,
+  buildReconciliation,
+  reprice,
+} from './reconcile.js';
+export type {
+  AllocateUsageInput,
+  BuildReconciliationInput,
+  ReconcileAllocPolicy,
+  ReconciliationAmounts,
+  RepriceBreakdownRow,
+  RepricePeriod,
+  RepriceResult,
+} from './reconcile.js';
 export { roundCent } from './round.js';
 export { computeBill } from './settle.js';
 export type {
