@@ -22,15 +22,16 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
+  AccountStatus,
   SettleAccount,
   SettleAccountDetail,
   WaterAccountRef,
 } from '../../api/types';
-import type { AccountStatus } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
   ACCOUNT_STATUS_LABELS,
   cleanBody,
+  cleanPatch,
   fmtTime,
   newIdemKey,
 } from './common';
@@ -136,7 +137,7 @@ export default function SettleAccounts() {
       } else if (modal?.mode === 'edit') {
         await api.patch(
           `/settle-accounts/${modal.row.id}`,
-          cleanBody({
+          cleanPatch({
             name: values.name,
             phone: values.phone,
             status: values.status,
@@ -219,7 +220,7 @@ export default function SettleAccounts() {
       dataIndex: 'accountNo',
       key: 'accountNo',
       render: (no: string) => (
-        <Link to={`/customer/water-accounts?accountNo=${no}`}>{no}</Link>
+        <Link to={`/customer/water-accounts?accountNo=${encodeURIComponent(no)}`}>{no}</Link>
       ),
     },
     { title: '用水类别', dataIndex: 'usageCategory', key: 'usageCategory' },

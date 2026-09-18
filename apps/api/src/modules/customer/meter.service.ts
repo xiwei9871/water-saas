@@ -68,10 +68,28 @@ export class MeterService {
     private readonly seq: SequenceService,
   ) {}
 
-  list(ctx: TenantCtx, q: { take: number; skip: number; status?: MeterStatus }) {
+  list(
+    ctx: TenantCtx,
+    q: { take: number; skip: number; status?: MeterStatus; q?: string },
+  ) {
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       tx.meter.findMany({
-        where: { tenantId: ctx.tenantId, status: q.status },
+        where: {
+          tenantId: ctx.tenantId,
+          status: q.status,
+          // Device-pick search — the registry can exceed one picker page.
+          ...(q.q
+            ? {
+                OR: [
+                  { meterNo: { contains: q.q } },
+                  { serialNo: { contains: q.q } },
+                  { barcode: { contains: q.q } },
+                  { brand: { contains: q.q } },
+                  { model: { contains: q.q } },
+                ],
+              }
+            : {}),
+        },
         select: METER_SELECT,
         orderBy: { meterNo: 'asc' },
         take: q.take,

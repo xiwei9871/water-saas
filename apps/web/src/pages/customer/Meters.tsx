@@ -36,6 +36,7 @@ import {
   INSTALL_REASON_LABELS,
   METER_STATUS_LABELS,
   cleanBody,
+  cleanPatch,
   fmtDate,
   fmtTime,
   newIdemKey,
@@ -226,7 +227,7 @@ export default function Meters() {
         // meterNo 不在 PATCH 字段内 —— 只提交设备字段与状态。
         await api.patch(
           `/meters/${meterModal.meter.id}`,
-          cleanBody({
+          cleanPatch({
             serialNo: values.serialNo,
             barcode: values.barcode,
             brand: values.brand,

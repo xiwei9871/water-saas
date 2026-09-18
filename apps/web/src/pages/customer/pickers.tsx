@@ -54,11 +54,32 @@ const useDebounced = (fn: (kw: string) => void, ms = 300) => {
   );
 };
 
+/**
+ * Selected-option label cache — remote search replaces `options`, and a
+ * Select shows the raw uuid once the picked option scrolls out of the
+ * refreshed list. Remember labels by value so the display never flashes ids.
+ * (Stable Map via lazy useState — reading ref.current during render is not
+ * React-Compiler-safe.)
+ */
+const useLabelCache = () => useState(() => new Map<string, string>())[0];
+
+/** Merge the currently-selected option back into a refreshed list. */
+const withSelected = (
+  options: Option[],
+  value: string | undefined,
+  labelCache: Map<string, string>,
+): Option[] => {
+  if (!value || options.some((o) => o.value === value)) return options;
+  const label = labelCache.get(value) ?? `${value.slice(0, 8)}…`;
+  return [...options, { value, label }];
+};
+
 /** 客户选择：?name= 模糊搜索（label = 名称（客户编号））。 */
 export function CustomerSelect({ value, onChange, placeholder, disabled }: PickerProps) {
   const { message } = AntdApp.useApp();
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -96,9 +117,15 @@ export function CustomerSelect({ value, onChange, placeholder, disabled }: Picke
       placeholder={placeholder ?? '搜索客户名称'}
       disabled={disabled}
       loading={fetching}
-      options={options}
+      options={withSelected(options, value, labelCache)}
       value={value}
-      onChange={(v: string | undefined) => onChange?.(v)}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配客户'}
     />
@@ -115,6 +142,7 @@ export function SettleAccountSelect({
   const { message } = AntdApp.useApp();
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -151,9 +179,15 @@ export function SettleAccountSelect({
       placeholder={placeholder ?? '搜索结算户名称'}
       disabled={disabled}
       loading={fetching}
-      options={options}
+      options={withSelected(options, value, labelCache)}
       value={value}
-      onChange={(v: string | undefined) => onChange?.(v)}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配结算户'}
     />
@@ -166,8 +200,8 @@ interface MeterSelectProps extends PickerProps {
 }
 
 /**
- * 水表选择：列表接口只有 ?status= 过滤 —— 取一页（200）后用 Select 的
- * optionFilterProp 按 label（表号/品牌/型号/口径）本地过滤。
+ * 水表选择：?q= 远程模糊搜索（表号/序列号/条码/品牌/型号），可叠加
+ * ?status= —— 注册表数超出一页也能搜到。
  */
 export function MeterSelect({
   value,
@@ -179,43 +213,59 @@ export function MeterSelect({
   const { message } = AntdApp.useApp();
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
 
-  const fetch = useCallback(async () => {
-    setFetching(true);
-    try {
-      const res = await api.get<Meter[]>('/meters', {
-        params: { take: 200, ...(status ? { status } : {}) },
-      });
-      setOptions(
-        res.data.map((m) => ({
-          value: m.id,
-          label: [m.meterNo, m.brand, m.model, m.caliber]
-            .filter(Boolean)
-            .join(' · '),
-        })),
-      );
-    } catch (err) {
-      message.error(apiErrorText(err));
-    } finally {
-      setFetching(false);
-    }
-  }, [message, status]);
+  const fetch = useCallback(
+    async (kw: string) => {
+      setFetching(true);
+      try {
+        const res = await api.get<Meter[]>('/meters', {
+          params: {
+            take: 50,
+            ...(kw.trim() ? { q: kw.trim() } : {}),
+            ...(status ? { status } : {}),
+          },
+        });
+        setOptions(
+          res.data.map((m) => ({
+            value: m.id,
+            label: [m.meterNo, m.brand, m.model, m.caliber]
+              .filter(Boolean)
+              .join(' · '),
+          })),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setFetching(false);
+      }
+    },
+    [message, status],
+  );
 
   useEffect(() => {
-    queueMicrotask(() => void fetch());
+    queueMicrotask(() => void fetch(''));
   }, [fetch]);
+  const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
     <Select
       showSearch
       allowClear
-      optionFilterProp="label"
+      filterOption={false}
       placeholder={placeholder ?? '搜索表号/品牌'}
       disabled={disabled}
       loading={fetching}
-      options={options}
+      options={withSelected(options, value, labelCache)}
       value={value}
-      onChange={(v: string | undefined) => onChange?.(v)}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
+      onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配水表'}
     />
   );
@@ -240,6 +290,7 @@ export function WaterAccountSelect({
   const { message } = AntdApp.useApp();
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
 
   useEffect(() => {
     if (!customerId) {
@@ -282,9 +333,15 @@ export function WaterAccountSelect({
       }
       disabled={disabled || !customerId}
       loading={fetching}
-      options={options}
+      options={withSelected(options, value, labelCache)}
       value={value}
-      onChange={(v: string | undefined) => onChange?.(v)}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
       notFoundContent={fetching ? '加载中…' : '该客户暂无水表户'}
     />
   );

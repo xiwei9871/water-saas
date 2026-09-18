@@ -62,10 +62,10 @@ interface WizardValues {
 }
 
 const STEPS = [
-  { title: '客户', desc: '新建或选择已有客户' },
-  { title: '结算户', desc: '默认同户主 / 新建 / 已有' },
-  { title: '水表户', desc: '用水类别与地址' },
-  { title: '水表安装', desc: '挂表与初始读数' },
+  { title: '客户', description: '新建或选择已有客户' },
+  { title: '结算户', description: '默认同户主 / 新建 / 已有' },
+  { title: '水表户', description: '用水类别与地址' },
+  { title: '水表安装', description: '挂表与初始读数' },
 ];
 
 /**
@@ -215,7 +215,7 @@ export default function Onboard() {
             </Button>,
             <Link
               key="view"
-              to={`/customer/water-accounts?accountNo=${result.waterAccount.accountNo}`}
+              to={`/customer/water-accounts?accountNo=${encodeURIComponent(result.waterAccount.accountNo)}`}
             >
               <Button>查看水表户</Button>
             </Link>,

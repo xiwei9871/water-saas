@@ -72,8 +72,14 @@ export const DECIMAL_RULE = {
  * Idempotency-Key for POST mutations — one uuid per form-open / wizard-mount.
  * Retried submits reuse the same key so a double-click can't double-apply;
  * the server rolls the key row back on failure so edit-then-retry still works.
+ * crypto.randomUUID is missing in non-secure (plain-http) contexts — fall
+ * back to a random-shaped uuid rather than crashing every form-open.
  */
-export const newIdemKey = (): string => crypto.randomUUID();
+export const newIdemKey = (): string =>
+  crypto.randomUUID?.() ??
+  'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) =>
+    ((Math.random() * 16) | (c === 'x' ? 0 : 8 + Math.random() * 4)).toString(16),
+  );
 
 /** Strip empty-string/undefined fields so POST bodies stay clean. */
 export const cleanBody = <T extends Record<string, unknown>>(body: T): T => {
@@ -83,4 +89,20 @@ export const cleanBody = <T extends Record<string, unknown>>(body: T): T => {
     out[k] = typeof v === 'string' ? v.trim() : v;
   }
   return out as T;
+};
+
+/**
+ * PATCH semantics differ from POST: undefined = leave unchanged, but an
+ * emptied optional field must reach the server as `null` — the explicit
+ * clear — or the old value silently persists.
+ */
+export const cleanPatch = <T extends Record<string, unknown>>(
+  body: T,
+): Record<string, unknown> => {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (v === undefined) continue;
+    out[k] = typeof v === 'string' ? v.trim() || null : v;
+  }
+  return out;
 };

@@ -45,6 +45,7 @@ export class MeterController {
   @Permissions('customer:read')
   list(
     @Query('status') status?: string,
+    @Query('q') q?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
@@ -54,6 +55,7 @@ export class MeterController {
     return this.svc.list(currentTenant(), {
       ...pageArgs(take, skip),
       status: status as MeterStatus | undefined,
+      q: q?.trim() || undefined,
     });
   }
 

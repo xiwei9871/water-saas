@@ -27,6 +27,7 @@ import { useAuth } from '../../auth/AuthContext';
 import {
   CUST_TYPE_LABELS,
   cleanBody,
+  cleanPatch,
   fmtTime,
   newIdemKey,
 } from './common';
@@ -140,7 +141,7 @@ export default function Customers() {
         // customerNo 不可变 —— PATCH 只提交资料字段。
         await api.patch(
           `/customers/${modal.customer.id}`,
-          cleanBody({
+          cleanPatch({
             name: values.name,
             custType: values.custType,
             idType: values.idType,
@@ -237,7 +238,7 @@ export default function Customers() {
       dataIndex: 'accountNo',
       key: 'accountNo',
       render: (no: string) => (
-        <Link to={`/customer/water-accounts?accountNo=${no}`}>{no}</Link>
+        <Link to={`/customer/water-accounts?accountNo=${encodeURIComponent(no)}`}>{no}</Link>
       ),
     },
     { title: '用水类别', dataIndex: 'usageCategory', key: 'usageCategory' },
@@ -270,7 +271,7 @@ export default function Customers() {
           />
           <Input.Search
             allowClear
-            placeholder="按客户编号搜索"
+            placeholder="按客户编号精确查询"
             style={{ width: 180 }}
             value={noInput}
             onChange={(e) => setNoInput(e.target.value)}
