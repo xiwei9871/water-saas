@@ -237,7 +237,14 @@ export class MeterReadingService {
       if (plan.status !== 'OPEN' && plan.status !== 'IN_PROGRESS') {
         throw planNotOpen(plan.status);
       }
-      if (item.status !== 'PENDING') throw itemAlreadyDone(item.status);
+      // PENDING accepts the first observation; NO_READ accepts a retry (a
+      // failed visit followed by a successful one — the new row is a fresh
+      // observation, not a supersede; the NO_READ row stays as history).
+      // READ is terminal for direct entry — value corrections go through
+      // POST /:id/supersede.
+      if (item.status !== 'PENDING' && item.status !== 'NO_READ') {
+        throw itemAlreadyDone(item.status);
+      }
       const installation = installations.get(item.waterAccountId);
       if (!installation) {
         throw new BadRequestException({
@@ -315,7 +322,7 @@ export class MeterReadingService {
         failed.push({ row, code: 'PLAN_NOT_FOUND', error: 'plan not found' });
         continue;
       }
-      if (plan.bookOrgUnitId !== null && !orgInScope(ctx, plan.bookOrgUnitId)) {
+      if (!orgInScope(ctx, plan.bookOrgUnitId)) {
         failed.push({ row, code: 'ORG_OUT_OF_SCOPE', error: 'book org outside data scope' });
         continue;
       }
@@ -323,7 +330,7 @@ export class MeterReadingService {
         failed.push({ row, code: 'PLAN_NOT_OPEN', error: `plan status ${plan.status}` });
         continue;
       }
-      if (item.status !== 'PENDING') {
+      if (item.status !== 'PENDING' && item.status !== 'NO_READ') {
         failed.push({ row, code: 'ITEM_ALREADY_DONE', error: `item status ${item.status}` });
         continue;
       }
@@ -364,6 +371,17 @@ export class MeterReadingService {
     if (!existing) throw new NotFoundException({ code: 'READING_NOT_FOUND' });
     await this.assertReadingScope(tx, ctx, existing.planItemId);
 
+    // A superseded row is no longer the valid fact — QC'ing it would leave
+    // a stale verdict on history. The superseding child carries its own
+    // PENDING qc_status; that's the row to verdict.
+    const child = await tx.meterReading.findFirst({
+      where: { tenantId: ctx.tenantId, supersedesReadingId: id },
+      select: { id: true },
+    });
+    if (child) {
+      throw new ConflictException({ code: 'READING_SUPERSEDED', by: child.id });
+    }
+
     const to = QC_TARGET[action];
     const allowedFrom = QC_ALLOWED_FROM[to];
     req.auditBefore = existing;
@@ -397,7 +415,8 @@ export class MeterReadingService {
    * supersede chain tracks dial truth, QC is per-fact.
    *
    * Only ACTUAL/REMOTE rows are supersede-able (a NO_READ carries no dial
-   * value to correct — its "correction" is a fresh entry flow). The original
+   * value to correct — its "correction" is a direct re-entry on the item,
+   * which the PENDING|NO_READ item guard now allows). The original
    * row is locked FOR UPDATE before the child check so two concurrent
    * supersedes on the same parent can't both win the supersedes_reading_id
    * slot.
@@ -528,7 +547,7 @@ export class MeterReadingService {
         status: 'ACTIVE',
       },
       select: { id: true, waterAccountId: true, meterId: true, installedAt: true },
-      orderBy: { installedAt: 'desc' },
+      orderBy: [{ installedAt: 'desc' }, { id: 'asc' }],
     });
     const byAccount = new Map<string, { id: string; meterId: string }>();
     for (const r of rows) {
@@ -575,8 +594,14 @@ export class MeterReadingService {
       });
       // Guarded flip: a concurrent entry on the same item loses the race
       // here (count=0 → 409) instead of silently double-completing it.
+      // NO_READ is a retryable outcome — a fresh observation lands a new
+      // fact row and repoints completed_reading_id (history preserved).
       const flipped = await tx.readingPlanItem.updateMany({
-        where: { tenantId: ctx.tenantId, id: item.id, status: 'PENDING' },
+        where: {
+          tenantId: ctx.tenantId,
+          id: item.id,
+          status: { in: ['PENDING', 'NO_READ'] },
+        },
         data: {
           status: input.resultType === 'NO_READ' ? 'NO_READ' : 'READ',
           completedReadingId: reading.id,
@@ -600,7 +625,17 @@ export class MeterReadingService {
     ctx: TenantCtx,
     planIds: string[],
   ) {
-    for (const planId of planIds) {
+    // Sorted FOR UPDATE: the guarded writes below only lock the plan row
+    // while their status predicate matches — without this lock, two
+    // concurrent "last item" completions could each count PENDING=1 (the
+    // other's flip is still uncommitted) and neither would land DONE,
+    // leaving the plan stuck IN_PROGRESS forever. Sorting also orders lock
+    // acquisition across multi-plan batches (deadlock discipline).
+    for (const planId of [...planIds].sort()) {
+      await tx.$queryRaw`
+        SELECT id FROM reading_plan
+        WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${planId}::uuid
+        FOR UPDATE`;
       await tx.readingPlan.updateMany({
         where: { tenantId: ctx.tenantId, id: planId, status: 'OPEN' },
         data: { status: 'IN_PROGRESS', updatedBy: ctx.staffId },

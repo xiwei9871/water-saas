@@ -850,3 +850,82 @@ describe('tenant isolation + permissions + scope', () => {
     expect(res.body).toMatchObject({ code: 'PERMISSION_DENIED' });
   });
 });
+
+describe('T6 review follow-ups', () => {
+  it('NO_READ item accepts a retry: new ACTUAL lands, item READ, old NO_READ row preserved', async () => {
+    const itemId = itemOf('p3', 'B');
+    const first = await request(app.getHttpServer())
+      .post('/meter-readings')
+      .set(auth(adminToken))
+      .send({ planItemId: itemId, resultType: 'NO_READ', exceptionCode: 'LOCKED' })
+      .expect(201);
+
+    // Same-day successful visit — a fresh observation, not a supersede.
+    const retry = await request(app.getHttpServer())
+      .post('/meter-readings')
+      .set(auth(adminToken))
+      .send({ planItemId: itemId, resultType: 'ACTUAL', readingValue: 66 })
+      .expect(201);
+    expect(retry.body.supersedesReadingId).toBeNull();
+
+    const items = (
+      await request(app.getHttpServer())
+        .get(`/reading-plans/${plans['p3'].id}/items`)
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    const item = items.find((i: { id: string }) => i.id === itemId);
+    expect(item.status).toBe('READ');
+    expect(item.completedReadingId).toBe(retry.body.id);
+
+    // The failed visit stays as history.
+    const readings = (
+      await request(app.getHttpServer())
+        .get(`/meter-readings?planItemId=${itemId}`)
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    expect(readings).toHaveLength(2);
+    expect(readings.map((r: { id: string }) => r.id)).toEqual(
+      expect.arrayContaining([first.body.id, retry.body.id]),
+    );
+  });
+
+  it('{rows} import forces source=IMPORT even when a row claims WEB', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/meter-readings/import')
+      .set(auth(adminToken))
+      .send({
+        rows: [
+          {
+            planItemId: itemOf('p3', 'C'),
+            resultType: 'ACTUAL',
+            readingValue: 5,
+            source: 'WEB',
+          },
+        ],
+      })
+      .expect(201);
+    expect(res.body.readings[0].source).toBe('IMPORT');
+
+    // p3's last item landed → plan DONE.
+    const p = await progress(plans['p3'].id);
+    expect(p.planStatus).toBe('DONE');
+  });
+
+  it('QC on a superseded reading → 409 READING_SUPERSEDED', async () => {
+    const list = await request(app.getHttpServer())
+      .get(`/meter-readings?planItemId=${itemOf('p1', 'A')}`)
+      .set(auth(adminToken))
+      .expect(200);
+    const superseded = list.body.find(
+      (r: { supersedesReadingId: string | null }) => r.supersedesReadingId === null,
+    );
+    const res = await request(app.getHttpServer())
+      .post(`/meter-readings/${superseded.id}/qc`)
+      .set(auth(adminToken))
+      .send({ action: 'reject' });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'READING_SUPERSEDED' });
+  });
+});

@@ -287,7 +287,12 @@ export class MeterReadingController {
     } else if (Array.isArray(body?.rows) && body.rows.length > 0) {
       body.rows.forEach((raw, i) => {
         try {
-          inputs.push({ row: i + 1, input: parseReadingInput(raw, 'IMPORT') });
+          // Strip per-row source: import provenance is forced IMPORT —
+          // a row claiming WEB provenance would pollute the audit channel.
+          inputs.push({
+            row: i + 1,
+            input: parseReadingInput({ ...raw, source: undefined }, 'IMPORT'),
+          });
         } catch (err) {
           preFailed.push(rowErrorOf(i + 1, err));
         }
