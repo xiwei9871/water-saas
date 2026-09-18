@@ -309,7 +309,7 @@ export default function Bills() {
                 title={`红冲账单 ${fmtCent(record.totalAmount)}？`}
                 description="原单转“已红冲”，同时生成一张 POSTED 红冲负单冲抵 —— 财务事实追加不改写。"
                 okText="红冲"
-                okButtonProps={{ danger: true }}
+                okButtonProps={{ danger: true, loading: acting === record.id }}
                 cancelText="取消"
                 onConfirm={() => void reverse(record)}
               >
@@ -419,7 +419,7 @@ export default function Bills() {
                     setWaterAccountId(undefined);
                     setPage(1);
                   }}
-                  placeholder="按客户过滤"
+                  placeholder="先选客户（联动水表户）"
                 />
               </span>
               <span style={{ width: 200, display: 'inline-block' }}>
@@ -638,11 +638,11 @@ export default function Bills() {
                   title="红冲该账单？"
                   description="原单转“已红冲”，生成 POSTED 红冲负单冲抵。"
                   okText="红冲"
-                  okButtonProps={{ danger: true }}
+                  okButtonProps={{ danger: true, loading: acting === detail.id }}
                   cancelText="取消"
                   onConfirm={() => void reverse(detail)}
                 >
-                  <Button danger>红冲</Button>
+                  <Button danger loading={acting === detail.id}>红冲</Button>
                 </Popconfirm>
                 <Button icon={<SwapOutlined />} onClick={() => openReplace(detail)}>
                   换票重开

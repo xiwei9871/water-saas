@@ -193,8 +193,9 @@ export default function Tariffs() {
 
   const openEdit = async (row: TariffPlan) => {
     if (row.status === 'ACTIVE') {
+      // 长期有效的方案不预填日期（默认今天没有意义），让用户主动选择关账日。
       activeForm.setFieldsValue({
-        effectiveTo: row.effectiveTo ? dayjs(row.effectiveTo) : dayjs(),
+        effectiveTo: row.effectiveTo ? dayjs(row.effectiveTo) : undefined,
       });
       setModal({ kind: 'editActive', plan: row });
       return;
@@ -309,6 +310,16 @@ export default function Tariffs() {
       message.error(tierErr);
       return;
     }
+    // 服务端 effectiveTo 缺省会“继承源方案截止日”，所以清空必须显式发 null，
+    // 且客户端先挡住“截止日 ≤ 生效日”（否则继承值可能撞 TARIFF_WINDOW_INVALID）。
+    if (
+      modal?.kind === 'newVersion' &&
+      values.effectiveTo &&
+      !values.effectiveTo.isAfter(values.effectiveFrom, 'day')
+    ) {
+      message.error('新版本的失效日期必须晚于生效日期');
+      return;
+    }
     setSaving(true);
     try {
       if (modal?.kind === 'create') {
@@ -340,7 +351,8 @@ export default function Tariffs() {
           cleanBody({
             name: values.name,
             effectiveFrom: values.effectiveFrom.format('YYYY-MM-DD'),
-            effectiveTo: values.effectiveTo ? values.effectiveTo.format('YYYY-MM-DD') : undefined,
+            // null = 长期有效；undefined 会被服务端解释为“继承源方案截止日”。
+            effectiveTo: values.effectiveTo ? values.effectiveTo.format('YYYY-MM-DD') : null,
             tiers: flattenTiers(values.groups),
           }),
           { headers: { 'Idempotency-Key': idemKey } },
@@ -496,6 +508,7 @@ export default function Tariffs() {
               title={`激活 ${record.name}？`}
               description="同用水类别下生效区间重叠会激活失败；无阶梯的草稿不能激活。"
               okText="激活"
+              okButtonProps={{ loading: acting === record.id }}
               cancelText="取消"
               onConfirm={() => void transition(record, 'activate', '已激活')}
             >
@@ -515,7 +528,7 @@ export default function Tariffs() {
               title={`停用 ${record.name}？`}
               description="停用后该账期起不再按此方案开账；已出账单不受影响。"
               okText="停用"
-              okButtonProps={{ danger: true }}
+              okButtonProps={{ danger: true, loading: acting === record.id }}
               cancelText="取消"
               onConfirm={() => void transition(record, 'retire', '已停用')}
             >

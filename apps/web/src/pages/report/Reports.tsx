@@ -133,7 +133,7 @@ export default function Reports({ kind }: { kind: ReportKind }) {
     }
   }, [bookId, date, kind, message, orgUnitId, period, through]);
 
-  // 默认参数自动查一次；参数修改由“查询”按钮提交（也可改日期直接重查）。
+  // 默认参数自动查一次；参数修改均由“查询”按钮提交重查。
   useEffect(() => {
     queueMicrotask(() => void run());
     // eslint-disable-next-line react-hooks/exhaustive-deps -- kind 由路由 key 强制重挂载，仅首查

@@ -386,7 +386,7 @@ export default function Cashier() {
           {items.length > 0 && (
             <Card size="small" style={{ marginTop: 16 }} title="收款分摊">
               <Form layout="inline" style={{ rowGap: 8 }}>
-                <Form.Item label="收款总额（元）">
+                <Form.Item label="自动分摊总额（元）">
                   <InputNumber
                     min={0}
                     precision={2}

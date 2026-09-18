@@ -287,7 +287,7 @@ export default function Payments() {
               title={`红冲收款 ${fmtCent(record.amount)}？`}
               description="追加一条负额收款（原单状态不变、原收据作废），相关账单欠费恢复。"
               okText="红冲"
-              okButtonProps={{ danger: true }}
+              okButtonProps={{ danger: true, loading: acting === record.id }}
               cancelText="取消"
               onConfirm={() => void reverse(record)}
             >
@@ -368,7 +368,8 @@ export default function Payments() {
             allowClear
             placeholder="状态"
             style={{ width: 110 }}
-            options={(['RECEIVED', 'DAY_CLOSED', 'REVERSED'] as const).map((s) => ({
+            // REVERSED 是保留态（无迁移路径，红冲以负额新单表达），不提供过滤。
+            options={(['RECEIVED', 'DAY_CLOSED'] as const).map((s) => ({
               value: s,
               label: PAYMENT_STATUS_LABELS[s],
             }))}
@@ -517,12 +518,13 @@ export default function Payments() {
                     打印票据
                   </Button>
                 )}
-                {detail.reversalOfId === null && (
+                {/* 已被红冲过的原单：收据已作废，不再提供重复红冲入口。 */}
+                {detail.reversalOfId === null && !(receipt && receipt.voidFlag) && (
                   <Popconfirm
                     title="红冲该收款？"
                     description="追加一条负额收款（原单状态不变、原收据作废），相关账单欠费恢复。"
                     okText="红冲"
-                    okButtonProps={{ danger: true }}
+                    okButtonProps={{ danger: true, loading: acting === detail.id }}
                     cancelText="取消"
                     onConfirm={() => void reverse(detail)}
                   >

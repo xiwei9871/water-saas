@@ -305,6 +305,7 @@ export default function BillingRuns() {
               title={`执行 ${fmtPeriod(record.period)} 开账？`}
               description="同步执行：重跑失败户并对所有草稿账单过账（DRAFT→POSTED）。"
               okText="执行"
+              okButtonProps={{ loading: acting === record.id }}
               cancelText="取消"
               onConfirm={() => void runAction(record, 'post', '开账完成')}
             >
@@ -327,6 +328,7 @@ export default function BillingRuns() {
                 title={`重试 ${fmtPeriod(record.period)} 批次？`}
                 description="重跑失败明细（资费修正后重试是 PARTIAL→POSTED 的路径）。"
                 okText="重试"
+                okButtonProps={{ loading: acting === record.id }}
                 cancelText="取消"
                 onConfirm={() => void runAction(record, 'retry', '重试完成')}
               >
@@ -344,7 +346,7 @@ export default function BillingRuns() {
               title={`作废 ${fmtPeriod(record.period)} 批次？`}
               description="删除该批次及其全部草稿账单，账期可重新开账；已出账数据不会被删除。"
               okText="作废"
-              okButtonProps={{ danger: true }}
+              okButtonProps={{ danger: true, loading: acting === record.id }}
               cancelText="取消"
               onConfirm={() => void runAction(record, 'discard', '已作废')}
             >
