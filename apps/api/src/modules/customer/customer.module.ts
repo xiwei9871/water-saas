@@ -41,5 +41,8 @@ import { WaterAccountService } from './water-account.service.js';
     CloseAccountUseCase,
     { provide: FinancePort, useClass: StubFinancePort },
   ],
+  // metering (downstream in the iam←customer←metering direction) reuses the
+  // tenant-scoped document numbering for reading_book.book_no.
+  exports: [SequenceService],
 })
 export class CustomerModule {}

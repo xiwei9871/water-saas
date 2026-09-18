@@ -10,9 +10,10 @@ import { PermissionsGuard } from './common/permissions.guard.js';
 import { TenantInterceptor } from './common/tenant.interceptor.js';
 import { CustomerModule } from './modules/customer/customer.module.js';
 import { IamModule } from './modules/iam/iam.module.js';
+import { MeteringModule } from './modules/metering/metering.module.js';
 
 @Module({
-  imports: [CommonModule, IamModule, CustomerModule],
+  imports: [CommonModule, IamModule, CustomerModule, MeteringModule],
   controllers: [AppController],
   providers: [
     AppService,
