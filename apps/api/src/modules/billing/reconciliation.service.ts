@@ -81,38 +81,60 @@ const POSTED_STATUSES = ['POSTED', 'PARTIAL_PAID', 'PAID'] as const;
  * against the previous trusted reading (the anchor — always a real dial,
  * never an estimate's synthetic end) and the true cumulative usage
  * `actual − anchor` is reconciled against the settlements billed in the
- * span (anchor.period, actual.period]:
+ * span (anchor.period, actual.period].
+ *
+ * Field semantics (post-review, C1/I2): `previously_settled_usage`
+ * counts FINAL settlements ONLY — a DRAFT settlement's usage is not a
+ * fixed fact, it is still open usage. `remainder_usage` is therefore
+ * the OPEN remainder `actualTotal − ΣFINAL`: what the actual period's
+ * settlement should carry once estimates are corrected.
  *
  *  - POST /reconciliations resolves the actual (explicit id or the
  *    account's latest trusted reading) + anchor + span in ONE tx, then:
  *      · meter swap (anchor/actual on different installations) →
  *        MANUAL_REVIEW — cross-meter usage attribution is out of MVP
  *        scope; the row records the raw computed facts for an operator.
- *      · actual < anchor (dial regression) → tenant param
- *        `negative_usage_policy` (jsonb string, spec §2.4, default
- *        CLAMP_REVIEW): MANUAL_REVIEW. Under ALLOW_NEGATIVE the reprice
- *        path is still attempted and any engine DomainError on the
- *        negative quantities lands the row in MANUAL_REVIEW instead of
- *        failing the request.
- *      · remainder ≥ 0 AND the settlement covering actual.period is
- *        DRAFT with NO NORMAL bill → ABSORB: remainder is added into
- *        that settlement's total_usage_qty (guarded updateMany; a lost
- *        race to FINAL falls through to the adjustment path). This is
- *        the normal estimate-catch-up — no bill, adjustment_amount = 0.
- *      · otherwise → ADJUST: `reconcile_alloc_policy` (default
- *        PROPORTIONAL_TO_SETTLED, alt ALL_TO_CURRENT) redistributes the
- *        true usage over the span, `reprice()` rebills each period at
- *        its own tariff version with the natural-year ladder, and
- *        `correct − posted` (posted = NORMAL|REPLACEMENT bills in
- *        POSTED|PARTIAL_PAID|PAID) becomes ONE POSTED ADJUSTMENT bill
- *        (source RECONCILIATION, negative = credit). adjustment = 0 →
- *        APPLIED with no bill.
+ *      · actual < anchor (dial regression) → MANUAL_REVIEW under EVERY
+ *        posture. Tenant param `negative_usage_policy` is still read but
+ *        RESERVED (M4): CLAMP_REVIEW and ALLOW_NEGATIVE both land here
+ *        today — the old ALLOW_NEGATIVE reprice attempt was dead code,
+ *        a negative total always hit a DomainError anyway.
+ *      · remainder ≥ 0 AND the settlement covering actual.period exists,
+ *        is DRAFT with NO NORMAL bill, and EVERY other span settlement
+ *        is FINAL → ABSORB: `total_usage_qty := remainder` — SET, not
+ *        increment (the estimate was wrong wholesale; SET is also
+ *        idempotent under replay). The component on the actual's
+ *        installation is rewired to the real dial (end_reading_value =
+ *        actual value, sourceType READING, usage = remainder − Σ other
+ *        components) so the next period's prevChain starts at the true
+ *        dial — without it the absorbed delta bills twice (I1). A
+ *        settlement with no matching component, or a computed component
+ *        usage < 0 (multi-installation attribution impossible) →
+ *        MANUAL_REVIEW instead of absorbing.
+ *      · otherwise → ADJUST — but only when the span is fully closed:
+ *        EVERY settlement FINAL and covered by posted-side debt
+ *        (NORMAL|REPLACEMENT in POSTED|PARTIAL_PAID|PAID), else 422
+ *        RECONCILIATION_UNBILLED_SPAN — repricing an unbilled period
+ *        would mint an adjustment on top of the NORMAL bill that still
+ *        arrives later (double charge). `reconcile_alloc_policy`
+ *        (default PROPORTIONAL_TO_SETTLED, alt ALL_TO_CURRENT)
+ *        redistributes the true usage, `reprice()` rebills each period
+ *        at its own tariff version with the natural-year ladder, and
+ *        `correct − posted` becomes ONE POSTED ADJUSTMENT bill (source
+ *        RECONCILIATION, negative = credit). `posted` counts NORMAL +
+ *        REPLACEMENT + prior ADJUSTMENT bills (C2 — prior corrections
+ *        are real debt; counting them is what makes successive
+ *        reconciliations converge instead of double-correcting).
+ *        adjustment = 0 → APPLIED with no bill.
  *
  * Immutability: FINAL settlements and POSTED bills are NEVER mutated
  * (spec §1.3/§2.4) — the adjustment appends a new document. The recon
  * row is append-only and lands BEFORE its bill (the bill's sourceId);
  * UNIQUE(tenant_id, actual_reading_id) makes one actual reconcilable
  * exactly once — a repeat POST is 409, not a second calibration.
+ * Same-period anchor+actual → span (P,P] is empty → 409 — so a
+ * same-period superseding re-read has NO recalibration path in MVP
+ * (documented M1; the correcting reading must land in a later period).
  */
 @Injectable()
 export class ReconciliationService {
@@ -159,9 +181,14 @@ export class ReconciliationService {
   }
 
   /**
-   * POST /reconciliations — resolve + decide + persist in ONE tx. See the
-   * class docblock for the decision table; the ordering below mirrors it:
-   * account → actual → anchor → dup guard → span → scope → outcome.
+   * POST /reconciliations — resolve + decide + persist in ONE tx. The
+   * ordering is deliberate (C3/M3/M6): account → water_account FOR
+   * UPDATE → CLOSED check → scope probe → actual → anchor → dup →
+   * span → outcome. One row lock taken BEFORE any state read serializes
+   * reconcile vs postOneBill vs close-account vs a sibling reconcile;
+   * the scope probe precedes every 404/409 so an out-of-scope caller
+   * can't probe account state through error codes (same ordering as
+   * settlement.service.generateTx).
    */
   async createTx(
     tx: Prisma.TransactionClient,
@@ -180,6 +207,29 @@ export class ReconciliationService {
     if (!account) {
       throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     }
+
+    // Serialization anchor: the row lock must precede every state read
+    // (readings, settlements, bills) or the checks below could decide on
+    // a snapshot a concurrent post/close has already invalidated (C3).
+    // Status is re-read under the lock — CLOSED refuses every outcome
+    // leg uniformly, absorb included (M6).
+    await lockAccountForUpdate(tx, ctx, account.id);
+    const acc = await tx.waterAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: account.id },
+      select: { status: true },
+    });
+    if (acc?.status === 'CLOSED') {
+      throw new ConflictException({
+        code: 'ACCOUNT_CLOSED',
+        waterAccountId: account.id,
+      });
+    }
+
+    // Scope BEFORE the probes (M3): every plan-item binding of the
+    // account resolves to a book → org; any out-of-scope org → 403.
+    // The probe covers all binding periods (the span isn't resolved
+    // yet), which subsumes a per-period check.
+    await this.assertAccountScope(tx, ctx, account.id);
 
     // Actual: the explicit reading (must itself be trusted + on this
     // account) or the account's latest trusted reading.
@@ -211,8 +261,9 @@ export class ReconciliationService {
       });
     }
 
-    // Span: every settlement billed inside (anchor, actual] — any status,
-    // a DRAFT still counts as settled usage (absorb adds on top).
+    // Span: every settlement inside (anchor, actual]. An empty span —
+    // including the same-period (P,P] case — means nothing was settled
+    // between the two readings, so there is nothing to reconcile.
     const span = await tx.consumptionSettlement.findMany({
       where: {
         tenantId: ctx.tenantId,
@@ -229,18 +280,16 @@ export class ReconciliationService {
       });
     }
 
-    // Org scope BEFORE any write: resolved per affected period through
-    // the plan-item → plan → book chain (same resolution as
-    // BillService.assertAccountScope). A reconciliation touches a period
-    // range, so every period's bindings must be in the caller's subtree.
-    for (const p of new Set([actual.period, ...span.map((s) => s.period)])) {
-      await this.assertAccountScope(tx, ctx, account.id, p);
-    }
-
+    // settled = FINAL only (C1/I2): a DRAFT settlement's usage is not a
+    // fixed fact — its period is either the absorb target or part of
+    // the still-open remainder. remainderUsage is therefore the OPEN
+    // usage the actual period should carry once estimates correct.
     const amounts = buildReconciliation({
       anchorValue: anchor.readingValue,
       actualValue: actual.readingValue,
-      settledUsages: span.map((s) => s.totalUsageQty),
+      settledUsages: span
+        .filter((s) => s.status === 'FINAL')
+        .map((s) => s.totalUsageQty),
     });
     // Re-wrap in Prisma.Decimal: decimal.js instances from another module
     // copy would slip past toJsonSafe's instanceof check (same rule as
@@ -274,14 +323,12 @@ export class ReconciliationService {
       return { ...row, adjustmentBill: null };
     }
 
-    // Dial regression (actual < anchor): the default CLAMP_REVIEW parks
-    // it; ALLOW_NEGATIVE still attempts the reprice path, where a
-    // DomainError on negative quantities degrades to MANUAL_REVIEW.
-    const negativeAllowed =
-      amounts.actualTotalUsage.isNegative() &&
-      (await this.tenantParam(tx, ctx, 'negative_usage_policy')) ===
-        'ALLOW_NEGATIVE';
-    if (amounts.actualTotalUsage.isNegative() && !negativeAllowed) {
+    // Dial regression: actual < anchor is unsafe under every tenant
+    // posture — the `negative_usage_policy` param is read but RESERVED
+    // (M4; see class docblock). `.lt(0)`, not `.isNegative()`:
+    // Decimal('-0') reports negative yet is absorbable zero.
+    await this.tenantParam(tx, ctx, 'negative_usage_policy');
+    if (amounts.actualTotalUsage.lt(0)) {
       const row = await this.record(tx, ctx, {
         ...baseFields,
         status: 'MANUAL_REVIEW',
@@ -289,11 +336,22 @@ export class ReconciliationService {
       return { ...row, adjustmentBill: null };
     }
 
-    // ABSORB path: a non-negative remainder is the current period's own
-    // catch-up usage — it lands on the DRAFT settlement covering
-    // actual.period when that settlement has no NORMAL bill yet.
+    // ABSORB: the open remainder lands on the actual period's own
+    // settlement — SET, not increment (C1): the DRAFT's estimate was
+    // wrong wholesale, so `total_usage_qty := remainder`, which is also
+    // replay-idempotent. Preconditions: remainder ≥ 0, the actual-period
+    // settlement exists and is DRAFT with no NORMAL bill, and every
+    // OTHER span settlement is FINAL (a second open period can't be
+    // corrected in place).
     const target = span.find((s) => s.period === actual.period);
-    if (!amounts.remainderUsage.isNegative() && target?.status === 'DRAFT') {
+    const othersFinal = span.every(
+      (s) => s.id === target?.id || s.status === 'FINAL',
+    );
+    if (
+      amounts.remainderUsage.gte(0) &&
+      target?.status === 'DRAFT' &&
+      othersFinal
+    ) {
       const billed = await tx.bill.findFirst({
         where: {
           tenantId: ctx.tenantId,
@@ -304,14 +362,54 @@ export class ReconciliationService {
         select: { id: true },
       });
       if (!billed) {
+        // I1: prove component attribution BEFORE writing — the
+        // component on the actual's installation takes
+        // `remainder − Σ(other components)` so Σ components ==
+        // totalUsageQty. No matching component or a negative result
+        // (multi-installation attribution impossible) → MANUAL_REVIEW,
+        // never a guessed absorb.
+        const components = await tx.consumptionComponent.findMany({
+          where: { tenantId: ctx.tenantId, settlementId: target.id },
+          select: { id: true, installationId: true, usageQty: true },
+        });
+        const comp = components.find(
+          (c) => c.installationId === actual.installationId,
+        );
+        const otherQty = components
+          .filter((c) => c !== comp)
+          .reduce((sum, c) => sum.plus(c.usageQty), new Prisma.Decimal(0));
+        const compQty =
+          comp === undefined
+            ? null
+            : amounts.remainderUsage.minus(otherQty);
+        if (comp === undefined || compQty === null || compQty.lt(0)) {
+          const row = await this.record(tx, ctx, {
+            ...baseFields,
+            status: 'MANUAL_REVIEW',
+          });
+          return { ...row, adjustmentBill: null };
+        }
         const bumped = await tx.consumptionSettlement.updateMany({
           where: { tenantId: ctx.tenantId, id: target.id, status: 'DRAFT' },
           data: {
-            totalUsageQty: { increment: usageFields.remainderUsage },
+            totalUsageQty: usageFields.remainderUsage,
             updatedBy: ctx.staffId,
           },
         });
         if (bumped.count === 1) {
+          // Rewire the dial chain: the estimate's synthetic end is
+          // replaced by the REAL dial so next period's prevChain starts
+          // at the actual — without this the absorbed delta bills twice.
+          await tx.consumptionComponent.update({
+            where: { id: comp.id },
+            data: {
+              usageQty: new Prisma.Decimal(compQty.toString()),
+              endReadingValue: actual.readingValue,
+              sourceType: 'READING',
+              sourceReadingId: actual.id,
+              updatedBy: ctx.staffId,
+            },
+          });
           // The mutated settlement's pre-image for audit_log.before.
           req.auditBefore = target;
           const row = await this.record(tx, ctx, {
@@ -327,8 +425,66 @@ export class ReconciliationService {
       }
     }
 
-    // ADJUST path: every span period must be priceable — an unpriced
-    // period can't be reconciled, so the whole op fails loud.
+    // ADJUST: the span must be fully closed — every settlement FINAL
+    // AND covered by posted-side debt (NORMAL|REPLACEMENT in
+    // POSTED|PARTIAL_PAID|PAID). Repricing an unbilled period would mint
+    // an adjustment on top of the NORMAL bill that still arrives later
+    // (double charge, C1); the first offending period fails the op.
+    // `posted` counts prior ADJUSTMENT bills too (C2): a posted
+    // correction is real debt, and counting it is what makes successive
+    // reconciliations converge instead of double-correcting.
+    const postedBills = await tx.bill.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        waterAccountId: account.id,
+        period: { in: span.map((s) => s.period) },
+        billKind: { in: ['NORMAL', 'REPLACEMENT', 'ADJUSTMENT'] },
+        status: { in: [...POSTED_STATUSES] },
+      },
+      select: {
+        id: true,
+        period: true,
+        totalAmount: true,
+        billKind: true,
+        sourceType: true,
+        sourceId: true,
+      },
+    });
+    // Coverage per settlement: a NORMAL bill links the settlement
+    // directly (sourceType SETTLEMENT); a REPLACEMENT links its original
+    // bill (sourceType ORIGINAL_BILL) — resolve through it.
+    const replSourceIds = postedBills
+      .filter((b) => b.billKind === 'REPLACEMENT')
+      .map((b) => b.sourceId);
+    const replacedSettlements = replSourceIds.length
+      ? await tx.bill.findMany({
+          where: {
+            tenantId: ctx.tenantId,
+            id: { in: replSourceIds },
+            sourceType: 'SETTLEMENT',
+          },
+          select: { sourceId: true },
+        })
+      : [];
+    const billedSettlements = new Set<string>([
+      ...postedBills
+        .filter(
+          (b) => b.billKind === 'NORMAL' && b.sourceType === 'SETTLEMENT',
+        )
+        .map((b) => b.sourceId),
+      ...replacedSettlements.map((b) => b.sourceId),
+    ]);
+    for (const s of span) {
+      if (s.status !== 'FINAL' || !billedSettlements.has(s.id)) {
+        throw new UnprocessableEntityException({
+          code: 'RECONCILIATION_UNBILLED_SPAN',
+          period: s.period,
+        });
+      }
+    }
+
+    // Every span period must be priceable — an unpriced period can't be
+    // reconciled, so the whole op fails loud.
     const allocPolicy =
       (await this.tenantParam(tx, ctx, 'reconcile_alloc_policy')) ===
       'ALL_TO_CURRENT'
@@ -366,32 +522,14 @@ export class ReconciliationService {
       });
     } catch (err) {
       if (err instanceof DomainError) {
-        if (negativeAllowed) {
-          const row = await this.record(tx, ctx, {
-            ...baseFields,
-            status: 'MANUAL_REVIEW',
-          });
-          return { ...row, adjustmentBill: null };
-        }
         throw new BadRequestException({ code: err.code, message: err.message });
       }
       throw err;
     }
 
-    // Posted-side charge of the span: NORMAL|REPLACEMENT bills in
-    // POSTED|PARTIAL_PAID|PAID (a DRAFT bill never collected anything;
-    // a REVERSED one is already undone). Per-period sums size the
-    // adjustment bill_item rows below.
-    const postedBills = await tx.bill.findMany({
-      where: {
-        tenantId: ctx.tenantId,
-        waterAccountId: account.id,
-        period: { in: span.map((s) => s.period) },
-        billKind: { in: ['NORMAL', 'REPLACEMENT'] },
-        status: { in: [...POSTED_STATUSES] },
-      },
-      select: { period: true, totalAmount: true },
-    });
+    // Posted-side charge of the span, per-period — sizes both the net
+    // adjustment and each adjustment bill_item row below. (A DRAFT bill
+    // never collected anything; a REVERSED original is already undone.)
     const postedByPeriod = new Map<string, bigint>();
     let postedChargeCent = 0n;
     for (const b of postedBills) {
@@ -416,24 +554,17 @@ export class ReconciliationService {
       return { ...recon, adjustmentBill: null };
     }
 
-    // Mint the adjustment debt: water_account FOR UPDATE first
-    // (close-vs-post serialization, same contract + lock order as
-    // BillingRunService.postOneBill — status is re-read under the lock),
-    // then the last span period's plan FOR UPDATE — the T8 freeze
-    // contract for any non-DRAFT reference.
-    await lockAccountForUpdate(tx, ctx, account.id);
-    const acc = await tx.waterAccount.findFirst({
-      where: { tenantId: ctx.tenantId, id: account.id },
-      select: { status: true },
-    });
-    if (acc?.status === 'CLOSED') {
-      throw new ConflictException({
-        code: 'ACCOUNT_CLOSED',
-        waterAccountId: account.id,
-      });
+    // Freeze every plan the reprice referenced (M2): the T8 contract is
+    // FOR UPDATE on the plan row before a non-DRAFT bill points at it —
+    // one unpriced-at-checkout plan would silently misprice the whole
+    // span. Distinct ids, sorted for a stable lock order; the water
+    // account row is already held (top of this tx, same order as
+    // postOneBill: account → plan). The bill's tariffPlanId stays the
+    // last span period's plan — the documented approximation.
+    for (const planId of [...new Set(planIds)].sort()) {
+      await lockPlanForUpdate(tx, ctx, planId);
     }
     const lastPlanId = planIds[planIds.length - 1];
-    await lockPlanForUpdate(tx, ctx, lastPlanId);
     const bill = await tx.bill.create({
       data: {
         tenantId: ctx.tenantId,
@@ -552,19 +683,31 @@ export class ReconciliationService {
     return rows.filter((r): r is TrustedReading => r.readingValue !== null);
   }
 
-  /** Latest trusted reading of the account (period desc → readDate → id). */
+  /**
+   * Latest trusted reading of the account (period desc → readDate → id).
+   * take:1 per probe — a superseded top row is skipped and the NEXT
+   * candidate fetched (M7: never load-all-then-pick).
+   */
   private async latestTrusted(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     waterAccountId: string,
   ): Promise<TrustedReading | null> {
-    const candidates = await tx.meterReading.findMany({
-      where: this.trustedWhere(ctx, waterAccountId),
-      select: READING_SELECT,
-      orderBy: [{ period: 'desc' }, { readDate: 'desc' }, { id: 'desc' }],
-    });
-    const valid = await this.dropSuperseded(tx, ctx, candidates);
-    return this.onlyValued(valid)[0] ?? null;
+    const skipped: string[] = [];
+    for (;;) {
+      const row = await tx.meterReading.findFirst({
+        where: {
+          ...this.trustedWhere(ctx, waterAccountId),
+          id: { notIn: skipped },
+        },
+        select: READING_SELECT,
+        orderBy: [{ period: 'desc' }, { readDate: 'desc' }, { id: 'desc' }],
+      });
+      if (!row) return null;
+      const valid = await this.dropSuperseded(tx, ctx, [row]);
+      if (valid.length === 1) return this.onlyValued(valid)[0] ?? null;
+      skipped.push(row.id);
+    }
   }
 
   /** A caller-named reading counts only if it is itself trusted. */
@@ -588,6 +731,7 @@ export class ReconciliationService {
    * ordered strictly by (readDate, id), restricted to
    * `period <= actual.period` so a later-period row can never anchor a
    * past actual, while a same-period earlier actual still can.
+   * take:1 per probe; a superseded top row is skipped (M7).
    */
   private async anchorBefore(
     tx: Prisma.TransactionClient,
@@ -595,21 +739,26 @@ export class ReconciliationService {
     waterAccountId: string,
     actual: TrustedReading,
   ): Promise<TrustedReading | null> {
-    const candidates = await tx.meterReading.findMany({
-      where: {
-        ...this.trustedWhere(ctx, waterAccountId),
-        id: { not: actual.id },
-        period: { lte: actual.period },
-        OR: [
-          { readDate: { lt: actual.readDate } },
-          { readDate: actual.readDate, id: { lt: actual.id } },
-        ],
-      },
-      select: READING_SELECT,
-      orderBy: [{ readDate: 'desc' }, { id: 'desc' }],
-    });
-    const valid = await this.dropSuperseded(tx, ctx, candidates);
-    return this.onlyValued(valid)[0] ?? null;
+    const skipped: string[] = [actual.id];
+    for (;;) {
+      const row = await tx.meterReading.findFirst({
+        where: {
+          ...this.trustedWhere(ctx, waterAccountId),
+          id: { notIn: skipped },
+          period: { lte: actual.period },
+          OR: [
+            { readDate: { lt: actual.readDate } },
+            { readDate: actual.readDate, id: { lt: actual.id } },
+          ],
+        },
+        select: READING_SELECT,
+        orderBy: [{ readDate: 'desc' }, { id: 'desc' }],
+      });
+      if (!row) return null;
+      const valid = await this.dropSuperseded(tx, ctx, [row]);
+      if (valid.length === 1) return this.onlyValued(valid)[0] ?? null;
+      skipped.push(row.id);
+    }
   }
 
   /** jsonb-string tenant param → string value (null when unset/wrong type). */
@@ -626,24 +775,21 @@ export class ReconciliationService {
   }
 
   /**
-   * Org guard — verbatim mirror of BillService.assertAccountScope (the
-   * same plan-item → plan → book resolution settlement.service uses):
-   * every covering book's org must be in the caller's subtree; an
-   * account+period with no plan item has no org anchor and returns
+   * Org guard — the same plan-item → plan → book resolution as
+   * BillService/SettlementService.assertAccountScope, but WITHOUT the
+   * period filter: it runs before actual/anchor/span resolution (M3),
+   * so it must cover EVERY period binding of the account. Every
+   * covering book's org must be in the caller's subtree; an account
+   * with no plan items at all has no org anchor and returns
    * permissively (the established MVP carve-out).
    */
   private async assertAccountScope(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     waterAccountId: string,
-    period: string,
   ) {
     const items = await tx.readingPlanItem.findMany({
-      where: {
-        tenantId: ctx.tenantId,
-        waterAccountId,
-        plan: { tenantId: ctx.tenantId, period },
-      },
+      where: { tenantId: ctx.tenantId, waterAccountId },
       select: { planId: true },
     });
     if (items.length === 0) return;

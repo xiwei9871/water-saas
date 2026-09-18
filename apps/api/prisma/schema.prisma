@@ -729,9 +729,10 @@ model Reconciliation {
 
   // One actual reading anchors at most ONE reconciliation (append-only
   // calibration); created as plain SQL in migration
-  // 20260918200000_reconciliation_actual_unique, kept here so
-  // introspection matches.
-  @@unique([tenantId, actualReadingId])
+  // 20260918200000_reconciliation_actual_unique — the map name keeps
+  // introspection aligned with the hand-named index so a future
+  // migrate doesn't plan a rename.
+  @@unique([tenantId, actualReadingId], map: "reconciliation_actual_uniq")
   @@index([tenantId, waterAccountId])
   @@index([tenantId, status])
   @@map("reconciliation")

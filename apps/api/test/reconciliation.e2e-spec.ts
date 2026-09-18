@@ -3,24 +3,37 @@
  * carry the `t11-` prefix. Boots the real AppModule so JWT/permission
  * guards, tenant ALS and RLS all apply.
  *
- * Covers (Task-11 brief assertions):
+ * Post-review semantics: settled = FINAL-only, absorb SETs (not
+ * increments) and rewires the component dial chain, posted counts
+ * NORMAL|REPLACEMENT|ADJUSTMENT.
+ *
+ * Covers (Task-11 brief + fix-round assertions):
  *  1. ABSORB: anchor 202606=1000 → estimates 30 (202607 FINAL) + 35
- *     (202608 DRAFT) → actual 202608=1080: total 80, settled 65,
- *     remainder +15 absorbed into the DRAFT settlement (35 → 50),
- *     status=ABSORBED, adjustment 0, NO bill
- *  2. explicit actualReadingId chains a second reconciliation onto the
+ *     (202608 DRAFT) → actual 202608=1080: total 80, fixed 30,
+ *     openUsage 50 → DRAFT settlement SET to 50 (estimate corrected
+ *     wholesale), component rewired to the real dial, status=ABSORBED,
+ *     adjustment 0, NO bill
+ *  2. C1 sharpest: 202607 FINAL+billed 30, 202608 DRAFT 40, actual
+ *     1055 → ABSORBED, settlement := 25 (55−30) — the over-estimate is
+ *     corrected in place, no bill; Idempotency-Key replay + a 409
+ *     re-POST both leave the settlement at 25 (SET semantics)
+ *  3. C1 gate: FINAL-but-UNBILLED settlement inside the span + adjust
+ *     triggered → 422 RECONCILIATION_UNBILLED_SPAN naming the period
+ *  4. C2 convergence: an APPLIED recon's ADJUSTMENT bill counts toward
+ *     the next recon's posted — second calibration nets only the
+ *     remaining delta (−3000 already corrected → −6000, not −9000)
+ *  5. explicit actualReadingId chains a second reconciliation onto the
  *     first one's actual (anchor = previous actual)
- *  3. negative adjustment: actual 1055 → remainder −10 → reprice →
- *     APPLIED + POSTED ADJUSTMENT bill (RECONCILIATION source) with
- *     negative totalAmount = correct(55 repriced) − posted(65 billed);
+ *  6. negative adjustment: actual 1055 → openUsage −10 → reprice →
+ *     APPLIED + POSTED ADJUSTMENT bill (RECONCILIATION source);
  *     Idempotency-Key replay returns the same row, no second bill
- *  4. positive remainder but span FINAL+billed → APPLIED + positive
+ *  7. positive remainder but span FINAL+billed → APPLIED + positive
  *     ADJUSTMENT bill (frozen settlements are never mutated)
- *  5. actual < anchor (dial regression) → MANUAL_REVIEW, no bill, no
+ *  8. actual < anchor (dial regression) → MANUAL_REVIEW, no bill, no
  *     settlement mutation; meter swap → MANUAL_REVIEW
- *  6. errors: re-reconcile same actual → 409; no trusted reading → 404;
+ *  9. errors: re-reconcile same actual → 409; no trusted reading → 404;
  *     no anchor → 404; superseded actual → 404; empty span → 409;
- *     tenant B sees nothing; field guards → 400
+ *     CLOSED account → 409; tenant B sees nothing; field guards → 400
  */
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -59,9 +72,9 @@ let tenantBToken = '';
 let waterItem = ''; // fee_item WATER-* (PER_QTY)
 let fixedItem = ''; // fee_item FIXED-* (FIXED)
 let planRes = ''; // ACTIVE RESIDENTIAL plan
-const acct: Record<string, string> = {}; // A1..A9 water_account ids
-const inst: Record<string, string> = {}; // A1..A9 ACTIVE installation ids
-const meter: Record<string, string> = {}; // A1..A9 meter ids
+const acct: Record<string, string> = {}; // A1..A13 water_account ids
+const inst: Record<string, string> = {}; // A1..A13 ACTIVE installation ids
+const meter: Record<string, string> = {}; // A1..A13 meter ids
 const reading: Record<string, string> = {}; // label → meter_reading id
 const settle: Record<string, string> = {}; // label → settlement id
 const recon: Record<string, string> = {}; // label → reconciliation id
@@ -150,6 +163,56 @@ const seedSettlement = async (
   settle[label] = row.id;
   return row.id as string;
 };
+
+/**
+ * Insert one ESTIMATE component on a settlement — absorb rewires the
+ * component on the actual's installation (end dial → real reading,
+ * source → READING), so absorb-target DRAFTs need a row to rewire.
+ */
+const seedComponent = async (
+  settlementId: string,
+  installationId: string,
+  prev: string,
+  end: string,
+  usage: string,
+) =>
+  owner.query(
+    `INSERT INTO consumption_component
+       (id, tenant_id, settlement_id, installation_id, prev_reading_value,
+        end_reading_value, usage_qty, source_type, source_reading_id,
+        created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'ESTIMATE', NULL,
+             now(), now())`,
+    [T11A, settlementId, installationId, prev, end, usage],
+  );
+
+/** The component rows of a settlement (owner-side read for assertions).
+ *  Numeric scale is normalized ('50.0000' → '50') for clean matching. */
+const componentsOf = async (settlementId: string) =>
+  (
+    await owner.query(
+      `SELECT installation_id::text AS "installationId",
+              TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM prev_reading_value::text))
+                AS "prevReadingValue",
+              TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM end_reading_value::text))
+                AS "endReadingValue",
+              TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM usage_qty::text))
+                AS "usageQty",
+              source_type::text AS "sourceType",
+              source_reading_id::text AS "sourceReadingId"
+         FROM consumption_component
+        WHERE tenant_id = $1 AND settlement_id = $2
+        ORDER BY installation_id`,
+      [T11A, settlementId],
+    )
+  ).rows as {
+    installationId: string;
+    prevReadingValue: string;
+    endReadingValue: string;
+    usageQty: string;
+    sourceType: string;
+    sourceReadingId: string | null;
+  }[];
 
 /** Generate + post a billing run (real engine-priced POSTED bills). */
 const runAndPost = async (period: string) => {
@@ -279,7 +342,10 @@ describe('fixtures: fee items + plan + accounts + readings', () => {
   });
 
   it('onboards the scenario accounts and seeds trusted readings', async () => {
-    for (const label of ['A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8', 'A9']) {
+    for (const label of [
+      'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8', 'A9',
+      'A10', 'A11', 'A12', 'A13',
+    ]) {
       await onboard(label);
     }
 
@@ -309,6 +375,25 @@ describe('fixtures: fee items + plan + accounts + readings', () => {
     // A9 — two readings, no settlements (empty span).
     await seedReading('A9-anchor', inst['A9'], meter['A9'], '202606', '2026-06-30', '1000');
     await seedReading('A9-actual', inst['A9'], meter['A9'], '202608', '2026-08-31', '1050');
+
+    // A10 — C1 absorb: anchor 202606=1000, actual 202608=1055 (over-estimate
+    // corrected into the DRAFT settlement).
+    await seedReading('A10-anchor', inst['A10'], meter['A10'], '202606', '2026-06-30', '1000');
+    await seedReading('A10-actual', inst['A10'], meter['A10'], '202608', '2026-08-31', '1055');
+
+    // A11 — unbilled-FINAL-in-span gate: anchor 202606=1000, actual 1080.
+    await seedReading('A11-anchor', inst['A11'], meter['A11'], '202606', '2026-06-30', '1000');
+    await seedReading('A11-actual', inst['A11'], meter['A11'], '202608', '2026-08-31', '1080');
+
+    // A12 — convergence: R0 anchor, R1 first actual (later superseded by
+    // a back-dated correction R1s so recon2's anchor precedes the first
+    // ADJUSTMENT's period), R2 second actual.
+    await seedReading('A12-r0', inst['A12'], meter['A12'], '202606', '2026-06-30', '1000');
+    await seedReading('A12-r1', inst['A12'], meter['A12'], '202608', '2026-08-31', '1055');
+    await seedReading('A12-r2', inst['A12'], meter['A12'], '202610', '2026-10-31', '1130');
+
+    // A13 — CLOSED account (status flipped inside its test; no readings
+    // needed — the CLOSED check precedes every probe).
   });
 
   it('A8 — swaps in a second meter; anchor on the removed, actual on the new installation', async () => {
@@ -369,12 +454,201 @@ describe('posted history: A2 + A3 billed for the estimated months', () => {
   });
 });
 
-describe('ABSORB — positive remainder into the DRAFT settlement', () => {
-  it('A1: actual 1080 → total 80, settled 65, remainder +15 absorbed (35 → 50), NO bill', async () => {
-    // A1's estimated months — seeded only now so the 202607 run above
-    // could not bill them (the absorb path reads unbilled DRAFT/FINAL).
+describe('C1 semantics — FINAL-only settled, absorb SETs + rewires the dial', () => {
+  it('A10: over-estimated DRAFT corrected in place — settlement := 25 (55−30), NO bill', async () => {
+    // 202607 FINAL 30 → billed by its own run (already-billed
+    // settlements count toward successCount, so assert the bill itself).
+    await seedSettlement('A10-07', acct['A10'], '202607', 30);
+    const r = await runAndPost('202607');
+    expect(r.status).toBe('POSTED');
+    const a10Bills = (await get(`/bills?waterAccountId=${acct['A10']}`)).body;
+    expect(a10Bills).toHaveLength(1);
+    expect(a10Bills[0]).toMatchObject({ period: '202607', totalAmount: '10000' });
+
+    // 202608 DRAFT estimate 40 (too high) + its ESTIMATE component —
+    // the dial chain absorb must rewire.
+    await seedSettlement('A10-08', acct['A10'], '202608', 40, 'DRAFT');
+    await seedComponent(settle['A10-08'], inst['A10'], '1030', '1070', '40');
+
+    const key = `t11-absorb-${RUN}`;
+    const res = await request(app.getHttpServer())
+      .post('/reconciliations')
+      .set(auth(adminToken))
+      .set('Idempotency-Key', key)
+      .send({ waterAccountId: acct['A10'] })
+      .expect(201);
+    recon['A10'] = res.body.id;
+
+    // actualTotal 55, fixedUsage 30 (FINAL only — the DRAFT's 40 is
+    // open usage, not settled) → openUsage 25 SET over the estimate 40.
+    expect(res.body).toMatchObject({
+      waterAccountId: acct['A10'],
+      anchorReadingId: reading['A10-anchor'],
+      actualReadingId: reading['A10-actual'],
+      fromPeriod: '202607',
+      toPeriod: '202608',
+      actualTotalUsage: '55',
+      previouslySettledUsage: '30',
+      remainderUsage: '25',
+      absorbedSettlementId: settle['A10-08'],
+      status: 'ABSORBED',
+      adjustmentAmountCent: '0',
+      adjustmentBill: null,
+    });
+    expect((await settlementDetail(settle['A10-08'])).totalUsageQty).toBe('25');
+
+    // I1: the component now carries the REAL dial — next period's
+    // prevChain starts at 1055, not the estimate's synthetic 1070.
+    const comps = await componentsOf(settle['A10-08']);
+    expect(comps).toHaveLength(1);
+    expect(comps[0]).toMatchObject({
+      installationId: inst['A10'],
+      usageQty: '25',
+      endReadingValue: '1055',
+      sourceType: 'READING',
+      sourceReadingId: reading['A10-actual'],
+    });
+
+    expect(
+      (await get(`/bills?waterAccountId=${acct['A10']}&period=202608`)).body,
+    ).toHaveLength(0); // absorb mints no bill
+
+    // Idempotency-Key replay: the stored response returns and the
+    // settlement is still 25 — SET semantics make even a re-execution
+    // a no-op, and the unique actual guard blocks a second row.
+    const replay = await request(app.getHttpServer())
+      .post('/reconciliations')
+      .set(auth(adminToken))
+      .set('Idempotency-Key', key)
+      .send({ waterAccountId: acct['A10'] })
+      .expect(201);
+    expect(replay.body.id).toBe(recon['A10']);
+    expect((await settlementDetail(settle['A10-08'])).totalUsageQty).toBe('25');
+
+    const dup = await post('/reconciliations', { waterAccountId: acct['A10'] });
+    expect(dup.status).toBe(409);
+    expect(dup.body).toMatchObject({ code: 'RECONCILIATION_EXISTS' });
+    expect((await settlementDetail(settle['A10-08'])).totalUsageQty).toBe('25');
+  });
+
+  it('A11: FINAL-but-UNBILLED settlement inside the span → 422 RECONCILIATION_UNBILLED_SPAN', async () => {
+    // 202608 FINAL 35 billed by its own run; 202607 FINAL 30 seeded
+    // AFTER the 202607 runs — FINAL but never billed.
+    await seedSettlement('A11-08', acct['A11'], '202608', 35);
+    const r = await runAndPost('202608');
+    expect(r.status).toBe('POSTED');
+    const a11Bills = (await get(`/bills?waterAccountId=${acct['A11']}`)).body;
+    expect(a11Bills).toHaveLength(1);
+    expect(a11Bills[0]).toMatchObject({ period: '202608', totalAmount: '11500' });
+    await seedSettlement('A11-07', acct['A11'], '202607', 30);
+
+    // actual 1080 → openUsage 80−65=+15; S_n (202608) is FINAL so no
+    // absorb → adjust → 202607 is FINAL but unbilled → loud 422.
+    const res = await post('/reconciliations', { waterAccountId: acct['A11'] });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({
+      code: 'RECONCILIATION_UNBILLED_SPAN',
+      period: '202607',
+    });
+  });
+
+  it('A12: convergence — a prior ADJUSTMENT counts toward the next posted (C2)', async () => {
+    // recon1's span: (202606, 202608] = {07, 08} — both FINAL+billed.
+    await seedSettlement('A12-07', acct['A12'], '202607', 30);
+    const r1 = await runAndPost('202607'); // also bills A11-07, still unbilled
+    expect(r1.status).toBe('POSTED');
+    await seedSettlement('A12-08', acct['A12'], '202608', 35);
+    const r2 = await runAndPost('202608');
+    expect(r2.status).toBe('POSTED');
+    const a12Posted = new Map(
+      (
+        (await get(`/bills?waterAccountId=${acct['A12']}`)).body as {
+          period: string;
+          totalAmount: string;
+        }[]
+      ).map((b) => [b.period, b.totalAmount]),
+    );
+    expect(a12Posted.get('202607')).toBe('10000');
+    expect(a12Posted.get('202608')).toBe('11500');
+
+    const res1 = await post('/reconciliations', {
+      waterAccountId: acct['A12'],
+      actualReadingId: reading['A12-r1'],
+    }).expect(201);
+    recon['A12-1'] = res1.body.id;
+    // Same math as A2: correct 18500 − posted 21500 → −3000 on 202608.
+    expect(res1.body).toMatchObject({
+      status: 'APPLIED',
+      postedChargeCent: '21500',
+      adjustmentAmountCent: '-3000',
+    });
+    expect(res1.body.adjustmentBill).toMatchObject({ period: '202608' });
+
+    // Later span settlements + a back-dated superseding correction of
+    // R1 (period 202607) so recon2's anchor precedes the ADJUSTMENT's
+    // period and the bill lands INSIDE the new span.
+    await seedSettlement('A12-09', acct['A12'], '202609', 40);
+    await seedSettlement('A12-10', acct['A12'], '202610', 45);
+    const r3 = await runAndPost('202609');
+    expect(r3.status).toBe('POSTED');
+    const r4 = await runAndPost('202610');
+    expect(r4.status).toBe('POSTED');
+    await seedReading(
+      'A12-r1s', inst['A12'], meter['A12'], '202607', '2026-09-15', '1040',
+      { supersedes: reading['A12-r1'] },
+    );
+
+    // recon2: anchor R1s(202607=1040) → span (202607,202610]={08,09,10},
+    // actualTotal 90, fixed 120 → openUsage −30 → adjust. posted =
+    // 11500+13000+14500 PLUS the prior ADJUSTMENT −3000 = 36000; without
+    // C2 it would be 39000 and the recon would double-correct.
+    const res2 = await post('/reconciliations', {
+      waterAccountId: acct['A12'],
+      actualReadingId: reading['A12-r2'],
+    }).expect(201);
+    recon['A12-2'] = res2.body.id;
+    // allocated 90 over [35,40,45] → [26.25, 30, 33.75]; baseYtd=30 →
+    // correct = 8875+10000+11125 = 30000 → adjustment 30000−36000.
+    expect(res2.body).toMatchObject({
+      status: 'APPLIED',
+      anchorReadingId: reading['A12-r1s'],
+      fromPeriod: '202608',
+      toPeriod: '202610',
+      actualTotalUsage: '90',
+      previouslySettledUsage: '120',
+      remainderUsage: '-30',
+      correctChargeCent: '30000',
+      postedChargeCent: '36000',
+      adjustmentAmountCent: '-6000',
+    });
+    const detail = (await get(`/bills/${res2.body.adjustmentBill.id}`)).body;
+    expect(detail.items).toHaveLength(3);
+    const byDesc = new Map(
+      detail.items.map((i: { description: string }) => [i.description, i]),
+    );
+    // 202608's posted side nets NORMAL 11500 + prior ADJUSTMENT −3000.
+    expect(byDesc.get('reconcile 202608')).toMatchObject({
+      qty: '-8.75', // 26.25 − 35
+      amount: '375', // 8875 − (11500 − 3000)
+    });
+    expect(byDesc.get('reconcile 202609')).toMatchObject({
+      qty: '-10',
+      amount: '-3000', // 10000 − 13000
+    });
+    expect(byDesc.get('reconcile 202610')).toMatchObject({
+      qty: '-11.25',
+      amount: '-3375', // 11125 − 14500
+    });
+  });
+});
+
+describe('ABSORB — open remainder SET onto the DRAFT settlement', () => {
+  it('A1: actual 1080 → total 80, fixed 30, openUsage 50 → settlement SET to 50, NO bill', async () => {
+    // A1's estimated months — seeded only now so the runs above could
+    // not bill them (the absorb path reads unbilled DRAFT/FINAL).
     await seedSettlement('A1-07', acct['A1'], '202607', 30);
     await seedSettlement('A1-08', acct['A1'], '202608', 35, 'DRAFT');
+    await seedComponent(settle['A1-08'], inst['A1'], '1030', '1065', '35');
 
     const res = await post('/reconciliations', { waterAccountId: acct['A1'] }).expect(201);
     recon['A1'] = res.body.id;
@@ -385,8 +659,8 @@ describe('ABSORB — positive remainder into the DRAFT settlement', () => {
       fromPeriod: '202607',
       toPeriod: '202608',
       actualTotalUsage: '80',
-      previouslySettledUsage: '65',
-      remainderUsage: '15',
+      previouslySettledUsage: '30', // FINAL-only: the DRAFT's 35 is open usage
+      remainderUsage: '50',
       absorbedSettlementId: settle['A1-08'],
       status: 'ABSORBED',
       adjustmentAmountCent: '0',
@@ -394,7 +668,17 @@ describe('ABSORB — positive remainder into the DRAFT settlement', () => {
     });
 
     const s = await settlementDetail(settle['A1-08']);
-    expect(s.totalUsageQty).toBe('50'); // 35 + 15
+    expect(s.totalUsageQty).toBe('50'); // SET to openUsage, not 35+15
+
+    // Dial chain rewired to the actual: usage 50, end 1080, READING.
+    const comps = await componentsOf(settle['A1-08']);
+    expect(comps[0]).toMatchObject({
+      installationId: inst['A1'],
+      usageQty: '50',
+      endReadingValue: '1080',
+      sourceType: 'READING',
+      sourceReadingId: reading['A1-actual'],
+    });
 
     const bills = (await get(`/bills?waterAccountId=${acct['A1']}`)).body;
     expect(bills).toHaveLength(0);
@@ -403,6 +687,7 @@ describe('ABSORB — positive remainder into the DRAFT settlement', () => {
   it('chains a second reconciliation: explicit actualReadingId anchors on the previous actual', async () => {
     // Next month arrives: actual 202609=1130, DRAFT settlement usage 40.
     await seedSettlement('A1-09', acct['A1'], '202609', 40, 'DRAFT');
+    await seedComponent(settle['A1-09'], inst['A1'], '1080', '1120', '40');
     await seedReading('A1-actual2', inst['A1'], meter['A1'], '202609', '2026-09-30', '1130');
 
     const res = await post('/reconciliations', {
@@ -416,12 +701,19 @@ describe('ABSORB — positive remainder into the DRAFT settlement', () => {
       fromPeriod: '202609',
       toPeriod: '202609',
       actualTotalUsage: '50',
-      previouslySettledUsage: '40',
-      remainderUsage: '10',
+      previouslySettledUsage: '0', // no FINAL settlement in the span
+      remainderUsage: '50',
       status: 'ABSORBED',
     });
     const s = await settlementDetail(settle['A1-09']);
-    expect(s.totalUsageQty).toBe('50'); // 40 + 10
+    expect(s.totalUsageQty).toBe('50'); // SET to openUsage
+    const comps = await componentsOf(settle['A1-09']);
+    expect(comps[0]).toMatchObject({
+      usageQty: '50',
+      endReadingValue: '1130',
+      sourceType: 'READING',
+      sourceReadingId: reading['A1-actual2'],
+    });
   });
 
   it('GET /reconciliations filters + detail; tenant-scoped list shape', async () => {
@@ -580,8 +872,8 @@ describe('MANUAL_REVIEW — regression + meter swap', () => {
     expect(res.body).toMatchObject({
       status: 'MANUAL_REVIEW',
       actualTotalUsage: '-10',
-      previouslySettledUsage: '65',
-      remainderUsage: '-75',
+      previouslySettledUsage: '30', // FINAL-only: the DRAFT's 35 is open usage
+      remainderUsage: '-40', // −10 actual − 30 fixed
       adjustmentBill: null,
     });
     // untouched settlement + no bill
@@ -645,6 +937,15 @@ describe('errors + tenant isolation', () => {
     const res = await post('/reconciliations', { waterAccountId: acct['A9'] });
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'RECONCILIATION_EMPTY_SPAN' });
+  });
+
+  it('A13: CLOSED account → 409 ACCOUNT_CLOSED before any probe', async () => {
+    await owner.query(`UPDATE water_account SET status = 'CLOSED' WHERE id = $1`, [
+      acct['A13'],
+    ]);
+    const res = await post('/reconciliations', { waterAccountId: acct['A13'] });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'ACCOUNT_CLOSED' });
   });
 
   it('field guards → 400', async () => {
