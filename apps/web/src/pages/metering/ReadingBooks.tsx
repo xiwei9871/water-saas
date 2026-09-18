@@ -22,7 +22,7 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type {
   BookMember,
@@ -241,18 +241,22 @@ export default function ReadingBooks() {
     }
   };
 
+  const membersSeq = useRef(0);
+
   const openMembers = async (book: ReadingBook) => {
+    // Stale-guard: only the most recent openMembers may write drawer state.
+    const seq = ++membersSeq.current;
     setMembersLoading(true);
     setMembersBook(null);
     setMemberIdemKey(newIdemKey()); // 每次成功添加后重新生成 —— 同一键不能复用于不同内容
     memberForm.resetFields();
     try {
       const res = await api.get<ReadingBookDetail>(`/reading-books/${book.id}`);
-      setMembersBook(res.data);
+      if (seq === membersSeq.current) setMembersBook(res.data);
     } catch (err) {
-      message.error(apiErrorText(err));
+      if (seq === membersSeq.current) message.error(apiErrorText(err));
     } finally {
-      setMembersLoading(false);
+      if (seq === membersSeq.current) setMembersLoading(false);
     }
   };
 
@@ -542,7 +546,7 @@ export default function ReadingBooks() {
             </Form.Item>
           )}
           <Form.Item name="scheduleDay" label="计划抄表日">
-            <InputNumber min={1} max={31} style={{ width: '100%' }} placeholder="1-31，可空" />
+            <InputNumber min={1} max={31} precision={0} style={{ width: '100%' }} placeholder="1-31，可空" />
           </Form.Item>
         </Form>
       </Modal>
@@ -601,7 +605,7 @@ export default function ReadingBooks() {
                   </Form.Item>
                 )}
                 <Form.Item name="seqNo" style={{ width: 110 }}>
-                  <InputNumber min={1} placeholder="顺序(可空)" style={{ width: '100%' }} />
+                  <InputNumber min={1} precision={0} placeholder="顺序(可空)" style={{ width: '100%' }} />
                 </Form.Item>
                 <Form.Item>
                   <Button

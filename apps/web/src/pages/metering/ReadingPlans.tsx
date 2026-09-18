@@ -26,7 +26,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type {
   BookMember,
@@ -128,6 +128,7 @@ export default function ReadingPlans() {
   const [detailProgress, setDetailProgress] = useState<ReadingPlanProgress | null>(null);
   const [itemStatus, setItemStatus] = useState<PlanItemStatus | undefined>(undefined);
   const [memberLabels, setMemberLabels] = useState<Map<string, string>>(new Map());
+  const detailSeq = useRef(0);
 
   // ---- 抄表录入 ----
   const [entryItem, setEntryItem] = useState<ReadingPlanItem | null>(null);
@@ -242,12 +243,13 @@ export default function ReadingPlans() {
         { headers: { 'Idempotency-Key': newIdemKey() } },
       );
       message.success(action === 'start' ? '计划已开始' : '计划已取消');
-      await load(page, pageSize);
-      if (drawerPlanId === plan.id) await loadDetail(plan.id);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
       setActing(null);
+      // Resync even on failure so a stale status button doesn't linger.
+      await load(page, pageSize);
+      if (drawerPlanId === plan.id) await loadDetail(plan.id);
     }
   };
 
@@ -284,18 +286,27 @@ export default function ReadingPlans() {
   // ---- 明细抽屉 ----
 
   const loadDetail = async (planId: string) => {
+    // Stale-guard: only the most recent loadDetail may write detail state,
+    // so a slow response for a previously opened plan can't overwrite it.
+    const seq = ++detailSeq.current;
     setDetailLoading(true);
     try {
       const res = await api.get<ReadingPlanDetail>(`/reading-plans/${planId}`);
+      if (seq !== detailSeq.current) return;
       setDetail(res.data);
       api
         .get<ReadingPlanProgress>(`/reading-plans/${planId}/progress`)
-        .then((p) => setDetailProgress(p.data))
-        .catch(() => setDetailProgress(null));
+        .then((p) => {
+          if (seq === detailSeq.current) setDetailProgress(p.data);
+        })
+        .catch(() => {
+          if (seq === detailSeq.current) setDetailProgress(null);
+        });
       // 册成员 → 户号/地址水合（册可能已删 —— 退化为短 id）。
       api
         .get<ReadingBookDetail>(`/reading-books/${res.data.bookId}`)
         .then((b) => {
+          if (seq !== detailSeq.current) return;
           setMemberLabels(
             new Map(
               b.data.members.map((m: BookMember) => [
@@ -307,11 +318,13 @@ export default function ReadingPlans() {
             ),
           );
         })
-        .catch(() => setMemberLabels(new Map()));
+        .catch(() => {
+          if (seq === detailSeq.current) setMemberLabels(new Map());
+        });
     } catch (err) {
-      message.error(apiErrorText(err));
+      if (seq === detailSeq.current) message.error(apiErrorText(err));
     } finally {
-      setDetailLoading(false);
+      if (seq === detailSeq.current) setDetailLoading(false);
     }
   };
 

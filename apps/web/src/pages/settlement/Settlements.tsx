@@ -165,11 +165,12 @@ export default function Settlements() {
         { headers: { 'Idempotency-Key': newIdemKey() } },
       );
       message.success(`${fmtPeriod(row.period)} 结算已终审`);
-      await load(page, pageSize);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
       setActing(null);
+      // Resync even on failure so a stale status/action button can't linger.
+      await load(page, pageSize);
     }
   };
 

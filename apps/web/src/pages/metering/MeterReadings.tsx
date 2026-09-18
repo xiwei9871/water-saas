@@ -94,6 +94,10 @@ export default function MeterReadings() {
 
   const [rows, setRows] = useState<MeterReading[]>([]);
   const [loading, setLoading] = useState(false);
+  // Draft input vs committed filter — the ids go through assertUuid
+  // server-side, so committing on 搜索/回车 avoids a 400-toast per keystroke.
+  const [planItemInput, setPlanItemInput] = useState('');
+  const [installationInput, setInstallationInput] = useState('');
   const [planItemId, setPlanItemId] = useState('');
   const [installationId, setInstallationId] = useState('');
   const [period, setPeriod] = useState<dayjs.Dayjs | null>(null);
@@ -420,23 +424,25 @@ export default function MeterReadings() {
       title="抄表记录 / 质检"
       extra={
         <Space wrap>
-          <Input
+          <Input.Search
             allowClear
             placeholder="计划明细 ID"
-            style={{ width: 180 }}
-            value={planItemId}
-            onChange={(e) => {
-              setPlanItemId(e.target.value);
+            style={{ width: 200 }}
+            value={planItemInput}
+            onChange={(e) => setPlanItemInput(e.target.value)}
+            onSearch={(v) => {
+              setPlanItemId(v);
               setPage(1);
             }}
           />
-          <Input
+          <Input.Search
             allowClear
             placeholder="表计安装 ID"
-            style={{ width: 180 }}
-            value={installationId}
-            onChange={(e) => {
-              setInstallationId(e.target.value);
+            style={{ width: 200 }}
+            value={installationInput}
+            onChange={(e) => setInstallationInput(e.target.value)}
+            onSearch={(v) => {
+              setInstallationId(v);
               setPage(1);
             }}
           />

@@ -155,7 +155,12 @@ export default function Reconciliations() {
         res.data.status === 'APPLIED' && res.data.adjustmentBill
           ? `，调账金额 ${fmtCent(res.data.adjustmentAmountCent)}`
           : '';
-      message.success(`${RESULT_TEXT[res.data.status]}${extra}`);
+      // Zero-delta APPLIED mints no bill — don't claim one was generated.
+      const text =
+        res.data.status === 'APPLIED' && !res.data.adjustmentBill
+          ? '已重算，差额为零（无调账账单）'
+          : RESULT_TEXT[res.data.status];
+      message.success(`${text}${extra}`);
       setCreateOpen(false);
       await load(page, pageSize);
     } catch (err) {
