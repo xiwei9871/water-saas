@@ -18,4 +18,15 @@ export default defineConfig({
       },
     },
   },
+  // `vite preview` serves the production build — mirror the same /api proxy
+  // so a prod-mode smoke exercises the same path as dev.
+  preview: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
+  },
 })
