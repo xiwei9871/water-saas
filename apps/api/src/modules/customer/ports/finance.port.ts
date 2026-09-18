@@ -9,7 +9,8 @@ import { Prisma } from '@prisma/client';
  * only.
  *
  * The real implementation is BillingFinancePort in the billing module
- * (T10) — bound in CustomerModule via `useExisting`. T13 consolidates all
+ * (T10) — bound in CustomerModule via `useExisting`. T13's integration
+ * stubs live in src/modules/integration but the live FinancePort stays
  * module ports under src/modules/integration.
  */
 export abstract class FinancePort {

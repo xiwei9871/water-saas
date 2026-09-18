@@ -23,8 +23,9 @@ import { WaterAccountService } from './water-account.service.js';
  * close orchestration reaches finance through the FinancePort interface
  * only. The module-level `imports: [BillingModule]` exists solely to bind
  * the shared token to BillingFinancePort (T10): a DI wiring compromise,
- * not a domain dependency. T13 consolidates all module ports under
- * src/modules/integration and removes this inversion.
+ * not a domain dependency. T13's stub ports live in
+ * src/modules/integration, but the live FinancePort stays here — the
+ * inversion is documented, not removed.
  * TenantPrismaService/IdempotencyService/SequenceService come from the
  * global CommonModule (T12 moved document numbering there so payment can
  * consume it without importing customer).

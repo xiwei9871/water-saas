@@ -151,6 +151,14 @@ export class ReportService {
           ON p.tenant_id = i.tenant_id AND p.id = i.plan_id
         WHERE r.tenant_id = ${ctx.tenantId}::uuid
           AND r.read_date = ${q.date}::date
+          -- valid-fact convention: a superseded row is no longer the
+          -- fact (its child is), so a same-day correction chain counts
+          -- once, not twice.
+          AND NOT EXISTS (
+            SELECT 1 FROM meter_reading c
+            WHERE c.tenant_id = r.tenant_id
+              AND c.supersedes_reading_id = r.id
+          )
         GROUP BY p.book_id`;
       const taken = new Map(takenRows.map((r) => [r.book_id, r.taken]));
       for (const bookId of taken.keys()) bookIds.add(bookId);
