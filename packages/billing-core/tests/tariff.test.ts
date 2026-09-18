@@ -180,3 +180,76 @@ describe('tieredAmount', () => {
     }
   });
 });
+
+describe('tieredAmount — boundary + malformed-window hardening', () => {
+  it('qty landing exactly on a tier boundary produces no phantom part', () => {
+    const r = tieredAmount(new Decimal('180'), new Decimal('0'), [
+      tier(1, '0', '180', '3.0'),
+      tier(2, '180', null, '4.5'),
+    ]);
+    expect(r.parts).toHaveLength(1);
+    expect(r.parts[0].qty.toFixed(4)).toBe('180.0000');
+    expect(r.amountCent).toBe(54000n);
+  });
+
+  it('ytd exactly on a boundary skips the exhausted tier entirely', () => {
+    const r = tieredAmount(new Decimal('15'), new Decimal('180'), [
+      tier(1, '0', '180', '3.0'),
+      tier(2, '180', null, '4.5'),
+    ]);
+    expect(r.parts).toHaveLength(1);
+    expect(r.parts[0].tierNo).toBe(2);
+    expect(r.amountCent).toBe(6750n);
+  });
+
+  it('regressive toQty (data-entry slip) → TARIFF_TIERS_INVALID, not silent misprice', () => {
+    try {
+      tieredAmount(new Decimal('250'), new Decimal('0'), [
+        tier(1, '0', '200', '3.0'),
+        tier(2, '200', '100', '4.5'),
+        tier(3, '100', null, '5.0'),
+      ]);
+      expect.unreachable();
+    } catch (e) {
+      expect((e as DomainError).code).toBe('TARIFF_TIERS_INVALID');
+    }
+  });
+
+  it('zero-width window → TARIFF_TIERS_INVALID', () => {
+    expect(() =>
+      tieredAmount(new Decimal('100'), new Decimal('0'), [
+        tier(1, '0', '180', '3.0'),
+        tier(2, '180', '180', '4.5'),
+        tier(3, '180', null, '5.0'),
+      ]),
+    ).toThrowError(DomainError);
+  });
+
+  it('unbounded tier that is not last → TARIFF_TIERS_INVALID', () => {
+    try {
+      tieredAmount(new Decimal('10'), new Decimal('0'), [
+        tier(1, '0', null, '3.0'),
+        tier(2, '0', '100', '4.5'),
+      ]);
+      expect.unreachable();
+    } catch (e) {
+      expect((e as DomainError).code).toBe('TARIFF_TIERS_INVALID');
+    }
+  });
+
+  it('non-finite inputs → DomainError, not SyntaxError/TypeError', () => {
+    for (const [qty, ytd, code] of [
+      [new Decimal('NaN'), new Decimal('0'), 'INVALID_QTY'],
+      [new Decimal('Infinity'), new Decimal('0'), 'INVALID_QTY'],
+      [new Decimal('5'), new Decimal('NaN'), 'INVALID_YTD'],
+    ] as const) {
+      try {
+        tieredAmount(qty, ytd, [tier(1, '0', null, '3.0')]);
+        expect.unreachable();
+      } catch (e) {
+        expect(e).toBeInstanceOf(DomainError);
+        expect((e as DomainError).code).toBe(code);
+      }
+    }
+  });
+});

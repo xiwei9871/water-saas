@@ -8,6 +8,15 @@ import { Decimal } from 'decimal.js';
  * the only rounding point is roundCent at bill-item materialization.
  * Idempotent; runs once when this module is imported (all engine modules
  * depend on it transitively).
+ *
+ * NOTE — process-wide by design: `Decimal.set` mutates the shared
+ * decimal.js constructor, so consumers importing this package (and any
+ * library resolving the same decimal.js instance, e.g. Prisma.Decimal)
+ * inherit precision 40 and HALF_UP as defaults. Consequence already
+ * accepted: `estimateAvg3`'s implicit `.toDecimalPlaces(4)` now rounds
+ * HALF_UP rather than the library-default HALF_DOWN — desirable here, but
+ * any future `.div()`/`.toDecimalPlaces()` in API code runs under these
+ * defaults too.
  */
 Decimal.set({ precision: 40, rounding: Decimal.ROUND_HALF_UP });
 

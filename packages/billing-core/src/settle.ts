@@ -97,6 +97,15 @@ function singleTier(fi: FeeItemInput): TariffTier {
  */
 export function computeBill(input: ComputeBillInput): ComputeBillResult {
   const { usageQty, ytdBeforeQty, feeItems } = input;
+  if (!usageQty.isFinite()) {
+    throw new DomainError('INVALID_QTY', `usageQty must be finite, got ${usageQty}`);
+  }
+  if (!ytdBeforeQty.isFinite()) {
+    throw new DomainError(
+      'INVALID_YTD',
+      `ytdBeforeQty must be finite, got ${ytdBeforeQty}`,
+    );
+  }
   if (usageQty.lt(0)) {
     throw new DomainError('NEGATIVE_QTY', `usageQty must be >= 0, got ${usageQty}`);
   }
@@ -153,11 +162,14 @@ export function computeBill(input: ComputeBillInput): ComputeBillResult {
   for (const fi of feeItems) {
     if (fi.calcType !== 'PERCENT') continue;
     const tier = singleTier(fi);
+    const amountCent = roundCent(baseYuan.times(tier.unitPrice));
+    // A zero row is pure noise — "5% of nothing" is not a billable fact.
+    if (amountCent === 0n) continue;
     items.push({
       feeItemCode: fi.code,
       itemType: 'NORMAL',
       unitPrice: tier.unitPrice,
-      amountCent: roundCent(baseYuan.times(tier.unitPrice)),
+      amountCent,
       description: `${fi.code} ${tier.unitPrice} × ${baseYuan}`,
     });
   }

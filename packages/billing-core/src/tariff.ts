@@ -49,12 +49,28 @@ export interface TieredAmount {
  * - `TARIFF_TIERS_EXHAUSTED`  — qty remains after the last tier (no
  *   unbounded top tier covers it). Never silently under-bill: an
  *   unpriceable remainder means the tariff plan is misconfigured.
+ * - `TARIFF_TIERS_INVALID`    — malformed windows: `toQty` values must be
+ *   strictly increasing in tierNo order and `null` may appear only as the
+ *   last tier. The API layer (`assertTiersValid`) enforces contiguity at
+ *   write time; this is the engine's own last line of defense — a gap or
+ *   overlap would otherwise be silently repriced at the WRONG rate.
+ * - `INVALID_QTY`/`INVALID_YTD`/`INVALID_TIER_VALUE` — non-finite Decimal
+ *   input (NaN/Infinity). The engine only throws DomainError for bad input.
  */
 export function tieredAmount(
   qty: Decimal,
   ytdBeforeQty: Decimal,
   tiers: TariffTier[],
 ): TieredAmount {
+  if (!qty.isFinite()) {
+    throw new DomainError('INVALID_QTY', `qty must be finite, got ${qty}`);
+  }
+  if (!ytdBeforeQty.isFinite()) {
+    throw new DomainError(
+      'INVALID_YTD',
+      `ytdBeforeQty must be finite, got ${ytdBeforeQty}`,
+    );
+  }
   if (qty.lt(0)) {
     throw new DomainError('NEGATIVE_QTY', `qty must be >= 0, got ${qty}`);
   }
@@ -73,6 +89,35 @@ export function tieredAmount(
   }
 
   const ordered = [...tiers].sort((a, b) => a.tierNo - b.tierNo);
+
+  // Window integrity: toQty must strictly increase in tierNo order and
+  // null is only legal on the last tier. A zero-width/regressive/gapped
+  // ladder would otherwise price silently at the wrong rate.
+  for (let i = 0; i < ordered.length; i++) {
+    const t = ordered[i];
+    if (!t.unitPrice.isFinite() || (t.toQty !== null && !t.toQty.isFinite())) {
+      throw new DomainError(
+        'INVALID_TIER_VALUE',
+        `tier ${t.tierNo}: non-finite unitPrice/toQty`,
+      );
+    }
+    if (t.toQty === null && i !== ordered.length - 1) {
+      throw new DomainError(
+        'TARIFF_TIERS_INVALID',
+        `unbounded tier ${t.tierNo} is not the last tier`,
+      );
+    }
+    if (i > 0 && t.toQty !== null) {
+      const prev = ordered[i - 1].toQty;
+      if (prev !== null && t.toQty.lte(prev)) {
+        throw new DomainError(
+          'TARIFF_TIERS_INVALID',
+          `tier ${t.tierNo} toQty ${t.toQty} does not exceed previous ${prev}`,
+        );
+      }
+    }
+  }
+
   let remaining = qty;
   let cursor = ytdBeforeQty;
   let amountCent = 0n;

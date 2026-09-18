@@ -158,14 +158,13 @@ describe('computeBill — PERCENT', () => {
     expect(r.totalAmountCent).toBe(11500n);
   });
 
-  it('emits a zero-amount PERCENT row when the base is zero', () => {
+  it('skips a PERCENT row when the base is zero (no 0-amount noise rows)', () => {
     const r = computeBill({
       usageQty: D('5'),
       ytdBeforeQty: D('0'),
       feeItems: [percent('附加费', '0.05')],
     });
-    expect(r.items).toHaveLength(1);
-    expect(r.items[0].amountCent).toBe(0n);
+    expect(r.items).toHaveLength(0);
     expect(r.totalAmountCent).toBe(0n);
   });
 });
@@ -306,5 +305,51 @@ describe('computeBill — DomainError paths', () => {
     } catch (e) {
       expect((e as DomainError).code).toBe('TARIFF_TIERS_EXHAUSTED');
     }
+  });
+});
+
+describe('computeBill — review hardening cases', () => {
+  it('unknown calcType → UNKNOWN_CALC_TYPE DomainError', () => {
+    try {
+      computeBill({
+        usageQty: D('10'),
+        ytdBeforeQty: D('0'),
+        feeItems: [
+          { code: 'X', calcType: 'HOURLY' as never, tiers: [tier(1, '0', null, '1')] },
+        ],
+      });
+      expect.unreachable();
+    } catch (e) {
+      expect((e as DomainError).code).toBe('UNKNOWN_CALC_TYPE');
+    }
+  });
+
+  it('non-finite usageQty/ytd → DomainError', () => {
+    for (const [usageQty, ytdBeforeQty, code] of [
+      [D('NaN'), D('0'), 'INVALID_QTY'],
+      [D('10'), D('Infinity'), 'INVALID_YTD'],
+    ] as const) {
+      try {
+        computeBill({
+          usageQty,
+          ytdBeforeQty,
+          feeItems: [perQty('水费', [tier(1, '0', null, '3.0')])],
+        });
+        expect.unreachable();
+      } catch (e) {
+        expect(e).toBeInstanceOf(DomainError);
+        expect((e as DomainError).code).toBe(code);
+      }
+    }
+  });
+
+  it('PERCENT on a zero base emits no bill_item row', () => {
+    const r = computeBill({
+      usageQty: D('0'),
+      ytdBeforeQty: D('0'),
+      feeItems: [percent('附加费', '0.05')],
+    });
+    expect(r.items).toHaveLength(0);
+    expect(r.totalAmountCent).toBe(0n);
   });
 });
