@@ -220,6 +220,10 @@ export class SettlementService {
       throw new BadRequestException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     }
 
+    // Scope first: a 409-before-403 order would leak whether
+    // (account, period) is already settled to an out-of-scope writer.
+    await this.assertAccountScope(tx, ctx, body.waterAccountId, body.period);
+
     // Friendly pre-check; the unique index still guards the race below.
     const dup = await tx.consumptionSettlement.findFirst({
       where: {
@@ -236,8 +240,6 @@ export class SettlementService {
         status: dup.status,
       });
     }
-
-    await this.assertAccountScope(tx, ctx, body.waterAccountId, body.period);
 
     const { start, end } = periodBounds(body.period);
     // Installations contributing to the period: lifetime intersects
@@ -349,6 +351,12 @@ export class SettlementService {
           estimatedInstallations: estimatedInsts.map((i) => i.id),
         });
       }
+      if (overrideMap.has(estimatedInsts[0].id)) {
+        throw new BadRequestException({
+          code: 'USAGE_QTY_AMBIGUOUS',
+          installationId: estimatedInsts[0].id,
+        });
+      }
       overrideMap.set(estimatedInsts[0].id, body.usageQty);
     }
 
@@ -446,7 +454,21 @@ export class SettlementService {
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === 'P2002'
       ) {
-        throw new ConflictException({ code: 'SETTLEMENT_ALREADY_EXISTS' });
+        // Same response shape as the friendly pre-check — the winner's row
+        // is committed by now, so its id/status are safe to read.
+        const winner = await tx.consumptionSettlement.findFirst({
+          where: {
+            tenantId: ctx.tenantId,
+            waterAccountId: body.waterAccountId,
+            period: body.period,
+          },
+          select: { id: true, status: true },
+        });
+        throw new ConflictException({
+          code: 'SETTLEMENT_ALREADY_EXISTS',
+          settlementId: winner?.id ?? null,
+          status: winner?.status ?? null,
+        });
       }
       throw err;
     }
@@ -685,7 +707,11 @@ export class SettlementService {
         createdAt: true,
         settlement: { select: { period: true } },
       },
-      orderBy: [{ settlement: { period: 'desc' } }, { createdAt: 'desc' }],
+      orderBy: [
+        { settlement: { period: 'desc' } },
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
       take: 3,
     });
     return rows.map((r) => r.usageQty).reverse();
@@ -705,6 +731,16 @@ export class SettlementService {
     let usage = end.minus(prev);
     if (usage.isNegative()) {
       if (inst.meter.maxDial !== null) {
+        if (prev.gt(inst.meter.maxDial)) {
+          // prev above the dial ceiling is corrupt data — a rollover
+          // formula would return a positive-but-wrong usage. Fail loud.
+          throw new BadRequestException({
+            code: 'PREV_EXCEEDS_MAX_DIAL',
+            installationId: inst.id,
+            prevReadingValue: prev.toString(),
+            maxDial: inst.meter.maxDial.toString(),
+          });
+        }
         usage = inst.meter.maxDial.minus(prev).plus(end);
       }
       if (usage.isNegative()) {

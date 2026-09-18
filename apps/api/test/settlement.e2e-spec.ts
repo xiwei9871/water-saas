@@ -755,3 +755,76 @@ describe('idempotency + scope + isolation', () => {
     expect(prev.status).toBe(400);
   });
 });
+
+describe('T7 review follow-ups: supersede exclusion + rollover', () => {
+  it('superseded PASSED reading is excluded — settlement uses the corrected child', async () => {
+    await genPlan('x1', '202611');
+    const parent = await passActual('x1', 'S', 200, '2026-11-06');
+    const child = (
+      await request(app.getHttpServer())
+        .post(`/meter-readings/${parent.id}/supersede`)
+        .set(auth(adminToken))
+        .send({ readingValue: 210 })
+        .expect(201)
+    ).body;
+    await request(app.getHttpServer())
+      .post(`/meter-readings/${child.id}/qc`)
+      .set(auth(adminToken))
+      .send({ action: 'pass' })
+      .expect(201);
+
+    const res = await settle('S', '202611').expect(201);
+    const c = componentOf(res.body, inst['S2']); // entry lands on current install
+    expect(c.sourceType).toBe('READING');
+    expect(c.sourceReadingId).toBe(child.id);
+    expect(Number(c.endReadingValue)).toBe(210);
+    // prev chain: S2's latest prior component end is 23 (202609 estimate:
+    // synthetic 18 + 5), so usage = 210 − 23 = 187.
+    expect(Number(c.usageQty)).toBe(187);
+  });
+
+  it('superseded parent with child still PENDING → ESTIMATE (no valid fact)', async () => {
+    await genPlan('x2', '202702');
+    const parent = await passActual('x2', 'S', 300, '2027-02-06');
+    await request(app.getHttpServer())
+      .post(`/meter-readings/${parent.id}/supersede`)
+      .set(auth(adminToken))
+      .send({ readingValue: 310 })
+      .expect(201);
+    // Child deliberately left PENDING — the parent is superseded history
+    // and the child is unverdicted, so no READING source exists.
+    const res = await settle('S', '202702', { estimateReason: 'correction pending QC' }).expect(201);
+    const c = componentOf(res.body, inst['S2']);
+    expect(c.sourceType).toBe('ESTIMATE');
+    expect(res.body.isEstimated).toBe(true);
+  });
+
+  it('rollover: end < prev with maxDial → usage = (maxDial − prev) + end', async () => {
+    const r = (
+      await request(app.getHttpServer())
+        .post('/water-accounts/onboard')
+        .set(auth(adminToken))
+        .send({
+          customer: { name: `T7 R ${RUN}`, custType: 'PERSONAL' },
+          account: { usageCategory: 'RESIDENTIAL', addr: 'R Water St' },
+          meter: { brand: 't7-brand', caliber: 'DN15', maxDial: 100 },
+          installation: { initialReading: 90, installedAt: '2026-10-01' },
+        })
+        .expect(201)
+    ).body;
+    acct['R'] = r.waterAccount.id;
+    inst['R'] = r.installation.id;
+    await request(app.getHttpServer())
+      .post(`/reading-books/${bookId}/meters`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: acct['R'] })
+      .expect(201);
+
+    await genPlan('x3', '202703');
+    await passActual('x3', 'R', 15, '2027-03-06'); // 15 < prev 90 → rolled
+    const res = await settle('R', '202703').expect(201);
+    const c = componentOf(res.body, inst['R']);
+    expect(c.sourceType).toBe('READING');
+    expect(Number(c.usageQty)).toBe(25); // (100 − 90) + 15
+  });
+});

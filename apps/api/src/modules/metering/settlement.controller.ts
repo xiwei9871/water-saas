@@ -137,6 +137,13 @@ export class SettlementController {
     if (!body?.waterAccountId || !body?.period) {
       throw new BadRequestException({ code: 'SETTLEMENT_FIELDS_REQUIRED' });
     }
+    if (
+      body.estimateReason !== undefined &&
+      body.estimateReason !== null &&
+      typeof body.estimateReason !== 'string'
+    ) {
+      throw new BadRequestException({ code: 'ESTIMATE_REASON_INVALID' });
+    }
     const parsed: SettlementCreateBody = {
       waterAccountId: assertUuid(body.waterAccountId, 'waterAccountId'),
       period: assertPeriod(body.period),

@@ -10,6 +10,7 @@
     "seed": "tsx prisma/seed.ts"
   },
   "scripts": {
+    "prebuild": "pnpm --filter @ws/billing-core build",
     "build": "nest build",
     "deploy": "nest deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
@@ -18,10 +19,12 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
     "lint": "oxlint --type-aware src/ test/",
+    "pretest": "pnpm --filter @ws/billing-core build",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
+    "pretest:e2e": "pnpm --filter @ws/billing-core build",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
   },
   "dependencies": {
