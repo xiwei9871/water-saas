@@ -411,6 +411,7 @@ describe('POST /payments — multi-bill allocation', () => {
     });
     res = (await get(`/water-accounts/${acct['A1']}/outstanding`)).body;
     expect(res.items).toHaveLength(1); // the credit bill is not payable
+    expect(res.reversedBillCredit).toBe('0');
     expect(res.totalOutstanding).toBe('3000');
   });
 
@@ -458,6 +459,16 @@ describe('POST /payments — multi-bill allocation', () => {
         channel: 'CASH',
         amount: '12.5',
         allocs: [{ billId: bill['B2'], amount: '12.5' }],
+      })).body,
+    ).toMatchObject({ code: 'INVALID_AMOUNT' });
+    // Above 2^53−1 the JSON number cannot represent its cents exactly.
+    const unsafe = Number.MAX_SAFE_INTEGER + 1;
+    expect(
+      (await bad({
+        settleAccountId: settleAcct['A1'],
+        channel: 'CASH',
+        amount: unsafe,
+        allocs: [{ billId: bill['B2'], amount: unsafe }],
       })).body,
     ).toMatchObject({ code: 'INVALID_AMOUNT' });
     expect(
@@ -634,6 +645,59 @@ describe('POST /payments/:id/reverse — append-only reversal', () => {
     expect(revOfRev.body).toMatchObject({ code: 'PAYMENT_NOT_REVERSABLE' });
   });
 
+  it('a different cashier\'s reversal is attributed to the ORIGINAL cashier\'s drawer', async () => {
+    // The cashier reverses an ADMIN payment — the correction must land
+    // in admin's drawer sequence (cashierId/orgUnitId copied from the
+    // original) so the +/− pair nets inside one cashier's closes.
+    const rev = await post(`/payments/${pay['P-idem']}/reverse`, {}, cashierToken).expect(201);
+    expect(rev.body).toMatchObject({
+      cashierId: STAFF_ADMIN_A,
+      orgUnitId: ORG_A,
+      channel: 'TRANSFER',
+      amount: '-1000',
+      reversalOfId: pay['P-idem'],
+      status: 'RECEIVED',
+    });
+    // It is the original cashier's pending line, not the actor's.
+    const mine = (
+      await get(`/payments?cashierId=${STAFF_CASHIER_A}`, cashierToken)
+    ).body;
+    expect(mine.map((p: { id: string }) => p.id)).not.toContain(rev.body.id);
+  });
+
+  it('Idempotency-Key on reverse: same payload replays, a different body → 409', async () => {
+    const target = await post('/payments', {
+      settleAccountId: settleAcct['A2'],
+      channel: 'CASH',
+      amount: 1000,
+      allocs: [{ billId: bill['B3b'], amount: 1000 }],
+    }).expect(201);
+    const key = `t12-rev-${RUN}`;
+    const first = await request(app.getHttpServer())
+      .post(`/payments/${target.body.id}/reverse`)
+      .set(auth(adminToken))
+      .set('Idempotency-Key', key)
+      .send({})
+      .expect(201);
+    const replay = await request(app.getHttpServer())
+      .post(`/payments/${target.body.id}/reverse`)
+      .set(auth(adminToken))
+      .set('Idempotency-Key', key)
+      .send({})
+      .expect(201);
+    expect(replay.body.id).toBe(first.body.id);
+
+    const conflict = await request(app.getHttpServer())
+      .post(`/payments/${target.body.id}/reverse`)
+      .set(auth(adminToken))
+      .set('Idempotency-Key', key)
+      .send({ reason: 'different-body' })
+      .expect(409);
+    expect(conflict.body).toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
+    });
+  });
+
   it('receipt print sets printed_at and re-print updates it', async () => {
     const p = (await get(`/payments/${pay['P1']}`)).body;
     const first = await post(`/receipts/${p.receipt.id}/print`, {}).expect(201);
@@ -690,9 +754,13 @@ describe('cashier day-close', () => {
       close.body.payments.map((p: { id: string }) => p.id).sort(),
     ).toEqual([pay['C1'], pay['C2']].sort());
 
-    // Both payments flipped to DAY_CLOSED.
+    // Both payments flipped to DAY_CLOSED and stamped with this close —
+    // membership is a stored fact (payment.day_close_id), not a boundary
+    // reconstruction.
     for (const pid of [pay['C1'], pay['C2']]) {
-      expect((await get(`/payments/${pid}`)).body.status).toBe('DAY_CLOSED');
+      const row = (await get(`/payments/${pid}`)).body;
+      expect(row.status).toBe('DAY_CLOSED');
+      expect(row.dayCloseId).toBe(pay['CLOSE1']);
     }
 
     // List + detail: the close's payment membership is exact.
@@ -738,7 +806,11 @@ describe('cashier day-close', () => {
     expect(next.body).toMatchObject({ totalCount: 1, totalAmount: '-4000' });
     expect(next.body.byChannel.CASH).toEqual({ count: 1, amount: '-4000' });
     expect(next.body.payments.map((p: { id: string }) => p.id)).toEqual([pay['C1-rev']]);
-    expect((await get(`/payments/${pay['C1-rev']}`)).body.status).toBe('DAY_CLOSED');
+    const revRow = (await get(`/payments/${pay['C1-rev']}`)).body;
+    expect(revRow.status).toBe('DAY_CLOSED');
+    expect(revRow.dayCloseId).toBe(pay['CLOSE2']);
+    // The originals' stored membership still points at the first close.
+    expect((await get(`/payments/${pay['C1']}`)).body.dayCloseId).toBe(pay['CLOSE1']);
 
     // Membership reconstruction: the first close still shows exactly its
     // own two payments — the reversal does NOT leak backwards.
@@ -805,6 +877,93 @@ describe('getOutstanding ↔ close-account after payment', () => {
     await post(`/payments/${pay['P5']}/reverse`, {}).expect(201);
     const ok = await post(`/water-accounts/${acct['A5']}/close`, {}).expect(201);
     expect(ok.body.status).toBe('CLOSED');
+  });
+});
+
+describe('review: probe credit surface + closed-account reversal guard', () => {
+  it('probe: a paid-then-replaced bill exposes reversedBillCredit and nets the total', async () => {
+    // A8 + a FIXED-fee plan so the seeded bill carries a real
+    // tariff_plan_id for /bills/:id/replace to reprice against.
+    await onboard('A8');
+    const fixedItem = (
+      await post('/fee-items', { code: `FIX12-${RUN}`, name: '定额费', calcType: 'FIXED' }).expect(201)
+    ).body.id;
+    const plan = await post('/tariff-plans', {
+      code: `PLAN12-${RUN}`,
+      name: 'T12 定额价',
+      usageCategory: 'RESIDENTIAL',
+      effectiveFrom: '2026-01-01',
+      tiers: [{ feeItemId: fixedItem, tierNo: 1, fromQty: 0, toQty: null, unitPrice: '80' }],
+    }).expect(201);
+    await post(`/tariff-plans/${plan.body.id}/activate`, {}).expect(201);
+    // 8000 POSTED NORMAL carrying the plan; pay 6000 → PARTIAL_PAID.
+    await seedBill('B10', acct['A8'], settleAcct['A8'], '202606', {
+      totalAmount: 8000,
+    });
+    await owner.query(`UPDATE bill SET tariff_plan_id = $2 WHERE id = $1`, [
+      bill['B10'],
+      plan.body.id,
+    ]);
+    const p = await post('/payments', {
+      settleAccountId: settleAcct['A8'],
+      channel: 'CASH',
+      amount: 6000,
+      allocs: [{ billId: bill['B10'], amount: 6000 }],
+    }).expect(201);
+    pay['P10'] = p.body.id;
+    expect((await get(`/bills/${bill['B10']}`)).body.status).toBe('PARTIAL_PAID');
+
+    // Replace red-flushes the original; its 6000 of applied money survives
+    // as allocs on a REVERSED bill — a customer credit, not a vanished fact.
+    const repl = await post(`/bills/${bill['B10']}/replace`, { usageQty: 1 }).expect(201);
+    expect((await get(`/bills/${bill['B10']}`)).body.status).toBe('REVERSED');
+    expect(repl.body.billKind).toBe('REPLACEMENT');
+    expect(repl.body.totalAmount).toBe('8000'); // FIXED reprices flat
+
+    const probe = (await get(`/water-accounts/${acct['A8']}/outstanding`)).body;
+    expect(probe.items).toHaveLength(1);
+    expect(probe.items[0]).toMatchObject({
+      billId: repl.body.id,
+      billKind: 'REPLACEMENT',
+      outstanding: '8000',
+    });
+    expect(probe.reversedBillCredit).toBe('6000');
+    expect(probe.totalOutstanding).toBe('2000');
+    // The FinancePort agrees — close sees the same net position.
+    const blocked = await post(`/water-accounts/${acct['A8']}/close`, {});
+    expect(blocked.status).toBe(409);
+    expect(blocked.body).toMatchObject({ outstanding: '2000' });
+
+    // Reversing the payment refunds the credit: allocs net to zero and the
+    // replacement's full 8000 is the only remaining debt.
+    await post(`/payments/${pay['P10']}/reverse`, {}).expect(201);
+    const after = (await get(`/water-accounts/${acct['A8']}/outstanding`)).body;
+    expect(after.reversedBillCredit).toBe('0');
+    expect(after.totalOutstanding).toBe('8000');
+  });
+
+  it('a reversal that would resurrect debt on a CLOSED account → 409 PAYMENT_ACCOUNT_CLOSED', async () => {
+    await onboard('A9');
+    await seedBill('B11', acct['A9'], settleAcct['A9'], '202606', { totalAmount: 3000 });
+    const p = await post('/payments', {
+      settleAccountId: settleAcct['A9'],
+      channel: 'CASH',
+      amount: 3000,
+      allocs: [{ billId: bill['B11'], amount: 3000 }],
+    }).expect(201);
+    pay['P11'] = p.body.id;
+    const closed = await post(`/water-accounts/${acct['A9']}/close`, {}).expect(201);
+    expect(closed.body.status).toBe('CLOSED');
+
+    const rev = await post(`/payments/${pay['P11']}/reverse`, {});
+    expect(rev.status).toBe(409);
+    expect(rev.body).toMatchObject({ code: 'PAYMENT_ACCOUNT_CLOSED' });
+
+    // Nothing was written: the original is untouched and no reversal exists.
+    const original = (await get(`/payments/${pay['P11']}`)).body;
+    expect(original.status).toBe('RECEIVED');
+    const list = (await get(`/payments?settleAccountId=${settleAcct['A9']}`)).body;
+    expect(list.map((x: { id: string }) => x.id)).toEqual([pay['P11']]);
   });
 });
 

@@ -40,7 +40,8 @@ const assertCents = (
   if (typeof v !== 'number' && typeof v !== 'string') {
     throw new BadRequestException({ code: 'INVALID_AMOUNT', field });
   }
-  if (typeof v === 'number' && !Number.isInteger(v)) {
+  if (typeof v === 'number' && !Number.isSafeInteger(v)) {
+    // isInteger admits values above 2^53 whose cents silently drift.
     throw new BadRequestException({ code: 'INVALID_AMOUNT', field });
   }
   if (typeof v === 'string' && !/^-?\d+$/.test(v.trim())) {
@@ -187,6 +188,7 @@ export class PaymentController {
   @Permissions('payment:write')
   reverse(
     @Param('id') id: string,
+    @Body() body: unknown,
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
   ) {
@@ -196,7 +198,9 @@ export class PaymentController {
       this.prisma,
       this.idem,
       ctx,
-      { key, method: 'POST', route: req.path, body: {}, responseStatus: 201 },
+      // The real body participates in the key hash (parity with create):
+      // same key + different body must 409, not silently replay.
+      { key, method: 'POST', route: req.path, body: body ?? {}, responseStatus: 201 },
       (tx) => this.svc.reverseTx(tx, ctx, id, req),
     );
   }

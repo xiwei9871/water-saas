@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { PayChannel, Prisma } from '@prisma/client';
 import { type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
@@ -22,6 +22,18 @@ export const DAY_CLOSE_SELECT = {
   updatedAt: true,
 } satisfies Prisma.CashierDayCloseSelect;
 
+/** Payment columns returned inside a close detail. */
+const PAYMENT_MEMBER_SELECT = {
+  id: true,
+  paymentNo: true,
+  channel: true,
+  amount: true,
+  status: true,
+  receivedAt: true,
+  reversalOfId: true,
+  dayCloseId: true,
+} satisfies Prisma.PaymentSelect;
+
 /** One flipped payment row as the claim SELECT returns it. */
 export interface ClaimedPayment {
   id: string;
@@ -31,6 +43,27 @@ export interface ClaimedPayment {
   received_at: Date;
   reversal_of_id: string | null;
 }
+
+/** Wire shape for a payment inside a close — camelCase like /payments. */
+const memberWire = (p: {
+  id: string;
+  paymentNo: string;
+  channel: string;
+  amount: bigint;
+  status: string;
+  receivedAt: Date;
+  reversalOfId: string | null;
+  dayCloseId: string | null;
+}) => ({
+  id: p.id,
+  paymentNo: p.paymentNo,
+  channel: p.channel,
+  amount: p.amount,
+  status: p.status,
+  receivedAt: p.receivedAt,
+  reversalOfId: p.reversalOfId,
+  dayCloseId: p.dayCloseId,
+});
 
 /**
  * CashierDayClose （收费员日结） — spec §2.6: a cashier signs off one
@@ -86,16 +119,11 @@ export class DayCloseService {
 
   /**
    * GET /cashier-day-close/:id — the close plus the payments it swept.
-   * Membership is not stored as a column, so it is reconstructed
-   * exactly: a DAY_CLOSED payment belongs to THIS close iff it existed
-   * when the close ran (received_at <= closed_at), its received date is
-   * covered (<= closeDate), and the immediately previous close did NOT
-   * sweep it — i.e. the payment's received date falls after the
-   * previous close's operating date OR the payment arrived only after
-   * that previous close committed. Close dates per cashier are
-   * monotone (a close whose date is already covered finds nothing to
-   * sweep → DAY_CLOSE_EMPTY), so the previous close is the exact
-   * boundary.
+   * Membership is a stored fact: the RECEIVED→DAY_CLOSED flip stamps
+   * payment.day_close_id, so members are read back exactly — no
+   * boundary math (a received_at/closed_at reconstruction misattributes
+   * payments whose commits straddle a queued close, because closed_at =
+   * transaction_timestamp() marks the tx START, not the sweep).
    */
   async getById(ctx: TenantCtx, id: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
@@ -106,27 +134,12 @@ export class DayCloseService {
       if (!close) {
         throw new NotFoundException({ code: 'DAY_CLOSE_NOT_FOUND' });
       }
-      const prev = await tx.cashierDayClose.findFirst({
-        where: {
-          tenantId: ctx.tenantId,
-          cashierId: close.cashierId,
-          closedAt: { lt: close.closedAt },
-        },
-        orderBy: [{ closedAt: 'desc' }, { id: 'desc' }],
-        select: { closeDate: true, closedAt: true },
+      const members = await tx.payment.findMany({
+        where: { tenantId: ctx.tenantId, dayCloseId: close.id },
+        orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
+        select: PAYMENT_MEMBER_SELECT,
       });
-      const swept = await tx.$queryRaw<ClaimedPayment[]>`
-        SELECT id::text AS id, payment_no, channel::text AS channel, amount,
-               received_at, reversal_of_id::text AS reversal_of_id
-        FROM payment p
-        WHERE p.tenant_id = ${ctx.tenantId}::uuid
-          AND p.cashier_id = ${close.cashierId}::uuid
-          AND p.status = 'DAY_CLOSED'
-          AND p.received_at <= ${close.closedAt}::timestamp
-          AND p.received_at::date <= ${close.closeDate}::date
-          ${prev ? Prisma.sql`AND (p.received_at > ${prev.closedAt}::timestamp OR p.received_at::date > ${prev.closeDate}::date)` : Prisma.empty}
-        ORDER BY p.received_at, p.id`;
-      return { ...close, payments: swept };
+      return { ...close, payments: members.map(memberWire) };
     });
   }
 
@@ -189,22 +202,12 @@ export class DayCloseService {
     }
 
     const ids = pending.map((p) => p.id);
-    const flip = await tx.payment.updateMany({
-      where: { tenantId: ctx.tenantId, id: { in: ids }, status: 'RECEIVED' },
-      data: { status: 'DAY_CLOSED', updatedBy: ctx.staffId },
-    });
-    if (flip.count !== ids.length) {
-      // Only another writer could have moved a claimed row off
-      // RECEIVED — nothing else writes payment.status, so this is a
-      // defensive abort, not an expected race.
-      throw new ConflictException({ code: 'DAY_CLOSE_LOST_RACE' });
-    }
-
-    const byChannel: Record<string, { count: number; amount: bigint }> = {
-      CASH: { count: 0, amount: 0n },
-      POS: { count: 0, amount: 0n },
-      TRANSFER: { count: 0, amount: 0n },
-    };
+    // Buckets are derived from the PayChannel enum itself — a future
+    // channel can never crash on an undefined bucket or silently
+    // aggregate into a hardcoded set.
+    const byChannel = Object.fromEntries(
+      Object.values(PayChannel).map((c) => [c, { count: 0, amount: 0n }]),
+    ) as Record<PayChannel, { count: number; amount: bigint }>;
     let totalAmount = 0n;
     for (const p of pending) {
       const bucket = byChannel[p.channel];
@@ -222,6 +225,8 @@ export class DayCloseService {
       ]),
     ) as unknown as Prisma.InputJsonValue;
 
+    // The close row lands FIRST — its id is what the flip stamps onto
+    // every swept payment, making membership a stored fact.
     const close = await tx.cashierDayClose.create({
       data: {
         tenantId: ctx.tenantId,
@@ -237,17 +242,36 @@ export class DayCloseService {
       },
       select: DAY_CLOSE_SELECT,
     });
+
+    const flip = await tx.payment.updateMany({
+      where: { tenantId: ctx.tenantId, id: { in: ids }, status: 'RECEIVED' },
+      data: {
+        status: 'DAY_CLOSED',
+        dayCloseId: close.id,
+        updatedBy: ctx.staffId,
+      },
+    });
+    if (flip.count !== ids.length) {
+      // Only another writer could have moved a claimed row off
+      // RECEIVED — nothing else writes payment.status, so this is a
+      // defensive abort, not an expected race.
+      throw new ConflictException({ code: 'DAY_CLOSE_LOST_RACE' });
+    }
+
     return {
       ...close,
-      payments: pending.map((p) => ({
-        id: p.id,
-        paymentNo: p.payment_no,
-        channel: p.channel,
-        amount: p.amount,
-        status: 'DAY_CLOSED' as const,
-        receivedAt: p.received_at,
-        reversalOfId: p.reversal_of_id,
-      })),
+      payments: pending.map((p) =>
+        memberWire({
+          id: p.id,
+          paymentNo: p.payment_no,
+          channel: p.channel,
+          amount: p.amount,
+          status: 'DAY_CLOSED',
+          receivedAt: p.received_at,
+          reversalOfId: p.reversal_of_id,
+          dayCloseId: close.id,
+        }),
+      ),
     };
   }
 }

@@ -930,6 +930,11 @@ model Payment {
   status          PaymentStatus @default(RECEIVED)
   receivedAt      DateTime      @default(now()) @map("received_at")
   reversalOfId    String?       @map("reversal_of_id") @db.Uuid
+  // Which cashier_day_close swept this payment — written once, by the
+  // RECEIVED→DAY_CLOSED flip, so close membership is a stored fact, not a
+  // reconstructed boundary. Plain column (like receipt.payment_id): the
+  // close is referenced, never navigated.
+  dayCloseId      String?       @map("day_close_id") @db.Uuid
   createdAt       DateTime      @default(now()) @map("created_at")
   createdBy       String?       @map("created_by") @db.Uuid
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -941,6 +946,7 @@ model Payment {
   @@unique([tenantId, id])
   @@index([tenantId, settleAccountId, status])
   @@index([tenantId, cashierId, status])
+  @@index([tenantId, dayCloseId])
   @@map("payment")
 }
 

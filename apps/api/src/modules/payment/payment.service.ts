@@ -10,6 +10,7 @@ import type { Request } from 'express';
 import { SequenceService } from '../../common/sequence.service.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { lockAccountForUpdate } from '../billing/pricing.js';
 
 export const PAYMENT_SELECT = {
   id: true,
@@ -23,6 +24,7 @@ export const PAYMENT_SELECT = {
   status: true,
   receivedAt: true,
   reversalOfId: true,
+  dayCloseId: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.PaymentSelect;
@@ -126,12 +128,18 @@ const lockPaymentForUpdate = async (
  *    a NEW payment (amount negated, reversal_of_id → original, same
  *    channel/settle_account, RECEIVED) that lands in the NEXT close as a
  *    negative line — the patch's "9/18 close +100 stays, 9/19 close
- *    carries −100". PaymentStatus.REVERSED is therefore vestigial in the
+ *    carries −100". It is attributed to the ORIGINAL payment's cashier
+ *    and org_unit (the +/− pair nets inside one cashier's drawer
+ *    sequence); createdBy records whoever ran the refund.
+ *    PaymentStatus.REVERSED is therefore vestigial in the
  *    enum: nothing ever transitions into it. Mirror allocs (−amount
  *    each) release the bills' outstanding and statuses are recomputed
  *    back (Σ = 0 → POSTED, partial → PARTIAL_PAID). The original's
  *    receipt is voided in the same tx. Reversing a reversal → 400;
- *    double-reverse → 409 behind the payment row lock.
+ *    double-reverse → 409 behind the payment row lock; a reversal that
+ *    would resurrect debt on a CLOSED water account → 409
+ *    PAYMENT_ACCOUNT_CLOSED (account rows are locked FOR UPDATE first,
+ *    serializing against close-account).
  *  - No receipt is issued for a reversal payment: a receipt documents
  *    money received at the counter; the reversal is a correction line —
  *    the voided original receipt is the audit trail.
@@ -193,6 +201,11 @@ export class PaymentService {
    * allocs + receipt inserts → guarded bill status recompute. The bill
    * row locks precede every outstanding read so a concurrent payment on
    * the same bill can never split the difference.
+   *
+   * Account status is NOT gated: paying onto a SUSPENDED account is
+   * normal residual-debt collection (suspension stops water, not owed
+   * money), and a CLOSED account simply has no payable bills left — the
+   * per-alloc 409s cover it naturally without a special case.
    */
   async createTx(
     tx: Prisma.TransactionClient,
@@ -344,9 +357,14 @@ export class PaymentService {
   /**
    * GET /water-accounts/:id/outstanding — the cashier's open-debt view:
    * every POSTED | PARTIAL_PAID non-REVERSAL bill on the account's settle
-   * account with its remaining balance > 0, plus the total. This is the
-   * per-bill projection of BillingFinancePort.getOutstanding minus the
-   * in-flight DRAFT term (a DRAFT is not yet payable at the counter).
+   * account with its remaining balance > 0, plus the net total. This is
+   * the per-bill projection of BillingFinancePort.getOutstanding minus
+   * the in-flight DRAFT term (a DRAFT is not yet payable at the counter)
+   * — INCLUDING its credit leg: `reversedBillCredit` surfaces money
+   * applied to bills that were red-flushed afterwards (the customer is
+   * owed it back via a payment reversal — a refund, not more
+   * collection). Without it the probe would overstate collectible debt
+   * by exactly the orphaned alloc sum.
    */
   async outstandingTx(
     tx: Prisma.TransactionClient,
@@ -386,19 +404,42 @@ export class PaymentService {
         outstanding: b.totalAmount - paidAmount,
       };
     });
+    // The REVERSED-side credit: a bill red-flushed AFTER money was
+    // applied (PARTIAL_PAID → reverse/replace) leaves its allocs behind
+    // — append-only, so they survive the status flip and the gross
+    // contribution vanishes with the status. Σ allocs on REVERSED bills
+    // is money the customer prepaid on voided debt — owed back, and it
+    // must net against what the cashier is asked to collect (this is
+    // BillingFinancePort.getOutstanding's alloc term, minus the DRAFT
+    // term the counter doesn't see). A positive reversedBillCredit says
+    // "run a payment reversal (refund), don't collect more".
+    const reversedBillCredit = await tx.paymentAlloc.aggregate({
+      _sum: { amount: true },
+      where: {
+        tenantId: ctx.tenantId,
+        bill: {
+          tenantId: ctx.tenantId,
+          settleAccountId: account.settleAccountId,
+          status: 'REVERSED',
+          billKind: { not: 'REVERSAL' },
+        },
+      },
+    });
+    const credit = reversedBillCredit._sum.amount ?? 0n;
     // items = the payable lines (outstanding > 0 — a zero/negative bill
     // is nothing the cashier can act on, and alloc targets require
     // positive outstanding anyway). totalOutstanding = the settle
-    // account's NET position over every live bill: a credit bill (e.g.
-    // a negative ADJUSTMENT from reconciliation) nets against real debt,
-    // consistent with BillingFinancePort.getOutstanding — so the total
-    // can differ from Σ items and can itself go negative.
+    // account's NET position: Σ over every live line (a negative
+    // ADJUSTMENT nets against real debt) minus the reversed-bill credit
+    // — so the total can differ from Σ items and can itself go negative.
     const items = lines.filter((i) => i.outstanding > 0n);
-    const totalOutstanding = lines.reduce((s, i) => s + i.outstanding, 0n);
+    const totalOutstanding =
+      lines.reduce((s, i) => s + i.outstanding, 0n) - credit;
     return {
       waterAccountId: account.id,
       settleAccountId: account.settleAccountId,
       items,
+      reversedBillCredit: credit,
       totalOutstanding,
     };
   }
@@ -407,8 +448,25 @@ export class PaymentService {
    * POST /payments/:id/reverse — append-only 红冲退款 (see class
    * docblock for why the original is never mutated). Order: payment row
    * FOR UPDATE (serializes double-reverse) → load → already-reversed
-   * probe → scope → sorted bill locks → reversal payment + mirror allocs
-   * + receipt void → bill status recompute.
+   * probe → scope → affected water_account rows FOR UPDATE in sorted id
+   * order → CLOSED refuses → sorted bill locks → reversal payment +
+   * mirror allocs + receipt void → bill status recompute.
+   *
+   * The account locks serialize against close-account (closeTx takes the
+   * same row lock before its guarded CLOSED flip) and against bill
+   * posting (postOneBill: account → plan → bill). A payment reversal is
+   * the ONLY path that can RAISE an account's outstanding — without the
+   * lock, a racing or already-committed close would leave a CLOSED
+   * account carrying resurrected debt with no recovery path. Lock order
+   * is payment → accounts → bills → seq: nothing else takes a payment
+   * row lock and then waits on accounts (day-close flips payments under
+   * the staff lock; postOneBill never touches payment rows), so no
+   * lock-order cycle exists with either writer.
+   *
+   * Attribution: the reversal's cashierId/orgUnitId are the ORIGINAL
+   * payment's — the correction belongs in that cashier's drawer
+   * sequence so the +/− pair nets inside one cashier's closes, no matter
+   * who performs the refund. createdBy still records the actor.
    */
   async reverseTx(
     tx: Prisma.TransactionClient,
@@ -450,15 +508,46 @@ export class PaymentService {
       select: { billId: true, amount: true },
     });
     const billIds = [...new Set(origAllocs.map((a) => a.billId))].sort();
+
+    // Discover the affected water accounts before locking anything —
+    // bill.waterAccountId is immutable so an unlocked read suffices to
+    // choose the lock set. Every distinct account locks in sorted id
+    // order (all multi-row lockers in this codebase walk sorted ids).
+    const allocBills = billIds.length
+      ? await tx.bill.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: billIds } },
+          select: { waterAccountId: true },
+        })
+      : [];
+    const accountIds = [
+      ...new Set(allocBills.map((b) => b.waterAccountId)),
+    ].sort();
+    for (const accountId of accountIds) {
+      await lockAccountForUpdate(tx, ctx, accountId);
+    }
+    if (accountIds.length > 0) {
+      const closed = await tx.waterAccount.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          id: { in: accountIds },
+          status: 'CLOSED',
+        },
+        select: { id: true },
+      });
+      if (closed) {
+        // A reversal RAISES outstanding — on a closed account that is
+        // resurrected debt no close-out path can ever settle. The
+        // refund path for closed accounts is out of MVP scope; the
+        // operator reverses the payment BEFORE closing instead.
+        throw new ConflictException({
+          code: 'PAYMENT_ACCOUNT_CLOSED',
+          waterAccountId: closed.id,
+        });
+      }
+    }
     for (const billId of billIds) {
       await lockBillForUpdate(tx, ctx, billId);
     }
-
-    const staff = await tx.staff.findFirst({
-      where: { tenantId: ctx.tenantId, id: ctx.staffId },
-      select: { orgUnitId: true },
-    });
-    if (!staff) throw new NotFoundException({ code: 'STAFF_NOT_FOUND' });
 
     const paymentNo = await this.seq.nextFormatted(
       tx,
@@ -472,8 +561,9 @@ export class PaymentService {
         tenantId: ctx.tenantId,
         paymentNo,
         settleAccountId: original.settleAccountId,
-        cashierId: ctx.staffId,
-        orgUnitId: staff.orgUnitId,
+        // Original's drawer, not the actor's (see docblock).
+        cashierId: original.cashierId,
+        orgUnitId: original.orgUnitId,
         channel: original.channel,
         amount: -original.amount,
         status: 'RECEIVED', // enters the NEXT close as a negative line
