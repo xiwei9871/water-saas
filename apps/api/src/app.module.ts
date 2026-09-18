@@ -11,11 +11,22 @@ import { TenantInterceptor } from './common/tenant.interceptor.js';
 import { BillingModule } from './modules/billing/billing.module.js';
 import { CustomerModule } from './modules/customer/customer.module.js';
 import { IamModule } from './modules/iam/iam.module.js';
+import { IntegrationModule } from './modules/integration/integration.module.js';
 import { MeteringModule } from './modules/metering/metering.module.js';
 import { PaymentModule } from './modules/payment/payment.module.js';
+import { ReportModule } from './modules/report/report.module.js';
 
 @Module({
-  imports: [CommonModule, IamModule, CustomerModule, MeteringModule, BillingModule, PaymentModule],
+  imports: [
+    CommonModule,
+    IamModule,
+    CustomerModule,
+    MeteringModule,
+    BillingModule,
+    PaymentModule,
+    ReportModule,
+    IntegrationModule,
+  ],
   controllers: [AppController],
   providers: [
     AppService,
