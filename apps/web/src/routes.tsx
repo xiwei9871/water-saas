@@ -10,6 +10,11 @@ import {
 } from '@ant-design/icons';
 import type { ReactNode } from 'react';
 import Workbench from './pages/Workbench';
+import Customers from './pages/customer/Customers';
+import Meters from './pages/customer/Meters';
+import Onboard from './pages/customer/Onboard';
+import SettleAccounts from './pages/customer/SettleAccounts';
+import WaterAccounts from './pages/customer/WaterAccounts';
 import AuditLogs from './pages/system/AuditLogs';
 import Orgs from './pages/system/Orgs';
 import Roles from './pages/system/Roles';
@@ -51,6 +56,40 @@ export const APP_ROUTES: AppRoute[] = [
     label: '客户管理',
     icon: <TeamOutlined />,
     perms: ['customer:read'],
+    children: [
+      // 立户是纯写操作 —— 只读用户从菜单隐藏（路由层 PermRoute 同样拦截）。
+      {
+        key: 'customer-onboard',
+        path: '/customer/onboard',
+        label: '立户向导',
+        perms: ['customer:write'],
+        element: <Onboard />,
+      },
+      {
+        key: 'customer-customers',
+        path: '/customer/customers',
+        label: '客户列表',
+        element: <Customers />,
+      },
+      {
+        key: 'customer-water-accounts',
+        path: '/customer/water-accounts',
+        label: '水表户',
+        element: <WaterAccounts />,
+      },
+      {
+        key: 'customer-settle-accounts',
+        path: '/customer/settle-accounts',
+        label: '结算户',
+        element: <SettleAccounts />,
+      },
+      {
+        key: 'customer-meters',
+        path: '/customer/meters',
+        label: '水表档案',
+        element: <Meters />,
+      },
+    ],
   },
   {
     key: 'metering',
