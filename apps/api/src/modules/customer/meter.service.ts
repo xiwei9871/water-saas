@@ -110,7 +110,7 @@ export class MeterService {
   /** Register a device in inventory — always lands AVAILABLE. */
   async createTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: MeterBody) {
     const meterNo =
-      body.meterNo ??
+      body.meterNo?.trim() ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'meter_no', 'M', ctx.staffId));
     return conflictOnUnique(
       tx.meter.create({

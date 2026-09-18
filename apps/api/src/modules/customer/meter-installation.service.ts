@@ -132,10 +132,17 @@ export class MeterInstallationService {
         updatedBy: ctx.staffId,
       },
     });
-    await tx.meter.update({
-      where: { tenantId_id: { tenantId: ctx.tenantId, id: body.meterId } },
+    // Guarded transition: the AVAILABLE check above is check-then-act, so the
+    // state predicate is repeated in the UPDATE itself — a concurrent install
+    // on the same meter loses the race here (count=0) instead of silently
+    // producing two ACTIVE installations.
+    const flipped = await tx.meter.updateMany({
+      where: { tenantId: ctx.tenantId, id: body.meterId, status: 'AVAILABLE' },
       data: { status: 'INSTALLED', updatedBy: ctx.staffId },
     });
+    if (flipped.count === 0) {
+      throw new ConflictException({ code: 'METER_NOT_AVAILABLE' });
+    }
     return tx.meterInstallation.findUniqueOrThrow({
       where: { tenantId_id: { tenantId: ctx.tenantId, id: installation.id } },
       select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
@@ -170,8 +177,10 @@ export class MeterInstallationService {
     }
     req.auditBefore = existing;
 
-    await tx.meterInstallation.update({
-      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+    // Guarded transition (see installTx): a concurrent remove loses the race
+    // here instead of overwriting the winner's final_reading.
+    const flipped = await tx.meterInstallation.updateMany({
+      where: { tenantId: ctx.tenantId, id, status: 'ACTIVE' },
       data: {
         status: 'REMOVED',
         removedAt: body.removedAt ?? new Date(),
@@ -179,6 +188,9 @@ export class MeterInstallationService {
         updatedBy: ctx.staffId,
       },
     });
+    if (flipped.count === 0) {
+      throw new ConflictException({ code: 'INSTALLATION_NOT_ACTIVE' });
+    }
     await tx.meter.update({
       where: { tenantId_id: { tenantId: ctx.tenantId, id: existing.meterId } },
       data: { status: 'AVAILABLE', updatedBy: ctx.staffId },

@@ -75,7 +75,7 @@ export class MeterController {
     const ctx = currentTenant();
     const parsed: MeterBody = {
       ...body,
-      maxDial: body?.maxDial !== undefined ? assertDecimal(body.maxDial, 'maxDial') : undefined,
+      maxDial: body?.maxDial !== undefined ? assertDecimal(body.maxDial, 'maxDial', { min: 0 }) : undefined,
     };
     return withOptionalIdem(
       this.prisma,
@@ -105,7 +105,7 @@ export class MeterController {
     const ctx = currentTenant();
     const parsed: MeterPatchBody = {
       ...body,
-      maxDial: body?.maxDial !== undefined ? assertDecimal(body.maxDial, 'maxDial') : undefined,
+      maxDial: body?.maxDial !== undefined ? assertDecimal(body.maxDial, 'maxDial', { min: 0 }) : undefined,
     };
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       this.svc.updateTx(tx, ctx, id, parsed, req),

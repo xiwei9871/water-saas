@@ -30,8 +30,10 @@ export class CloseAccountUseCase {
     body: EventBody,
     req: Request,
   ) {
-    const outstanding = await this.finance.getOutstanding(accountId);
-    if (outstanding > 0n) {
+    const outstanding = await this.finance.getOutstanding(ctx.tenantId, accountId);
+    // Non-zero blocks close in both directions: a credit balance means the
+    // tenant owes the customer money that must be refunded first.
+    if (outstanding !== 0n) {
       throw new ConflictException({
         code: 'ACCOUNT_OUTSTANDING_BALANCE',
         outstanding: outstanding.toString(),

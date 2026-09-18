@@ -93,7 +93,7 @@ export class CustomerService {
   /** Inside the caller's tenant tx — allocates customer_no when absent. */
   async createTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: CustomerBody) {
     const customerNo =
-      body.customerNo ??
+      body.customerNo?.trim() ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'customer_no', 'C', ctx.staffId));
     return conflictOnUnique(
       tx.customer.create({

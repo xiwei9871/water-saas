@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
@@ -82,7 +82,7 @@ export class SettleAccountService {
     body: SettleAccountBody,
   ) {
     const settleNo =
-      body.settleNo ??
+      body.settleNo?.trim() ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'settle_no', 'S', ctx.staffId));
     return conflictOnUnique(
       tx.settleAccount.create({
@@ -111,6 +111,11 @@ export class SettleAccountService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+    // A CLOSED settle account stays closed — reopening goes through a future
+    // business flow, not a profile PATCH that could resurrect it silently.
+    if (existing.status === 'CLOSED') {
+      throw new ConflictException({ code: 'SETTLE_ACCOUNT_CLOSED' });
+    }
     req.auditBefore = existing;
     return tx.settleAccount.update({
       where: { tenantId_id: { tenantId: ctx.tenantId, id } },

@@ -1,7 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
-/** Current 'yyyyMM' period (server-local calendar month). */
+/**
+ * Current 'yyyyMM' period (server-local calendar month). Tenants in a
+ * different timezone can see a number land on the other side of a month
+ * boundary by ±1 day — acceptable for MVP numbering (unique, not gapless).
+ */
 const currentPeriod = (): string => {
   const d = new Date();
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;

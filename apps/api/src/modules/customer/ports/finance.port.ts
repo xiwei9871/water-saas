@@ -12,7 +12,7 @@ import { Injectable } from '@nestjs/common';
  */
 export abstract class FinancePort {
   /** Outstanding amount in cents for a water account (0 = clear to close). */
-  abstract getOutstanding(waterAccountId: string): Promise<bigint>;
+  abstract getOutstanding(tenantId: string, waterAccountId: string): Promise<bigint>;
 }
 
 /**
@@ -25,7 +25,7 @@ export abstract class FinancePort {
 export class StubFinancePort extends FinancePort {
   outstanding = 0n;
 
-  getOutstanding(_waterAccountId: string): Promise<bigint> {
+  getOutstanding(_tenantId: string, _waterAccountId: string): Promise<bigint> {
     return Promise.resolve(this.outstanding);
   }
 }

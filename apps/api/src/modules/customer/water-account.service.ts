@@ -205,7 +205,7 @@ export class WaterAccountService {
     });
     if (!settle) throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
     const accountNo =
-      body.accountNo ??
+      body.accountNo?.trim() ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'account_no', 'A', ctx.staffId));
     return conflictOnUnique(
       tx.waterAccount.create({
@@ -312,6 +312,7 @@ export class WaterAccountService {
     req: Request,
   ) {
     const existing = await this.loadAccount(tx, ctx, id);
+    if (existing.status === 'CLOSED') throw invalidTransition('CLOSED', 'PATCH');
     req.auditBefore = existing;
     return tx.waterAccount.update({
       where: { tenantId_id: { tenantId: ctx.tenantId, id } },
@@ -403,13 +404,22 @@ export class WaterAccountService {
     }
     req.auditBefore = existing;
 
-    const updated = await tx.waterAccount.update({
-      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+    // Guarded transition: the allowed-from predicate is part of the UPDATE so
+    // a concurrent transition loses the race (count=0) instead of double-
+    // writing events (e.g. two SUSPEND records).
+    const flipped = await tx.waterAccount.updateMany({
+      where: { tenantId: ctx.tenantId, id, status: { in: allowed[to] } },
       data: {
         status: to,
         closedAt: to === 'CLOSED' ? (body.effectiveDate ?? new Date()) : undefined,
         updatedBy: ctx.staffId,
       },
+    });
+    if (flipped.count === 0) {
+      throw invalidTransition(existing.status, to);
+    }
+    const updated = await tx.waterAccount.findUniqueOrThrow({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
       select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
     });
     await this.writeEvent(
