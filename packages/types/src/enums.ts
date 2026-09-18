@@ -108,3 +108,14 @@ export type EstimateMethod = (typeof ESTIMATE_METHODS)[number];
 
 export const RECEIPT_TYPES = ['RECEIPT'] as const;
 export type ReceiptType = (typeof RECEIPT_TYPES)[number];
+
+export const TENANT_STATUSES = ['ACTIVE', 'SUSPENDED'] as const;
+export type TenantStatus = (typeof TENANT_STATUSES)[number];
+
+export const STAFF_STATUSES = ['ACTIVE', 'DISABLED'] as const;
+export type StaffStatus = (typeof STAFF_STATUSES)[number];
+
+// cashier_day_close rows are created POSTED and immutable — corrections go
+// through negative reversal payments, never in-place day-close reversal.
+export const DAY_CLOSE_STATUSES = ['POSTED'] as const;
+export type DayCloseStatus = (typeof DAY_CLOSE_STATUSES)[number];

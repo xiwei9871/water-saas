@@ -1,0 +1,921 @@
+// Water SaaS MVP — full schema (spec §3).
+// Conventions: id = uuid PK (client-generated); every business table carries
+// tenant_id + audit columns; money = bigint cents; water qty = numeric(18,4);
+// unit price = numeric(18,6); period = char(6) YYYYMM. DB columns are snake_case
+// via @map — the RLS policy references `tenant_id` directly.
+//
+// datasource: runtime client uses `url` (ws_app, non-owner, RLS-enforced);
+// `prisma migrate` uses `directUrl` (postgres owner). Owner credentials must
+// never appear in runtime code paths.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("MIGRATION_DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums — kept 1:1 with packages/types/src/enums.ts (spec §2.7)
+// ---------------------------------------------------------------------------
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum StaffStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum OrgType {
+  COMPANY
+  BRANCH
+  DEPT
+}
+
+enum DataScope {
+  ALL
+  ORG_SUBTREE
+  SELF
+}
+
+enum PermType {
+  MENU
+  ACTION
+  DATA
+}
+
+enum CustType {
+  PERSONAL
+  ORG
+}
+
+enum AccountStatus {
+  NORMAL
+  SUSPENDED
+  CLOSED
+}
+
+enum AccountEventType {
+  TRANSFER
+  SUSPEND
+  RESUME
+  CLOSE
+}
+
+enum MeterStatus {
+  AVAILABLE
+  INSTALLED
+  MAINTENANCE
+  RETIRED
+}
+
+enum InstallationStatus {
+  ACTIVE
+  REMOVED
+}
+
+enum InstallReason {
+  NEW
+  REPLACE
+  FAULT
+  PERIODIC_CHECK
+}
+
+enum PlanStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  CLOSED
+}
+
+enum PlanItemStatus {
+  PENDING
+  READ
+  NO_READ
+  SKIPPED
+}
+
+enum ReadResultType {
+  ACTUAL
+  REMOTE
+  NO_READ
+}
+
+enum ExceptionCode {
+  LOCKED
+  DIAL_DIRTY
+  FLOODED
+  OCCUPIED
+  STOPPED
+  BROKEN
+  SUSPECTED_THEFT
+  OTHER
+}
+
+enum QcStatus {
+  PENDING
+  PASSED
+  REJECTED
+  MANUAL_REVIEW
+}
+
+enum ReadSource {
+  WEB
+  IMPORT
+  APP
+  REMOTE
+}
+
+enum SettlementStatus {
+  DRAFT
+  FINAL
+}
+
+enum ComponentSourceType {
+  READING
+  ESTIMATE
+  MANUAL
+}
+
+enum EstimateMethod {
+  AUTO_AVG3
+  MANUAL
+}
+
+enum ReconStatus {
+  DRAFT
+  ABSORBED
+  APPLIED
+  MANUAL_REVIEW
+}
+
+enum CalcType {
+  PER_QTY
+  FIXED
+  PERCENT
+}
+
+enum TariffStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+enum RunType {
+  MANUAL
+  AUTO
+}
+
+enum RunStatus {
+  DRAFT
+  PROCESSING
+  PARTIAL
+  POSTED
+  FAILED
+}
+
+enum BillKind {
+  NORMAL
+  ADJUSTMENT
+  REVERSAL
+  REPLACEMENT
+}
+
+enum BillSourceType {
+  SETTLEMENT
+  RECONCILIATION
+  MANUAL
+  ORIGINAL_BILL
+}
+
+enum BillStatus {
+  DRAFT
+  POSTED
+  PARTIAL_PAID
+  PAID
+  REVERSED
+}
+
+enum BillItemType {
+  NORMAL
+  ADJUSTMENT
+  PENALTY
+}
+
+enum IdemStatus {
+  PROCESSING
+  COMPLETED
+}
+
+enum PayChannel {
+  CASH
+  POS
+  TRANSFER
+}
+
+enum PaymentStatus {
+  RECEIVED
+  DAY_CLOSED
+  REVERSED
+}
+
+enum ReceiptType {
+  RECEIPT
+}
+
+enum DayCloseStatus {
+  POSTED
+}
+
+// ---------------------------------------------------------------------------
+// iam
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id        String       @id @default(uuid()) @db.Uuid
+  code      String       @unique
+  name      String
+  status    TenantStatus @default(ACTIVE)
+  params    Json?        @db.JsonB
+  createdAt DateTime     @default(now()) @map("created_at")
+  createdBy String?      @map("created_by") @db.Uuid
+  updatedAt DateTime     @updatedAt @map("updated_at")
+  updatedBy String?      @map("updated_by") @db.Uuid
+
+  @@map("tenant")
+}
+
+model OrgUnit {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  parentId  String?  @map("parent_id") @db.Uuid
+  name      String
+  type      OrgType
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@index([tenantId, parentId])
+  @@map("org_unit")
+}
+
+model Staff {
+  id           String      @id @default(uuid()) @db.Uuid
+  tenantId     String      @map("tenant_id") @db.Uuid
+  orgUnitId    String      @map("org_unit_id") @db.Uuid
+  login        String
+  passwordHash String      @map("password_hash")
+  name         String
+  status       StaffStatus @default(ACTIVE)
+  createdAt    DateTime    @default(now()) @map("created_at")
+  createdBy    String?     @map("created_by") @db.Uuid
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+  updatedBy    String?     @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, login])
+  @@index([tenantId, orgUnitId])
+  @@map("staff")
+}
+
+model Role {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  dataScope DataScope @map("data_scope")
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by") @db.Uuid
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  updatedBy String?   @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, code])
+  @@map("role")
+}
+
+model StaffRole {
+  tenantId  String   @map("tenant_id") @db.Uuid
+  staffId   String   @map("staff_id") @db.Uuid
+  roleId    String   @map("role_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@id([staffId, roleId])
+  @@index([tenantId, roleId])
+  @@map("staff_role")
+}
+
+model Permission {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  type      PermType
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, code])
+  @@map("permission")
+}
+
+model RolePermission {
+  tenantId     String   @map("tenant_id") @db.Uuid
+  roleId       String   @map("role_id") @db.Uuid
+  permissionId String   @map("permission_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+  createdBy    String?  @map("created_by") @db.Uuid
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  updatedBy    String?  @map("updated_by") @db.Uuid
+
+  @@id([roleId, permissionId])
+  @@index([tenantId, permissionId])
+  @@map("role_permission")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  staffId   String?  @map("staff_id") @db.Uuid
+  action    String
+  entity    String
+  entityId  String?  @map("entity_id") @db.Uuid
+  before    Json?    @db.JsonB
+  after     Json?    @db.JsonB
+  ip        String?
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@index([tenantId, entity, entityId])
+  @@index([tenantId, createdAt])
+  @@map("audit_log")
+}
+
+model SysSequence {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  seqKey    String   @map("seq_key")
+  period    String?  @db.Char(6)
+  curVal    BigInt   @default(0) @map("cur_val")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, seqKey, period])
+  @@map("sys_sequence")
+}
+
+model TenantParam {
+  tenantId  String   @map("tenant_id") @db.Uuid
+  key       String
+  value     Json     @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@id([tenantId, key])
+  @@map("tenant_param")
+}
+
+// ---------------------------------------------------------------------------
+// customer
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  customerNo String   @map("customer_no")
+  name       String
+  custType   CustType @map("cust_type")
+  idType     String?  @map("id_type")
+  idNo       String?  @map("id_no")
+  phone      String?
+  addr       String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  createdBy  String?  @map("created_by") @db.Uuid
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  updatedBy  String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, customerNo])
+  @@map("customer")
+}
+
+model SettleAccount {
+  id        String        @id @default(uuid()) @db.Uuid
+  tenantId  String        @map("tenant_id") @db.Uuid
+  settleNo  String        @map("settle_no")
+  name      String
+  phone     String?
+  status    AccountStatus @default(NORMAL)
+  createdAt DateTime      @default(now()) @map("created_at")
+  createdBy String?       @map("created_by") @db.Uuid
+  updatedAt DateTime      @updatedAt @map("updated_at")
+  updatedBy String?       @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, settleNo])
+  @@map("settle_account")
+}
+
+model WaterAccount {
+  id              String        @id @default(uuid()) @db.Uuid
+  tenantId        String        @map("tenant_id") @db.Uuid
+  accountNo       String        @map("account_no")
+  customerId      String        @map("customer_id") @db.Uuid
+  settleAccountId String        @map("settle_account_id") @db.Uuid
+  usageCategory   String        @map("usage_category")
+  addr            String
+  status          AccountStatus @default(NORMAL)
+  openedAt        DateTime?     @map("opened_at") @db.Date
+  closedAt        DateTime?     @map("closed_at") @db.Date
+  createdAt       DateTime      @default(now()) @map("created_at")
+  createdBy       String?       @map("created_by") @db.Uuid
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  updatedBy       String?       @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, accountNo])
+  @@index([tenantId, customerId])
+  @@index([tenantId, settleAccountId])
+  @@index([tenantId, usageCategory])
+  @@map("water_account")
+}
+
+model Meter {
+  id            String      @id @default(uuid()) @db.Uuid
+  tenantId      String      @map("tenant_id") @db.Uuid
+  meterNo       String      @map("meter_no")
+  serialNo      String?     @map("serial_no")
+  barcode       String?
+  brand         String?
+  model         String?
+  caliber       String?
+  maxDial       Decimal?    @map("max_dial") @db.Decimal(18, 4)
+  parentMeterId String?     @map("parent_meter_id") @db.Uuid
+  status        MeterStatus @default(AVAILABLE)
+  createdAt     DateTime    @default(now()) @map("created_at")
+  createdBy     String?     @map("created_by") @db.Uuid
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+  updatedBy     String?     @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, meterNo])
+  @@map("meter")
+}
+
+model MeterInstallation {
+  id             String             @id @default(uuid()) @db.Uuid
+  tenantId       String             @map("tenant_id") @db.Uuid
+  waterAccountId String             @map("water_account_id") @db.Uuid
+  meterId        String             @map("meter_id") @db.Uuid
+  installedAt    DateTime           @map("installed_at")
+  removedAt      DateTime?          @map("removed_at")
+  initialReading Decimal            @map("initial_reading") @db.Decimal(18, 4)
+  finalReading   Decimal?           @map("final_reading") @db.Decimal(18, 4)
+  reason         InstallReason
+  status         InstallationStatus @default(ACTIVE)
+  createdAt      DateTime           @default(now()) @map("created_at")
+  createdBy      String?            @map("created_by") @db.Uuid
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  updatedBy      String?            @map("updated_by") @db.Uuid
+
+  @@index([tenantId, waterAccountId, status])
+  @@index([tenantId, meterId])
+  @@map("meter_installation")
+}
+
+model AccountEvent {
+  id             String           @id @default(uuid()) @db.Uuid
+  tenantId       String           @map("tenant_id") @db.Uuid
+  waterAccountId String           @map("water_account_id") @db.Uuid
+  type           AccountEventType
+  payload        Json?            @db.JsonB
+  effectiveDate  DateTime         @map("effective_date") @db.Date
+  createdAt      DateTime         @default(now()) @map("created_at")
+  createdBy      String?          @map("created_by") @db.Uuid
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+  updatedBy      String?          @map("updated_by") @db.Uuid
+
+  @@index([tenantId, waterAccountId])
+  @@map("account_event")
+}
+
+// ---------------------------------------------------------------------------
+// metering
+// ---------------------------------------------------------------------------
+
+model ReadingBook {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  bookNo      String   @map("book_no")
+  name        String
+  orgUnitId   String   @map("org_unit_id") @db.Uuid
+  readerId    String?  @map("reader_id") @db.Uuid
+  scheduleDay Int?     @map("schedule_day")
+  createdAt   DateTime @default(now()) @map("created_at")
+  createdBy   String?  @map("created_by") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  updatedBy   String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, bookNo])
+  @@map("reading_book")
+}
+
+model BookMeter {
+  tenantId       String   @map("tenant_id") @db.Uuid
+  bookId         String   @map("book_id") @db.Uuid
+  waterAccountId String   @map("water_account_id") @db.Uuid
+  seqNo          Int      @map("seq_no")
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by") @db.Uuid
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by") @db.Uuid
+
+  @@id([bookId, waterAccountId])
+  @@index([tenantId, bookId])
+  @@map("book_meter")
+}
+
+model ReadingPlan {
+  id        String     @id @default(uuid()) @db.Uuid
+  tenantId  String     @map("tenant_id") @db.Uuid
+  bookId    String     @map("book_id") @db.Uuid
+  period    String     @db.Char(6)
+  planDate  DateTime   @map("plan_date") @db.Date
+  readerId  String?    @map("reader_id") @db.Uuid
+  status    PlanStatus @default(OPEN)
+  createdAt DateTime   @default(now()) @map("created_at")
+  createdBy String?    @map("created_by") @db.Uuid
+  updatedAt DateTime   @updatedAt @map("updated_at")
+  updatedBy String?    @map("updated_by") @db.Uuid
+
+  @@index([tenantId, period])
+  @@index([tenantId, bookId, period])
+  @@map("reading_plan")
+}
+
+model ReadingPlanItem {
+  id                    String         @id @default(uuid()) @db.Uuid
+  tenantId              String         @map("tenant_id") @db.Uuid
+  planId                String         @map("plan_id") @db.Uuid
+  waterAccountId        String         @map("water_account_id") @db.Uuid
+  seqNo                 Int            @map("seq_no")
+  plannedInstallationId String?        @map("planned_installation_id") @db.Uuid
+  status                PlanItemStatus @default(PENDING)
+  completedReadingId    String?        @map("completed_reading_id") @db.Uuid
+  createdAt             DateTime       @default(now()) @map("created_at")
+  createdBy             String?        @map("created_by") @db.Uuid
+  updatedAt             DateTime       @updatedAt @map("updated_at")
+  updatedBy             String?        @map("updated_by") @db.Uuid
+
+  @@unique([planId, waterAccountId])
+  @@unique([planId, seqNo])
+  @@index([tenantId, status])
+  @@index([tenantId, waterAccountId])
+  @@map("reading_plan_item")
+}
+
+model MeterReading {
+  id                  String         @id @default(uuid()) @db.Uuid
+  tenantId            String         @map("tenant_id") @db.Uuid
+  planItemId          String?        @map("plan_item_id") @db.Uuid
+  installationId      String         @map("installation_id") @db.Uuid
+  meterId             String         @map("meter_id") @db.Uuid
+  period              String         @db.Char(6)
+  readDate            DateTime       @map("read_date") @db.Date
+  resultType          ReadResultType @map("result_type")
+  readingValue        Decimal?       @map("reading_value") @db.Decimal(18, 4)
+  exceptionCode       ExceptionCode? @map("exception_code")
+  supersedesReadingId String?        @map("supersedes_reading_id") @db.Uuid
+  qcStatus            QcStatus       @default(PENDING) @map("qc_status")
+  qcBy                String?        @map("qc_by") @db.Uuid
+  qcAt                DateTime?      @map("qc_at")
+  source              ReadSource
+  operatorId          String         @map("operator_id") @db.Uuid
+  photoRef            String?        @map("photo_ref")
+  remark              String?
+  createdAt           DateTime       @default(now()) @map("created_at")
+  createdBy           String?        @map("created_by") @db.Uuid
+  updatedAt           DateTime       @updatedAt @map("updated_at")
+  updatedBy           String?        @map("updated_by") @db.Uuid
+
+  @@index([tenantId, period])
+  @@index([tenantId, installationId, period])
+  @@index([tenantId, planItemId])
+  @@index([tenantId, qcStatus])
+  @@map("meter_reading")
+}
+
+model ConsumptionSettlement {
+  id             String           @id @default(uuid()) @db.Uuid
+  tenantId       String           @map("tenant_id") @db.Uuid
+  waterAccountId String           @map("water_account_id") @db.Uuid
+  period         String           @db.Char(6)
+  totalUsageQty  Decimal          @default(0) @map("total_usage_qty") @db.Decimal(18, 4)
+  isEstimated    Boolean          @default(false) @map("is_estimated")
+  estimateMethod EstimateMethod?  @map("estimate_method")
+  estimateBasis  Json?            @map("estimate_basis") @db.JsonB
+  estimateReason String?          @map("estimate_reason")
+  status         SettlementStatus @default(DRAFT)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  createdBy      String?          @map("created_by") @db.Uuid
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+  updatedBy      String?          @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, waterAccountId, period])
+  @@index([tenantId, period, status])
+  @@map("consumption_settlement")
+}
+
+model ConsumptionComponent {
+  id               String              @id @default(uuid()) @db.Uuid
+  tenantId         String              @map("tenant_id") @db.Uuid
+  settlementId     String              @map("settlement_id") @db.Uuid
+  installationId   String              @map("installation_id") @db.Uuid
+  prevReadingValue Decimal             @map("prev_reading_value") @db.Decimal(18, 4)
+  endReadingValue  Decimal?            @map("end_reading_value") @db.Decimal(18, 4)
+  usageQty         Decimal             @map("usage_qty") @db.Decimal(18, 4)
+  sourceType       ComponentSourceType @map("source_type")
+  sourceReadingId  String?             @map("source_reading_id") @db.Uuid
+  createdAt        DateTime            @default(now()) @map("created_at")
+  createdBy        String?             @map("created_by") @db.Uuid
+  updatedAt        DateTime            @updatedAt @map("updated_at")
+  updatedBy        String?             @map("updated_by") @db.Uuid
+
+  @@index([tenantId, settlementId])
+  @@map("consumption_component")
+}
+
+model Reconciliation {
+  id                     String      @id @default(uuid()) @db.Uuid
+  tenantId               String      @map("tenant_id") @db.Uuid
+  waterAccountId         String      @map("water_account_id") @db.Uuid
+  anchorReadingId        String      @map("anchor_reading_id") @db.Uuid
+  actualReadingId        String      @map("actual_reading_id") @db.Uuid
+  fromPeriod             String      @map("from_period") @db.Char(6)
+  toPeriod               String      @map("to_period") @db.Char(6)
+  actualTotalUsage       Decimal     @map("actual_total_usage") @db.Decimal(18, 4)
+  previouslySettledUsage Decimal     @map("previously_settled_usage") @db.Decimal(18, 4)
+  remainderUsage         Decimal     @map("remainder_usage") @db.Decimal(18, 4)
+  absorbedSettlementId   String?     @map("absorbed_settlement_id") @db.Uuid
+  correctChargeCent      BigInt?     @map("correct_charge_cent")
+  postedChargeCent       BigInt?     @map("posted_charge_cent")
+  adjustmentAmountCent   BigInt?     @map("adjustment_amount_cent")
+  status                 ReconStatus @default(DRAFT)
+  createdAt              DateTime    @default(now()) @map("created_at")
+  createdBy              String?     @map("created_by") @db.Uuid
+  updatedAt              DateTime    @updatedAt @map("updated_at")
+  updatedBy              String?     @map("updated_by") @db.Uuid
+
+  @@index([tenantId, waterAccountId])
+  @@index([tenantId, status])
+  @@map("reconciliation")
+}
+
+model EstimateRule {
+  tenantId  String         @map("tenant_id") @db.Uuid
+  method    EstimateMethod
+  params    Json?          @db.JsonB
+  enabled   Boolean        @default(true)
+  createdAt DateTime       @default(now()) @map("created_at")
+  createdBy String?        @map("created_by") @db.Uuid
+  updatedAt DateTime       @updatedAt @map("updated_at")
+  updatedBy String?        @map("updated_by") @db.Uuid
+
+  @@id([tenantId, method])
+  @@map("estimate_rule")
+}
+
+// ---------------------------------------------------------------------------
+// billing
+// ---------------------------------------------------------------------------
+
+model FeeItem {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  calcType  CalcType @map("calc_type")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, code])
+  @@map("fee_item")
+}
+
+model TariffPlan {
+  id            String       @id @default(uuid()) @db.Uuid
+  tenantId      String       @map("tenant_id") @db.Uuid
+  code          String
+  name          String
+  usageCategory String       @map("usage_category")
+  effectiveFrom DateTime     @map("effective_from") @db.Date
+  effectiveTo   DateTime?    @map("effective_to") @db.Date
+  status        TariffStatus @default(DRAFT)
+  createdAt     DateTime     @default(now()) @map("created_at")
+  createdBy     String?      @map("created_by") @db.Uuid
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+  updatedBy     String?      @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, code, effectiveFrom])
+  @@index([tenantId, usageCategory, status])
+  @@map("tariff_plan")
+}
+
+model TariffTier {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  tariffPlanId String   @map("tariff_plan_id") @db.Uuid
+  feeItemId    String   @map("fee_item_id") @db.Uuid
+  tierNo       Int      @map("tier_no")
+  fromQty      Decimal  @map("from_qty") @db.Decimal(18, 4)
+  toQty        Decimal? @map("to_qty") @db.Decimal(18, 4)
+  unitPrice    Decimal  @map("unit_price") @db.Decimal(18, 6)
+  createdAt    DateTime @default(now()) @map("created_at")
+  createdBy    String?  @map("created_by") @db.Uuid
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  updatedBy    String?  @map("updated_by") @db.Uuid
+
+  @@unique([tariffPlanId, feeItemId, tierNo])
+  @@index([tenantId, tariffPlanId])
+  @@map("tariff_tier")
+}
+
+model BillingRun {
+  id                  String    @id @default(uuid()) @db.Uuid
+  tenantId            String    @map("tenant_id") @db.Uuid
+  period              String    @db.Char(6)
+  runType             RunType   @map("run_type")
+  status              RunStatus @default(DRAFT)
+  postedAt            DateTime? @map("posted_at")
+  totalCount          Int       @default(0) @map("total_count")
+  successCount        Int       @default(0) @map("success_count")
+  failedCount         Int       @default(0) @map("failed_count")
+  failedSettlementIds Json?     @map("failed_settlement_ids") @db.JsonB
+  createdAt           DateTime  @default(now()) @map("created_at")
+  createdBy           String?   @map("created_by") @db.Uuid
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+  updatedBy           String?   @map("updated_by") @db.Uuid
+
+  @@index([tenantId, period, status])
+  @@map("billing_run")
+}
+
+model Bill {
+  id              String         @id @default(uuid()) @db.Uuid
+  tenantId        String         @map("tenant_id") @db.Uuid
+  billingRunId    String?        @map("billing_run_id") @db.Uuid
+  settleAccountId String         @map("settle_account_id") @db.Uuid
+  waterAccountId  String         @map("water_account_id") @db.Uuid
+  period          String         @db.Char(6)
+  billKind        BillKind       @map("bill_kind")
+  sourceType      BillSourceType @map("source_type")
+  sourceId        String         @map("source_id") @db.Uuid
+  tariffPlanId    String?        @map("tariff_plan_id") @db.Uuid
+  status          BillStatus     @default(DRAFT)
+  isEstimated     Boolean        @default(false) @map("is_estimated")
+  totalAmount     BigInt         @map("total_amount")
+  issuedAt        DateTime?      @map("issued_at")
+  dueDate         DateTime?      @map("due_date") @db.Date
+  createdAt       DateTime       @default(now()) @map("created_at")
+  createdBy       String?        @map("created_by") @db.Uuid
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  updatedBy       String?        @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, sourceType, sourceId, billKind])
+  @@index([tenantId, waterAccountId, period])
+  @@index([tenantId, settleAccountId, status])
+  @@index([tenantId, billingRunId])
+  @@map("bill")
+}
+
+model BillItem {
+  id          String       @id @default(uuid()) @db.Uuid
+  tenantId    String       @map("tenant_id") @db.Uuid
+  billId      String       @map("bill_id") @db.Uuid
+  feeItemId   String?      @map("fee_item_id") @db.Uuid
+  itemType    BillItemType @map("item_type")
+  description String?
+  qty         Decimal?     @db.Decimal(18, 4)
+  unitPrice   Decimal?     @map("unit_price") @db.Decimal(18, 6)
+  amount      BigInt
+  createdAt   DateTime     @default(now()) @map("created_at")
+  createdBy   String?      @map("created_by") @db.Uuid
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+  updatedBy   String?      @map("updated_by") @db.Uuid
+
+  @@index([tenantId, billId])
+  @@map("bill_item")
+}
+
+model IdempotencyKey {
+  id             String     @id @default(uuid()) @db.Uuid
+  tenantId       String     @map("tenant_id") @db.Uuid
+  key            String
+  method         String
+  route          String
+  requestHash    String     @map("request_hash")
+  responseStatus Int?       @map("response_status")
+  responseRef    String?    @map("response_ref")
+  status         IdemStatus @default(PROCESSING)
+  createdAt      DateTime   @default(now()) @map("created_at")
+  createdBy      String?    @map("created_by") @db.Uuid
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+  updatedBy      String?    @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, key])
+  @@map("idempotency_key")
+}
+
+// ---------------------------------------------------------------------------
+// payment
+// ---------------------------------------------------------------------------
+
+model Payment {
+  id              String        @id @default(uuid()) @db.Uuid
+  tenantId        String        @map("tenant_id") @db.Uuid
+  paymentNo       String        @map("payment_no")
+  settleAccountId String        @map("settle_account_id") @db.Uuid
+  cashierId       String        @map("cashier_id") @db.Uuid
+  orgUnitId       String        @map("org_unit_id") @db.Uuid
+  channel         PayChannel
+  amount          BigInt
+  status          PaymentStatus @default(RECEIVED)
+  receivedAt      DateTime      @default(now()) @map("received_at")
+  reversalOfId    String?       @map("reversal_of_id") @db.Uuid
+  createdAt       DateTime      @default(now()) @map("created_at")
+  createdBy       String?       @map("created_by") @db.Uuid
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  updatedBy       String?       @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, paymentNo])
+  @@index([tenantId, settleAccountId, status])
+  @@index([tenantId, cashierId, status])
+  @@map("payment")
+}
+
+model PaymentAlloc {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  paymentId String   @map("payment_id") @db.Uuid
+  billId    String   @map("bill_id") @db.Uuid
+  amount    BigInt
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@index([tenantId, paymentId])
+  @@index([tenantId, billId])
+  @@map("payment_alloc")
+}
+
+model Receipt {
+  id        String      @id @default(uuid()) @db.Uuid
+  tenantId  String      @map("tenant_id") @db.Uuid
+  paymentId String      @map("payment_id") @db.Uuid
+  receiptNo String      @map("receipt_no")
+  rcpType   ReceiptType @default(RECEIPT) @map("rcp_type")
+  printedAt DateTime?   @map("printed_at")
+  voidFlag  Boolean     @default(false) @map("void_flag")
+  createdAt DateTime    @default(now()) @map("created_at")
+  createdBy String?     @map("created_by") @db.Uuid
+  updatedAt DateTime    @updatedAt @map("updated_at")
+  updatedBy String?     @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, receiptNo])
+  @@index([tenantId, paymentId])
+  @@map("receipt")
+}
+
+model CashierDayClose {
+  id          String         @id @default(uuid()) @db.Uuid
+  tenantId    String         @map("tenant_id") @db.Uuid
+  cashierId   String         @map("cashier_id") @db.Uuid
+  orgUnitId   String         @map("org_unit_id") @db.Uuid
+  closeDate   DateTime       @map("close_date") @db.Date
+  totalCount  Int            @map("total_count")
+  totalAmount BigInt         @map("total_amount")
+  byChannel   Json           @map("by_channel") @db.JsonB
+  status      DayCloseStatus @default(POSTED)
+  closedAt    DateTime       @default(now()) @map("closed_at")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  createdBy   String?        @map("created_by") @db.Uuid
+  updatedAt   DateTime       @updatedAt @map("updated_at")
+  updatedBy   String?        @map("updated_by") @db.Uuid
+
+  @@index([tenantId, cashierId, closeDate])
+  @@index([tenantId, closeDate])
+  @@map("cashier_day_close")
+}
