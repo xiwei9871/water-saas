@@ -26,10 +26,13 @@ import { Permissions } from '../src/common/permissions.decorator.js';
 import { AppModule } from '../src/app.module.js';
 
 // Point the app's runtime client at the TEST database before Nest builds it.
+// (PrismaClient is constructed lazily at app init, so this lands in time.
+// JWT_SECRET would NOT work here — JwtModule reads env at module-evaluation
+// time, before spec top-level code runs; the suite uses the dev fallback
+// secret deliberately.)
 process.env.DATABASE_URL =
   process.env.DATABASE_URL_TEST ??
   'postgresql://ws_app:ws_app_pw@localhost:5432/watersaas_test';
-process.env.JWT_SECRET = process.env.JWT_SECRET ?? 't3-e2e-secret';
 
 const OWNER_URL =
   process.env.MIGRATION_DATABASE_URL_TEST ??
@@ -46,6 +49,11 @@ const PERM_READ = '33333333-0000-4000-8000-00000000e601';
 const STAFF_ADMIN = '33333333-0000-4000-8000-0000000a0001';
 const STAFF_VIEWER = '33333333-0000-4000-8000-0000000b0002';
 const STAFF_DISABLED = '33333333-0000-4000-8000-0000000d0003';
+// non-admin writer: holds iam:read+iam:write but NOT '*' — the escalation attacker
+const PERM_WRITE = '33333333-0000-4000-8000-00000000e602';
+const ROLE_WRITER = '33333333-0000-4000-8000-000000001e02';
+const ROLE_ALLSCOPE = '33333333-0000-4000-8000-000000001e03'; // non-admin, dataScope ALL
+const STAFF_WRITER = '33333333-0000-4000-8000-0000000b0004';
 // tenant B fixtures — used to prove refresh dies when the tenant is suspended
 const ORG_B = '44444444-0000-4000-8000-0000000000c0';
 const ROLE_B_ADMIN = '44444444-0000-4000-8000-00000000ad01';
@@ -65,6 +73,7 @@ const owner = new pg.Client({ connectionString: OWNER_URL });
 let app: INestApplication<App>;
 let adminToken = '';
 let viewerToken = '';
+let writerToken = '';
 let refreshToken = '';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -97,13 +106,29 @@ beforeAll(async () => {
   );
   await owner.query(
     `INSERT INTO permission (id, tenant_id, code, type, created_at, updated_at)
-     VALUES ($1, $2, 'iam:read', 'ACTION', now(), now()) ON CONFLICT DO NOTHING`,
-    [PERM_READ, T3],
+     VALUES ($1, $2, 'iam:read', 'ACTION', now(), now()),
+            ($3, $2, 'iam:write', 'ACTION', now(), now())
+     ON CONFLICT DO NOTHING`,
+    [PERM_READ, T3, PERM_WRITE],
   );
   await owner.query(
     `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
      VALUES ($1, $2, $3, now(), now()) ON CONFLICT DO NOTHING`,
     [T3, ROLE_LIMITED, PERM_READ],
+  );
+  // writer role: iam:read + iam:write (no '*')
+  await owner.query(
+    `INSERT INTO role (id, tenant_id, code, name, data_scope, created_at, updated_at)
+     VALUES ($1, $3, 't3-writer', 'T3 Writer', 'ORG_SUBTREE', now(), now()),
+            ($2, $3, 't3-notadmin', 'T3 AllScope', 'ALL', now(), now())
+     ON CONFLICT DO NOTHING`,
+    [ROLE_WRITER, ROLE_ALLSCOPE, T3],
+  );
+  await owner.query(
+    `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
+     VALUES ($1, $2, $3, now(), now()), ($1, $2, $4, now(), now())
+     ON CONFLICT DO NOTHING`,
+    [T3, ROLE_WRITER, PERM_READ, PERM_WRITE],
   );
   await owner.query(
     `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
@@ -118,6 +143,23 @@ beforeAll(async () => {
      VALUES ($1, $2, $4, now(), now()), ($1, $3, $5, now(), now()), ($1, $6, $4, now(), now())
      ON CONFLICT DO NOTHING`,
     [T3, STAFF_ADMIN, STAFF_VIEWER, ROLE_ADMIN, ROLE_LIMITED, STAFF_DISABLED],
+  );
+  // writer staff: iam:read+iam:write via t3-writer role, ORG_SUBTREE at branch
+  await owner.query(
+    `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
+     VALUES ($1, $2, $3, 't3-writer', $4, 'T3 Writer', 'ACTIVE', now(), now())
+     ON CONFLICT (tenant_id, login) DO NOTHING`,
+    [STAFF_WRITER, T3, ORG_BR, hash],
+  );
+  // heal drift: a previous spec run may have rebound the writer's roles
+  await owner.query(
+    `DELETE FROM staff_role WHERE tenant_id = $1 AND staff_id = $2 AND role_id <> $3`,
+    [T3, STAFF_WRITER, ROLE_WRITER],
+  );
+  await owner.query(
+    `INSERT INTO staff_role (tenant_id, staff_id, role_id, created_at, updated_at)
+     VALUES ($1, $2, $3, now(), now()) ON CONFLICT DO NOTHING`,
+    [T3, STAFF_WRITER, ROLE_WRITER],
   );
   // tenant B: org + admin role + admin staff (suspension regression fixtures)
   await owner.query(
@@ -205,6 +247,14 @@ describe('auth flow', () => {
       .expect(201);
     viewerToken = viewer.body.accessToken;
     expect(viewer.body.perms).toEqual(['iam:read']);
+
+    const writer = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ tenantCode: 't3-water', login: 't3-writer', password: 't3-pass' })
+      .expect(201);
+    writerToken = writer.body.accessToken;
+    expect(writer.body.perms.sort()).toEqual(['iam:read', 'iam:write']);
+    expect(writer.body.perms).not.toContain('*');
   });
 
   it('rejects X-Tenant-Id that disagrees with the token (403)', async () => {
@@ -279,6 +329,103 @@ describe('permissions', () => {
       .set('Authorization', `Bearer ${viewerToken}`)
       .send({ login: 'x', name: 'x', password: 'x', orgUnitId: ORG_BR })
       .expect(403);
+  });
+});
+
+/**
+ * Privilege-escalation chain (F1, uniform admin-only model): the whole
+ * role-management surface AND staff role binding are grant surfaces — a
+ * non-admin iam:write user must not mint scope/permissions nor bind roles
+ * (self-assign → re-login → tenant takeover). All of them → 403
+ * ADMIN_REQUIRED. Delegated writes (staff profile fields inside the
+ * caller's subtree) still work.
+ */
+describe('privilege-escalation guards', () => {
+  it('role management is admin-only — create + patch + delete', async () => {
+    const create = await request(app.getHttpServer())
+      .post('/iam/roles')
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ code: 't3-evil', name: 'Evil', dataScope: 'ALL' })
+      .expect(403);
+    expect(create.body).toMatchObject({ code: 'ADMIN_REQUIRED' });
+
+    const patch = await request(app.getHttpServer())
+      .patch(`/iam/roles/${ROLE_LIMITED}`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ dataScope: 'ALL' })
+      .expect(403);
+    expect(patch.body).toMatchObject({ code: 'ADMIN_REQUIRED' });
+
+    const del = await request(app.getHttpServer())
+      .delete(`/iam/roles/${ROLE_LIMITED}`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .expect(403);
+    expect(del.body).toMatchObject({ code: 'ADMIN_REQUIRED' });
+
+    // admin CAN still manage roles (control case)
+    await request(app.getHttpServer())
+      .patch(`/iam/roles/${ROLE_LIMITED}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ dataScope: 'ALL' })
+      .expect(200);
+    // restore — later tests assume ROLE_LIMITED stays ORG_SUBTREE
+    await request(app.getHttpServer())
+      .patch(`/iam/roles/${ROLE_LIMITED}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ dataScope: 'ORG_SUBTREE' })
+      .expect(200);
+  });
+
+  it('permission binding is admin-only', async () => {
+    const res = await request(app.getHttpServer())
+      .put(`/iam/roles/${ROLE_LIMITED}/permissions`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ permissionIds: [PERM_READ] })
+      .expect(403);
+    expect(res.body).toMatchObject({ code: 'ADMIN_REQUIRED' });
+  });
+
+  it('staff role binding is admin-only — even for a plain ORG_SUBTREE role', async () => {
+    // ANY roleIds on PATCH is a grant surface → admin (not just privileged
+    // roles — the uniform model doesn't let non-admins bind at all)
+    for (const roleId of [ROLE_ADMIN, ROLE_ALLSCOPE, ROLE_LIMITED]) {
+      const res = await request(app.getHttpServer())
+        .patch(`/iam/staff/${STAFF_WRITER}`)
+        .set('Authorization', `Bearer ${writerToken}`)
+        .send({ roleIds: [roleId] })
+        .expect(403);
+      expect(res.body).toMatchObject({ code: 'ADMIN_REQUIRED' });
+    }
+    // POST /iam/staff carrying roleIds → same rule
+    const res = await request(app.getHttpServer())
+      .post('/iam/staff')
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({
+        login: 't3-x',
+        name: 'X',
+        password: 'x',
+        orgUnitId: ORG_BR,
+        roleIds: [ROLE_LIMITED],
+      })
+      .expect(403);
+    expect(res.body).toMatchObject({ code: 'ADMIN_REQUIRED' });
+  });
+
+  it('non-admin CAN still PATCH staff profile fields (no roleIds) inside their subtree', async () => {
+    const res = await request(app.getHttpServer())
+      .patch(`/iam/staff/${STAFF_WRITER}`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send({ name: 'T3 Writer' })
+      .expect(200);
+    expect(res.body.name).toBe('T3 Writer');
+  });
+
+  it('built-in admin role cannot be deleted, even by admin', async () => {
+    const res = await request(app.getHttpServer())
+      .delete(`/iam/roles/${ROLE_ADMIN}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(403);
+    expect(res.body).toMatchObject({ code: 'ROLE_PROTECTED' });
   });
 });
 

@@ -16,11 +16,13 @@ import { Prisma } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { createHash } from 'node:crypto';
 import type { Request } from 'express';
+import { assertAdmin } from '../../common/admin.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import { currentTenant, orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { assertUuid } from '../../common/uuid.js';
 
 const SAFE_SELECT = {
   id: true,
@@ -53,20 +55,6 @@ const assertOrgWritable = (ctx: TenantCtx, orgUnitId: string | null | undefined)
   if (!orgInScope(ctx, orgUnitId)) throw outOfScope();
 };
 
-/**
- * Privilege-escalation guard: only an admin ('*' perms) may hand out the
- * 'admin' role — otherwise a limited iam:write user could grant themselves
- * admin and own every permission after the next login.
- */
-const assertNoElevation = (
-  roles: { code: string }[],
-  callerPerms: string[] | undefined,
-) => {
-  if (roles.some((r) => r.code === 'admin') && !(callerPerms ?? []).includes('*')) {
-    throw new ForbiddenException({ code: 'ROLE_ELEVATION_DENIED' });
-  }
-};
-
 @Controller('iam/staff')
 export class StaffController {
   constructor(
@@ -97,16 +85,17 @@ export class StaffController {
   private async createStaffTx(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
-    callerPerms: string[] | undefined,
     body: CreateStaffBody,
   ) {
-    assertOrgWritable(ctx, body.orgUnitId);
+    const orgUnitId = assertUuid(body.orgUnitId, 'orgUnitId');
+    assertOrgWritable(ctx, orgUnitId);
     const org = await tx.orgUnit.findFirst({
-      where: { tenantId: ctx.tenantId, id: body.orgUnitId! },
+      where: { tenantId: ctx.tenantId, id: orgUnitId },
     });
     if (!org) throw new BadRequestException({ code: 'ORG_UNIT_NOT_FOUND' });
 
     const roleIds = [...new Set(body.roleIds ?? [])];
+    for (const rid of roleIds) assertUuid(rid, 'roleIds');
     if (roleIds.length) {
       const roles = await tx.role.findMany({
         where: { tenantId: ctx.tenantId, id: { in: roleIds } },
@@ -114,7 +103,6 @@ export class StaffController {
       if (roles.length !== roleIds.length) {
         throw new BadRequestException({ code: 'ROLE_NOT_FOUND' });
       }
-      assertNoElevation(roles, callerPerms);
     }
 
     const passwordHash = await bcrypt.hash(body.password!, 10);
@@ -163,11 +151,13 @@ export class StaffController {
       throw new BadRequestException({ code: 'STAFF_FIELDS_REQUIRED' });
     }
     const ctx = currentTenant();
-    const callerPerms = req.user?.perms;
+    // Binding roles at creation is a grant → admin-only. Plain profile
+    // creation (no roleIds) stays delegated to orgScope holders.
+    if (body.roleIds !== undefined) assertAdmin(req.user);
 
     if (!key) {
       return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-        this.createStaffTx(tx, ctx, callerPerms, body),
+        this.createStaffTx(tx, ctx, body),
       );
     }
 
@@ -175,7 +165,7 @@ export class StaffController {
     const result = await this.idem.runWithKey(
       ctx.tenantId,
       { key, method: 'POST', route: '/iam/staff', requestHash, responseStatus: 201 },
-      (tx) => this.createStaffTx(tx, ctx, callerPerms, body),
+      (tx) => this.createStaffTx(tx, ctx, body),
     );
     return result.body;
   }
@@ -195,6 +185,10 @@ export class StaffController {
     @Req() req: Request,
   ) {
     const ctx = currentTenant();
+    // Rebinding roles is a grant → admin-only. Profile-only PATCH stays
+    // delegated (orgScope checks on target + new org still apply below).
+    if (body.roleIds !== undefined) assertAdmin(req.user);
+    assertUuid(id, 'id');
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.staff.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'STAFF_NOT_FOUND' });
@@ -202,6 +196,7 @@ export class StaffController {
       // across branches — and so must any org being assigned.
       assertOrgWritable(ctx, existing.orgUnitId);
       if (body.orgUnitId) {
+        assertUuid(body.orgUnitId, 'orgUnitId');
         assertOrgWritable(ctx, body.orgUnitId);
         const org = await tx.orgUnit.findFirst({
           where: { tenantId: ctx.tenantId, id: body.orgUnitId },
@@ -219,15 +214,15 @@ export class StaffController {
         },
         select: SAFE_SELECT,
       });
-      if (body.roleIds) {
+      if (body.roleIds !== undefined) {
         const roleIds = [...new Set(body.roleIds)];
+        for (const rid of roleIds) assertUuid(rid, 'roleIds');
         const roles = await tx.role.findMany({
           where: { tenantId: ctx.tenantId, id: { in: roleIds } },
         });
         if (roles.length !== roleIds.length) {
           throw new BadRequestException({ code: 'ROLE_NOT_FOUND' });
         }
-        assertNoElevation(roles, req.user?.perms);
         await tx.staffRole.deleteMany({
           where: { tenantId: ctx.tenantId, staffId: id },
         });
@@ -259,6 +254,7 @@ export class StaffController {
       throw new BadRequestException({ code: 'PASSWORD_REQUIRED' });
     }
     const ctx = currentTenant();
+    assertUuid(id, 'id');
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.staff.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'STAFF_NOT_FOUND' });

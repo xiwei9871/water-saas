@@ -4,6 +4,7 @@ import {
   ConflictException,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   Headers,
   NotFoundException,
@@ -16,6 +17,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import type { Request } from 'express';
+import { assertAdmin } from '../../common/admin.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
@@ -26,6 +28,11 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
  * Role CRUD + permission binding. `role.code === 'admin'` bypasses all
  * permission checks ('*' in the JWT) — other roles need explicit
  * role_permission rows.
+ *
+ * The whole role-management surface (create/patch/delete/permission-bind) is
+ * ADMIN-ONLY (assertAdmin): a non-admin iam:write user must not mint wider
+ * scope/permissions than they hold — that's the tenant-takeover chain
+ * (grant → self-assign → re-login). Reads stay iam:read.
  */
 @Controller('iam/roles')
 export class RolesController {
@@ -67,9 +74,11 @@ export class RolesController {
   @Permissions('iam:write')
   async create(
     @Body() body: { code?: string; name?: string; dataScope?: 'ALL' | 'ORG_SUBTREE' | 'SELF' },
+    @Req() req: Request,
     @Headers('idempotency-key') key?: string,
   ) {
     const ctx = currentTenant();
+    assertAdmin(req.user);
     const doCreate = (tx: Prisma.TransactionClient) => {
       if (!body?.code || !body?.name || !body?.dataScope) {
         throw new BadRequestException({ code: 'ROLE_FIELDS_REQUIRED' });
@@ -107,6 +116,7 @@ export class RolesController {
     @Req() req: Request,
   ) {
     const ctx = currentTenant();
+    assertAdmin(req.user);
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
@@ -126,9 +136,16 @@ export class RolesController {
   @Permissions('iam:write')
   remove(@Param('id') id: string, @Req() req: Request) {
     const ctx = currentTenant();
+    assertAdmin(req.user);
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
+      // The built-in 'admin' role is never deletable — removing it would
+      // brick the tenant's administration (and its '*' wildcard must not be
+      // casually churned even by an admin).
+      if (existing.code === 'admin') {
+        throw new ForbiddenException({ code: 'ROLE_PROTECTED' });
+      }
       const holders = await tx.staffRole.count({
         where: { tenantId: ctx.tenantId, roleId: id },
       });
@@ -143,7 +160,7 @@ export class RolesController {
     });
   }
 
-  /** PUT /iam/roles/:id/permissions {permissionIds: []} — full replace. */
+  /** PUT /iam/roles/:id/permissions {permissionIds: []} — full replace. Admin-only. */
   @Put(':id/permissions')
   @Permissions('iam:write')
   setPermissions(
@@ -152,6 +169,7 @@ export class RolesController {
     @Req() req: Request,
   ) {
     const ctx = currentTenant();
+    assertAdmin(req.user);
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });

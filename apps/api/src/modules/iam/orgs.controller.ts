@@ -15,6 +15,7 @@ import type { Request } from 'express';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant, orgInScope } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { assertUuid } from '../../common/uuid.js';
 
 const outOfScope = () =>
   new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
@@ -43,7 +44,7 @@ export class OrgsController {
   @Post()
   @Permissions('iam:write')
   create(
-    @Body() body: { name?: string; type?: 'COMPANY' | 'BRANCH' | 'DEPT'; parentId?: string },
+    @Body() body: { name?: string; type?: 'COMPANY' | 'BRANCH' | 'DEPT'; parentId?: string | null },
   ) {
     if (!body?.name || !body?.type) {
       throw new BadRequestException({ code: 'ORG_FIELDS_REQUIRED' });
@@ -51,6 +52,9 @@ export class OrgsController {
     const ctx = currentTenant();
     // A scoped caller cannot plant a new tree root outside their subtree.
     if (ctx.scope !== 'ALL' && !body.parentId) throw outOfScope();
+    if (body.parentId !== undefined && body.parentId !== null) {
+      assertUuid(body.parentId, 'parentId');
+    }
     if (body.parentId && !orgInScope(ctx, body.parentId)) throw outOfScope();
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       if (body.parentId) {
@@ -80,9 +84,16 @@ export class OrgsController {
     @Req() req: Request,
   ) {
     const ctx = currentTenant();
+    assertUuid(id, 'id');
     if (!orgInScope(ctx, id)) throw outOfScope();
     if (body.parentId === id) {
       throw new BadRequestException({ code: 'ORG_CYCLE' });
+    }
+    // Explicit null promotes the org to a root — same restriction as create:
+    // a scoped caller must not plant roots outside their subtree.
+    if (body.parentId === null && ctx.scope !== 'ALL') throw outOfScope();
+    if (body.parentId !== undefined && body.parentId !== null) {
+      assertUuid(body.parentId, 'parentId');
     }
     if (body.parentId && !orgInScope(ctx, body.parentId)) throw outOfScope();
 
@@ -127,6 +138,7 @@ export class OrgsController {
   @Permissions('iam:write')
   async remove(@Param('id') id: string, @Req() req: Request) {
     const ctx = currentTenant();
+    assertUuid(id, 'id');
     if (!orgInScope(ctx, id)) throw outOfScope();
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.orgUnit.findFirst({ where: { tenantId: ctx.tenantId, id } });
