@@ -46,7 +46,7 @@ export class AuditLogsController {
           action: action ? { contains: action } : undefined,
           staffId: staffId ?? undefined,
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: takeN,
         skip: skipN,
         select: {

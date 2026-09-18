@@ -1,4 +1,4 @@
-import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { ReloadOutlined } from '@ant-design/icons';
 import {
   App as AntdApp,
   Button,
@@ -10,11 +10,12 @@ import {
   Tooltip,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { AuditLog, Staff } from '../../api/types';
 
-const fmtTime = (iso: string) => iso.replace('T', ' ').slice(0, 19);
+const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss');
 
 const ACTION_COLORS: Record<string, string> = {
   POST: 'green',
@@ -30,6 +31,9 @@ export default function AuditLogs() {
   const [rows, setRows] = useState<AuditLog[]>([]);
   const [staffById, setStaffById] = useState<Map<string, Staff>>(new Map());
   const [loading, setLoading] = useState(false);
+  // Typing only updates the input — the filter applies on 搜索/回车 so a
+  // request doesn't fire per keystroke (and can't resolve out of order).
+  const [entityInput, setEntityInput] = useState('');
   const [entity, setEntity] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -132,14 +136,14 @@ export default function AuditLogs() {
       title="操作日志"
       extra={
         <Space>
-          <Input
+          <Input.Search
             allowClear
             placeholder="按对象类型过滤，如 staff"
-            prefix={<SearchOutlined />}
-            style={{ width: 220 }}
-            value={entity}
-            onChange={(e) => {
-              setEntity(e.target.value);
+            style={{ width: 240 }}
+            value={entityInput}
+            onChange={(e) => setEntityInput(e.target.value)}
+            onSearch={(v) => {
+              setEntity(v);
               setPage(1);
             }}
           />

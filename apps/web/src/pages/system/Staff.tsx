@@ -19,6 +19,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type { DataNode } from 'antd/es/tree';
+import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { OrgUnit, Role, Staff } from '../../api/types';
@@ -33,7 +34,7 @@ interface StaffFormValues {
   roleIds?: string[];
 }
 
-const fmtTime = (iso: string) => iso.replace('T', ' ').slice(0, 19);
+const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss');
 
 /** 用户管理：员工列表 + 新建/编辑 + 重置密码。角色绑定仅管理员可见。 */
 export default function StaffPage() {
@@ -93,16 +94,20 @@ export default function StaffPage() {
   );
 
   const orgTreeData = useMemo<DataNode[]>(() => {
-    const build = (parentId: string | null): DataNode[] =>
-      orgs
-        .filter((o) => o.parentId === parentId)
-        .map((o) => ({
-          key: o.id,
-          value: o.id,
-          title: o.name,
-          children: build(o.id),
-        }));
-    return build(null);
+    // Roots = parentId null OR parent outside the fetched (orgScope-limited)
+    // set — otherwise a scoped user's whole subtree is unreachable.
+    const ids = new Set(orgs.map((o) => o.id));
+    const roots = orgs.filter(
+      (o) => o.parentId === null || !ids.has(o.parentId),
+    );
+    const build = (list: OrgUnit[]): DataNode[] =>
+      list.map((o) => ({
+        key: o.id,
+        value: o.id,
+        title: o.name,
+        children: build(orgs.filter((c) => c.parentId === o.id)),
+      }));
+    return build(roots);
   }, [orgs]);
 
   const openCreate = () => {
@@ -123,7 +128,12 @@ export default function StaffPage() {
   };
 
   const submit = async () => {
-    const values = await form.validateFields();
+    let values: StaffFormValues;
+    try {
+      values = await form.validateFields();
+    } catch {
+      return; // inline field errors are already shown
+    }
     setSaving(true);
     try {
       if (modal?.mode === 'create') {
@@ -157,7 +167,12 @@ export default function StaffPage() {
   };
 
   const submitPassword = async () => {
-    const { password } = await pwdForm.validateFields();
+    let password: string;
+    try {
+      ({ password } = await pwdForm.validateFields());
+    } catch {
+      return; // inline field errors are already shown
+    }
     if (!pwdTarget) return;
     setSaving(true);
     try {
@@ -322,7 +337,7 @@ export default function StaffPage() {
             <Form.Item
               name="roleIds"
               label="角色"
-              extra="留空表示不修改角色；选择后提交将整体替换该用户的角色。"
+              extra="不改动此字段则保持原角色不变；一旦修改（含清空），提交将整体替换该用户的角色。"
             >
               <Select
                 mode="multiple"

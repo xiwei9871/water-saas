@@ -2,11 +2,30 @@ import { App as AntdApp, ConfigProvider } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import 'dayjs/locale/zh-cn';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
-import { AuthProvider } from './auth/AuthContext';
+import { AuthProvider, useAuth } from './auth/AuthContext';
 import AdminLayout from './layouts/AdminLayout';
 import Login from './pages/Login';
 import Placeholder from './pages/Placeholder';
 import { APP_ROUTES, leafRoutes } from './routes';
+import type { AppRoute } from './routes';
+
+/** Direct-URL guard — the menu hides denied entries but routes must too. */
+function PermRoute({ route }: { route: AppRoute }) {
+  const { hasPerm } = useAuth();
+  if (route.perms && !hasPerm(...route.perms)) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{route.element ?? <Placeholder title={route.label} />}</>;
+}
+
+/** Group landing: first child the user may actually see. */
+function GroupRedirect({ route }: { route: AppRoute }) {
+  const { hasPerm } = useAuth();
+  const first =
+    route.children?.find((c) => !c.perms || hasPerm(...c.perms)) ??
+    route.children?.[0];
+  return <Navigate to={first?.path ?? '/'} replace />;
+}
 
 /**
  * /login is public; every other route renders inside the AdminLayout guard
@@ -27,7 +46,7 @@ export default function App() {
                   <Route
                     key={r.key}
                     path={r.path}
-                    element={r.element ?? <Placeholder title={r.label} />}
+                    element={<PermRoute route={r} />}
                   />
                 ))}
                 {/* Menu groups land on their first child. */}
@@ -35,9 +54,7 @@ export default function App() {
                   <Route
                     key={`${r.key}-index`}
                     path={r.path}
-                    element={
-                      <Navigate to={r.children![0].path} replace />
-                    }
+                    element={<GroupRedirect route={r} />}
                   />
                 ))}
               </Route>

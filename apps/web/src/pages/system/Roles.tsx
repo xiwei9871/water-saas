@@ -55,6 +55,7 @@ export default function Roles() {
     { mode: 'create' } | { mode: 'edit'; role: Role } | null
   >(null);
   const [saving, setSaving] = useState(false);
+  const [permsTouched, setPermsTouched] = useState(false);
   const [form] = Form.useForm<RoleFormValues>();
 
   const load = useCallback(async () => {
@@ -75,8 +76,13 @@ export default function Roles() {
     api
       .get<Permission[]>('/iam/roles/permissions/list')
       .then((res) => setDict(res.data))
-      .catch(() => setDict([]));
-  }, [load]);
+      .catch((err) => {
+        // Surface it — a silently-empty dictionary makes edit modals map every
+        // bound permission to nothing, and PUT would wipe the role's grants.
+        setDict([]);
+        message.error(`权限字典加载失败：${apiErrorText(err)}`);
+      });
+  }, [load, message]);
 
   const permIdByCode = useMemo(
     () => new Map(dict.map((p) => [p.code, p.id])),
@@ -90,6 +96,7 @@ export default function Roles() {
       dataScope: 'ORG_SUBTREE',
       permissionIds: [],
     });
+    setPermsTouched(false);
     setModal({ mode: 'create' });
   };
 
@@ -103,11 +110,17 @@ export default function Roles() {
         .map((c) => permIdByCode.get(c))
         .filter((id): id is string => id !== undefined),
     });
+    setPermsTouched(false);
     setModal({ mode: 'edit', role });
   };
 
   const submit = async () => {
-    const values = await form.validateFields();
+    let values: RoleFormValues;
+    try {
+      values = await form.validateFields();
+    } catch {
+      return; // inline field errors are already shown
+    }
     setSaving(true);
     try {
       if (modal?.mode === 'create') {
@@ -127,9 +140,14 @@ export default function Roles() {
           name: values.name,
           dataScope: values.dataScope,
         });
-        await api.put(`/iam/roles/${modal.role.id}/permissions`, {
-          permissionIds: values.permissionIds,
-        });
+        // PUT is a full replace — only send it when the admin actually edited
+        // the checkbox list, or a failed/empty dictionary would wipe every
+        // existing grant on an unrelated rename.
+        if (permsTouched) {
+          await api.put(`/iam/roles/${modal.role.id}/permissions`, {
+            permissionIds: values.permissionIds,
+          });
+        }
         message.success('角色已更新');
       }
       setModal(null);
@@ -287,10 +305,13 @@ export default function Roles() {
             />
           </Form.Item>
           <Divider plain style={{ margin: '8px 0 16px' }}>
-            权限（勾选后整体替换）
+            权限（未改动保持原样；改动后整体替换）
           </Divider>
           <Form.Item name="permissionIds" noStyle>
-            <Checkbox.Group style={{ width: '100%' }}>
+            <Checkbox.Group
+              style={{ width: '100%' }}
+              onChange={() => setPermsTouched(true)}
+            >
               <Space direction="vertical" size={4}>
                 {dict.map((p) => (
                   <Checkbox key={p.id} value={p.id}>

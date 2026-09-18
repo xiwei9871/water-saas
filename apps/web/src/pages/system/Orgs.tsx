@@ -23,6 +23,7 @@ import {
   Typography,
 } from 'antd';
 import type { DataNode } from 'antd/es/tree';
+import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { OrgUnit } from '../../api/types';
@@ -40,13 +41,16 @@ interface OrgFormValues {
   parentId?: string | null;
 }
 
-const fmtTime = (iso: string) => iso.replace('T', ' ').slice(0, 19);
+const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss');
 
 /** 组织管理：左侧组织树，右侧选中节点详情 + 增/改/删。 */
 export default function Orgs() {
   const { message } = AntdApp.useApp();
-  const { hasPerm } = useAuth();
+  const { user, hasPerm } = useAuth();
   const canWrite = hasPerm('iam:write');
+  // Creating a ROOT org requires ALL scope — a scoped writer's parentId=null
+  // is outside their orgScope and the API rejects it with ORG_OUT_OF_SCOPE.
+  const canCreateRoot = canWrite && user?.scope === 'ALL';
 
   const [orgs, setOrgs] = useState<OrgUnit[]>([]);
   const [loading, setLoading] = useState(false);
@@ -81,31 +85,39 @@ export default function Orgs() {
     [orgs],
   );
 
+  // A scoped user's subtree top still has parentId pointing at an org
+  // OUTSIDE the returned set — it must render as a root or the whole tree
+  // (and every org TreeSelect) comes out empty.
+  const rootNodes = useMemo(() => {
+    const ids = new Set(orgs.map((o) => o.id));
+    return orgs.filter((o) => o.parentId === null || !ids.has(o.parentId));
+  }, [orgs]);
+
   const treeData = useMemo<DataNode[]>(() => {
-    const build = (parentId: string | null): DataNode[] =>
-      childrenOf(parentId).map((o) => ({
+    const build = (list: OrgUnit[]): DataNode[] =>
+      list.map((o) => ({
         key: o.id,
         title: `${o.name}（${ORG_TYPE_LABELS[o.type]}）`,
-        children: build(o.id),
+        children: build(childrenOf(o.id)),
       }));
-    return build(null);
-  }, [childrenOf]);
+    return build(rootNodes);
+  }, [childrenOf, rootNodes]);
 
   /** TreeSelect data for the parent picker inside the edit modal. */
   const parentTreeData = useMemo<DataNode[]>(() => {
     const exclude = modal?.mode === 'edit' ? modal.org.id : null;
-    const build = (parentId: string | null): DataNode[] =>
-      childrenOf(parentId).map((o) => ({
+    const build = (list: OrgUnit[]): DataNode[] =>
+      list.map((o) => ({
         key: o.id,
         value: o.id,
         title: o.name,
         // Disallow reparenting onto self — deeper descendants are still
         // offered but the API rejects cycles with ORG_CYCLE (surfaced).
         disabled: o.id === exclude,
-        children: build(o.id),
+        children: build(childrenOf(o.id)),
       }));
-    return build(null);
-  }, [childrenOf, modal]);
+    return build(rootNodes);
+  }, [childrenOf, rootNodes, modal]);
 
   const selected = orgs.find((o) => o.id === selectedId) ?? null;
   const selectedChildren = selectedId ? childrenOf(selectedId) : [];
@@ -122,7 +134,12 @@ export default function Orgs() {
   };
 
   const submit = async () => {
-    const values = await form.validateFields();
+    let values: OrgFormValues;
+    try {
+      values = await form.validateFields();
+    } catch {
+      return; // inline field errors are already shown
+    }
     setSaving(true);
     try {
       if (modal?.mode === 'create') {
@@ -133,11 +150,17 @@ export default function Orgs() {
         });
         message.success('组织已创建');
       } else if (modal?.mode === 'edit') {
-        await api.patch(`/iam/orgs/${modal.org.id}`, {
+        const patch: Record<string, unknown> = {
           name: values.name,
           type: values.type,
-          parentId: values.parentId ?? null,
-        });
+        };
+        // Send parentId ONLY when it changed — a scoped user's current parent
+        // sits outside their orgScope, so echoing it back trips
+        // ORG_OUT_OF_SCOPE on a plain rename.
+        if ((values.parentId ?? null) !== modal.org.parentId) {
+          patch.parentId = values.parentId ?? null;
+        }
+        await api.patch(`/iam/orgs/${modal.org.id}`, patch);
         message.success('组织已更新');
       }
       setModal(null);
@@ -169,7 +192,7 @@ export default function Orgs() {
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
-          {canWrite && (
+          {canCreateRoot && (
             <Button
               type="primary"
               icon={<PlusOutlined />}

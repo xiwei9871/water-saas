@@ -56,11 +56,13 @@ export default function AdminLayout() {
         style={{
           minHeight: '100vh',
           display: 'flex',
+          flexDirection: 'column',
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Spin size="large" tip="正在恢复登录状态…" />
+        <Spin size="large" />
+        <div style={{ marginTop: 16, color: '#888' }}>正在恢复登录状态…</div>
       </div>
     );
   }

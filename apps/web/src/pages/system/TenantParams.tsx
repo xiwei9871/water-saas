@@ -11,6 +11,7 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { TenantParam } from '../../api/types';
@@ -21,7 +22,7 @@ interface ParamFormValues {
   value: string;
 }
 
-const fmtTime = (iso: string) => iso.replace('T', ' ').slice(0, 19);
+const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss');
 
 const pretty = (v: unknown): string => {
   try {
@@ -72,12 +73,22 @@ export default function TenantParams() {
   };
 
   const submit = async () => {
-    const values = await form.validateFields();
+    let values: ParamFormValues;
+    try {
+      values = await form.validateFields();
+    } catch {
+      return; // inline field errors are already shown
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(values.value);
     } catch {
       message.error('参数值不是合法的 JSON，请检查后重试');
+      return;
+    }
+    // `value Json` is a required column — a literal null 500s server-side.
+    if (parsed === null) {
+      message.error('参数值不支持 null，请改用 0、false 或 {}');
       return;
     }
     setSaving(true);
@@ -188,7 +199,9 @@ export default function TenantParams() {
               {
                 validator: (_, v: string) => {
                   try {
-                    JSON.parse(v);
+                    if (JSON.parse(v) === null) {
+                      return Promise.reject(new Error('不支持 null 值'));
+                    }
                     return Promise.resolve();
                   } catch {
                     return Promise.reject(new Error('不是合法的 JSON'));

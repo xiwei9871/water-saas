@@ -41,6 +41,9 @@ export const session = {
     }
   },
   clear() {
+    // Bumping the epoch invalidates any in-flight refresh — a refresh that
+    // resolves AFTER logout must not write tokens back into storage.
+    sessionEpoch += 1;
     localStorage.removeItem(ACCESS_KEY);
     localStorage.removeItem(REFRESH_KEY);
     localStorage.removeItem(TENANT_CODE_KEY);
@@ -114,7 +117,7 @@ const CODE_LABELS: Record<string, string> = {
   ROLE_PROTECTED: '内置管理员角色不可删除',
   PERMISSION_NOT_FOUND: '权限不存在',
   PARAM_VALUE_REQUIRED: '参数值必填',
-  UNIQUE_CONSTRAINT: '已存在相同编码/账号的记录',
+  UNIQUE_CONSTRAINT_VIOLATION: '已存在相同编码/账号的记录',
   IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST: '重复提交：同一幂等键不能用于不同内容',
   NETWORK_ERROR: '网络异常，请检查 API 服务是否已启动',
 };
@@ -147,20 +150,37 @@ export const setSessionExpiredHandler = (fn: (() => void) | null) => {
  * POST /auth/refresh.
  */
 let refreshPromise: Promise<string | null> | null = null;
+/** Bumped by session.clear() so a stale in-flight refresh can't re-save. */
+let sessionEpoch = 0;
 
 const refreshTokens = (): Promise<string | null> => {
   refreshPromise ??= (async (): Promise<string | null> => {
     const refreshToken = session.refreshToken;
-    if (!refreshToken) return null;
-    try {
-      // Bare axios (not `api`) — no interceptors, no recursion.
-      const res = await axios.post<TokenPair>('/api/auth/refresh', {
-        refreshToken,
-      });
-      session.save(res.data);
-      return res.data.accessToken;
-    } catch {
+    if (!refreshToken) {
       session.clear();
+      return null;
+    }
+    const epoch = sessionEpoch;
+    try {
+      // Bare axios (not `api`) — no interceptors, no recursion. Explicit
+      // timeout: the `api` instance's 15s does not apply to this call, and a
+      // hung refresh would stall every queued 401 forever.
+      const res = await axios.post<TokenPair>(
+        '/api/auth/refresh',
+        { refreshToken },
+        { timeout: 15000 },
+      );
+      if (!res.data?.accessToken || !res.data?.refreshToken) {
+        session.clear();
+        return null;
+      }
+      if (sessionEpoch === epoch) session.save(res.data);
+      return res.data.accessToken;
+    } catch (err) {
+      // Only an auth rejection means the refresh token is dead — a transient
+      // network failure keeps the stored pair so a reload can still resume.
+      const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+      if (status === 401 || status === 403) session.clear();
       return null;
     }
   })().finally(() => {
