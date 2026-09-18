@@ -8,12 +8,13 @@ import { BigIntInterceptor } from './common/bigint.interceptor.js';
 import { CommonModule } from './common/common.module.js';
 import { PermissionsGuard } from './common/permissions.guard.js';
 import { TenantInterceptor } from './common/tenant.interceptor.js';
+import { BillingModule } from './modules/billing/billing.module.js';
 import { CustomerModule } from './modules/customer/customer.module.js';
 import { IamModule } from './modules/iam/iam.module.js';
 import { MeteringModule } from './modules/metering/metering.module.js';
 
 @Module({
-  imports: [CommonModule, IamModule, CustomerModule, MeteringModule],
+  imports: [CommonModule, IamModule, CustomerModule, MeteringModule, BillingModule],
   controllers: [AppController],
   providers: [
     AppService,
