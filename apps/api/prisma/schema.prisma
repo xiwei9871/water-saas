@@ -946,7 +946,11 @@ model Payment {
   @@unique([tenantId, id])
   @@index([tenantId, settleAccountId, status])
   @@index([tenantId, cashierId, status])
-  @@index([tenantId, dayCloseId])
+  // First-class day-close membership (T12 review I2) — stamped by the
+  // same guarded RECEIVED→DAY_CLOSED flip; map name keeps introspection
+  // aligned with the hand-named migration index so a future migrate
+  // doesn't plan a rename.
+  @@index([tenantId, dayCloseId], map: "payment_tenant_day_close_idx")
   @@map("payment")
 }
 

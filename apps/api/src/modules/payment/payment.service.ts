@@ -455,9 +455,12 @@ export class PaymentService {
    * The account locks serialize against close-account (closeTx takes the
    * same row lock before its guarded CLOSED flip) and against bill
    * posting (postOneBill: account → plan → bill). A payment reversal is
-   * the ONLY path that can RAISE an account's outstanding — without the
-   * lock, a racing or already-committed close would leave a CLOSED
-   * account carrying resurrected debt with no recovery path. Lock order
+   * the common path that can RAISE an account's outstanding — without
+   * the lock, a racing or already-committed close would leave a CLOSED
+   * account carrying resurrected debt with no recovery path. (Known
+   * same-class residual: bill.reverseTx on a NEGATIVE bill — e.g. an
+   * ADJUSTMENT — also resurrects debt and takes no account lock yet;
+   * flagged for a follow-up, not this path.) Lock order
    * is payment → accounts → bills → seq: nothing else takes a payment
    * row lock and then waits on accounts (day-close flips payments under
    * the staff lock; postOneBill never touches payment rows), so no
