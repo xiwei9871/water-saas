@@ -11,7 +11,16 @@ const REDACTED_KEYS = new Set(['password', 'passwordHash']);
 
 const stripSecrets = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(stripSecrets);
-  if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
+  // Recurse plain objects only. Dates pass through (Prisma serializes them);
+  // Prisma.Decimal must too — it carries an own enumerable `constructor`
+  // property that would otherwise land in the payload as a bare function and
+  // crash jsonb serialization. toJsonSafe stringifies Decimals downstream.
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    !(value instanceof Date) &&
+    !(value instanceof Prisma.Decimal)
+  ) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       out[k] = REDACTED_KEYS.has(k) ? '[redacted]' : stripSecrets(v);
