@@ -1,7 +1,14 @@
 # 水务抄表收费 SaaS — MVP 设计规格 v1.1
 
-日期：2026-09-18（v1.1 修订）
-状态：待评审
+日期：2026-09-18（v1.1 + final patch）
+状态：已评审，架构冻结
+
+### v1.1 final patch
+
+1. Reconciliation 语义修正：恢复实抄后累计差额**优先由当前周期正常 settlement 吸收**，不必然生成 adjustment bill；仅当负差/历史账务必须调整/无法被吸收时才落 adjustment（详见 §2.4）。
+2. 新增 `reading_plan_item`：计划生成时 snapshot 册成员，进度/完成率/NO_READ/补抄均基于 plan item（§2.2）。
+3. 不可变表述精确化：POSTED 后**财务事实字段 immutable**，允许受控且全审计的 workflow status transition（§1.3）。
+4. Tariff 版本冻结：`DRAFT → ACTIVE → RETIRED`，已用于 POSTED bill 的版本计算字段禁改，调价 = 新版本 + 生效日；`bill.tariff_plan_id` 存定价快照引用（§2.5）。
 
 ## 0. 背景与范围基线
 
@@ -61,7 +68,7 @@
 ### 1.3 财务不可变规则
 
 - **DRAFT**：允许编辑、删除、重算。开账批次、结算水量未 POST/FINAL 前可作废重跑。
-- **POSTED / FINAL**：不得覆盖修改、不得物理删除。一切纠错通过 reversal（红冲）+ replacement（正向单）或 reconciliation→adjustment 完成；`bill`/`bill_item`/`payment`/`payment_alloc`/`consumption_settlement`(FINAL)/`reconciliation` 均 append-only。
+- **POSTED / FINAL**：**财务事实字段 immutable**——金额、数量、单价、业务来源、关联单据等不可覆盖、不可物理删除；**允许受控且全审计的 workflow status transition**（如 `bill POSTED→PAID`、`payment RECEIVED→DAY_CLOSED`），每次状态迁移记 `audit_log`。金额类错误只能通过 reversal（红冲）+ replacement（正向单）或 reconciliation→adjustment 新单据修正。
 - 数值精度与舍入（v1.1 统一）：水量 `numeric(18,4)` m³；单价 `numeric(18,6)` 元/m³；金额 `bigint` 分。舍入规则：每条 `bill_item.amount` 按 `qty × unit_price` 以 **HALF_UP** 入到分，`bill.total = Σ items`；阶梯分档计算过程保留 4 位小数，仅在成行时舍入。
 
 ## 2. 领域模型
@@ -81,9 +88,12 @@ meter 水表(物理设备) ──< meter_installation 安装关系 >── water
 ### 2.2 抄表：事实读数（v1.1 严格分离）
 
 ```
-reading_book 抄表册 ──< book_meter(册内水表+顺序)
-reading_plan 抄表计划 ──< meter_reading 抄表记录(采集事实)
+reading_book 抄表册 ──< book_meter(当前册成员)
+reading_plan 抄表计划 ──< reading_plan_item(生成计划时的成员快照)
+reading_plan_item ──< meter_reading 抄表记录(采集事实)
 ```
+
+- `reading_plan_item`：计划创建时把**当时**的册成员固化为计划项，之后册的增删不影响已生成计划。字段：`plan_id / water_account_id / seq_no / planned_installation_id(快照，nullable) / status: PENDING | READ | NO_READ | SKIPPED / completed_reading_id`。抄表时以户当期 ACTIVE installation 为准（`planned_installation_id` 仅快照，允许抄表期间换表）。计划进度、完成率、未抄名单、补抄任务、抄表员工作量统计全部基于 plan item，而非动态读当前册。
 
 `meter_reading` = **一次现场观察/一次数据采集的事实**，append-only，永不覆盖：
 
@@ -108,7 +118,7 @@ consumption_settlement (water_account × period, header)
 - **估水算法**：第一版 `AUTO_AVG3` = 最近 3 次有效 ACTUAL 用量均值；`Estimator` 接口 + `estimate_rule` 租户参数可配置，去年同期/日均算法二期注册。
 - 连续估抄上限：租户参数 `max_consecutive_estimates`（默认 3），超限进"补抄任务"台账列表（不接工单流）。
 
-### 2.4 Reconciliation：锚点式补差（v1.1 新增实体）
+### 2.4 Reconciliation：锚点式校准与补差（final patch 修语义）
 
 ```
 reconciliation
@@ -116,25 +126,30 @@ reconciliation
   actual_reading_id   -- 新到的实抄读数
   water_account_id
   from_period / to_period          -- 受影响账期范围
-  actual_total_usage               -- actual - anchor
+  actual_total_usage               -- actual - anchor（真实累计用量）
   previously_settled_usage         -- 范围内已 FINAL 结算水量合计
-  delta_usage                      -- actual_total - previously_settled（可正可负，解释字段）
-  correct_charge_cent              -- 按正确用量重计价的应收
-  posted_charge_cent               -- 范围内已 POSTED 的用量类费用合计
-  adjustment_amount_cent           -- correct - posted（正=补收，负=退减）
-  status: DRAFT → APPLIED          -- APPLIED 时关联生成的调整账单
+  remainder_usage                  -- actual_total - previously_settled（应归属当前期的剩余量，可负）
+  absorbed_settlement_id           -- 吸收 remainder 的当前期 settlement（nullable）
+  correct_charge_cent              -- 需调整时：重计价应收
+  posted_charge_cent               -- 需调整时：范围内已 POSTED 用量费用
+  adjustment_amount_cent           -- correct - posted；ABSORBED 时恒为 0
+  status: DRAFT → ABSORBED | APPLIED | MANUAL_REVIEW
 ```
 
-- **触发**：新 ACTUAL 读数入库且其覆盖范围内存在 `is_estimated` 的 FINAL settlement → 自动生成 DRAFT reconciliation（也可人工发起）。
-- **语义示例**：6 月实抄 1000 → 7 月估 30 → 8 月估 35 → 9 月实抄 1080：anchor=1000，actual_total=80，settled=65，delta=+15。**锚点是最后实抄而非最近一次估算的 synthetic end**，连续估 N 月同样正确。
-- **重计价（v1.1 关键）**：`billing-core.reprice()` 按租户参数 `reconcile_alloc_policy`（默认 `PROPORTIONAL_TO_SETTLED`，备选 `ALL_TO_CURRENT`）把实际用量分摊回各受影响账期，逐期用**该期生效的 tariff 版本 + 自然年阶梯状态**重算应收 → `correct_charge`；`adjustment = correct_charge − posted_charge`。金额层面的补差，天然正确处理阶梯分布变化和跨期调价。
-- **不可变**：FINAL settlement 永不因后续实抄而修改；reconciliation 是新的 append-only 业务事实，经 `RECONCILE` 类型 adjustment bill 落到应收。
-- **负用量保护**：actual < anchor（表码回退异常）或重算后出现异常大额 → `MANUAL_REVIEW`；租户参数 `negative_usage_policy: CLAMP_REVIEW(默认) | ALLOW_NEGATIVE`。
+- **语义（final patch）**：reconciliation 首先是**校准与审计过程**，不是"每次恢复实抄必生成调整账单"。恢复实抄时：
+  - `remainder_usage ≥ 0` → 作为**当前周期 settlement 的正常结算水量**入账（天然含历史估差回归，无额外单据）；reconciliation 记 `status=ABSORBED`、`adjustment_amount=0`，仅留审计链。例：1000 → 估30 → 估35 → 实抄1080：累计80，已结65，remainder=15 → 9月 settlement=15，**不产生 adjustment bill**——若再按 delta 开调整单即双重计费。
+  - `remainder_usage < 0`（高估，如实抄 1055 → -10）或差异无法被当前 settlement 吸收（历史账期需更正、调价穿越、争议处理）→ `billing-core.reprice()` 重算正确应收，`adjustment = correct − posted`，生成 adjustment bill，`status=APPLIED`。
+  - 存在 reconciliation 时，当前期 settlement 水量以 `remainder_usage` 为准（= 实抄 − 锚点 − 区间已结算），保证不重不漏。
+- **锚点**：始终是最后一次可信 ACTUAL/REMOTE 读数，而非估算的 synthetic end——连续估 N 月同样正确。
+- **重计价**：`reprice()` 按租户参数 `reconcile_alloc_policy`（默认 `PROPORTIONAL_TO_SETTLED`，备选 `ALL_TO_CURRENT`）分摊实际用量到各受影响账期，逐期用该期 tariff 版本 + 自然年阶梯状态重算 → `correct_charge`。
+- **不可变**：FINAL settlement 永不因后续实抄修改；reconciliation append-only。
+- **负用量保护**：actual < anchor（表码回退）→ `MANUAL_REVIEW`；租户参数 `negative_usage_policy: CLAMP_REVIEW(默认) | ALLOW_NEGATIVE`。
 
 ### 2.5 计费与开账
 
 - `fee_item` 费用项：水费/污水费/水资源费/违约金等，`calc_type: PER_QTY | FIXED | PERCENT`。
 - `tariff_plan`：`usage_category + effective_from/to` 版本化；`tariff_tier`：`tier_no / from_qty / to_qty(NULL=∞) / unit_price`。第一版：普通单价（单 tier）+ 阶梯价（多 tier，自然年累计分档）。不硬编码地方政策。
+- **Tariff 版本冻结（final patch）**：`status: DRAFT → ACTIVE → RETIRED`。DRAFT 可编辑；**一旦某 ACTIVE 版本参与过 POSTED bill 计算，其计算字段（tier 边界/单价/生效区间）禁止原地修改**——调价必须复制出新版本 + 新 `effective_from`。`bill.tariff_plan_id` 记录定价版本引用（`bill_item.unit_price` 即价格快照），保证"为什么算成这个价"可审计、`reprice()` 历史复算不被污染。
 - `billing_run`：`period + run_type(MANUAL|AUTO)`，`status: DRAFT → POSTED | FAILED→DRAFT 重跑`；DRAFT 批可整批作废重算。
 - `bill`（v1.1 幂等重构）：
   - `bill_kind: NORMAL | ADJUSTMENT | REVERSAL | REPLACEMENT`
@@ -159,9 +174,11 @@ reconciliation
 | meter | AVAILABLE → INSTALLED → MAINTENANCE → AVAILABLE \| RETIRED |
 | meter_installation | ACTIVE → REMOVED |
 | reading_plan | OPEN → IN_PROGRESS → DONE → CLOSED |
+| reading_plan_item | PENDING → READ / NO_READ / SKIPPED |
 | meter_reading.qc_status | PENDING → PASSED / REJECTED / MANUAL_REVIEW → PASSED / REJECTED |
 | consumption_settlement | DRAFT → FINAL（FINAL 后冻结，reconcile 走独立实体） |
-| reconciliation | DRAFT → APPLIED；异常 → MANUAL_REVIEW |
+| reconciliation | DRAFT → ABSORBED / APPLIED；异常 → MANUAL_REVIEW |
+| tariff_plan | DRAFT → ACTIVE → RETIRED（用于 POSTED bill 后计算字段冻结） |
 | billing_run | DRAFT → POSTED / FAILED → DRAFT 重跑 |
 | bill | DRAFT → POSTED → PARTIAL_PAID → PAID；POSTED → REVERSED |
 | payment | RECEIVED → DAY_CLOSED；→ REVERSED（红冲） |
@@ -178,9 +195,9 @@ reconciliation
 
 **customer**: `customer(id, customer_no, name, cust_type, id_type, id_no, phone, addr)`、`settle_account(id, settle_no, name, phone, status)`、`water_account(id, account_no, customer_id, settle_account_id, usage_category, addr, status, opened_at, closed_at)`、`meter(id, meter_no, serial_no, barcode, brand, model, caliber, max_dial, parent_meter_id, status)`、`meter_installation(id, water_account_id, meter_id, installed_at, removed_at, initial_reading, final_reading, reason, status)`、`account_event(id, water_account_id, type(TRANSFER|SUSPEND|RESUME|CLOSE), payload jsonb, effective_date)`
 
-**metering**: `reading_book(id, book_no, name, org_unit_id, reader_id, schedule_day)`、`book_meter(book_id, water_account_id, seq_no)`（册按"去哪户抄"组织，抄表时动态解析当期 ACTIVE installation，换表不影响册内关系）、`reading_plan(id, book_id, period, plan_date, reader_id, status)`、`meter_reading(id, plan_id, installation_id, meter_id, period, read_date, result_type, reading_value, exception_code, supersedes_reading_id, qc_status, qc_by, qc_at, source, operator_id, photo_ref, remark)`、`consumption_settlement(id, water_account_id, period, total_usage_qty, is_estimated, estimate_method, estimate_basis jsonb, estimate_reason, status)`、`consumption_component(id, settlement_id, installation_id, prev_reading_value, end_reading_value, usage_qty, source_type, source_reading_id)`、`reconciliation(id, water_account_id, anchor_reading_id, actual_reading_id, from_period, to_period, actual_total_usage, previously_settled_usage, delta_usage, correct_charge_cent, posted_charge_cent, adjustment_amount_cent, status)`、`estimate_rule(tenant_id, method, params jsonb, enabled)`
+**metering**: `reading_book(id, book_no, name, org_unit_id, reader_id, schedule_day)`、`book_meter(book_id, water_account_id, seq_no)`（册按"去哪户抄"组织，抄表时动态解析当期 ACTIVE installation，换表不影响册内关系）、`reading_plan(id, book_id, period, plan_date, reader_id, status)`、`reading_plan_item(id, plan_id, water_account_id, seq_no, planned_installation_id, status, completed_reading_id)`、`meter_reading(id, plan_item_id, installation_id, meter_id, period, read_date, result_type, reading_value, exception_code, supersedes_reading_id, qc_status, qc_by, qc_at, source, operator_id, photo_ref, remark)`、`consumption_settlement(id, water_account_id, period, total_usage_qty, is_estimated, estimate_method, estimate_basis jsonb, estimate_reason, status)`、`consumption_component(id, settlement_id, installation_id, prev_reading_value, end_reading_value, usage_qty, source_type, source_reading_id)`、`reconciliation(id, water_account_id, anchor_reading_id, actual_reading_id, from_period, to_period, actual_total_usage, previously_settled_usage, remainder_usage, absorbed_settlement_id, correct_charge_cent, posted_charge_cent, adjustment_amount_cent, status)`、`estimate_rule(tenant_id, method, params jsonb, enabled)`
 
-**billing**: `fee_item(id, code, name, calc_type)`、`tariff_plan(id, code, name, usage_category, effective_from, effective_to, status)`、`tariff_tier(id, tariff_plan_id, fee_item_id, tier_no, from_qty, to_qty, unit_price)`、`billing_run(id, period, run_type, status, posted_at)`、`bill(id, billing_run_id, settle_account_id, water_account_id, period, bill_kind, source_type, source_id, status, is_estimated, total_amount, issued_at, due_date)`、`bill_item(id, bill_id, fee_item_id, item_type, description, qty, unit_price, amount)`、`idempotency_key(tenant_id, key, endpoint, response_ref)`
+**billing**: `fee_item(id, code, name, calc_type)`、`tariff_plan(id, code, name, usage_category, effective_from, effective_to, status)`、`tariff_tier(id, tariff_plan_id, fee_item_id, tier_no, from_qty, to_qty, unit_price)`、`billing_run(id, period, run_type, status, posted_at)`、`bill(id, billing_run_id, settle_account_id, water_account_id, period, bill_kind, source_type, source_id, tariff_plan_id, status, is_estimated, total_amount, issued_at, due_date)`、`bill_item(id, bill_id, fee_item_id, item_type, description, qty, unit_price, amount)`、`idempotency_key(tenant_id, key, endpoint, response_ref)`
 
 **payment**: `payment(id, payment_no, settle_account_id, cashier_id, org_unit_id, channel, amount, status, received_at, reversal_of_id)`、`payment_alloc(id, payment_id, bill_id, amount)`、`receipt(id, payment_id, receipt_no, rcp_type, printed_at, void_flag)`、`cashier_day_close(id, cashier_id, org_unit_id, close_date, total_count, total_amount, by_channel jsonb, status, closed_at)`
 
@@ -193,7 +210,7 @@ reconciliation
 /tenants  /orgs  /staff  /roles  /permissions  /audit-logs  /tenant-params
 /customers  /settle-accounts  /water-accounts(+ /transfer /suspend /resume /close)
 /meters  /meter-installations(+ /remove 拆表 /install 复装)
-/reading-books  /reading-plans(+ /generate)
+/reading-books  /reading-plans(+ /generate /:id/items /:id/progress)
 /meter-readings(+ POST 批量录入 /import CSV; 录入含 NO_READ+exception_code)
 /meter-readings/:id/qc (pass|reject|review)  /meter-readings/:id/supersede (更正)
 /consumption-settlements(+ /:id/finalize; GET 含 components)
@@ -223,11 +240,16 @@ reconciliation
 1. 建两个租户，验证跨租户数据互不可见——含非 owner 连接 + FORCE RLS 下的直连 SQL 验证；连接池复用后无租户上下文残留。
 2. 完成链路：立户（客户+用水户+装表 installation）→ 入册排计划 → 录实抄 → 质检 → 手工/批量开账 → POSTED 账单（阶梯价正确分档）。
 3. **中途换表**：账期内拆旧装新，settlement 生成两个 component（旧 30 + 新 18 = 48），账单按 48 正确计价。
-4. **连续估抄补差**：实抄 1000 → 估 30 → 估 35 → 实抄 1080：reconciliation 锚定 1000，delta=+15；adjustment bill 金额 = 重计价正确应收 − 已 POSTED 应收（验证阶梯边界情形：+15 跨档时金额正确拆分）；原 FINAL settlement 不被修改。
-5. 收款：一笔 payment 分摊 2+ 账单、部分缴费 → PARTIAL_PAID、收据号生成、收费员日结汇总正确。
-6. 纠错：POSTED 账单不可改；红冲 + 重开链路完整；更正读数经 `supersedes_reading_id` 成链，原读数保留；DRAFT 批次可作废重跑。
-7. 幂等：Worker 重跑同一 billing_run / 重复提交同一 source，只产生一张 `(source_type, source_id, bill_kind)` 对应单据。
-8. 操作日志覆盖所有写操作；报表四张可对数。
+4. **估抄恢复与补差**：
+   - a. 正差吸收：实抄 1000 → 估 30 → 估 35 → 实抄 1080：reconciliation 锚定 1000，remainder=+15 **被 9 月 settlement 正常吸收**（settlement=15），`status=ABSORBED`、adjustment=0、**不产生 adjustment bill**；累计 80m³ 不重不漏。
+   - b. 负差调整：实抄 1055 → remainder=−10 → `reprice()` 重算 → 生成 credit adjustment bill，`status=APPLIED`；调整金额在阶梯跨档/跨期调价情形下正确拆分。
+   - c. 原 FINAL settlement 全程不被修改。
+5. **抄表计划快照**：计划生成后修改册成员，已生成 plan 的 `reading_plan_item` 不变；进度/完成率/未抄名单按 plan item 统计。
+6. **Tariff 冻结**：已用于 POSTED bill 的 tariff 版本计算字段不可改（API 拒绝），调价走新版本+生效日；账单保留 `tariff_plan_id` 可回溯定价依据。
+7. 收款：一笔 payment 分摊 2+ 账单、部分缴费 → PARTIAL_PAID、收据号生成、收费员日结汇总正确。
+8. 纠错：POSTED 账单财务事实不可改（状态机正常流转除外）；红冲 + 重开链路完整；更正读数经 `supersedes_reading_id` 成链，原读数保留；DRAFT 批次可作废重跑。
+9. 幂等：Worker 重跑同一 billing_run / 重复提交同一 source，只产生一张 `(source_type, source_id, bill_kind)` 对应单据。
+10. 操作日志覆盖所有写操作；报表四张可对数。
 
 ## 7. 非功能与边界
 
