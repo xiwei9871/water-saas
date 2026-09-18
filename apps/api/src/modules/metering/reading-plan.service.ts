@@ -1,12 +1,13 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
-import type { TenantCtx } from '../../common/tenant-context.js';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
 export const READING_PLAN_SELECT = {
@@ -47,6 +48,8 @@ type PlanItemStatus = 'PENDING' | 'READ' | 'NO_READ' | 'SKIPPED';
 const invalidTransition = (from: string, to: string) =>
   new ConflictException({ code: 'INVALID_PLAN_STATUS_TRANSITION', from, to });
 
+const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
+
 /**
  * ReadingPlan （抄表计划） + ReadingPlanItem （生成时刻的册成员快照） —
  * spec §2.2/§6.5: a plan freezes the book's membership at generation time;
@@ -76,7 +79,7 @@ export class ReadingPlanService {
           status: q.status,
         },
         select: READING_PLAN_SELECT,
-        orderBy: [{ period: 'desc' }, { createdAt: 'desc' }],
+        orderBy: [{ period: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
         take: q.take,
         skip: q.skip,
       }),
@@ -167,17 +170,19 @@ export class ReadingPlanService {
     if (!body.bookId || !body.period) {
       throw new BadRequestException({ code: 'GENERATE_FIELDS_REQUIRED' });
     }
-    const locked = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM reading_book
+    const locked = await tx.$queryRaw<
+      { id: string; org_unit_id: string; reader_id: string | null }[]
+    >`
+      SELECT id, org_unit_id, reader_id FROM reading_book
       WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${body.bookId}::uuid
       FOR UPDATE`;
     if (locked.length === 0) {
       throw new BadRequestException({ code: 'BOOK_NOT_FOUND' });
     }
-    const book = await tx.readingBook.findFirst({
-      where: { tenantId: ctx.tenantId, id: body.bookId },
-    });
-    if (!book) throw new BadRequestException({ code: 'BOOK_NOT_FOUND' });
+    const book = locked[0];
+    // Same write-path orgInScope guard as the book endpoints — a scoped
+    // caller must not mint plans for a book outside their subtree.
+    if (!orgInScope(ctx, book.org_unit_id)) throw outOfScope();
 
     const existing = await tx.readingPlan.findFirst({
       where: {
@@ -200,7 +205,19 @@ export class ReadingPlanService {
       where: { tenantId: ctx.tenantId, bookId: body.bookId },
       orderBy: [{ seqNo: 'asc' }, { waterAccountId: 'asc' }],
     });
-    if (members.length === 0) {
+    // Members whose account has since been CLOSED are skipped — a closed
+    // point has nothing to read and would only produce dead plan items.
+    const liveAccounts = await tx.waterAccount.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: { in: members.map((m) => m.waterAccountId) },
+        status: { not: 'CLOSED' },
+      },
+      select: { id: true },
+    });
+    const liveIds = new Set(liveAccounts.map((a) => a.id));
+    const liveMembers = members.filter((m) => liveIds.has(m.waterAccountId));
+    if (liveMembers.length === 0) {
       throw new BadRequestException({ code: 'EMPTY_BOOK' });
     }
 
@@ -212,7 +229,7 @@ export class ReadingPlanService {
     const actives = await tx.meterInstallation.findMany({
       where: {
         tenantId: ctx.tenantId,
-        waterAccountId: { in: members.map((m) => m.waterAccountId) },
+        waterAccountId: { in: liveMembers.map((m) => m.waterAccountId) },
         status: 'ACTIVE',
       },
       select: { id: true, waterAccountId: true, installedAt: true },
@@ -225,7 +242,7 @@ export class ReadingPlanService {
       }
     }
 
-    const readerId = body.readerId ?? book.readerId ?? null;
+    const readerId = body.readerId ?? book.reader_id ?? null;
     if (readerId) {
       const reader = await tx.staff.findFirst({
         where: { tenantId: ctx.tenantId, id: readerId },
@@ -251,7 +268,7 @@ export class ReadingPlanService {
     // caller-supplied duplicates, while reading_plan_item enforces
     // UNIQUE(plan_id, seq_no); only the *ordering* is snapshotted.
     await tx.readingPlanItem.createMany({
-      data: members.map((m, i) => ({
+      data: liveMembers.map((m, i) => ({
         tenantId: ctx.tenantId,
         planId: plan.id,
         waterAccountId: m.waterAccountId,
@@ -271,12 +288,31 @@ export class ReadingPlanService {
     return { ...plan, items };
   }
 
+  /**
+   * Plans act on books — a plan write is only allowed when the parent book's
+   * org_unit sits inside the caller's data scope (same guard as the book
+   * endpoints; bookId is a plain column so the org lookup is a second query).
+   */
+  private async assertPlanBookInScope(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    bookId: string,
+  ) {
+    const book = await tx.readingBook.findFirst({
+      where: { tenantId: ctx.tenantId, id: bookId },
+      select: { orgUnitId: true },
+    });
+    if (!book) throw new NotFoundException({ code: 'BOOK_NOT_FOUND' });
+    if (!orgInScope(ctx, book.orgUnitId)) throw outOfScope();
+  }
+
   /** OPEN → IN_PROGRESS （抄表开始）. Guarded write, same pattern as T4. */
   async startTx(tx: Prisma.TransactionClient, ctx: TenantCtx, id: string, req: Request) {
     const existing = await tx.readingPlan.findFirst({
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
+    await this.assertPlanBookInScope(tx, ctx, existing.bookId);
     if (existing.status !== 'OPEN') throw invalidTransition(existing.status, 'IN_PROGRESS');
     req.auditBefore = existing;
     const flipped = await tx.readingPlan.updateMany({
@@ -300,6 +336,7 @@ export class ReadingPlanService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
+    await this.assertPlanBookInScope(tx, ctx, existing.bookId);
     const cancellable: PlanStatus[] = ['OPEN', 'IN_PROGRESS'];
     if (!cancellable.includes(existing.status)) {
       throw invalidTransition(existing.status, 'CLOSED');

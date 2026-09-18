@@ -49,6 +49,11 @@ const PERM_MET_READ = '77777777-0000-4000-8000-00000000e601';
 const STAFF_ADMIN_A = '77777777-0000-4000-8000-0000000a0001';
 const STAFF_VIEWER_A = '77777777-0000-4000-8000-0000000b0002';
 const STAFF_READER_A = '77777777-0000-4000-8000-0000000c0003';
+// scoped-writer fixtures: metering:write at a branch that does NOT contain the book's org
+const ORG_A_BR = '77777777-0000-4000-8000-0000000000b1';
+const PERM_MET_WRITE = '77777777-0000-4000-8000-00000000e602';
+const ROLE_WRITER_A = '77777777-0000-4000-8000-000000001e02';
+const STAFF_WRITER_A = '77777777-0000-4000-8000-0000000b0004';
 const ORG_B = '88888888-0000-4000-8000-0000000000c0';
 const ROLE_B_ADMIN = '88888888-0000-4000-8000-00000000ad01';
 const STAFF_B_ADMIN = '88888888-0000-4000-8000-0000000a0001';
@@ -57,6 +62,7 @@ const owner = new pg.Client({ connectionString: OWNER_URL });
 let app: INestApplication<App>;
 let adminToken = '';
 let viewerToken = '';
+let writerToken = '';
 let tenantBToken = '';
 
 // ids populated by the sequential suite
@@ -104,45 +110,53 @@ beforeAll(async () => {
   await owner.query(
     `INSERT INTO org_unit (id, tenant_id, parent_id, name, type, created_at, updated_at)
      VALUES ($1, $2, NULL, 'T5 Company', 'COMPANY', now(), now()),
-            ($3, $4, NULL, 'T5B Company', 'COMPANY', now(), now())
+            ($3, $4, NULL, 'T5B Company', 'COMPANY', now(), now()),
+            ($5, $2, $1, 'T5 Branch', 'BRANCH', now(), now())
      ON CONFLICT DO NOTHING`,
-    [ORG_A, T5A, ORG_B, T5B],
+    [ORG_A, T5A, ORG_B, T5B, ORG_A_BR],
   );
   await owner.query(
     `INSERT INTO role (id, tenant_id, code, name, data_scope, created_at, updated_at)
      VALUES ($1, $3, 'admin', 'T5 Admin', 'ALL', now(), now()),
             ($2, $3, 't5-viewer', 'T5 Viewer', 'ORG_SUBTREE', now(), now()),
-            ($4, $5, 'admin', 'T5B Admin', 'ALL', now(), now())
+            ($4, $5, 'admin', 'T5B Admin', 'ALL', now(), now()),
+            ($6, $3, 't5-writer', 'T5 Writer', 'ORG_SUBTREE', now(), now())
      ON CONFLICT DO NOTHING`,
-    [ROLE_ADMIN_A, ROLE_VIEWER_A, T5A, ROLE_B_ADMIN, T5B],
+    [ROLE_ADMIN_A, ROLE_VIEWER_A, T5A, ROLE_B_ADMIN, T5B, ROLE_WRITER_A],
   );
   await owner.query(
     `INSERT INTO permission (id, tenant_id, code, type, created_at, updated_at)
-     VALUES ($1, $2, 'metering:read', 'ACTION', now(), now())
+     VALUES ($1, $2, 'metering:read', 'ACTION', now(), now()),
+            ($3, $2, 'metering:write', 'ACTION', now(), now())
      ON CONFLICT DO NOTHING`,
-    [PERM_MET_READ, T5A],
+    [PERM_MET_READ, T5A, PERM_MET_WRITE],
   );
   await owner.query(
     `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
-     VALUES ($1, $2, $3, now(), now()) ON CONFLICT DO NOTHING`,
-    [T5A, ROLE_VIEWER_A, PERM_MET_READ],
+     VALUES ($1, $2, $3, now(), now()),
+            ($1, $4, $3, now(), now()),
+            ($1, $4, $5, now(), now())
+     ON CONFLICT DO NOTHING`,
+    [T5A, ROLE_VIEWER_A, PERM_MET_READ, ROLE_WRITER_A, PERM_MET_WRITE],
   );
   await owner.query(
     `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
      VALUES ($1, $4, $6, 't5-admin',   $7, 'T5 Admin',   'ACTIVE', now(), now()),
             ($2, $4, $6, 't5-viewer',  $7, 'T5 Viewer',  'ACTIVE', now(), now()),
             ($8, $4, $6, 't5-reader',  $7, 'T5 Reader',  'ACTIVE', now(), now()),
-            ($3, $5, $9, 't5b-admin',  $7, 'T5B Admin',  'ACTIVE', now(), now())
+            ($3, $5, $9, 't5b-admin',  $7, 'T5B Admin',  'ACTIVE', now(), now()),
+            ($10,$4, $11,'t5-writer',  $7, 'T5 Writer',  'ACTIVE', now(), now())
      ON CONFLICT (tenant_id, login) DO NOTHING`,
-    [STAFF_ADMIN_A, STAFF_VIEWER_A, STAFF_B_ADMIN, T5A, T5B, ORG_A, hash, STAFF_READER_A, ORG_B],
+    [STAFF_ADMIN_A, STAFF_VIEWER_A, STAFF_B_ADMIN, T5A, T5B, ORG_A, hash, STAFF_READER_A, ORG_B, STAFF_WRITER_A, ORG_A_BR],
   );
   await owner.query(
     `INSERT INTO staff_role (tenant_id, staff_id, role_id, created_at, updated_at)
      VALUES ($1, $2, $4, now(), now()),
             ($1, $3, $5, now(), now()),
-            ($6, $7, $8, now(), now())
+            ($6, $7, $8, now(), now()),
+            ($1, $9, $10, now(), now())
      ON CONFLICT DO NOTHING`,
-    [T5A, STAFF_ADMIN_A, STAFF_VIEWER_A, ROLE_ADMIN_A, ROLE_VIEWER_A, T5B, STAFF_B_ADMIN, ROLE_B_ADMIN],
+    [T5A, STAFF_ADMIN_A, STAFF_VIEWER_A, ROLE_ADMIN_A, ROLE_VIEWER_A, T5B, STAFF_B_ADMIN, ROLE_B_ADMIN, STAFF_WRITER_A, ROLE_WRITER_A],
   );
 
   const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -160,6 +174,7 @@ beforeAll(async () => {
     ).body.accessToken as string;
   adminToken = await login('t5-water', 't5-admin');
   viewerToken = await login('t5-water', 't5-viewer');
+  writerToken = await login('t5-water', 't5-writer');
   tenantBToken = await login('t5-other', 't5b-admin');
 });
 
@@ -536,5 +551,57 @@ describe('tenant isolation + permissions', () => {
       .set(auth(viewerToken))
       .send({ name: 'x', orgUnitId: ORG_A })
       .expect(403);
+  });
+});
+
+describe('org-scope guards on plan writes (I1)', () => {
+  it('scoped writer cannot generate/start/cancel on a book outside their subtree', async () => {
+    // writer's data scope is ORG_A_BR; the shared book + plan live at ORG_A.
+    const gen = await request(app.getHttpServer())
+      .post('/reading-plans/generate')
+      .set(auth(writerToken))
+      .send({ bookId, period: '202612' })
+      .expect(403);
+    expect(gen.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+
+    // Scope check precedes the status check, so even the closed planId 403s.
+    for (const op of ['start', 'cancel']) {
+      const res = await request(app.getHttpServer())
+        .post(`/reading-plans/${planId}/${op}`)
+        .set(auth(writerToken))
+        .expect(403);
+      expect(res.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+    }
+  });
+
+  it('generate skips members whose account was CLOSED after joining the book', async () => {
+    const e = await onboard('E');
+    const f = await onboard('F');
+    const book = await request(app.getHttpServer())
+      .post('/reading-books')
+      .set(auth(adminToken))
+      .send({ name: `T5 ClosedBook ${RUN}`, orgUnitId: ORG_A })
+      .expect(201);
+    for (const a of [e, f]) {
+      await request(app.getHttpServer())
+        .post(`/reading-books/${book.body.id}/meters`)
+        .set(auth(adminToken))
+        .send({ waterAccountId: a.waterAccount.id })
+        .expect(201);
+    }
+    // F joined while NORMAL, then is closed — generation must skip it.
+    await request(app.getHttpServer())
+      .post(`/water-accounts/${f.waterAccount.id}/close`)
+      .set(auth(adminToken))
+      .send({})
+      .expect(201);
+
+    const plan = await request(app.getHttpServer())
+      .post('/reading-plans/generate')
+      .set(auth(adminToken))
+      .send({ bookId: book.body.id, period: '202612' })
+      .expect(201);
+    expect(plan.body.items).toHaveLength(1);
+    expect(plan.body.items[0].waterAccountId).toBe(e.waterAccount.id);
   });
 });

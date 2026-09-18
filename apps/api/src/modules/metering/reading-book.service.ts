@@ -98,7 +98,7 @@ export class ReadingBookService {
   private async membersOf(tx: Prisma.TransactionClient, ctx: TenantCtx, bookId: string) {
     const members = await tx.bookMeter.findMany({
       where: { tenantId: ctx.tenantId, bookId },
-      orderBy: { seqNo: 'asc' },
+      orderBy: [{ seqNo: 'asc' }, { waterAccountId: 'asc' }],
     });
     if (members.length === 0) return [];
     const accounts = await tx.waterAccount.findMany({
@@ -215,6 +215,13 @@ export class ReadingBookService {
    */
   async deleteTx(tx: Prisma.TransactionClient, ctx: TenantCtx, id: string, req: Request) {
     const existing = await this.assertBookInScope(tx, ctx, id);
+    // Serialize with generateTx (which takes the same FOR UPDATE lock):
+    // without it a concurrent generate could commit a plan between the count
+    // below and the delete, leaving a plan dangling on a deleted book_id.
+    await tx.$queryRaw`
+      SELECT id FROM reading_book
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
+      FOR UPDATE`;
     const plans = await tx.readingPlan.count({
       where: { tenantId: ctx.tenantId, bookId: id },
     });
@@ -278,14 +285,19 @@ export class ReadingBookService {
     ctx: TenantCtx,
     bookId: string,
     waterAccountId: string,
+    req: Request,
   ) {
     await this.assertBookInScope(tx, ctx, bookId);
-    const removed = await tx.bookMeter.deleteMany({
+    const member = await tx.bookMeter.findFirst({
       where: { tenantId: ctx.tenantId, bookId, waterAccountId },
     });
-    if (removed.count === 0) {
+    if (!member) {
       throw new NotFoundException({ code: 'BOOK_MEMBER_NOT_FOUND' });
     }
+    req.auditBefore = member;
+    await tx.bookMeter.deleteMany({
+      where: { tenantId: ctx.tenantId, bookId, waterAccountId },
+    });
     return { bookId, waterAccountId, removed: true };
   }
 }

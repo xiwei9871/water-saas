@@ -34,7 +34,8 @@ const pageArgs = (take?: string, skip?: string) => ({
 const scheduleDayOf = (v: unknown): number | null | undefined => {
   if (v === undefined) return undefined;
   if (v === null) return null;
-  const n = typeof v === 'string' ? parseInt(v, 10) : v;
+  // Strings must be pure digits — parseInt would silently truncate '5abc'/'5.9'.
+  const n = typeof v === 'string' ? (/^\d{1,2}$/.test(v) ? parseInt(v, 10) : NaN) : v;
   if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 31) {
     throw new BadRequestException({ code: 'SCHEDULE_DAY_INVALID' });
   }
@@ -93,7 +94,10 @@ export class ReadingBookController {
       bookNo: body.bookNo,
       name: body.name,
       orgUnitId: assertUuid(body.orgUnitId, 'orgUnitId'),
-      readerId: body.readerId ? assertUuid(body.readerId, 'readerId') : null,
+      readerId:
+        body.readerId === undefined || body.readerId === null
+          ? null
+          : assertUuid(body.readerId, 'readerId'),
       scheduleDay: scheduleDayOf(body.scheduleDay),
     };
     const ctx = currentTenant();
@@ -181,12 +185,13 @@ export class ReadingBookController {
   removeMember(
     @Param('id') id: string,
     @Param('waterAccountId') waterAccountId: string,
+    @Req() req: Request,
   ) {
     assertUuid(id, 'id');
     assertUuid(waterAccountId, 'waterAccountId');
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      this.svc.removeMemberTx(tx, ctx, id, waterAccountId),
+      this.svc.removeMemberTx(tx, ctx, id, waterAccountId, req),
     );
   }
 }
