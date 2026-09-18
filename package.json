@@ -1,0 +1,11 @@
+{
+  "name": "water-saas",
+  "private": true,
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "dev:api": "pnpm -C apps/api run start:dev",
+    "dev:web": "pnpm -C apps/web run dev"
+  }
+}
