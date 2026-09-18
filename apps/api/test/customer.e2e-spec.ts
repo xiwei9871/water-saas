@@ -12,8 +12,8 @@
  *     AVAILABLE + final_reading persisted
  *  4. meter swap (remove + new install) → account has two installations,
  *     new meter INSTALLED; installing an INSTALLED meter → 409
- *  5. suspend/resume/close write account_event rows; close refuses when the
- *     FinancePort stub reports outstanding > 0 (409)
+ *  5. suspend/resume/close write account_event rows; close refuses while a
+ *     POSTED bill keeps the real FinancePort outstanding > 0 (409)
  *  6. cross-tenant: tenant B token sees nothing of tenant A (404/empty — RLS)
  *  7. customer:read holder reads but cannot write (403)
  */
@@ -25,7 +25,6 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module.js';
-import { FinancePort, StubFinancePort } from '../src/modules/customer/ports/finance.port.js';
 
 // Point the app's runtime client at the TEST database before Nest builds it.
 process.env.DATABASE_URL =
@@ -51,7 +50,6 @@ const STAFF_B_ADMIN = '66666666-0000-4000-8000-0000000a0001';
 
 const owner = new pg.Client({ connectionString: OWNER_URL });
 let app: INestApplication<App>;
-let financeStub: StubFinancePort;
 let adminToken = '';
 let viewerToken = '';
 let tenantBToken = '';
@@ -138,10 +136,6 @@ beforeAll(async () => {
   }).compile();
   app = moduleFixture.createNestApplication();
   await app.init();
-  // The close orchestration's finance port — configurable outstanding so the
-  // >0 rejection path is exercisable before billing lands (T10).
-  financeStub = app.get(FinancePort) as StubFinancePort;
-  financeStub.outstanding = 0n;
 
   const login = async (tenantCode: string, login_: string) =>
     (
@@ -455,14 +449,36 @@ describe('account events (过户/暂停/恢复/销户)', () => {
     expect(events[1].payload.newValue.status).toBe('NORMAL');
   });
 
-  it('close refuses while FinancePort reports outstanding > 0 (409)', async () => {
-    financeStub.outstanding = 12345n; // cents
+  it('close refuses while a POSTED bill reports outstanding > 0 (409)', async () => {
+    // Real FinancePort (T10): outstanding = Σ POSTED/PARTIAL_PAID bills on
+    // the account's settle_account. Seed one directly.
+    const sa = (
+      await owner.query(
+        `SELECT settle_account_id::text AS id FROM water_account WHERE id = $1`,
+        [acctId],
+      )
+    ).rows[0].id;
+    const bill = (
+      await owner.query(
+        `INSERT INTO bill (id, tenant_id, settle_account_id, water_account_id, period,
+                           bill_kind, source_type, source_id, status, is_estimated,
+                           total_amount, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, '202601', 'NORMAL', 'MANUAL',
+                 gen_random_uuid(), 'POSTED', false, 12345, now(), now())
+         RETURNING id::text AS id`,
+        [T4A, sa, acctId],
+      )
+    ).rows[0];
+
     const res = await request(app.getHttpServer())
       .post(`/water-accounts/${acctId}/close`)
       .set(auth(adminToken))
       .send({})
       .expect(409);
-    expect(res.body).toMatchObject({ code: 'ACCOUNT_OUTSTANDING_BALANCE' });
+    expect(res.body).toMatchObject({
+      code: 'ACCOUNT_OUTSTANDING_BALANCE',
+      outstanding: '12345',
+    });
 
     // still NORMAL — the refused close must not transition or write an event
     const acct = await request(app.getHttpServer())
@@ -471,10 +487,13 @@ describe('account events (过户/暂停/恢复/销户)', () => {
       .expect(200);
     expect(acct.body.status).toBe('NORMAL');
     expect((await eventsOf(acctId)).map((e) => e.type)).not.toContain('CLOSE');
+
+    // PAID bills carry no outstanding — clearing the debt path for the
+    // next test (T12 will model real payment allocations).
+    await owner.query(`UPDATE bill SET status = 'PAID' WHERE id = $1`, [bill.id]);
   });
 
   it('close with outstanding cleared → CLOSED + closedAt + CLOSE event; second close → 409', async () => {
-    financeStub.outstanding = 0n;
     const res = await request(app.getHttpServer())
       .post(`/water-accounts/${acctId}/close`)
       .set(auth(adminToken))

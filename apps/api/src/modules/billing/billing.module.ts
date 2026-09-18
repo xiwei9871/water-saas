@@ -1,4 +1,9 @@
 import { Module } from '@nestjs/common';
+import { BillController } from './bill.controller.js';
+import { BillService } from './bill.service.js';
+import { BillingFinancePort } from './billing-finance.port.js';
+import { BillingRunController } from './billing-run.controller.js';
+import { BillingRunService } from './billing-run.service.js';
 import { FeeItemController } from './fee-item.controller.js';
 import { FeeItemService } from './fee-item.service.js';
 import { TariffPlanController } from './tariff-plan.controller.js';
@@ -6,17 +11,32 @@ import { TariffPlanService } from './tariff-plan.service.js';
 
 /**
  * Billing module （计费） — fee_item + tariff_plan/tariff_tier versioned
- * price configuration (Task 8). billing_run/bill land in T9–T10 on top of
- * these; the tariff freeze + activate overlap rules here are what make a
- * deterministic, auditable tariff pick possible.
+ * price configuration (Task 8), billing_core engine (Task 9), and now
+ * billing_run + bill lifecycle: synchronous in-request run execution,
+ * per-bill posting transactions, reversal/replacement corrections
+ * (Task 10).
  *
- * No module imports: billing sits above iam ← customer ← metering in the
- * dependency direction and needs nothing from them (tariffs are
- * tenant-level config, not org-scoped). TenantPrismaService /
- * IdempotencyService come from the global CommonModule.
+ * BillingFinancePort is exported so CustomerModule can bind the shared
+ * FinancePort token to it — the module-level import direction
+ * (customer → billing) is the deliberate DI wiring compromise for MVP;
+ * T13 consolidates all module ports under src/modules/integration.
+ * TenantPrismaService / IdempotencyService come from the global
+ * CommonModule.
  */
 @Module({
-  controllers: [FeeItemController, TariffPlanController],
-  providers: [FeeItemService, TariffPlanService],
+  controllers: [
+    FeeItemController,
+    TariffPlanController,
+    BillingRunController,
+    BillController,
+  ],
+  providers: [
+    FeeItemService,
+    TariffPlanService,
+    BillingRunService,
+    BillService,
+    BillingFinancePort,
+  ],
+  exports: [BillingFinancePort],
 })
 export class BillingModule {}
