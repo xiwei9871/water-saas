@@ -186,8 +186,8 @@ export class ReconciliationService {
    * UPDATE → CLOSED check → scope probe → actual → anchor → dup →
    * span → outcome. One row lock taken BEFORE any state read serializes
    * reconcile vs postOneBill vs close-account vs a sibling reconcile;
-   * the scope probe precedes every 404/409 so an out-of-scope caller
-   * can't probe account state through error codes (same ordering as
+   * the scope probe precedes the span/dup probes (account 404 and the
+   * CLOSED 409 necessarily come first — same ordering as
    * settlement.service.generateTx).
    */
   async createTx(
@@ -324,10 +324,9 @@ export class ReconciliationService {
     }
 
     // Dial regression: actual < anchor is unsafe under every tenant
-    // posture — the `negative_usage_policy` param is read but RESERVED
+    // posture — the `negative_usage_policy` param is RESERVED, unread
     // (M4; see class docblock). `.lt(0)`, not `.isNegative()`:
     // Decimal('-0') reports negative yet is absorbable zero.
-    await this.tenantParam(tx, ctx, 'negative_usage_policy');
     if (amounts.actualTotalUsage.lt(0)) {
       const row = await this.record(tx, ctx, {
         ...baseFields,
@@ -421,7 +420,8 @@ export class ReconciliationService {
           return { ...row, adjustmentBill: null };
         }
         // count=0: the settlement flipped FINAL between our read and the
-        // write — fall through to the adjustment path rather than fail.
+        // write — fall through to the span gate below, which 422s this
+        // now-unbilled span (the in-memory span row still says DRAFT).
       }
     }
 
