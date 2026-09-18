@@ -12,7 +12,7 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { CustomerService, type CustomerBody } from './customer.service.js';
 import { MeterService, type MeterBody } from './meter.service.js';
 import { MeterInstallationService } from './meter-installation.service.js';
-import { SequenceService } from './sequence.service.js';
+import { SequenceService } from '../../common/sequence.service.js';
 import {
   SettleAccountService,
   type SettleAccountBody,

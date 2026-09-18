@@ -9,7 +9,7 @@ import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
-import { SequenceService } from '../customer/sequence.service.js';
+import { SequenceService } from '../../common/sequence.service.js';
 
 export const READING_BOOK_SELECT = {
   id: true,

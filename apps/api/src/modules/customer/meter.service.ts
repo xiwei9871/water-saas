@@ -8,7 +8,7 @@ import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
-import { SequenceService } from './sequence.service.js';
+import { SequenceService } from '../../common/sequence.service.js';
 
 export type MeterStatus = 'AVAILABLE' | 'INSTALLED' | 'MAINTENANCE' | 'RETIRED';
 

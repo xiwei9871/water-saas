@@ -12,9 +12,10 @@ import { BillingModule } from './modules/billing/billing.module.js';
 import { CustomerModule } from './modules/customer/customer.module.js';
 import { IamModule } from './modules/iam/iam.module.js';
 import { MeteringModule } from './modules/metering/metering.module.js';
+import { PaymentModule } from './modules/payment/payment.module.js';
 
 @Module({
-  imports: [CommonModule, IamModule, CustomerModule, MeteringModule, BillingModule],
+  imports: [CommonModule, IamModule, CustomerModule, MeteringModule, BillingModule, PaymentModule],
   controllers: [AppController],
   providers: [
     AppService,

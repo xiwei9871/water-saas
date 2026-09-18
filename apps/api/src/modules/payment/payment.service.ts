@@ -1,0 +1,633 @@
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import type { Request } from 'express';
+import { SequenceService } from '../../common/sequence.service.js';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import { TenantPrismaService } from '../../common/tenant-prisma.js';
+
+export const PAYMENT_SELECT = {
+  id: true,
+  tenantId: true,
+  paymentNo: true,
+  settleAccountId: true,
+  cashierId: true,
+  orgUnitId: true,
+  channel: true,
+  amount: true,
+  status: true,
+  receivedAt: true,
+  reversalOfId: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.PaymentSelect;
+
+export const PAYMENT_ALLOC_SELECT = {
+  id: true,
+  tenantId: true,
+  paymentId: true,
+  billId: true,
+  amount: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.PaymentAllocSelect;
+
+export const RECEIPT_SELECT = {
+  id: true,
+  tenantId: true,
+  paymentId: true,
+  receiptNo: true,
+  rcpType: true,
+  printedAt: true,
+  voidFlag: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.ReceiptSelect;
+
+type PayChannel = 'CASH' | 'POS' | 'TRANSFER';
+type PaymentStatus = 'RECEIVED' | 'DAY_CLOSED' | 'REVERSED';
+type BillStatus = 'DRAFT' | 'POSTED' | 'PARTIAL_PAID' | 'PAID' | 'REVERSED';
+
+/** Statuses whose outstanding balance a payment may reduce. */
+const PAYABLE_STATUSES = new Set<BillStatus>(['POSTED', 'PARTIAL_PAID']);
+/** The guarded-update predicate shared by both recompute directions. */
+const RECOMPUTE_STATUSES: BillStatus[] = ['POSTED', 'PARTIAL_PAID', 'PAID'];
+
+const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
+
+const notPayable = (billId: string, status: string, reason?: string) =>
+  new ConflictException({ code: 'BILL_NOT_PAYABLE', billId, status, reason });
+
+export interface CreatePaymentBody {
+  settleAccountId: string;
+  channel: PayChannel;
+  /** Positive integer cents — the controller guarantees > 0. */
+  amount: bigint;
+  /** Non-empty, unique billIds, Σ amount == amount (controller-verified). */
+  allocs: { billId: string; amount: bigint }[];
+}
+
+/**
+ * `SELECT … FOR UPDATE` on ONE bill row. Bill rows are always locked one
+ * at a time in caller-sorted id order — the same contract the T8 plan
+ * freeze uses — so every transaction that touches several bills walks the
+ * identical lock sequence and concurrent payments/reversals on
+ * overlapping bills serialize instead of deadlocking.
+ */
+const lockBillForUpdate = async (
+  tx: Prisma.TransactionClient,
+  ctx: TenantCtx,
+  billId: string,
+) => {
+  await tx.$queryRaw`
+    SELECT id FROM bill
+    WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${billId}::uuid
+    FOR UPDATE`;
+};
+
+/**
+ * `SELECT … FOR UPDATE` on the payment row — taken BEFORE the
+ * already-reversed probe in reverseTx so two concurrent reverses of the
+ * same payment serialize: the loser reads the winner's committed
+ * reversal and 409s (a plain check alone would let both inserts pass).
+ */
+const lockPaymentForUpdate = async (
+  tx: Prisma.TransactionClient,
+  ctx: TenantCtx,
+  paymentId: string,
+) => {
+  await tx.$queryRaw`
+    SELECT id FROM payment
+    WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${paymentId}::uuid
+    FOR UPDATE`;
+};
+
+/**
+ * Payment （收款） + PaymentAlloc （销账分摊） + Receipt （收据） — counter
+ * collection and write-off allocation (spec §2.6).
+ *
+ *  - POST /payments — one tx: bill rows locked FOR UPDATE in sorted id
+ *    order, each target validated payable (non-REVERSAL, POSTED |
+ *    PARTIAL_PAID, positive outstanding), payment + allocs + receipt
+ *    inserted, each bill's status recomputed from Σ allocs
+ *    (≥ total → PAID, > 0 → PARTIAL_PAID). payment_no/receipt_no come
+ *    from sys_sequence inside the same tx — a rolled-back request
+ *    returns its numbers (unique, not gapless).
+ *  - POST /payments/:id/reverse — APPEND-ONLY reversal (T12 decided
+ *    semantics): the original payment's status is NEVER mutated — a
+ *    RECEIVED original must still enter its day close at face value so
+ *    the +amount/−amount pair nets to zero in the drawer, and a
+ *    DAY_CLOSED original must not change a signed close. The reversal is
+ *    a NEW payment (amount negated, reversal_of_id → original, same
+ *    channel/settle_account, RECEIVED) that lands in the NEXT close as a
+ *    negative line — the patch's "9/18 close +100 stays, 9/19 close
+ *    carries −100". PaymentStatus.REVERSED is therefore vestigial in the
+ *    enum: nothing ever transitions into it. Mirror allocs (−amount
+ *    each) release the bills' outstanding and statuses are recomputed
+ *    back (Σ = 0 → POSTED, partial → PARTIAL_PAID). The original's
+ *    receipt is voided in the same tx. Reversing a reversal → 400;
+ *    double-reverse → 409 behind the payment row lock.
+ *  - No receipt is issued for a reversal payment: a receipt documents
+ *    money received at the counter; the reversal is a correction line —
+ *    the voided original receipt is the audit trail.
+ *  - Over-payment / credit is OUT of MVP scope: every alloc must fit
+ *    the bill's remaining outstanding (409 PAYMENT_OVER_ALLOCATION).
+ */
+@Injectable()
+export class PaymentService {
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly seq: SequenceService,
+  ) {}
+
+  list(
+    ctx: TenantCtx,
+    q: {
+      take: number;
+      skip: number;
+      settleAccountId?: string;
+      cashierId?: string;
+      status?: PaymentStatus;
+      channel?: PayChannel;
+    },
+  ) {
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      tx.payment.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          settleAccountId: q.settleAccountId,
+          cashierId: q.cashierId,
+          status: q.status,
+          channel: q.channel,
+        },
+        select: PAYMENT_SELECT,
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        take: q.take,
+        skip: q.skip,
+      }),
+    );
+  }
+
+  /** GET /payments/:id — payment + its allocs + the receipt (null on a
+   *  reversal payment, which is never issued one). */
+  async getById(ctx: TenantCtx, id: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const payment = await tx.payment.findFirst({
+        where: { tenantId: ctx.tenantId, id },
+        select: PAYMENT_SELECT,
+      });
+      if (!payment) throw new NotFoundException({ code: 'PAYMENT_NOT_FOUND' });
+      return this.withDetail(tx, ctx, payment);
+    });
+  }
+
+  /**
+   * POST /payments — validated input (controller) → one tx. Order:
+   * settle_account → scope probe → sorted bill FOR UPDATE locks →
+   * per-alloc payable/outstanding checks → staff lookup → payment +
+   * allocs + receipt inserts → guarded bill status recompute. The bill
+   * row locks precede every outstanding read so a concurrent payment on
+   * the same bill can never split the difference.
+   */
+  async createTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    body: CreatePaymentBody,
+  ) {
+    const settleAccount = await tx.settleAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: body.settleAccountId },
+      select: { id: true },
+    });
+    if (!settleAccount) {
+      throw new NotFoundException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+    }
+    await this.assertSettleScope(tx, ctx, body.settleAccountId);
+
+    // Sorted FOR UPDATE on every target bill — serializes concurrent
+    // payments (and reversals) against the same rows in the same order.
+    const billIds = [...new Set(body.allocs.map((a) => a.billId))].sort();
+    for (const billId of billIds) {
+      await lockBillForUpdate(tx, ctx, billId);
+    }
+    const bills = await tx.bill.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: billIds } },
+      select: {
+        id: true,
+        settleAccountId: true,
+        billKind: true,
+        status: true,
+        totalAmount: true,
+      },
+    });
+    const byId = new Map(bills.map((b) => [b.id, b]));
+    // Money already applied per bill — negative reversal allocs net out
+    // inside the sum automatically.
+    const paidByBill = await this.appliedByBill(tx, ctx, billIds);
+
+    for (const alloc of body.allocs) {
+      const bill = byId.get(alloc.billId);
+      if (!bill) {
+        throw new NotFoundException({ code: 'BILL_NOT_FOUND', billId: alloc.billId });
+      }
+      if (bill.settleAccountId !== body.settleAccountId) {
+        throw new BadRequestException({
+          code: 'PAYMENT_BILL_ACCOUNT_MISMATCH',
+          billId: alloc.billId,
+        });
+      }
+      if (bill.billKind === 'REVERSAL' || !PAYABLE_STATUSES.has(bill.status)) {
+        throw notPayable(alloc.billId, bill.status, `kind ${bill.billKind}`);
+      }
+      const outstanding = bill.totalAmount - (paidByBill.get(bill.id) ?? 0n);
+      if (outstanding <= 0n) {
+        throw notPayable(alloc.billId, bill.status, 'no outstanding balance');
+      }
+      if (alloc.amount > outstanding) {
+        throw new ConflictException({
+          code: 'PAYMENT_OVER_ALLOCATION',
+          billId: alloc.billId,
+          outstanding: outstanding.toString(),
+        });
+      }
+    }
+
+    const staff = await tx.staff.findFirst({
+      where: { tenantId: ctx.tenantId, id: ctx.staffId },
+      select: { orgUnitId: true },
+    });
+    if (!staff) throw new NotFoundException({ code: 'STAFF_NOT_FOUND' });
+
+    const paymentNo = await this.seq.nextFormatted(
+      tx,
+      ctx.tenantId,
+      'payment_no',
+      'P',
+      ctx.staffId,
+    );
+    const payment = await tx.payment.create({
+      data: {
+        tenantId: ctx.tenantId,
+        paymentNo,
+        settleAccountId: body.settleAccountId,
+        cashierId: ctx.staffId,
+        orgUnitId: staff.orgUnitId,
+        channel: body.channel,
+        amount: body.amount,
+        status: 'RECEIVED',
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+      select: PAYMENT_SELECT,
+    });
+    await tx.paymentAlloc.createMany({
+      data: body.allocs.map((a) => ({
+        tenantId: ctx.tenantId,
+        paymentId: payment.id,
+        billId: a.billId,
+        amount: a.amount,
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      })),
+    });
+    const receiptNo = await this.seq.nextFormatted(
+      tx,
+      ctx.tenantId,
+      'receipt_no',
+      'R',
+      ctx.staffId,
+    );
+    const receipt = await tx.receipt.create({
+      data: {
+        tenantId: ctx.tenantId,
+        paymentId: payment.id,
+        receiptNo,
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+      select: RECEIPT_SELECT,
+    });
+
+    // Recompute each bill: new paid = pre-existing Σ allocs + this alloc.
+    // The row lock is already held, so the guarded updateMany can only
+    // lose to a pathological status write outside this module — reported,
+    // never silently skipped.
+    for (const alloc of body.allocs) {
+      const bill = byId.get(alloc.billId)!;
+      const paid = (paidByBill.get(bill.id) ?? 0n) + alloc.amount;
+      const next: BillStatus = paid >= bill.totalAmount ? 'PAID' : 'PARTIAL_PAID';
+      const flip = await tx.bill.updateMany({
+        where: {
+          tenantId: ctx.tenantId,
+          id: bill.id,
+          status: { in: RECOMPUTE_STATUSES },
+        },
+        data: { status: next, updatedBy: ctx.staffId },
+      });
+      if (flip.count === 0) {
+        throw notPayable(bill.id, bill.status, 'lost guarded transition race');
+      }
+    }
+
+    const allocs = await tx.paymentAlloc.findMany({
+      where: { tenantId: ctx.tenantId, paymentId: payment.id },
+      select: PAYMENT_ALLOC_SELECT,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    return { ...payment, allocs, receipt };
+  }
+
+  /**
+   * GET /water-accounts/:id/outstanding — the cashier's open-debt view:
+   * every POSTED | PARTIAL_PAID non-REVERSAL bill on the account's settle
+   * account with its remaining balance > 0, plus the total. This is the
+   * per-bill projection of BillingFinancePort.getOutstanding minus the
+   * in-flight DRAFT term (a DRAFT is not yet payable at the counter).
+   */
+  async outstandingTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+  ) {
+    const account = await tx.waterAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: waterAccountId },
+      select: { id: true, settleAccountId: true },
+    });
+    if (!account) {
+      throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    }
+    const bills = await tx.bill.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        settleAccountId: account.settleAccountId,
+        status: { in: ['POSTED', 'PARTIAL_PAID'] },
+        billKind: { not: 'REVERSAL' },
+      },
+      select: { id: true, period: true, billKind: true, totalAmount: true },
+      orderBy: [{ period: 'asc' }, { id: 'asc' }],
+    });
+    const paidByBill = await this.appliedByBill(
+      tx,
+      ctx,
+      bills.map((b) => b.id),
+    );
+    const lines = bills.map((b) => {
+      const paidAmount = paidByBill.get(b.id) ?? 0n;
+      return {
+        billId: b.id,
+        period: b.period,
+        billKind: b.billKind,
+        totalAmount: b.totalAmount,
+        paidAmount,
+        outstanding: b.totalAmount - paidAmount,
+      };
+    });
+    // items = the payable lines (outstanding > 0 — a zero/negative bill
+    // is nothing the cashier can act on, and alloc targets require
+    // positive outstanding anyway). totalOutstanding = the settle
+    // account's NET position over every live bill: a credit bill (e.g.
+    // a negative ADJUSTMENT from reconciliation) nets against real debt,
+    // consistent with BillingFinancePort.getOutstanding — so the total
+    // can differ from Σ items and can itself go negative.
+    const items = lines.filter((i) => i.outstanding > 0n);
+    const totalOutstanding = lines.reduce((s, i) => s + i.outstanding, 0n);
+    return {
+      waterAccountId: account.id,
+      settleAccountId: account.settleAccountId,
+      items,
+      totalOutstanding,
+    };
+  }
+
+  /**
+   * POST /payments/:id/reverse — append-only 红冲退款 (see class
+   * docblock for why the original is never mutated). Order: payment row
+   * FOR UPDATE (serializes double-reverse) → load → already-reversed
+   * probe → scope → sorted bill locks → reversal payment + mirror allocs
+   * + receipt void → bill status recompute.
+   */
+  async reverseTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+    req: Request,
+  ) {
+    await lockPaymentForUpdate(tx, ctx, id);
+    const original = await tx.payment.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+    });
+    if (!original) throw new NotFoundException({ code: 'PAYMENT_NOT_FOUND' });
+    if (original.reversalOfId !== null) {
+      // A reversal is itself a correction — reversing it would mint a
+      // positive leg out of a negative one (same rule as REVERSAL bills).
+      throw new BadRequestException({
+        code: 'PAYMENT_NOT_REVERSABLE',
+        paymentId: id,
+      });
+    }
+    req.auditBefore = original;
+
+    // Serialized by the payment row lock above — the winner's reversal
+    // row is committed-visible to the loser.
+    const dup = await tx.payment.findFirst({
+      where: { tenantId: ctx.tenantId, reversalOfId: id },
+      select: { id: true },
+    });
+    if (dup) {
+      throw new ConflictException({
+        code: 'PAYMENT_ALREADY_REVERSED',
+        reversalPaymentId: dup.id,
+      });
+    }
+    await this.assertSettleScope(tx, ctx, original.settleAccountId);
+
+    const origAllocs = await tx.paymentAlloc.findMany({
+      where: { tenantId: ctx.tenantId, paymentId: id },
+      select: { billId: true, amount: true },
+    });
+    const billIds = [...new Set(origAllocs.map((a) => a.billId))].sort();
+    for (const billId of billIds) {
+      await lockBillForUpdate(tx, ctx, billId);
+    }
+
+    const staff = await tx.staff.findFirst({
+      where: { tenantId: ctx.tenantId, id: ctx.staffId },
+      select: { orgUnitId: true },
+    });
+    if (!staff) throw new NotFoundException({ code: 'STAFF_NOT_FOUND' });
+
+    const paymentNo = await this.seq.nextFormatted(
+      tx,
+      ctx.tenantId,
+      'payment_no',
+      'P',
+      ctx.staffId,
+    );
+    const reversal = await tx.payment.create({
+      data: {
+        tenantId: ctx.tenantId,
+        paymentNo,
+        settleAccountId: original.settleAccountId,
+        cashierId: ctx.staffId,
+        orgUnitId: staff.orgUnitId,
+        channel: original.channel,
+        amount: -original.amount,
+        status: 'RECEIVED', // enters the NEXT close as a negative line
+        reversalOfId: id,
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+      select: PAYMENT_SELECT,
+    });
+    if (origAllocs.length > 0) {
+      await tx.paymentAlloc.createMany({
+        data: origAllocs.map((a) => ({
+          tenantId: ctx.tenantId,
+          paymentId: reversal.id,
+          billId: a.billId,
+          amount: -a.amount,
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        })),
+      });
+    }
+    // The original's receipt is void — a re-print must fail.
+    await tx.receipt.updateMany({
+      where: { tenantId: ctx.tenantId, paymentId: id, voidFlag: false },
+      data: { voidFlag: true, updatedBy: ctx.staffId },
+    });
+
+    // Bills recover outstanding: Σ allocs after the negative mirrors.
+    // A bill red-flushed meanwhile (REVERSED) keeps its status — the
+    // mirror allocs still land so the money trail stays complete, and
+    // the getOutstanding port turns the residue into a customer credit.
+    for (const billId of billIds) {
+      const bill = await tx.bill.findFirst({
+        where: { tenantId: ctx.tenantId, id: billId },
+        select: { id: true, status: true, totalAmount: true },
+      });
+      if (!bill || !RECOMPUTE_STATUSES.includes(bill.status)) continue;
+      const paid = (await this.appliedByBill(tx, ctx, [billId])).get(billId) ?? 0n;
+      const next: BillStatus =
+        paid <= 0n ? 'POSTED' : paid >= bill.totalAmount ? 'PAID' : 'PARTIAL_PAID';
+      await tx.bill.updateMany({
+        where: {
+          tenantId: ctx.tenantId,
+          id: billId,
+          status: { in: RECOMPUTE_STATUSES },
+        },
+        data: { status: next, updatedBy: ctx.staffId },
+      });
+    }
+    return this.withDetail(tx, ctx, reversal);
+  }
+
+  /**
+   * POST /receipts/:id/print — sets printed_at. A re-print is allowed
+   * (it updates printed_at — a document reprint, not a financial fact);
+   * a voided receipt can never print again (409 RECEIPT_VOID).
+   */
+  async printTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+    req: Request,
+  ) {
+    const receipt = await tx.receipt.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+      select: RECEIPT_SELECT,
+    });
+    if (!receipt) throw new NotFoundException({ code: 'RECEIPT_NOT_FOUND' });
+    if (receipt.voidFlag) throw new ConflictException({ code: 'RECEIPT_VOID' });
+    req.auditBefore = receipt;
+    // receipt has no (tenant,id) unique — the tenant-scoped findFirst +
+    // RLS are the ownership check; the update keys on the PK.
+    return tx.receipt.update({
+      where: { id: receipt.id },
+      data: { printedAt: new Date(), updatedBy: ctx.staffId },
+      select: RECEIPT_SELECT,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // internals
+  // -------------------------------------------------------------------------
+
+  /** payment + allocs + receipt (null when none was issued). */
+  private async withDetail<T extends { id: string }>(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    payment: T,
+  ) {
+    const allocs = await tx.paymentAlloc.findMany({
+      where: { tenantId: ctx.tenantId, paymentId: payment.id },
+      select: PAYMENT_ALLOC_SELECT,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const receipt = await tx.receipt.findFirst({
+      where: { tenantId: ctx.tenantId, paymentId: payment.id },
+      select: RECEIPT_SELECT,
+    });
+    return { ...payment, allocs, receipt };
+  }
+
+  /** Σ payment_alloc.amount per bill (reversal allocs net negative). */
+  private async appliedByBill(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    billIds: string[],
+  ): Promise<Map<string, bigint>> {
+    if (billIds.length === 0) return new Map();
+    const rows = await tx.paymentAlloc.groupBy({
+      by: ['billId'],
+      where: { tenantId: ctx.tenantId, billId: { in: billIds } },
+      _sum: { amount: true },
+    });
+    return new Map(rows.map((r) => [r.billId, r._sum.amount ?? 0n]));
+  }
+
+  /**
+   * Org guard for payment writes on a settle_account — the
+   * settleAccount → waterAccounts → plan-items → plans → books chain.
+   * A payment is a write on every bound book's account, so EVERY
+   * covering book's org must be in the caller's subtree (same rule as
+   * ReconciliationService.assertAccountScope: all bindings, any period).
+   * A settle account whose water accounts are bound to no reading plan
+   * has no org anchor and returns permissively (the established MVP
+   * carve-out for off-book accounts).
+   */
+  private async assertSettleScope(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    settleAccountId: string,
+  ) {
+    const accounts = await tx.waterAccount.findMany({
+      where: { tenantId: ctx.tenantId, settleAccountId },
+      select: { id: true },
+    });
+    if (accounts.length === 0) return;
+    const items = await tx.readingPlanItem.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        waterAccountId: { in: accounts.map((a) => a.id) },
+      },
+      select: { planId: true },
+    });
+    if (items.length === 0) return;
+    const plans = await tx.readingPlan.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: items.map((i) => i.planId) } },
+      select: { bookId: true },
+    });
+    const books = await tx.readingBook.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: plans.map((p) => p.bookId) } },
+      select: { orgUnitId: true },
+    });
+    for (const b of books) {
+      if (!orgInScope(ctx, b.orgUnitId)) throw outOfScope();
+    }
+  }
+}

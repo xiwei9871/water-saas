@@ -21,6 +21,11 @@ const currentPeriod = (): string => {
  *
  * The physical unique index is NULLS NOT DISTINCT; a non-NULL period matches
  * plain ON CONFLICT inference (verified against PG15).
+ *
+ * Lives in common/ (registered on the global CommonModule): every module
+ * consumes it — customer (customer_no/settle_no/account_no/meter_no),
+ * metering (book_no), payment (payment_no/receipt_no) — and the module
+ * direction forbids payment importing customer where it originally sat.
  */
 @Injectable()
 export class SequenceService {

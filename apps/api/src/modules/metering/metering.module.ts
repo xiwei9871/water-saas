@@ -16,10 +16,11 @@ import { SettlementService } from './settlement.service.js';
  * + consumption_settlement generation/finalize and the AVG3 estimate
  * preview (Task 7). Reconciliation lands in T11 on top of these.
  *
- * Imports CustomerModule for SequenceService (book_no numbering) — the
- * dependency direction iam ← customer ← metering is respected; metering
- * never imports billing. TenantPrismaService/IdempotencyService come from
- * the global CommonModule.
+ * Imports CustomerModule along the declared iam ← customer ← metering
+ * direction (metering never imports billing). SequenceService moved to the
+ * global CommonModule in T12 — book_no numbering no longer needs the
+ * module import, but the import stays as the declared direction.
+ * TenantPrismaService/IdempotencyService/SequenceService are global.
  */
 @Module({
   imports: [CustomerModule],

@@ -8,7 +8,6 @@ import { MeterInstallationController } from './meter-installation.controller.js'
 import { MeterInstallationService } from './meter-installation.service.js';
 import { MeterService } from './meter.service.js';
 import { FinancePort } from './ports/finance.port.js';
-import { SequenceService } from './sequence.service.js';
 import { SettleAccountController } from './settle-account.controller.js';
 import { SettleAccountService } from './settle-account.service.js';
 import { CloseAccountUseCase } from './use-cases/close-account.use-case.js';
@@ -26,7 +25,9 @@ import { WaterAccountService } from './water-account.service.js';
  * the shared token to BillingFinancePort (T10): a DI wiring compromise,
  * not a domain dependency. T13 consolidates all module ports under
  * src/modules/integration and removes this inversion.
- * TenantPrismaService/IdempotencyService come from the global CommonModule.
+ * TenantPrismaService/IdempotencyService/SequenceService come from the
+ * global CommonModule (T12 moved document numbering there so payment can
+ * consume it without importing customer).
  */
 @Module({
   imports: [BillingModule],
@@ -38,7 +39,6 @@ import { WaterAccountService } from './water-account.service.js';
     MeterInstallationController,
   ],
   providers: [
-    SequenceService,
     CustomerService,
     SettleAccountService,
     WaterAccountService,
@@ -47,8 +47,5 @@ import { WaterAccountService } from './water-account.service.js';
     CloseAccountUseCase,
     { provide: FinancePort, useExisting: BillingFinancePort },
   ],
-  // metering (downstream in the iam←customer←metering direction) reuses the
-  // tenant-scoped document numbering for reading_book.book_no.
-  exports: [SequenceService],
 })
 export class CustomerModule {}
