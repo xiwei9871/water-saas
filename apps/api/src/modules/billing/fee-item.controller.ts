@@ -75,11 +75,16 @@ export class FeeItemController {
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
   ) {
-    if (!body?.code || !body?.name || !body?.calcType) {
-      throw new BadRequestException({ code: 'FEE_ITEM_FIELDS_REQUIRED' });
+    for (const f of ['code', 'name', 'calcType'] as const) {
+      if (typeof body?.[f] !== 'string' || !body[f].trim()) {
+        throw new BadRequestException({ code: 'FEE_ITEM_FIELDS_REQUIRED', field: f });
+      }
     }
-    if (!CALC_TYPES.has(body.calcType)) {
-      throw new BadRequestException({ code: 'CALC_TYPE_INVALID', value: body.calcType });
+    const code = body.code!.trim();
+    const name = body.name!.trim();
+    const calcType = body.calcType!;
+    if (!CALC_TYPES.has(calcType)) {
+      throw new BadRequestException({ code: 'CALC_TYPE_INVALID', value: calcType });
     }
     const ctx = currentTenant();
     return withOptionalIdem(
@@ -87,7 +92,7 @@ export class FeeItemController {
       this.idem,
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
-      (tx) => this.svc.createTx(tx, ctx, body),
+      (tx) => this.svc.createTx(tx, ctx, { ...body, code, name, calcType }),
     );
   }
 

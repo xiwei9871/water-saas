@@ -162,13 +162,20 @@ export class TariffPlanController {
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
   ) {
-    if (!body?.code || !body?.name || !body?.usageCategory || body.effectiveFrom === undefined) {
+    // Same strictness as PATCH: reject non-strings and blank/whitespace
+    // values at the wire instead of storing them.
+    for (const f of ['code', 'name', 'usageCategory'] as const) {
+      if (typeof body?.[f] !== 'string' || !body[f].trim()) {
+        throw new BadRequestException({ code: 'TARIFF_FIELDS_REQUIRED', field: f });
+      }
+    }
+    if (body.effectiveFrom === undefined) {
       throw new BadRequestException({ code: 'TARIFF_FIELDS_REQUIRED' });
     }
     const parsed: TariffPlanCreateBody = {
-      code: body.code,
-      name: body.name,
-      usageCategory: body.usageCategory,
+      code: body.code!.trim(),
+      name: body.name!.trim(),
+      usageCategory: body.usageCategory!.trim(),
       effectiveFrom: asDay(body.effectiveFrom, 'effectiveFrom'),
       effectiveTo: asOptionalDay(body.effectiveTo, 'effectiveTo'),
       tiers: parseTiers(body.tiers) ?? [],

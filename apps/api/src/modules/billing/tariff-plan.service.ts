@@ -244,9 +244,25 @@ export class TariffPlanService {
         });
       }
       req.auditBefore = existing;
-      const updated = await tx.tariffPlan.update({
-        where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      // Guarded write: status must STILL be ACTIVE and the freeze
+      // condition is folded into the where itself — a bill committed
+      // between the probe and this statement makes count=0, not a write
+      // through the freeze (see isBillReferenced docblock for the T9
+      // FOR UPDATE contract that closes the remaining window).
+      const flipped = await tx.tariffPlan.updateMany({
+        where: {
+          tenantId: ctx.tenantId,
+          id,
+          status: 'ACTIVE',
+          bills: { none: { status: { not: 'DRAFT' } } },
+        },
         data: { effectiveTo: newTo, updatedBy: ctx.staffId },
+      });
+      if (flipped.count === 0) {
+        await this.throwRaceCause(tx, ctx, id);
+      }
+      const updated = await tx.tariffPlan.findFirstOrThrow({
+        where: { tenantId: ctx.tenantId, id },
         select: TARIFF_PLAN_SELECT,
       });
       return this.withTiers(tx, ctx, updated);
@@ -268,30 +284,47 @@ export class TariffPlanService {
     }
 
     req.auditBefore = await this.withTiers(tx, ctx, existing);
+    // Guarded write: the plan must still be DRAFT and still unreferenced —
+    // a concurrent activate commits between our read and this statement
+    // and the flip would otherwise rewrite a published version (including
+    // the tier replace below). count=0 → the race was lost, abort BEFORE
+    // touching tiers.
+    let flipped: { count: number };
     try {
-      const updated = await tx.tariffPlan.update({
-        where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      flipped = await tx.tariffPlan.updateMany({
+        where: {
+          tenantId: ctx.tenantId,
+          id,
+          status: 'DRAFT',
+          bills: { none: { status: { not: 'DRAFT' } } },
+        },
         data: {
           name: body.name,
           effectiveFrom: body.effectiveFrom,
           effectiveTo: body.effectiveTo === undefined ? undefined : body.effectiveTo,
           updatedBy: ctx.staffId,
         },
-        select: TARIFF_PLAN_SELECT,
       });
-      if (body.tiers !== undefined) {
-        await tx.tariffTier.deleteMany({
-          where: { tenantId: ctx.tenantId, tariffPlanId: id },
-        });
-        await this.insertTiers(tx, ctx, id, body.tiers);
-      }
-      return this.withTiers(tx, ctx, updated);
     } catch (err) {
       // Moving effectiveFrom can collide with a sibling version of the
       // same code — same conflict as on create.
       if (isUniqueViolation(err)) throw versionExists();
       throw err;
     }
+    if (flipped.count === 0) {
+      await this.throwRaceCause(tx, ctx, id);
+    }
+    if (body.tiers !== undefined) {
+      await tx.tariffTier.deleteMany({
+        where: { tenantId: ctx.tenantId, tariffPlanId: id },
+      });
+      await this.insertTiers(tx, ctx, id, body.tiers);
+    }
+    const updated = await tx.tariffPlan.findFirstOrThrow({
+      where: { tenantId: ctx.tenantId, id },
+      select: TARIFF_PLAN_SELECT,
+    });
+    return this.withTiers(tx, ctx, updated);
   }
 
   /**
@@ -300,6 +333,16 @@ export class TariffPlanService {
    * usage_category (deterministic tariff pick for billing runs).
    */
   async activateTx(tx: Prisma.TransactionClient, ctx: TenantCtx, id: string, req: Request) {
+    // Lock the plan row FIRST: the tier-count and overlap checks below must
+    // run on the row as it will be at flip time — a concurrent DRAFT PATCH
+    // committing between an unlocked read and the guarded flip could leave
+    // us activating a window/ladder that no longer exists. The PATCH's own
+    // guarded update blocks on this lock and aborts on count=0 after we
+    // commit, so the pair serializes correctly.
+    await tx.$queryRaw`
+      SELECT id FROM tariff_plan
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
+      FOR UPDATE`;
     const existing = await tx.tariffPlan.findFirst({
       where: { tenantId: ctx.tenantId, id },
     });
@@ -461,6 +504,14 @@ export class TariffPlanService {
    * The P0 freeze probe: TRUE once any bill references the plan with a
    * status other than DRAFT — DRAFT bills are still scratch, anything past
    * them has priced real money against this version.
+   *
+   * T9/T10 CONTRACT: a transaction that inserts a bill referencing a
+   * tariff plan must first `SELECT … FOR UPDATE` that plan row. Only then
+   * is the freeze airtight: this probe plus `bills:{none:…}` inside the
+   * guarded PATCH/activate writes makes the check atomic at write time,
+   * and the bill writer's row lock serializes it against those updates —
+   * without the lock, a bill INSERT could still commit in the gap between
+   * our probe and our UPDATE's predicate evaluation.
    */
   private async isBillReferenced(
     tx: Prisma.TransactionClient,
@@ -478,9 +529,34 @@ export class TariffPlanService {
     return bill !== null;
   }
 
-  /** effective_to, when present, must not precede effective_from. */
+  /**
+   * Re-read after a guarded write lost its race (count=0) and throw the
+   * accurate cause: bill-referenced → TARIFF_FROZEN, otherwise the status
+   * that now blocks the write (ACTIVE for a DRAFT edit, RETIRED, etc.).
+   */
+  private async throwRaceCause(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+  ): Promise<never> {
+    if (await this.isBillReferenced(tx, ctx, id)) {
+      throw frozen('referenced by a non-DRAFT bill');
+    }
+    const cur = await tx.tariffPlan.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+      select: { status: true },
+    });
+    throw frozen(`plan is ${cur?.status ?? 'gone'}`);
+  }
+
+  /**
+   * effective_to must be strictly after effective_from when present —
+   * an empty [x,x) window prices nothing and only exists to confuse the
+   * overlap check. (The ACTIVE shrink path intentionally bypasses this:
+   * closing an active plan "to yesterday" is a legitimate way to stop it.)
+   */
   private assertWindow(effectiveFrom: Date, effectiveTo: Date | null) {
-    if (effectiveTo !== null && effectiveTo < effectiveFrom) {
+    if (effectiveTo !== null && effectiveTo <= effectiveFrom) {
       throw new BadRequestException({
         code: 'TARIFF_WINDOW_INVALID',
         effectiveFrom,

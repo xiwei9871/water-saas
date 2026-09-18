@@ -761,7 +761,10 @@ model FeeItem {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String?  @map("updated_by") @db.Uuid
 
+  tiers TariffTier[]
+
   @@unique([tenantId, code])
+  @@unique([tenantId, id])
   @@map("fee_item")
 }
 
@@ -780,6 +783,7 @@ model TariffPlan {
   updatedBy     String?      @map("updated_by") @db.Uuid
 
   bills Bill[]
+  tiers TariffTier[]
 
   @@unique([tenantId, code, effectiveFrom])
   @@unique([tenantId, id])
@@ -800,6 +804,9 @@ model TariffTier {
   createdBy    String?  @map("created_by") @db.Uuid
   updatedAt    DateTime @updatedAt @map("updated_at")
   updatedBy    String?  @map("updated_by") @db.Uuid
+
+  tariffPlan TariffPlan @relation(fields: [tenantId, tariffPlanId], references: [tenantId, id], onDelete: Restrict)
+  feeItem    FeeItem    @relation(fields: [tenantId, feeItemId],    references: [tenantId, id], onDelete: Restrict)
 
   @@unique([tariffPlanId, feeItemId, tierNo])
   @@index([tenantId, tariffPlanId])
