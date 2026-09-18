@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,7 +9,7 @@ import { Prisma } from '@prisma/client';
 import { DomainError } from '@ws/billing-core';
 import type { Request } from 'express';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
-import type { TenantCtx } from '../../common/tenant-context.js';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import {
   computeBill,
@@ -60,6 +61,8 @@ type BillStatus = 'DRAFT' | 'POSTED' | 'PARTIAL_PAID' | 'PAID' | 'REVERSED';
 
 const notReversable = (status: string, reason?: string) =>
   new ConflictException({ code: 'BILL_NOT_REVERSABLE', status, reason });
+
+const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
 
 const notReplaceable = (status: string, reason?: string) =>
   new ConflictException({ code: 'BILL_NOT_REPLACEABLE', status, reason });
@@ -151,6 +154,7 @@ export class BillService {
     req: Request,
   ) {
     const original = await this.loadCorrectable(tx, ctx, id, notReversable);
+    await this.assertAccountScope(tx, ctx, original.waterAccountId, original.period);
     req.auditBefore = original;
 
     // Friendly pre-check; the unique index still guards the race.
@@ -258,6 +262,7 @@ export class BillService {
     req: Request,
   ) {
     const original = await this.loadCorrectable(tx, ctx, id, notReplaceable);
+    await this.assertAccountScope(tx, ctx, original.waterAccountId, original.period);
     req.auditBefore = original;
     if (!original.tariffPlanId) {
       throw notReplaceable(
@@ -396,5 +401,42 @@ export class BillService {
       throw reject(bill.status);
     }
     return bill;
+  }
+
+  /**
+   * Single-bill mutations are account facts like settlements: a scoped
+   * (non-ALL) caller may only touch bills whose water_account sits in
+   * their subtree — resolved the same way settlement.service does, via
+   * the period's plan items → plans → books. An account in NO reading
+   * plan returns permissively (same convention); run-level batch ops
+   * skip this check deliberately (tenant-wide by nature — see
+   * BillingRunService's class docblock).
+   */
+  private async assertAccountScope(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+    period: string,
+  ) {
+    const items = await tx.readingPlanItem.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        waterAccountId,
+        plan: { tenantId: ctx.tenantId, period },
+      },
+      select: { planId: true },
+    });
+    if (items.length === 0) return;
+    const plans = await tx.readingPlan.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: items.map((i) => i.planId) } },
+      select: { bookId: true },
+    });
+    const books = await tx.readingBook.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: plans.map((p) => p.bookId) } },
+      select: { orgUnitId: true },
+    });
+    for (const b of books) {
+      if (!orgInScope(ctx, b.orgUnitId)) throw outOfScope();
+    }
   }
 }

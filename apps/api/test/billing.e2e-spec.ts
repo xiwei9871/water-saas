@@ -676,3 +676,124 @@ describe('getOutstanding → close-account', () => {
     expect(ok.body.status).toBe('CLOSED');
   });
 });
+
+describe('review fixes: org scope, close-vs-post, input bounds', () => {
+  it('a scoped billing:write holder cannot reverse an out-of-scope bill (403); admin can', async () => {
+    // ORG_A2 is a CHILD of ORG_A — its subtree does not contain ORG_A.
+    const ORG_A2 = 'aa10aa10-0000-4000-8000-0000000000c2';
+    const ROLE_SCOPED = 'aa10aa10-0000-4000-8000-00000000c011';
+    const PERM_WRITE = 'aa10aa10-0000-4000-8000-00000000e802';
+    const STAFF_SCOPED = 'aa10aa10-0000-4000-8000-0000000c0003';
+    await owner.query(
+      `INSERT INTO org_unit (id, tenant_id, parent_id, name, type, created_at, updated_at)
+       VALUES ($1, $2, $3, 'T10 Branch', 'BRANCH', now(), now()) ON CONFLICT DO NOTHING`,
+      [ORG_A2, T10A, ORG_A],
+    );
+    await owner.query(
+      `INSERT INTO permission (id, tenant_id, code, type, created_at, updated_at)
+       VALUES ($1, $2, 'billing:write', 'ACTION', now(), now()) ON CONFLICT DO NOTHING`,
+      [PERM_WRITE, T10A],
+    );
+    await owner.query(
+      `INSERT INTO role (id, tenant_id, code, name, data_scope, created_at, updated_at)
+       VALUES ($1, $2, 't10-biller', 'T10 Scoped Biller', 'ORG_SUBTREE', now(), now())
+       ON CONFLICT DO NOTHING`,
+      [ROLE_SCOPED, T10A],
+    );
+    await owner.query(
+      `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
+       VALUES ($1, $2, $3, now(), now()) ON CONFLICT DO NOTHING`,
+      [T10A, ROLE_SCOPED, PERM_WRITE],
+    );
+    const hash = await bcrypt.hash('t10-pass', 10);
+    await owner.query(
+      `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
+       VALUES ($1, $2, $3, 't10-biller', $4, 'T10 Biller', 'ACTIVE', now(), now())
+       ON CONFLICT (tenant_id, login) DO NOTHING`,
+      [STAFF_SCOPED, T10A, ORG_A2, hash],
+    );
+    await owner.query(
+      `INSERT INTO staff_role (tenant_id, staff_id, role_id, created_at, updated_at)
+       VALUES ($1, $2, $3, now(), now()) ON CONFLICT DO NOTHING`,
+      [T10A, STAFF_SCOPED, ROLE_SCOPED],
+    );
+    const scopedToken = (
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ tenantCode: 't10-water', login: 't10-biller', password: 't10-pass' })
+        .expect(201)
+    ).body.accessToken as string;
+
+    // Fresh account + FINAL settlement + a POSTED bill to reverse.
+    await onboard('A5', 'RESIDENTIAL');
+    await seedSettlement('A5-10', acct['A5'], '202610', 40);
+    const r = await post('/billing-runs', { period: '202610' }).expect(201);
+    const posted = await post(`/billing-runs/${r.body.id}/post`, {}).expect(201);
+    expect(posted.body.status).toBe('POSTED');
+    const bills = (await get(`/billing-runs/${r.body.id}`)).body.bills;
+    bill['A5-10'] = bills[0].id;
+    expect(bills[0].status).toBe('POSTED');
+
+    // Bind A5 to a book under ORG_A via a plan item for the bill's
+    // period — out of the ORG_A2-scoped writer's subtree.
+    const bookId = 'aa10aa10-0000-4000-8000-00000000b001';
+    const planId = 'aa10aa10-0000-4000-8000-00000000b002';
+    await owner.query(
+      `INSERT INTO reading_book (id, tenant_id, org_unit_id, book_no, name, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 't10 scope book', now(), now()) ON CONFLICT DO NOTHING`,
+      [bookId, T10A, ORG_A, `T10B-${RUN}`],
+    );
+    await owner.query(
+      `INSERT INTO reading_plan (id, tenant_id, book_id, period, plan_date, status, created_at, updated_at)
+       VALUES ($1, $2, $3, '202610', '2026-10-01', 'DONE', now(), now()) ON CONFLICT DO NOTHING`,
+      [planId, T10A, bookId],
+    );
+    await owner.query(
+      `INSERT INTO reading_plan_item (id, tenant_id, plan_id, water_account_id, seq_no, status, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 1, 'PENDING', now(), now()) ON CONFLICT DO NOTHING`,
+      [T10A, planId, acct['A5']],
+    );
+
+    const denied = await post(`/bills/${bill['A5-10']}/reverse`, {}, scopedToken);
+    expect(denied.status).toBe(403);
+    expect(denied.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+
+    const ok = await post(`/bills/${bill['A5-10']}/reverse`, {});
+    expect(ok.status).toBe(201);
+    expect(ok.body.billKind).toBe('REVERSAL');
+  });
+
+  it('a DRAFT bill blocks close; posting onto a CLOSED account records ACCOUNT_CLOSED', async () => {
+    await onboard('A4', 'RESIDENTIAL');
+    await seedSettlement('A4-08', acct['A4'], '202608', 25);
+    const r1 = await post('/billing-runs', { period: '202608' }).expect(201);
+
+    // The generated DRAFT bill counts as outstanding in flight — close
+    // is blocked rather than letting the debt post onto a closed account.
+    const blocked = await post(`/water-accounts/${acct['A4']}/close`, {});
+    expect(blocked.status).toBe(409);
+    expect(blocked.body).toMatchObject({ code: 'ACCOUNT_OUTSTANDING_BALANCE' });
+
+    await post(`/billing-runs/${r1.body.id}/discard`, {}).expect(201);
+    const closed = await post(`/water-accounts/${acct['A4']}/close`, {}).expect(201);
+    expect(closed.body.status).toBe('CLOSED');
+
+    // A rerun still drafts the bill (the settlement is FINAL) but the
+    // post refuses to mint debt onto the CLOSED account.
+    const r2 = await post('/billing-runs', { period: '202608' }).expect(201);
+    const done = await post(`/billing-runs/${r2.body.id}/post`, {}).expect(201);
+    expect(done.body.status).toBe('FAILED');
+    const codes = (done.body.failedSettlementIds as { code: string }[]).map(
+      (f) => f.code,
+    );
+    expect(codes).toContain('ACCOUNT_CLOSED');
+  });
+
+  it('replace rejects usageQty beyond numeric(18,4) scale (400)', async () => {
+    const res = await post(`/bills/aa10aa10-9999-4999-8999-aa10aa10aa10/replace`, {
+      usageQty: '1.00005',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'BILL_USAGE_QTY_SCALE' });
+  });
+});

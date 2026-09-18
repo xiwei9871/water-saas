@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -16,6 +17,7 @@ import {
   feeItemIdMap,
   insertBillItems,
   loadFeeItems,
+  lockAccountForUpdate,
   lockPlanForUpdate,
   periodLastDay,
   pickPlan,
@@ -133,6 +135,15 @@ interface AccountFacts {
  * bills as "already billed" — if one is then discarded, the other can
  * post to POSTED while its bills are gone. Reruns are operator-serial in
  * practice; flagged here rather than silently handled.
+ *
+ * Scope note: run-level writes (generate/post/retry/discard) are
+ * TENANT-WIDE batch operations — a run covers every FINAL settlement of
+ * the period regardless of org, so there is no per-row org check to
+ * apply (same carve-out as tariff_plan being tenant-level). Org scope
+ * was enforced upstream where the account facts were written
+ * (settlements, readings); single-bill surgical mutations
+ * (reverse/replace in BillService) DO re-check org scope because they
+ * target one account's documents.
  */
 @Injectable()
 export class BillingRunService {
@@ -232,6 +243,10 @@ export class BillingRunService {
       try {
         await this.generateBillForSettlement(tx, ctx, run.id, body.period, s, acc, dueDays);
       } catch (err) {
+        // Lost the unique race against a sibling run's insert — the bill
+        // now exists, which is exactly "already billed": resolved, not a
+        // failure (same mapping retryGenerate uses).
+        if (isUniqueViolation(err)) continue;
         if (err instanceof RecordedFailure || err instanceof DomainError) {
           failures.push({
             settlementId: s.id,
@@ -405,17 +420,19 @@ export class BillingRunService {
       where: { tenantId: ctx.tenantId, id, status: 'DRAFT' },
     });
     if (removed.count === 0) throw invalidTransition(existing.status, 'DISCARD');
+    // Defense-in-depth: collect only DRAFT bill ids so the item sweep can
+    // never touch a POSTED-side row even if the invariant above erodes.
     const bills = await tx.bill.findMany({
-      where: { tenantId: ctx.tenantId, billingRunId: id },
+      where: { tenantId: ctx.tenantId, billingRunId: id, status: 'DRAFT' },
       select: { id: true },
     });
     await tx.billItem.deleteMany({
       where: { tenantId: ctx.tenantId, billId: { in: bills.map((b) => b.id) } },
     });
-    await tx.bill.deleteMany({
+    const deleted = await tx.bill.deleteMany({
       where: { tenantId: ctx.tenantId, billingRunId: id, status: 'DRAFT' },
     });
-    return { ...existing, deletedBillCount: bills.length };
+    return { ...existing, deletedBillCount: deleted.count };
   }
 
   // -------------------------------------------------------------------------
@@ -475,7 +492,17 @@ export class BillingRunService {
         `no ACTIVE tariff for usageCategory ${acc.usageCategory} covering ${period}`,
       );
     }
-    const feeItems = await loadFeeItems(tx, ctx, plan.id);
+    // A tier pointing at a deleted fee item is corrupted-but-loadable
+    // config — a per-settlement failure record, not an abort of the run.
+    let feeItems;
+    try {
+      feeItems = await loadFeeItems(tx, ctx, plan.id);
+    } catch (err) {
+      if (err instanceof BadRequestException) {
+        throw new RecordedFailure('FEE_ITEM_NOT_FOUND', err.message);
+      }
+      throw err;
+    }
     const ytd = await ytdBeforeQty(tx, ctx, s.waterAccountId, period);
     const result = computeBill({
       usageQty: s.totalUsageQty,
@@ -565,19 +592,34 @@ export class BillingRunService {
   }
 
   /**
-   * Stage-B post of ONE bill inside its own tx: tariff_plan FOR UPDATE
-   * FIRST (the T8 freeze contract applies here because the flip is what
-   * creates the non-DRAFT reference), then the guarded DRAFT→POSTED
-   * updateMany — a concurrent flip loses with count=0 and is re-read:
-   * already POSTED means the bill got posted by another run's pass over
-   * the same settlement (billed = success, not a failure).
+   * Stage-B post of ONE bill inside its own tx: water_account FOR UPDATE
+   * FIRST (serializes against close-account — whichever side commits
+   * first wins, and a CLOSED account refuses new debt), then tariff_plan
+   * FOR UPDATE (the T8 freeze contract — the flip is what creates the
+   * non-DRAFT reference), then the guarded DRAFT→POSTED updateMany — a
+   * concurrent flip loses with count=0 and is re-read: already POSTED
+   * means the bill got posted by another run's pass over the same
+   * settlement (billed = success, not a failure). Lock order is always
+   * water_account → tariff_plan.
    */
   private async postOneBill(tx: Prisma.TransactionClient, ctx: TenantCtx, billId: string) {
     const bill = await tx.bill.findFirst({
       where: { tenantId: ctx.tenantId, id: billId },
-      select: { id: true, status: true, tariffPlanId: true },
+      select: { id: true, status: true, tariffPlanId: true, waterAccountId: true },
     });
     if (!bill) throw new RecordedFailure('BILL_NOT_FOUND');
+    await lockAccountForUpdate(tx, ctx, bill.waterAccountId);
+    const acc = await tx.waterAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: bill.waterAccountId },
+      select: { status: true },
+    });
+    if (!acc) throw new RecordedFailure('WATER_ACCOUNT_NOT_FOUND');
+    if (acc.status === 'CLOSED') {
+      throw new RecordedFailure(
+        'ACCOUNT_CLOSED',
+        'cannot post a bill onto a CLOSED account',
+      );
+    }
     if (bill.tariffPlanId) await lockPlanForUpdate(tx, ctx, bill.tariffPlanId);
     const flip = await tx.bill.updateMany({
       where: { tenantId: ctx.tenantId, id: billId, status: 'DRAFT' },

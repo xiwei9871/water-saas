@@ -31,6 +31,16 @@ export class CloseAccountUseCase {
     body: EventBody,
     req: Request,
   ) {
+    // Serialize against bill posting (T10 I2): postOneBill takes this
+    // same row lock before its guarded DRAFT→POSTED flip, so the
+    // outstanding read below always sees every bill whose post committed
+    // before this lock was taken — a racing post can never mint debt the
+    // check missed. DRAFT bills also count in outstanding, so in-flight
+    // generation blocks the close instead of posting onto it later.
+    await tx.$queryRaw`
+      SELECT id FROM water_account
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${accountId}::uuid
+      FOR UPDATE`;
     // Read inside this tx: the balance check and the guarded CLOSED flip
     // commit under one consistent view of the account's bills.
     const outstanding = await this.finance.getOutstanding(ctx.tenantId, accountId, tx);

@@ -5,9 +5,15 @@ import { FinancePort } from '../customer/ports/finance.port.js';
 
 /**
  * Real FinancePort implementation (replaces StubFinancePort): the
- * outstanding balance of a water account is the NET posted debt on its
- * settle_account — Σ bill.total_amount over bills with status
- * POSTED | PARTIAL_PAID and billKind != REVERSAL.
+ * outstanding balance of a water account is the NET posted-side debt on
+ * its settle_account — Σ bill.total_amount over bills with status
+ * DRAFT | POSTED | PARTIAL_PAID and billKind != REVERSAL.
+ *
+ * Why DRAFT counts: a DRAFT bill is computed debt in flight — excluding
+ * it would let close-account slip past a bill that posts a moment later
+ * (the close-vs-post race is also serialized by the water_account row
+ * lock both sides take). Overstating is always the safe direction here:
+ * a blocked close is an operator retry, a leaked close is orphan debt.
  *
  * Why the kind filter: a reversal pair must net to zero. The REVERSED
  * original drops out by status; counting the POSTED reversal row's
@@ -51,7 +57,7 @@ export class BillingFinancePort extends FinancePort {
         where: {
           tenantId,
           settleAccountId: account.settleAccountId,
-          status: { in: ['POSTED', 'PARTIAL_PAID'] },
+          status: { in: ['DRAFT', 'POSTED', 'PARTIAL_PAID'] },
           billKind: { not: 'REVERSAL' },
         },
       });

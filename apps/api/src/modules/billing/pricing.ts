@@ -70,6 +70,25 @@ export const lockPlanForUpdate = async (
 };
 
 /**
+ * Close-account ↔ bill-post serialization (I2 review): both paths take
+ * this row lock, so whichever commits first wins — a POSTED bill either
+ * lands before close reads outstanding (blocking it) or finds the
+ * account already CLOSED and refuses. Lock order is always
+ * water_account → tariff_plan; nothing locks in the reverse order, so
+ * no deadlock cycle exists.
+ */
+export const lockAccountForUpdate = async (
+  tx: Prisma.TransactionClient,
+  ctx: TenantCtx,
+  waterAccountId: string,
+) => {
+  await tx.$queryRaw`
+    SELECT id FROM water_account
+    WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${waterAccountId}::uuid
+    FOR UPDATE`;
+};
+
+/**
  * A plan's tiers grouped into computeBill's FeeItemInput shape: one entry
  * per fee item carrying code/calcType plus its tiers sorted by tier_no.
  * Fee items are resolved in bulk; a tier referencing a missing fee item is
@@ -125,13 +144,15 @@ export const loadFeeItems = async (
  * PARTIAL_PAID / PAID, restricted to earlier periods of the same calendar
  * year (period >= YYYY01 AND period < current).
  *
- * Only billKind=NORMAL counts: REVERSAL/REPLACEMENT/ADJUSTMENT bills are
- * ORIGINAL_BILL-sourced corrections, not new consumption. A REVERSED
- * original drops out (reversed usage leaves the ladder) — MVP caveat: a
- * REPLACEMENT bill's corrected usageQty never re-enters the ladder either,
- * since replacements carry no settlement link. The full-correctness path
- * for ladder fixes is T11 reconciliation, documented here so nobody
- * "repairs" it ad hoc.
+ * Only billKind=NORMAL settlement usage counts on the settlement side:
+ * REVERSAL/ADJUSTMENT bills are ORIGINAL_BILL-sourced corrections, not
+ * new consumption, and a REVERSED original drops out (reversed usage
+ * leaves the ladder). REPLACEMENT bills carry no settlement link, so
+ * their corrected usage is recovered from the bill items themselves —
+ * only PER_QTY items carry a qty (FIXED/PERCENT never do), so summing
+ * non-null item qty on POSTED-side replacements is exactly the corrected
+ * consumption. Without it, a mid-year replace() would silently drop the
+ * corrected usage out of every later bill's ladder.
  */
 export const ytdBeforeQty = async (
   tx: Prisma.TransactionClient,
@@ -140,25 +161,50 @@ export const ytdBeforeQty = async (
   period: string,
 ): Promise<Prisma.Decimal> => {
   const yearStart = `${period.slice(0, 4)}01`;
+  const posted = ['POSTED', 'PARTIAL_PAID', 'PAID'] as const;
   const bills = await tx.bill.findMany({
     where: {
       tenantId: ctx.tenantId,
       waterAccountId,
       billKind: 'NORMAL',
       sourceType: 'SETTLEMENT',
-      status: { in: ['POSTED', 'PARTIAL_PAID', 'PAID'] },
+      status: { in: [...posted] },
       period: { gte: yearStart, lt: period },
     },
     select: { sourceId: true },
   });
-  if (bills.length === 0) return new Prisma.Decimal(0);
-  const settlements = await tx.consumptionSettlement.findMany({
-    where: { tenantId: ctx.tenantId, id: { in: bills.map((b) => b.sourceId) } },
-    select: { totalUsageQty: true },
-  });
-  return settlements.reduce(
+  const settlements = bills.length
+    ? await tx.consumptionSettlement.findMany({
+        where: { tenantId: ctx.tenantId, id: { in: bills.map((b) => b.sourceId) } },
+        select: { totalUsageQty: true },
+      })
+    : [];
+  const settled = settlements.reduce(
     (acc, s) => acc.plus(s.totalUsageQty),
     new Prisma.Decimal(0),
+  );
+  const replacements = await tx.bill.findMany({
+    where: {
+      tenantId: ctx.tenantId,
+      waterAccountId,
+      billKind: 'REPLACEMENT',
+      status: { in: [...posted] },
+      period: { gte: yearStart, lt: period },
+    },
+    select: { id: true },
+  });
+  if (replacements.length === 0) return settled;
+  const items = await tx.billItem.findMany({
+    where: {
+      tenantId: ctx.tenantId,
+      billId: { in: replacements.map((b) => b.id) },
+      qty: { not: null },
+    },
+    select: { qty: true },
+  });
+  return items.reduce(
+    (acc, it) => acc.plus(it.qty ?? 0),
+    settled,
   );
 };
 

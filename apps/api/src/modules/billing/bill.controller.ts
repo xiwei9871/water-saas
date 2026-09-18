@@ -131,7 +131,14 @@ export class BillController {
     if (body?.usageQty === undefined || body.usageQty === null) {
       throw new BadRequestException({ code: 'BILL_USAGE_QTY_REQUIRED' });
     }
-    const parsed = { usageQty: assertDecimal(body.usageQty, 'usageQty', { min: 0 }) };
+    const usageQty = assertDecimal(body.usageQty, 'usageQty', { min: 0 });
+    // bill_item.qty is numeric(18,4) — accepting finer input would store
+    // a rounded qty while amountCent was computed on full precision,
+    // making stored qty × unit_price diverge from amount.
+    if (usageQty.decimalPlaces() > 4) {
+      throw new BadRequestException({ code: 'BILL_USAGE_QTY_SCALE' });
+    }
+    const parsed = { usageQty };
     const ctx = currentTenant();
     return withOptionalIdem(
       this.prisma,
