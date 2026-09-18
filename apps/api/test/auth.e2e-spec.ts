@@ -563,4 +563,39 @@ describe('audit log', () => {
     }
     expect(n).toBeGreaterThan(0);
   });
+
+  it('GET /iam/audit-logs lists rows for iam:read holders, newest first', async () => {
+    await request(app.getHttpServer()).get('/iam/audit-logs').expect(401);
+
+    const res = await request(app.getHttpServer())
+      .get('/iam/audit-logs')
+      .set('Authorization', `Bearer ${viewerToken}`)
+      .expect(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    // The poll above only guarantees ≥1 staff row exists by now.
+    const staffRows = res.body.filter(
+      (r: { entity: string }) => r.entity === 'staff',
+    );
+    expect(staffRows.length).toBeGreaterThan(0);
+    for (const r of res.body) {
+      expect(r.tenantId).toBeUndefined(); // select omits tenant internals
+      expect(r).toMatchObject({ id: expect.any(String), action: expect.any(String) });
+    }
+
+    const filtered = await request(app.getHttpServer())
+      .get('/iam/audit-logs')
+      .query({ entity: 'staff', take: 5 })
+      .set('Authorization', `Bearer ${viewerToken}`)
+      .expect(200);
+    expect(filtered.body.length).toBeLessThanOrEqual(5);
+    expect(
+      filtered.body.every((r: { entity: string }) => r.entity === 'staff'),
+    ).toBe(true);
+
+    await request(app.getHttpServer())
+      .get('/iam/audit-logs')
+      .query({ take: 'abc' })
+      .set('Authorization', `Bearer ${viewerToken}`)
+      .expect(400);
+  });
 });

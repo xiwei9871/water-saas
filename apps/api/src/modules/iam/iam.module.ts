@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
+import { AuditLogsController } from './audit-logs.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { OrgsController } from './orgs.controller.js';
@@ -44,6 +45,7 @@ const jwtSecret = (() => {
     StaffController,
     RolesController,
     TenantParamsController,
+    AuditLogsController,
   ],
   providers: [AuthService],
   exports: [AuthService],
