@@ -13,12 +13,15 @@
 ## Global Constraints
 
 - 金额一律 `bigint` 分（`amount_cent`）；水量 `numeric(18,4)`；单价 `numeric(18,6)`；账期 `char(6)` `YYYYMM`。
+- **DB 连接分离**：`DATABASE_URL` = `ws_app` 非 owner（API/Worker runtime 唯一可用）；`MIGRATION_DATABASE_URL` = postgres owner（仅 `prisma migrate`/`db seed`）。Prisma `datasource` 用 `url = env("DATABASE_URL")` + `directUrl = env("MIGRATION_DATABASE_URL")`；**生产代码禁止出现 owner 连接**。
+- **billing-core 禁用 JS `number` 做水费计算**：水量/单价/中间量用 `decimal.js` `Decimal`，最终金额 `bigint` cents；DTO 中 decimal 以 **string** 传输（`"qty":"15.0000"`）。
 - 舍入：`bill_item.amount = round_half_up(qty × unit_price)` 到分，`bill.total = Σ items`。
 - 所有业务表含 `tenant_id` + `created_at/created_by/updated_at/updated_by`；`id` 用 uuid。
-- 财务事实 immutable：POSTED/FINAL 后金额/数量/单价/来源不可改；状态迁移记 `audit_log`。
+- 财务事实 immutable：POSTED/FINAL 后金额/数量/单价/来源不可改；状态迁移记 `audit_log`。**DAY_CLOSED 收款不原地反转**，纠错产生新的负向 reversal payment。
 - RLS：所有业务查询在事务内 `set_config('app.tenant_id', $1, true)`；应用角色非 owner、无 BYPASSRLS；核心表 `FORCE ROW LEVEL SECURITY`。
-- 幂等：`bill UNIQUE(tenant_id, source_type, source_id, bill_kind)`；POST 端点支持 `Idempotency-Key`。
-- 枚举值以 spec §2.7 状态机为准，命名全大写。
+- 幂等：`bill UNIQUE(tenant_id, source_type, source_id, bill_kind)`；POST 端点支持 `Idempotency-Key`（含 method/route/request_hash 校验与 PROCESSING→COMPLETED 状态，关键业务写入与幂等记录**同一事务**）。
+- 枚举值以 spec §2.7 状态机为准，命名全大写；`billing_run` 增加 `PROCESSING/PARTIAL` 状态与 `total/success/failed_count`。
+- **模块依赖纪律**：`customer` 不得依赖 `billing`；跨模块编排（如销户前欠费校验）放 application/use-case 层。
 - 不做（禁止实现）：移动 APP、在线支付、代扣文件、电子发票、短信、智能表平台、工单流、预付费扣款、总分表计费。
 
 ## File Structure
@@ -103,7 +106,16 @@ volumes:
   pgdata:
 ```
 
-`.env.example`: `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/watersaas`、`REDIS_URL=redis://localhost:6379`、`JWT_SECRET=dev-secret-change-me`
+`.env.example`:
+
+```
+DATABASE_URL=postgresql://ws_app:ws_app_pw@localhost:5432/watersaas          # runtime（非 owner，RLS 生效）
+MIGRATION_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/watersaas  # 仅 prisma migrate / db seed
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=dev-secret-change-me
+```
+
+注：`ws_app` 角色由 T2 的 migration 创建；T1 阶段 `.env` 可暂用 postgres 跑通，T2 完成后必须切到 `ws_app` 并在测试中验证。
 
 - [ ] **Step 2: 生成 apps 与 packages**
 
@@ -162,10 +174,11 @@ git add -A && git commit -m "chore: monorepo scaffold (api/web/billing-core/type
 - [ ] **Step 1: 写 schema.prisma（按 spec §3 全量，~30 模型）**
 
 要点：
-- `generator client` + `datasource db`（`DATABASE_URL`）。
+- `generator client` + `datasource db { url = env("DATABASE_URL"); directUrl = env("MIGRATION_DATABASE_URL") }`——`prisma migrate` 走 directUrl（owner），runtime client 走 url（ws_app）。
 - 每个模型 `tenantId String @db.Uuid` + `@@index([tenantId, …])`；审计字段 `createdAt DateTime @default(now())` 等 map 到 snake_case。
 - 枚举用 Prisma `enum`（与 `packages/types` 常量一一对应）。
-- `bill` 加 `@@unique([tenantId, sourceType, sourceId, billKind])`；`consumptionSettlement` 加 `@@unique([tenantId, waterAccountId, period])`；`idempotencyKey @@unique([tenantId, key])`。
+- `bill` 加 `@@unique([tenantId, sourceType, sourceId, billKind])`；`consumptionSettlement` 加 `@@unique([tenantId, waterAccountId, period])`。
+- `idempotencyKey` 字段：`tenantId / key / method / route / requestHash / responseStatus / responseRef / status(PROCESSING|COMPLETED)`，`@@unique([tenantId, key])`。
 - `meterReading.planItemId`、`readingPlanItem.plannedInstallationId nullable`、`meterReading.supersedesReadingId` 自引用、`reconciliation.absorbedSettlementId nullable`、`bill.tariffPlanId`。
 - 金额 `BigInt`；水量/单价 `Decimal`（`@db.Decimal(18,4)` / `@db.Decimal(18,6)`）。
 
@@ -281,7 +294,7 @@ Expected: 3 条断言全过。
 
 - [ ] **Step 5: seed 基础数据**
 
-`seed.ts`：tenant `cd-water`/`xh-water`、org 树、admin 账号（bcrypt）、role `admin/reader/cashier/reviewer`、fee_item（水费/污水费）、estimate_rule（AVG3）。
+`seed.ts`：**单独 new 一个用 `MIGRATION_DATABASE_URL` 的 PrismaClient**（owner，不受 RLS 限制；seed 是一次性运维脚本，不进 runtime 代码路径）：tenant `cd-water`/`xh-water`、org 树、admin 账号（bcrypt）、role `admin/reader/cashier/reviewer`、fee_item（水费/污水费）、estimate_rule（AVG3）。`package.json` 配 `prisma.seed`。
 
 - [ ] **Step 6: Commit** `feat: prisma schema + tenant RLS infrastructure`
 
@@ -296,7 +309,7 @@ Expected: 3 条断言全过。
 
 **Interfaces:**
 - Consumes: `TenantPrismaService`、`withTenant/currentTenant`
-- Produces: `@Permissions('customer:write')` 装饰器 + `PermissionsGuard`；`TenantInterceptor`（从 JWT 注入 ALS ctx）；`AuditInterceptor`（写操作落 audit_log）；`IdempotencyInterceptor`（`Idempotency-Key` 去重）；`POST /auth/login → {accessToken, refreshToken}`、`GET /auth/me`
+- Produces: `@Permissions('customer:write')` 装饰器 + `PermissionsGuard`；`TenantInterceptor`（从 JWT 注入 ALS ctx）；`AuditInterceptor`（写操作落 audit_log）；**`IdempotencyService`**：`runWithKey({key, method, route, requestHash}, fn)` —— 同事务内 `INSERT idempotency_key(status=PROCESSING)` → 执行业务 fn → 同 tx `UPDATE status=COMPLETED, response_ref, response_status`；key 冲突时比对 `request_hash`，不一致 → `409 IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST`，一致且 COMPLETED → 直接返回已存 response_ref。杜绝"业务已落库、幂等未记录、客户端重试"的重复窗口。`POST /auth/login → {accessToken, refreshToken}`、`GET /auth/me`
 
 - [ ] **Step 1: 失败测试** — 无 token 401；login 成功返回 JWT 且 `GET /auth/me` 返回 staff+role；tenant A token 请求带 `X-Tenant-Id: B` 被拒（token 内 tenant 为准）。
 - [ ] **Step 2: 实现** — bcrypt 校验、`@nestjs/jwt` 签发（payload `{sub, tenantId, orgScope, perms}`）、guard 校验权限码、interceptor 注入 ALS、写操作后 `audit_log` 记 before/after。
@@ -312,8 +325,9 @@ Expected: 3 条断言全过。
 
 **Interfaces:**
 - Produces: `POST /water-accounts/onboard`（一次创建 customer+water_account+meter+installation，事务内）、`POST /meter-installations/:id/remove`（拆表，需 final_reading）、`POST /meter-installations`（装表/复装）、`POST /water-accounts/:id/{transfer|suspend|resume|close}`（写 `account_event`）
+- **依赖纪律**：`customer` 模块自身不 import `billing`。销户编排放 `src/modules/customer/use-cases/close-account.use-case.ts`（application 层）：先调 `billing` 的 outstanding 查询端口（T10 前由 `integration` stub `FinancePort.getOutstanding(accountId)` 返回 0 顶替），再调 `customer.closeAccount()` 执行。customer domain 只负责"执行已校验的 close"。
 
-- [ ] **Step 1: 失败测试** — onboard 后 installation ACTIVE；拆表后 installation REMOVED + meter AVAILABLE；换表（remove+新 install）后户有两条 installation；销户要求欠费为 0（先 mock 欠费查询接口 `billing.getOutstanding(accountId)`，实现后置 stub 返回 0）。
+- [ ] **Step 1: 失败测试** — onboard 后 installation ACTIVE；拆表后 installation REMOVED + meter AVAILABLE；换表（remove+新 install）后户有两条 installation；close use-case 在 outstanding>0（stub 改为返回非 0）时拒绝销户。
 - [ ] **Step 2: 实现** — `sys_sequence` 发号（`customer_no`/`account_no` 规则：`前缀+yyyyMM+6位序列`，租户隔离）；onboard 全事务；event 写 `account_event`。
 - [ ] **Step 3: 测试通过 + Commit** `feat: customer domain (3-account model, meter installation lifecycle)`
 
@@ -359,22 +373,23 @@ Expected: 3 条断言全过。
 **Interfaces:**
 - Consumes: readings（PASSED）、installations、tenant_params
 - Produces:
-  - `estimateAvg3(validUsages: number[]): number | null`（billing-core；不足 3 次返回 null）
+  - `estimateAvg3(validUsages: Decimal[]): Decimal | null`（billing-core；**有 1–2 个有效历史值即按已有值平均，仅 0 个返回 null**——修正计划内部"不足3次返回null"与测试用例的矛盾，以测试语义为准）
   - `POST /estimate/preview {waterAccountId, period}` → `{suggestedUsage, method, basis}`
   - `POST /consumption-settlements`（按户+period 生成 DRAFT settlement+components，内部逻辑见 Step 2）、`POST /consumption-settlements/:id/finalize`
 
-- [ ] **Step 1: estimator 纯函数测试（vitest）**
+- [ ] **Step 1: estimator 纯函数测试（vitest，Decimal 版本）**
 
 ```ts
 import { describe, it, expect } from 'vitest';
+import { Decimal } from 'decimal.js';
 import { estimateAvg3 } from '../src/estimator';
 
 describe('estimateAvg3', () => {
   it('returns mean of last 3 valid usages', () => {
-    expect(estimateAvg3([30, 36, 33])).toBe(33);
+    expect(estimateAvg3([30, 36, 33].map(d => new Decimal(d)))!.toFixed(4)).toBe('33.0000');
   });
-  it('uses fewer than 3 if that is all we have', () => {
-    expect(estimateAvg3([40, 20])).toBe(30);
+  it('averages whatever valid history exists (1–2 values)', () => {
+    expect(estimateAvg3([40, 20].map(d => new Decimal(d)))!.toFixed(4)).toBe('30.0000');
   });
   it('returns null with no history', () => {
     expect(estimateAvg3([])).toBeNull();
@@ -384,14 +399,16 @@ describe('estimateAvg3', () => {
 
 ```ts
 // estimator.ts
-export function estimateAvg3(validUsages: number[]): number | null {
+import { Decimal } from 'decimal.js';
+export function estimateAvg3(validUsages: Decimal[]): Decimal | null {
   if (validUsages.length === 0) return null;
   const last3 = validUsages.slice(-3);
-  return Math.round((last3.reduce((a, b) => a + b, 0) / last3.length) * 10000) / 10000;
+  return last3.reduce((a, b) => a.plus(b), new Decimal(0))
+    .div(last3.length).toDecimalPlaces(4);
 }
 ```
 
-（取最近 3 个有 ACTUAL 读数的 settlement/component 用量。）
+（取最近 3 个有 ACTUAL 读数的 settlement/component 用量；`packages/billing-core` 加依赖 `decimal.js`。）
 
 - [ ] **Step 2: settlement 生成逻辑 + e2e**
 
@@ -429,35 +446,43 @@ e2e：覆盖中途换表（旧 component final 130-100=30 + 新 18-0=18 = 48）�
 - Create: `packages/billing-core/src/{tariff.ts, settle.ts}`、`packages/billing-core/tests/{tariff.test.ts, settle.test.ts}`
 
 **Interfaces:**
-- Produces:
-  - `roundCent(v: number): number`（HALF_UP 到分）
-  - `tieredAmount(qty: number, ytdBeforeQty: number, tiers: Tier[]): {amountCent, parts:{tierNo,qty,unitPrice,amountCent}[]}`
-  - `computeBill(input: {components: {usageQty:number}[], tiers: Tier[], feeItems: {code,calcType,price|percent}[], ytdBeforeQty:number}): BillItemDraft[]`
+- Produces（**全部 Decimal 入参，金额 bigint 出参**）:
+  - `roundCent(v: Decimal): bigint`（HALF_UP 到分：`v.times(100).toDecimalPlaces(0, ROUND_HALF_UP)` 转 bigint）
+  - `tieredAmount(qty: Decimal, ytdBeforeQty: Decimal, tiers: {tierNo:number, toQty:Decimal|null, unitPrice:Decimal}[]): {amountCent: bigint, parts:{tierNo:number, qty:Decimal, unitPrice:Decimal, amountCent:bigint}[]}`
+  - `computeBill(input: {components: {usageQty: Decimal}[], tiers: Tier[], feeItems: {code:string, calcType:CalcType, unitPrice?:Decimal, percent?:Decimal}[], ytdBeforeQty: Decimal}): BillItemDraft[]`（`BillItemDraft = {feeItemCode, itemType, qty?:Decimal, unitPrice?:Decimal, amountCent:bigint, description}`）
 
 - [ ] **Step 1: 失败测试（关键场景写全）**
 
 ```ts
-// 普通单价: 48m³ × 3.2 = 153.60元 = 15360分
+// 普通单价: 48m³ × 3.2 = 153.60元 → amountCent = 15360n
 // 阶梯: ytd=170, tiers=[{to:180,p:3.0},{to:null,p:4.5}], qty=15
-//   → 10m³@3.0 + 5m³@4.5 = 3000+2250 = 5250分
+//   → 10m³@3.0 + 5m³@4.5 = 3000n+2250n = 5250n
 // 阶梯跨年: ytd 按自然年重置（ytdBeforeQty 由调用方算）
 // 多费用项: 水费 PER_QTY + 污水费 PER_QTY 各自成行
 // qty=0 → 无行；负数 qty 抛 DomainError
+// 精度: 0.1+0.2 类陷阱——qty=33.3333 × 3.141593 的结果按 Decimal 精确值 HALF_UP，不允许出现浮点尾差
 ```
 
 - [ ] **Step 2: 实现纯函数**（无 IO、无 Date.now 依赖——today 由入参传）。
 
 ```ts
-export function tieredAmount(qty, ytdBeforeQty, tiers) {
-  let remaining = qty, cursor = ytdBeforeQty, amountCent = 0; const parts = [];
+import { Decimal } from 'decimal.js';
+Decimal.set({ precision: 40, rounding: Decimal.ROUND_HALF_UP });
+
+export function roundCent(v: Decimal): bigint {
+  return BigInt(v.times(100).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0));
+}
+
+export function tieredAmount(qty: Decimal, ytdBeforeQty: Decimal, tiers: Tier[]) {
+  let remaining = qty, cursor = ytdBeforeQty, amountCent = 0n; const parts = [];
   for (const t of tiers) {
-    if (remaining <= 0) break;
-    const cap = t.toQty === null ? Infinity : t.toQty - cursor;
-    const inTier = Math.min(remaining, Math.max(0, cap));
-    if (inTier <= 0) { if (t.toQty !== null && cursor >= t.toQty) continue; }
-    const cent = roundCent(inTier * t.unitPrice);
+    if (remaining.lte(0)) break;
+    const cap = t.toQty === null ? remaining : Decimal.max(0, t.toQty.minus(cursor));
+    const inTier = Decimal.min(remaining, cap);
+    if (inTier.lte(0)) continue;
+    const cent = roundCent(inTier.times(t.unitPrice));
     parts.push({ tierNo: t.tierNo, qty: inTier, unitPrice: t.unitPrice, amountCent: cent });
-    amountCent += cent; remaining -= inTier; cursor += inTier;
+    amountCent += cent; remaining = remaining.minus(inTier); cursor = cursor.plus(inTier);
   }
   return { amountCent, parts };
 }
@@ -475,10 +500,11 @@ export function tieredAmount(qty, ytdBeforeQty, tiers) {
 
 **Interfaces:**
 - Consumes: FINAL settlements、tariff（`usage_category`→ACTIVE plan@period 生效版本）、billing-core
-- Produces: `POST /billing-runs {period}`（DRAFT 批：试算生成 DRAFT bills）、`POST /billing-runs/:id/post`（事务/分批 POST，`source_type=SETTLEMENT, source_id=settlementId, bill_kind=NORMAL`）、`POST /billing-runs/:id/discard`、`POST /bills/:id/reverse`（生成 `bill_kind=REVERSAL, source_type=ORIGINAL_BILL, source_id=原bill`）、`POST /bills/:id/replace`（REPLACEMENT）
+- Produces: `POST /billing-runs {period}`（DRAFT 批：试算生成 DRAFT bills）、`POST /billing-runs/:id/post`（入队，run→PROCESSING）、`POST /billing-runs/:id/retry`（PARTIAL/FAILED 重跑失败户）、`POST /billing-runs/:id/discard`、`POST /bills/:id/reverse`（生成 `bill_kind=REVERSAL, source_type=ORIGINAL_BILL, source_id=原bill`）、`POST /bills/:id/replace`（REPLACEMENT）
+- **`billing_run` 状态与计数**：`DRAFT → PROCESSING → POSTED | PARTIAL | FAILED`；字段 `total_count / success_count / failed_count` + `failed_settlement_ids jsonb`（失败明细）。全部成功→POSTED；部分成功→PARTIAL（可 retry→POSTED）；全败→FAILED。源单据幂等约束保证 retry 不产生重复 bill（已存在的 settlement 直接计入 success）。
 
-- [ ] **Step 1: 失败测试** — 幂等：同一 settlement POST 两次 → 唯一约束冲突被捕获为"已存在"，bill 仍一张；reverse 后原 bill status=REVERSED 且存在负向 REVERSAL 单（amount 取负）；DRAFT 批 discard 后可重跑。
-- [ ] **Step 2: 实现** — post 走 BullMQ job（逐 settle_account 分组、单 bill 一事务、失败记 FAILED 可重跑）；`bill.tariff_plan_id` = 计算用 plan；`is_estimated` 继承。
+- [ ] **Step 1: 失败测试** — 幂等：同一 settlement POST 两次 → 唯一约束冲突被捕获为"已存在"，bill 仍一张；reverse 后原 bill status=REVERSED 且存在负向 REVERSAL 单（amount 取负）；DRAFT 批 discard 后可重跑；**模拟 1 户开账失败 → run=PARTIAL + counts 正确 → retry → POSTED**。
+- [ ] **Step 2: 实现** — post 走 BullMQ job（逐 settle_account 分组、单 bill 一事务、单户失败记 failed 不阻塞批次）；`bill.tariff_plan_id` = 计算用 plan；`is_estimated` 继承。
 - [ ] **Step 3: 测试通过 + Commit** `feat: billing run + bill lifecycle + reversal/replacement`
 
 ---
@@ -505,10 +531,11 @@ export function tieredAmount(qty, ytdBeforeQty, tiers) {
 // anchor 选取: 范围内最后一次 result_type∈{ACTUAL,REMOTE} 且未被 supersede 的 PASSED 读数
 ```
 
-- [ ] **Step 2: e2e 两场景**
-  - a. 实抄 1000 → 估30(FINAL) → 估35(FINAL) → 实抄1080：自动产生 reconciliation（DRAFT），apply → `status=ABSORBED`、`absorbed_settlement_id`=9月 settlement（其 usage=15）；**断言无新 bill**。
+- [ ] **Step 2: e2e 三场景**
+  - a. 实抄 1000 → 估30(FINAL) → 估35(FINAL) → 实抄1080，且 **9月 settlement 仍 DRAFT 未开账**：apply → `status=ABSORBED`、`absorbed_settlement_id`=9月 settlement（其 usage=15）；**断言无新 bill**。
   - b. 实抄 1055：apply → `reprice()` → `status=APPLIED` + ADJUSTMENT bill（金额=correct−posted，负值）。
-- [ ] **Step 3: 实现** — 触发点：ACTUAL 读数 QC PASS 后检查其覆盖范围内是否有 estimated FINAL settlement；absorb 路径把 remainder 写入当前期 settlement（`consumption_component.source_type=READING`）；adjust 路径重计价生成 adjustment bill。
+  - c. **吸收前置条件**：remainder ≥ 0 但当前期 settlement 已 FINAL 或已开账 → **不得**把 remainder 塞回已冻结 settlement；即使正差也走 `reprice()` + ADJUSTMENT bill。判定规则：`remainder>=0 AND current settlement is DRAFT/not billed → ABSORB，否则 → ADJUST`。
+- [ ] **Step 3: 实现** — 触发点：ACTUAL 读数 QC PASS 后检查其覆盖范围内是否有 estimated FINAL settlement；absorb 路径把 remainder 写入当前期 DRAFT settlement（`consumption_component.source_type=READING`）；adjust 路径重计价生成 adjustment bill。
 - [ ] **Step 4: 测试通过 + Commit** `feat: anchor-based reconciliation (absorb-first, adjust on negative)`
 
 ---
@@ -521,9 +548,10 @@ export function tieredAmount(qty, ytdBeforeQty, tiers) {
 
 **Interfaces:**
 - Produces: `POST /payments {settleAccountId, channel, amount, allocs:[{billId, amount}]}`、`GET /water-accounts/:id/outstanding`（未清账单）、`POST /payments/:id/reverse`、`POST /receipts/:id/print`、`POST /cashier-day-close/close`
+- **日结后红冲语义（patch）**：DAY_CLOSED 的 payment 永不原地反转（历史日结 immutable）。`reverse` 产生**新的负向 reversal payment**（`amount` 取负、`reversal_of_id`=原单、当日流水），原 payment 保持 `DAY_CLOSED`；被释放的 bill 金额回滚为未清。例：9/18 日结 10000 → 9/19 红冲 -100 → 9/19 日结含 -100 调整，9/18 报表不变。
 
-- [ ] **Step 1: 失败测试** — 一笔 payment 分摊 2 bill（一个全清→PAID、一个部分→PARTIAL_PAID）；allocs 总额≠payment.amount → 400；重复 Idempotency-Key → 返回原单；日结后收款不可 REVERSED 当日？（日结 POSTED 后允许 REVERSED 但记 audit，简化：允许，报表按状态过滤）；收据号唯一。
-- [ ] **Step 2: 实现** — 收款事务：payment + allocs + 更新 bill.status（重算 Σalloc vs total）；receipt 发号；day_close 汇总 `by_channel`。
+- [ ] **Step 1: 失败测试** — 一笔 payment 分摊 2 bill（一个全清→PAID、一个部分→PARTIAL_PAID）；allocs 总额≠payment.amount → 400；重复 Idempotency-Key+相同 payload → 返回原单、**不同 payload → 409**；日结后 reverse → 原单仍 DAY_CLOSED 且存在负向 reversal payment；收据号唯一。
+- [ ] **Step 2: 实现** — 收款走 `IdempotencyService.runWithKey`（payment+allocs+幂等记录同事务）；更新 bill.status（重算 Σalloc vs total）；receipt 发号；day_close 汇总 `by_channel`（reversal payment 计为负值行）。
 - [ ] **Step 3: 测试通过 + Commit** `feat: counter payment, multi-bill allocation, day close`
 
 ---
@@ -580,5 +608,7 @@ export function tieredAmount(qty, ytdBeforeQty, tiers) {
 ## Self-Review 结论
 
 - Spec 覆盖：§1 架构(T1-T2,T14)、§1.2 RLS(T2,T3)、§1.3 不可变(T10,T12 全程)、§2.1 三户+installation(T4)、§2.2 读数+plan_item(T5,T6)、§2.3 settlement/component(T7)、§2.4 reconciliation(T11)、§2.5 计费+冻结(T8,T9,T10)、§2.6 收款(T12)、§2.8 stub(T13)、§4 API(各任务 controller)、§5 页面(T14-T16)、§6 验收(T16 Step2 逐条)。
-- 类型一致性：`estimateAvg3`、`tieredAmount`、`computeBill`、`buildReconciliation`、`reprice`、`runAsTenant`、`withTenant/currentTenant` 签名在产出/消费处一致。
+- 类型一致性：`estimateAvg3(Decimal[]→Decimal|null)`、`tieredAmount(Decimal,Decimal,Tier[])→{amountCent:bigint}`、`computeBill→BillItemDraft[]`、`buildReconciliation`、`reprice`、`runAsTenant`、`withTenant/currentTenant`、`IdempotencyService.runWithKey` 签名在产出/消费处一致。
+- **Plan patch（评审后）**：runtime/migration DB 连接分离；billing-core 全 Decimal 计算（DTO decimal 用 string）；AVG3 契约统一（1–2 个历史值即平均，0 个才 null）；reconciliation ABSORB 前置"当前 settlement 未封账"；Idempotency-Key 含 request_hash+状态机+业务同事务；billing_run 加 PROCESSING/PARTIAL+counts；DAY_CLOSED 收款以负向 reversal payment 冲正；销户欠费校验上移到 use-case 层。
+- 高风险任务复核点：T2（RLS/角色分离）、T9（计费精度）、T10（幂等开账）、T11（补差语义）、T12（收款幂等+红冲）——执行时每个除任务测试外再做一次 data-integrity review。
 - 无占位符；CRUD 细节（字段校验、分页）由 spec §3 表结构直接映射，测试断言已在各任务给出。
