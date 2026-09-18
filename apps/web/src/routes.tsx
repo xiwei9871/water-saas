@@ -10,6 +10,10 @@ import {
 } from '@ant-design/icons';
 import type { ReactNode } from 'react';
 import Workbench from './pages/Workbench';
+import BillingRuns from './pages/billing/BillingRuns';
+import Bills from './pages/billing/Bills';
+import FeeItems from './pages/billing/FeeItems';
+import Tariffs from './pages/billing/Tariffs';
 import Customers from './pages/customer/Customers';
 import Meters from './pages/customer/Meters';
 import Onboard from './pages/customer/Onboard';
@@ -18,6 +22,10 @@ import WaterAccounts from './pages/customer/WaterAccounts';
 import MeterReadings from './pages/metering/MeterReadings';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
+import Cashier from './pages/payment/Cashier';
+import DayClose from './pages/payment/DayClose';
+import Payments from './pages/payment/Payments';
+import Reports from './pages/report/Reports';
 import Reconciliations from './pages/settlement/Reconciliations';
 import Settlements from './pages/settlement/Settlements';
 import AuditLogs from './pages/system/AuditLogs';
@@ -153,6 +161,32 @@ export const APP_ROUTES: AppRoute[] = [
     label: '计费管理',
     icon: <GoldOutlined />,
     perms: ['billing:read'],
+    children: [
+      {
+        key: 'billing-tariffs',
+        path: '/billing/tariffs',
+        label: '资费计划',
+        element: <Tariffs />,
+      },
+      {
+        key: 'billing-fee-items',
+        path: '/billing/fee-items',
+        label: '费用项',
+        element: <FeeItems />,
+      },
+      {
+        key: 'billing-runs',
+        path: '/billing/runs',
+        label: '开账批次',
+        element: <BillingRuns />,
+      },
+      {
+        key: 'billing-bills',
+        path: '/billing/bills',
+        label: '账单',
+        element: <Bills />,
+      },
+    ],
   },
   {
     key: 'payment',
@@ -160,6 +194,27 @@ export const APP_ROUTES: AppRoute[] = [
     label: '收费管理',
     icon: <PayCircleOutlined />,
     perms: ['payment:read'],
+    children: [
+      // 收费台以 payment:write 为主（查欠费只读可看，收款动作再按写权限隐藏）。
+      {
+        key: 'payment-counter',
+        path: '/payment/counter',
+        label: '收费台',
+        element: <Cashier />,
+      },
+      {
+        key: 'payment-payments',
+        path: '/payment/payments',
+        label: '收款记录',
+        element: <Payments />,
+      },
+      {
+        key: 'payment-day-close',
+        path: '/payment/day-close',
+        label: '收费员日结',
+        element: <DayClose />,
+      },
+    ],
   },
   {
     key: 'report',
@@ -167,6 +222,39 @@ export const APP_ROUTES: AppRoute[] = [
     label: '报表',
     icon: <FileTextOutlined />,
     perms: ['report:read'],
+    children: [
+      // 同一组件按 kind 渲染；key 强制重挂载，路由切换不复用旧查询态。
+      {
+        key: 'report-meter-daily',
+        path: '/report/meter-daily',
+        label: '抄表日报',
+        element: <Reports key="meter-daily" kind="meter-daily" />,
+      },
+      {
+        key: 'report-cashier-daily',
+        path: '/report/cashier-daily',
+        label: '收费日报',
+        element: <Reports key="cashier-daily" kind="cashier-daily" />,
+      },
+      {
+        key: 'report-ar-monthly',
+        path: '/report/ar-monthly',
+        label: '应收月报',
+        element: <Reports key="ar-monthly" kind="ar-monthly" />,
+      },
+      {
+        key: 'report-collected-monthly',
+        path: '/report/collected-monthly',
+        label: '实收月报',
+        element: <Reports key="collected-monthly" kind="collected-monthly" />,
+      },
+      {
+        key: 'report-recovery-rate',
+        path: '/report/recovery-rate',
+        label: '回收率',
+        element: <Reports key="recovery-rate" kind="recovery-rate" />,
+      },
+    ],
   },
   {
     key: 'system',

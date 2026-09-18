@@ -1,14 +1,22 @@
 import type {
   AccountStatus,
+  BillItemType,
+  BillKind,
+  BillSourceType,
+  BillStatus,
+  CalcType,
   ComponentSourceType,
   CustType,
   DataScope,
+  DayCloseStatus,
   EstimateMethod,
   ExceptionCode,
   InstallReason,
   InstallationStatus,
   MeterStatus,
   OrgType,
+  PayChannel,
+  PaymentStatus,
   PermType,
   PlanItemStatus,
   PlanStatus,
@@ -16,22 +24,33 @@ import type {
   ReadResultType,
   ReadSource,
   ReconStatus,
+  RunStatus,
+  RunType,
   SettlementStatus,
   StaffStatus,
+  TariffStatus,
 } from '@ws/types';
 
 /** Re-exported shared enums so pages can import everything from here. */
 export type {
   AccountStatus,
+  BillItemType,
+  BillKind,
+  BillSourceType,
+  BillStatus,
+  CalcType,
   ComponentSourceType,
   CustType,
   DataScope,
+  DayCloseStatus,
   EstimateMethod,
   ExceptionCode,
   InstallReason,
   InstallationStatus,
   MeterStatus,
   OrgType,
+  PayChannel,
+  PaymentStatus,
   PermType,
   PlanItemStatus,
   PlanStatus,
@@ -39,8 +58,11 @@ export type {
   ReadResultType,
   ReadSource,
   ReconStatus,
+  RunStatus,
+  RunType,
   SettlementStatus,
   StaffStatus,
+  TariffStatus,
 } from '@ws/types';
 
 /**
@@ -476,4 +498,308 @@ export interface Reconciliation {
 /** POST /reconciliations — row + the adjustment bill it minted (if any). */
 export interface ReconciliationCreated extends Reconciliation {
   adjustmentBill: { id: string; totalAmount: string; status: string } | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* billing domain — tariff / fee item / billing run / bill (spec §2.5)   */
+/* ------------------------------------------------------------------ */
+
+/** GET /fee-items — priced line kinds; code/calcType are write-once. */
+export interface FeeItem {
+  id: string;
+  tenantId: string;
+  code: string;
+  name: string;
+  calcType: CalcType;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /tariff-plans — the versioned price-book header. */
+export interface TariffPlan {
+  id: string;
+  tenantId: string;
+  code: string;
+  name: string;
+  usageCategory: string;
+  /** DATE columns — ISO strings. */
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  status: TariffStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** tariff_tier row inside GET /tariff-plans/:id — decimals as strings. */
+export interface TariffTier {
+  id: string;
+  tenantId: string;
+  tariffPlanId: string;
+  feeItemId: string;
+  tierNo: number;
+  /** Decimal(18,4) — string on the wire. */
+  fromQty: string;
+  /** null = open-ended (∞) — only legal on the last tier. */
+  toQty: string | null;
+  /** Decimal(18,6) — string on the wire. */
+  unitPrice: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /tariff-plans/:id — plan + tiers (feeItemId, tierNo ordered). */
+export interface TariffPlanDetail extends TariffPlan {
+  tiers: TariffTier[];
+}
+
+/** One unresolved failure inside billing_run.failed_settlement_ids (jsonb). */
+export interface RunFailure {
+  settlementId: string;
+  /** Present on post-stage records — the DRAFT bill that failed to flip. */
+  billId?: string;
+  stage: 'generate' | 'post';
+  code: string;
+  message?: string;
+}
+
+/** GET /billing-runs — a period batch row. */
+export interface BillingRun {
+  id: string;
+  tenantId: string;
+  /** char(6) YYYYMM. */
+  period: string;
+  runType: RunType;
+  status: RunStatus;
+  postedAt: string | null;
+  totalCount: number;
+  successCount: number;
+  failedCount: number;
+  failedSettlementIds: RunFailure[] | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /billing-runs/:id — run + its bills (created order). */
+export interface BillingRunDetail extends BillingRun {
+  bills: Bill[];
+}
+
+/** GET /bills — the issued debt row; totalAmount is bigint cents (string). */
+export interface Bill {
+  id: string;
+  tenantId: string;
+  billingRunId: string | null;
+  settleAccountId: string;
+  waterAccountId: string;
+  period: string;
+  billKind: BillKind;
+  sourceType: BillSourceType;
+  sourceId: string;
+  tariffPlanId: string | null;
+  status: BillStatus;
+  isEstimated: boolean;
+  /** BigInt cents — string on the wire (negative on REVERSAL). */
+  totalAmount: string;
+  issuedAt: string | null;
+  dueDate: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** bill_item — qty/unitPrice are decimals, amount is bigint cents. */
+export interface BillItem {
+  id: string;
+  tenantId: string;
+  billId: string;
+  feeItemId: string | null;
+  itemType: BillItemType;
+  description: string | null;
+  /** Decimal(18,4) — string; negated on reversal mirror rows. */
+  qty: string | null;
+  /** Decimal(18,6) — string. */
+  unitPrice: string | null;
+  /** BigInt cents — string on the wire. */
+  amount: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /bills/:id — bill + items inline. */
+export interface BillDetail extends Bill {
+  items: BillItem[];
+}
+
+/* ------------------------------------------------------------------ */
+/* payment domain — payment / alloc / receipt / day close (spec §2.6)    */
+/* ------------------------------------------------------------------ */
+
+/** GET /payments — amount is bigint cents (negative on reversal rows). */
+export interface Payment {
+  id: string;
+  tenantId: string;
+  paymentNo: string;
+  settleAccountId: string;
+  cashierId: string;
+  orgUnitId: string;
+  channel: PayChannel;
+  amount: string;
+  status: PaymentStatus;
+  receivedAt: string;
+  /** non-null marks this row as the appended reversal of that payment. */
+  reversalOfId: string | null;
+  dayCloseId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** payment_alloc — per-bill write-off line (bigint cents string). */
+export interface PaymentAlloc {
+  id: string;
+  tenantId: string;
+  paymentId: string;
+  billId: string;
+  amount: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** receipt — issued with every non-reversal payment; voided on reversal. */
+export interface Receipt {
+  id: string;
+  tenantId: string;
+  paymentId: string;
+  receiptNo: string;
+  rcpType: string;
+  printedAt: string | null;
+  voidFlag: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /payments/:id — payment + allocs + receipt (null on reversals). */
+export interface PaymentDetail extends Payment {
+  allocs: PaymentAlloc[];
+  receipt: Receipt | null;
+}
+
+/** One payable line inside GET /water-accounts/:id/outstanding. */
+export interface OutstandingItem {
+  billId: string;
+  period: string;
+  billKind: BillKind;
+  totalAmount: string;
+  paidAmount: string;
+  outstanding: string;
+}
+
+/**
+ * The cashier's open-debt probe — items are the payable lines
+ * (outstanding > 0); totalOutstanding is the settle account's NET
+ * position (Σ over every live line minus reversed-bill credit).
+ */
+export interface AccountOutstanding {
+  waterAccountId: string;
+  settleAccountId: string;
+  items: OutstandingItem[];
+  /** Money applied to since-REVERSED bills — owed back to the customer. */
+  reversedBillCredit: string;
+  totalOutstanding: string;
+}
+
+/** byChannel jsonb bucket on a cashier_day_close row (amounts strings). */
+export interface ChannelBucket {
+  count: number;
+  amount: string;
+}
+
+/** GET /cashier-day-close — the signed daily summary document. */
+export interface CashierDayClose {
+  id: string;
+  tenantId: string;
+  cashierId: string;
+  orgUnitId: string;
+  /** DATE column — ISO string (YYYY-MM-DD). */
+  closeDate: string;
+  totalCount: number;
+  /** BigInt cents — string on the wire. */
+  totalAmount: string;
+  byChannel: Partial<Record<PayChannel, ChannelBucket>>;
+  status: DayCloseStatus;
+  closedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Payment member row inside GET /cashier-day-close/:id. */
+export interface DayClosePayment {
+  id: string;
+  paymentNo: string;
+  channel: PayChannel;
+  amount: string;
+  status: PaymentStatus;
+  receivedAt: string;
+  reversalOfId: string | null;
+  dayCloseId: string | null;
+}
+
+/** GET /cashier-day-close/:id — the close + the payments it swept. */
+export interface CashierDayCloseDetail extends CashierDayClose {
+  payments: DayClosePayment[];
+}
+
+/* ------------------------------------------------------------------ */
+/* report domain — read-only projections (spec §4)                       */
+/* ------------------------------------------------------------------ */
+
+/** GET /reports/meter-daily — one row per reading book. */
+export interface MeterDailyRow {
+  bookId: string;
+  bookNo: string;
+  name: string;
+  orgUnitId: string;
+  /** Number of the book's plans in the date's period. */
+  plans: number;
+  total: number;
+  read: number;
+  noRead: number;
+  pending: number;
+  skipped: number;
+  /** meter_reading rows with read_date = date attributed to the book. */
+  readingsTaken: number;
+}
+
+/** GET /reports/cashier-daily — one row per cashier with collections. */
+export interface CashierDailyRow {
+  cashierId: string;
+  name: string | null;
+  byChannel: Partial<Record<PayChannel, ChannelBucket>>;
+  total: ChannelBucket;
+  /** A POSTED cashier_day_close exists for (cashier, close_date=date). */
+  closed: boolean;
+}
+
+/** GET /reports/ar-monthly — billed cents by usage category. */
+export interface ArMonthlyReport {
+  period: string;
+  /** BigInt cents — string on the wire. */
+  billed: string;
+  byCategory: Record<string, ChannelBucket>;
+}
+
+/** GET /reports/collected-monthly — collected cents by channel. */
+export interface CollectedMonthlyReport {
+  period: string;
+  collected: string;
+  byChannel: Partial<Record<PayChannel, ChannelBucket>>;
+  /** alloc-side Σ for the same month — ≡ collected by construction. */
+  allocated: string;
+}
+
+/** GET /reports/recovery-rate — rate is a 4-decimal string (null when billed=0). */
+export interface RecoveryRateReport {
+  period: string;
+  through: string | null;
+  billed: string;
+  collected: string;
+  rate: string | null;
 }
