@@ -262,6 +262,9 @@ model OrgUnit {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String?  @map("updated_by") @db.Uuid
 
+  staff Staff[]
+
+  @@unique([tenantId, id])
   @@index([tenantId, parentId])
   @@map("org_unit")
 }
@@ -279,7 +282,10 @@ model Staff {
   updatedAt    DateTime    @updatedAt @map("updated_at")
   updatedBy    String?     @map("updated_by") @db.Uuid
 
+  orgUnit OrgUnit @relation(fields: [tenantId, orgUnitId], references: [tenantId, id], onDelete: Restrict)
+
   @@unique([tenantId, login])
+  @@unique([tenantId, id])
   @@index([tenantId, orgUnitId])
   @@map("staff")
 }
@@ -372,6 +378,9 @@ model SysSequence {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String?  @map("updated_by") @db.Uuid
 
+  // NOTE: the physical unique index is created in migration SQL as
+  // `NULLS NOT DISTINCT` (PG15+) so a NULL period can't fork a sequence —
+  // Prisma can't express that flag; keep @@unique so introspection matches.
   @@unique([tenantId, seqKey, period])
   @@map("sys_sequence")
 }
@@ -408,7 +417,10 @@ model Customer {
   updatedAt  DateTime @updatedAt @map("updated_at")
   updatedBy  String?  @map("updated_by") @db.Uuid
 
+  waterAccounts WaterAccount[]
+
   @@unique([tenantId, customerNo])
+  @@unique([tenantId, id])
   @@map("customer")
 }
 
@@ -424,7 +436,11 @@ model SettleAccount {
   updatedAt DateTime      @updatedAt @map("updated_at")
   updatedBy String?       @map("updated_by") @db.Uuid
 
+  waterAccounts WaterAccount[]
+  bills         Bill[]
+
   @@unique([tenantId, settleNo])
+  @@unique([tenantId, id])
   @@map("settle_account")
 }
 
@@ -444,7 +460,14 @@ model WaterAccount {
   updatedAt       DateTime      @updatedAt @map("updated_at")
   updatedBy       String?       @map("updated_by") @db.Uuid
 
+  customer           Customer            @relation(fields: [tenantId, customerId], references: [tenantId, id], onDelete: Restrict)
+  settleAccount      SettleAccount       @relation(fields: [tenantId, settleAccountId], references: [tenantId, id], onDelete: Restrict)
+  readingPlanItems   ReadingPlanItem[]
+  bills              Bill[]
+  meterInstallations MeterInstallation[]
+
   @@unique([tenantId, accountNo])
+  @@unique([tenantId, id])
   @@index([tenantId, customerId])
   @@index([tenantId, settleAccountId])
   @@index([tenantId, usageCategory])
@@ -468,7 +491,11 @@ model Meter {
   updatedAt     DateTime    @updatedAt @map("updated_at")
   updatedBy     String?     @map("updated_by") @db.Uuid
 
+  installations MeterInstallation[]
+
   @@unique([tenantId, meterNo])
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
   @@map("meter")
 }
 
@@ -488,6 +515,12 @@ model MeterInstallation {
   updatedAt      DateTime           @updatedAt @map("updated_at")
   updatedBy      String?            @map("updated_by") @db.Uuid
 
+  meter        Meter                  @relation(fields: [tenantId, meterId], references: [tenantId, id], onDelete: Restrict)
+  waterAccount WaterAccount           @relation(fields: [tenantId, waterAccountId], references: [tenantId, id], onDelete: Restrict)
+  components   ConsumptionComponent[]
+  readings     MeterReading[]
+
+  @@unique([tenantId, id])
   @@index([tenantId, waterAccountId, status])
   @@index([tenantId, meterId])
   @@map("meter_installation")
@@ -542,6 +575,7 @@ model BookMeter {
 
   @@id([bookId, waterAccountId])
   @@index([tenantId, bookId])
+  @@index([tenantId, waterAccountId])
   @@map("book_meter")
 }
 
@@ -558,6 +592,9 @@ model ReadingPlan {
   updatedAt DateTime   @updatedAt @map("updated_at")
   updatedBy String?    @map("updated_by") @db.Uuid
 
+  items ReadingPlanItem[]
+
+  @@unique([tenantId, id])
   @@index([tenantId, period])
   @@index([tenantId, bookId, period])
   @@map("reading_plan")
@@ -577,8 +614,13 @@ model ReadingPlanItem {
   updatedAt             DateTime       @updatedAt @map("updated_at")
   updatedBy             String?        @map("updated_by") @db.Uuid
 
+  plan         ReadingPlan    @relation(fields: [tenantId, planId], references: [tenantId, id], onDelete: Restrict)
+  waterAccount WaterAccount   @relation(fields: [tenantId, waterAccountId], references: [tenantId, id], onDelete: Restrict)
+  readings     MeterReading[]
+
   @@unique([planId, waterAccountId])
   @@unique([planId, seqNo])
+  @@unique([tenantId, id])
   @@index([tenantId, status])
   @@index([tenantId, waterAccountId])
   @@map("reading_plan_item")
@@ -608,6 +650,9 @@ model MeterReading {
   updatedAt           DateTime       @updatedAt @map("updated_at")
   updatedBy           String?        @map("updated_by") @db.Uuid
 
+  planItem     ReadingPlanItem?  @relation(fields: [tenantId, planItemId], references: [tenantId, id], onDelete: Restrict)
+  installation MeterInstallation @relation(fields: [tenantId, installationId], references: [tenantId, id], onDelete: Restrict)
+
   @@index([tenantId, period])
   @@index([tenantId, installationId, period])
   @@index([tenantId, planItemId])
@@ -631,7 +676,10 @@ model ConsumptionSettlement {
   updatedAt      DateTime         @updatedAt @map("updated_at")
   updatedBy      String?          @map("updated_by") @db.Uuid
 
+  components ConsumptionComponent[]
+
   @@unique([tenantId, waterAccountId, period])
+  @@unique([tenantId, id])
   @@index([tenantId, period, status])
   @@map("consumption_settlement")
 }
@@ -650,6 +698,9 @@ model ConsumptionComponent {
   createdBy        String?             @map("created_by") @db.Uuid
   updatedAt        DateTime            @updatedAt @map("updated_at")
   updatedBy        String?             @map("updated_by") @db.Uuid
+
+  settlement   ConsumptionSettlement @relation(fields: [tenantId, settlementId], references: [tenantId, id], onDelete: Restrict)
+  installation MeterInstallation     @relation(fields: [tenantId, installationId], references: [tenantId, id], onDelete: Restrict)
 
   @@index([tenantId, settlementId])
   @@map("consumption_component")
@@ -728,7 +779,10 @@ model TariffPlan {
   updatedAt     DateTime     @updatedAt @map("updated_at")
   updatedBy     String?      @map("updated_by") @db.Uuid
 
+  bills Bill[]
+
   @@unique([tenantId, code, effectiveFrom])
+  @@unique([tenantId, id])
   @@index([tenantId, usageCategory, status])
   @@map("tariff_plan")
 }
@@ -793,7 +847,14 @@ model Bill {
   updatedAt       DateTime       @updatedAt @map("updated_at")
   updatedBy       String?        @map("updated_by") @db.Uuid
 
+  tariffPlan    TariffPlan?    @relation(fields: [tenantId, tariffPlanId], references: [tenantId, id], onDelete: Restrict)
+  waterAccount  WaterAccount   @relation(fields: [tenantId, waterAccountId], references: [tenantId, id], onDelete: Restrict)
+  settleAccount SettleAccount  @relation(fields: [tenantId, settleAccountId], references: [tenantId, id], onDelete: Restrict)
+  allocs        PaymentAlloc[]
+  items         BillItem[]
+
   @@unique([tenantId, sourceType, sourceId, billKind])
+  @@unique([tenantId, id])
   @@index([tenantId, waterAccountId, period])
   @@index([tenantId, settleAccountId, status])
   @@index([tenantId, billingRunId])
@@ -814,6 +875,8 @@ model BillItem {
   createdBy   String?      @map("created_by") @db.Uuid
   updatedAt   DateTime     @updatedAt @map("updated_at")
   updatedBy   String?      @map("updated_by") @db.Uuid
+
+  bill Bill @relation(fields: [tenantId, billId], references: [tenantId, id], onDelete: Restrict)
 
   @@index([tenantId, billId])
   @@map("bill_item")
@@ -859,7 +922,10 @@ model Payment {
   updatedAt       DateTime      @updatedAt @map("updated_at")
   updatedBy       String?       @map("updated_by") @db.Uuid
 
+  allocs PaymentAlloc[]
+
   @@unique([tenantId, paymentNo])
+  @@unique([tenantId, id])
   @@index([tenantId, settleAccountId, status])
   @@index([tenantId, cashierId, status])
   @@map("payment")
@@ -875,6 +941,9 @@ model PaymentAlloc {
   createdBy String?  @map("created_by") @db.Uuid
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String?  @map("updated_by") @db.Uuid
+
+  payment Payment @relation(fields: [tenantId, paymentId], references: [tenantId, id], onDelete: Restrict)
+  bill    Bill    @relation(fields: [tenantId, billId], references: [tenantId, id], onDelete: Restrict)
 
   @@index([tenantId, paymentId])
   @@index([tenantId, billId])

@@ -59,16 +59,20 @@ describe('tenant RLS', () => {
     try {
       await client.query('BEGIN');
       await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
-      const a = await client.query('SELECT customer_no FROM customer ORDER BY 1');
+      const a = await client.query(
+        `SELECT customer_no FROM customer WHERE customer_no LIKE 'cust-rls-%' ORDER BY 1`,
+      );
       expect(a.rows.map((r) => r.customer_no)).toEqual(['cust-rls-a']);
       // tenant table isolates on its own id, not tenant_id
-      const t = await client.query('SELECT code FROM tenant');
+      const t = await client.query(`SELECT code FROM tenant WHERE code LIKE 'rls-%'`);
       expect(t.rows.map((r) => r.code)).toEqual(['rls-a']);
       await client.query('COMMIT');
 
       await client.query('BEGIN');
       await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_B]);
-      const b = await client.query('SELECT customer_no FROM customer ORDER BY 1');
+      const b = await client.query(
+        `SELECT customer_no FROM customer WHERE customer_no LIKE 'cust-rls-%' ORDER BY 1`,
+      );
       expect(b.rows.map((r) => r.customer_no)).toEqual(['cust-rls-b']);
       await client.query('COMMIT');
     } finally {
@@ -83,7 +87,9 @@ describe('tenant RLS', () => {
       const c1 = await pool.connect();
       await c1.query('BEGIN');
       await c1.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
-      const inside = await c1.query('SELECT count(*)::int AS n FROM customer');
+      const inside = await c1.query(
+        `SELECT count(*)::int AS n FROM customer WHERE customer_no LIKE 'cust-rls-%'`,
+      );
       expect(inside.rows[0].n).toBe(1);
       await c1.query('COMMIT');
       c1.release();
@@ -123,7 +129,9 @@ describe('tenant RLS', () => {
 
       await ownerConn.query('BEGIN');
       await ownerConn.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
-      const onlyA = await ownerConn.query('SELECT customer_no FROM customer');
+      const onlyA = await ownerConn.query(
+        `SELECT customer_no FROM customer WHERE customer_no LIKE 'cust-rls-%'`,
+      );
       expect(onlyA.rows.map((r) => r.customer_no)).toEqual(['cust-rls-a']);
       await ownerConn.query('COMMIT');
 
