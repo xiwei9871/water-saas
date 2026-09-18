@@ -5,8 +5,10 @@ import {
   Get,
   Param,
   Put,
+  Req,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import type { Request } from 'express';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -43,13 +45,21 @@ export class TenantParamsController {
   /** PUT /iam/tenant-params/:key {value} — upsert a JSON value. */
   @Put(':key')
   @Permissions('iam:write')
-  put(@Param('key') key: string, @Body() body: { value?: Prisma.InputJsonValue }) {
+  put(
+    @Param('key') key: string,
+    @Body() body: { value?: Prisma.InputJsonValue },
+    @Req() req: Request,
+  ) {
     if (body === null || body === undefined || !('value' in body)) {
       throw new BadRequestException({ code: 'PARAM_VALUE_REQUIRED' });
     }
     const ctx = currentTenant();
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.tenantParam.upsert({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // Snapshot for audit_log.before (NULL when the key is new).
+      req.auditBefore = await tx.tenantParam.findUnique({
+        where: { tenantId_key: { tenantId: ctx.tenantId, key } },
+      });
+      return tx.tenantParam.upsert({
         where: { tenantId_key: { tenantId: ctx.tenantId, key } },
         create: {
           tenantId: ctx.tenantId,
@@ -59,7 +69,7 @@ export class TenantParamsController {
           updatedBy: ctx.staffId,
         },
         update: { value: body.value as Prisma.InputJsonValue, updatedBy: ctx.staffId },
-      }),
-    );
+      });
+    });
   }
 }

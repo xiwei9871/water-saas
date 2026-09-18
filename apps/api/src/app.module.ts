@@ -5,19 +5,16 @@ import { AppService } from './app.service.js';
 import { AuditInterceptor } from './common/audit.interceptor.js';
 import { JwtAuthGuard } from './common/auth.guard.js';
 import { BigIntInterceptor } from './common/bigint.interceptor.js';
-import { IdempotencyService } from './common/idempotency.service.js';
+import { CommonModule } from './common/common.module.js';
 import { PermissionsGuard } from './common/permissions.guard.js';
 import { TenantInterceptor } from './common/tenant.interceptor.js';
-import { TenantPrismaService } from './common/tenant-prisma.js';
 import { IamModule } from './modules/iam/iam.module.js';
 
 @Module({
-  imports: [IamModule],
+  imports: [CommonModule, IamModule],
   controllers: [AppController],
   providers: [
     AppService,
-    TenantPrismaService,
-    IdempotencyService,
     // Guard order: authenticate (JWT → req.user) then authorize (@Permissions).
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
@@ -27,6 +24,5 @@ import { IamModule } from './modules/iam/iam.module.js';
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
     { provide: APP_INTERCEPTOR, useClass: BigIntInterceptor },
   ],
-  exports: [TenantPrismaService, IdempotencyService],
 })
 export class AppModule {}

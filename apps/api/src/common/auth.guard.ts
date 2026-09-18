@@ -9,6 +9,8 @@ export interface JwtUser {
   /** staff id */
   sub: string;
   tenantId: string;
+  /** widest role data_scope — distinguishes ALL from a subtree covering everything */
+  scope: 'ALL' | 'ORG_SUBTREE' | 'SELF';
   /** org_unit ids the staff may see (ALL scope = every org id in the tenant) */
   orgScope: string[];
   /** permission codes; '*' = admin, allow everything */
@@ -19,6 +21,11 @@ export interface JwtUser {
 declare module 'express' {
   interface Request {
     user?: JwtUser;
+    /**
+     * Pre-mutation row snapshot set by controllers that already loaded the
+     * existing entity — AuditInterceptor writes it to audit_log.before.
+     */
+    auditBefore?: unknown;
   }
 }
 

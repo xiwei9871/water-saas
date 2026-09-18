@@ -1,15 +1,24 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
+  Delete,
   Get,
+  Headers,
   NotFoundException,
   Param,
   Patch,
   Post,
   Put,
+  Req,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { createHash } from 'node:crypto';
+import type { Request } from 'express';
+import { IdempotencyService } from '../../common/idempotency.service.js';
 import { Permissions } from '../../common/permissions.decorator.js';
+import { conflictOnUnique } from '../../common/prisma-errors.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
@@ -20,7 +29,10 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
  */
 @Controller('iam/roles')
 export class RolesController {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly idem: IdempotencyService,
+  ) {}
 
   @Get()
   @Permissions('iam:read')
@@ -46,25 +58,45 @@ export class RolesController {
     });
   }
 
+  /**
+   * POST /iam/roles — create a role. Honors Idempotency-Key like staff POST;
+   * field validation lives inside the keyed fn so an in-flight replay check
+   * always precedes input validation.
+   */
   @Post()
   @Permissions('iam:write')
-  create(@Body() body: { code?: string; name?: string; dataScope?: 'ALL' | 'ORG_SUBTREE' | 'SELF' }) {
-    if (!body?.code || !body?.name || !body?.dataScope) {
-      throw new BadRequestException({ code: 'ROLE_FIELDS_REQUIRED' });
-    }
+  async create(
+    @Body() body: { code?: string; name?: string; dataScope?: 'ALL' | 'ORG_SUBTREE' | 'SELF' },
+    @Headers('idempotency-key') key?: string,
+  ) {
     const ctx = currentTenant();
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.role.create({
-        data: {
-          tenantId: ctx.tenantId,
-          code: body.code!,
-          name: body.name!,
-          dataScope: body.dataScope!,
-          createdBy: ctx.staffId,
-          updatedBy: ctx.staffId,
-        },
-      }),
+    const doCreate = (tx: Prisma.TransactionClient) => {
+      if (!body?.code || !body?.name || !body?.dataScope) {
+        throw new BadRequestException({ code: 'ROLE_FIELDS_REQUIRED' });
+      }
+      return conflictOnUnique(
+        tx.role.create({
+          data: {
+            tenantId: ctx.tenantId,
+            code: body.code!,
+            name: body.name!,
+            dataScope: body.dataScope!,
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+        }),
+      );
+    };
+    if (!key) {
+      return this.prisma.runAsTenant(ctx.tenantId, doCreate);
+    }
+    const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+    const result = await this.idem.runWithKey(
+      ctx.tenantId,
+      { key, method: 'POST', route: '/iam/roles', requestHash, responseStatus: 201 },
+      doCreate,
     );
+    return result.body;
   }
 
   @Patch(':id')
@@ -72,11 +104,13 @@ export class RolesController {
   update(
     @Param('id') id: string,
     @Body() body: { name?: string; dataScope?: 'ALL' | 'ORG_SUBTREE' | 'SELF' },
+    @Req() req: Request,
   ) {
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
+      req.auditBefore = existing;
       return tx.role.update({
         where: { id },
         data: { name: body.name, dataScope: body.dataScope, updatedBy: ctx.staffId },
@@ -84,15 +118,44 @@ export class RolesController {
     });
   }
 
-  /** PUT /iam/roles/:id/permissions {permissionIds: []} — full replace. */
-  @Put(':id/permissions')
+  /**
+   * DELETE /iam/roles/:id — refused while any staff still holds the role;
+   * the role's own permission bindings are removed with it.
+   */
+  @Delete(':id')
   @Permissions('iam:write')
-  setPermissions(@Param('id') id: string, @Body() body: { permissionIds?: string[] }) {
+  remove(@Param('id') id: string, @Req() req: Request) {
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
-      const permIds = body.permissionIds ?? [];
+      const holders = await tx.staffRole.count({
+        where: { tenantId: ctx.tenantId, roleId: id },
+      });
+      if (holders > 0) {
+        throw new ConflictException({ code: 'ROLE_IN_USE', holders });
+      }
+      req.auditBefore = existing;
+      await tx.rolePermission.deleteMany({
+        where: { tenantId: ctx.tenantId, roleId: id },
+      });
+      return tx.role.delete({ where: { id } });
+    });
+  }
+
+  /** PUT /iam/roles/:id/permissions {permissionIds: []} — full replace. */
+  @Put(':id/permissions')
+  @Permissions('iam:write')
+  setPermissions(
+    @Param('id') id: string,
+    @Body() body: { permissionIds?: string[] },
+    @Req() req: Request,
+  ) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
+      if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
+      const permIds = [...new Set(body.permissionIds ?? [])];
       if (permIds.length) {
         const perms = await tx.permission.findMany({
           where: { tenantId: ctx.tenantId, id: { in: permIds } },
@@ -101,6 +164,7 @@ export class RolesController {
           throw new BadRequestException({ code: 'PERMISSION_NOT_FOUND' });
         }
       }
+      req.auditBefore = existing;
       await tx.rolePermission.deleteMany({ where: { tenantId: ctx.tenantId, roleId: id } });
       for (const permissionId of permIds) {
         await tx.rolePermission.create({
@@ -139,15 +203,17 @@ export class RolesController {
     }
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.permission.create({
-        data: {
-          tenantId: ctx.tenantId,
-          code: body.code!,
-          type: body.type!,
-          createdBy: ctx.staffId,
-          updatedBy: ctx.staffId,
-        },
-      }),
+      conflictOnUnique(
+        tx.permission.create({
+          data: {
+            tenantId: ctx.tenantId,
+            code: body.code!,
+            type: body.type!,
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+        }),
+      ),
     );
   }
 }

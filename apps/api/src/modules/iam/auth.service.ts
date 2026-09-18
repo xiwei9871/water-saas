@@ -12,6 +12,12 @@ import type { JwtUser } from '../../common/auth.guard.js';
 const INVALID_CREDENTIALS = () =>
   new UnauthorizedException({ code: 'INVALID_CREDENTIALS' });
 
+/**
+ * Compared against when the login is unknown — keeps the response timing of
+ * "user not found" indistinguishable from "wrong password".
+ */
+const DUMMY_HASH = bcrypt.hashSync('timing-equalizer', 10);
+
 interface TenantDirRow {
   id: string;
   code: string;
@@ -68,11 +74,12 @@ export class AuthService {
         SELECT id::text AS id FROM org_unit WHERE tenant_id = ${tenantId}::uuid`;
       return rows.map((r) => r.id);
     }
-    // ORG_SUBTREE — staff's own org plus all descendants.
+    // ORG_SUBTREE — staff's own org plus all descendants. UNION (dedupe)
+    // instead of UNION ALL so a cycle in the org tree can never loop forever.
     const rows = await tx.$queryRaw<{ id: string }[]>`
       WITH RECURSIVE sub AS (
         SELECT id FROM org_unit WHERE tenant_id = ${tenantId}::uuid AND id = ${orgUnitId}::uuid
-        UNION ALL
+        UNION
         SELECT o.id FROM org_unit o
         JOIN sub s ON o.parent_id = s.id AND o.tenant_id = ${tenantId}::uuid
       )
@@ -84,6 +91,9 @@ export class AuthService {
   private async loadIdentity(tx: Prisma.TransactionClient, tenantId: string, staffId: string) {
     const staff = await tx.staff.findFirst({ where: { tenantId, id: staffId } });
     if (!staff) throw INVALID_CREDENTIALS();
+    // NOTE (MVP accepted risk): disabling a staff blocks login/refresh/me but
+    // access tokens already issued stay valid until expiry (≤15min). Phase 2:
+    // token version / revocation list for immediate cut-off.
     if (staff.status !== 'ACTIVE') {
       throw new ForbiddenException({ code: 'STAFF_DISABLED' });
     }
@@ -113,18 +123,20 @@ export class AuthService {
 
     const scope = this.widestScope(roles);
     const orgScope = await this.computeOrgScope(tx, tenantId, staff.orgUnitId, scope);
-    return { staff, roles, perms, orgScope };
+    return { staff, roles, perms, orgScope, scope };
   }
 
   private signTokens(identity: {
     staff: { id: string };
     perms: string[];
     orgScope: string[];
+    scope: 'ALL' | 'ORG_SUBTREE' | 'SELF';
     tenantId: string;
   }) {
     const access: JwtUser = {
       sub: identity.staff.id,
       tenantId: identity.tenantId,
+      scope: identity.scope,
       orgScope: identity.orgScope,
       perms: identity.perms,
       type: 'access',
@@ -148,10 +160,12 @@ export class AuthService {
       const staff = await tx.staff.findFirst({
         where: { tenantId, login: body.login },
       });
-      if (!staff) throw INVALID_CREDENTIALS();
-      if (!(await bcrypt.compare(body.password, staff.passwordHash))) {
+      // Always bcrypt.compare — a missing login must cost the same time as a
+      // wrong password (no user-existence timing oracle).
+      if (!(await bcrypt.compare(body.password, staff?.passwordHash ?? DUMMY_HASH))) {
         throw INVALID_CREDENTIALS();
       }
+      if (!staff) throw INVALID_CREDENTIALS();
       if (staff.status !== 'ACTIVE') {
         throw new ForbiddenException({ code: 'STAFF_DISABLED' });
       }
@@ -176,7 +190,12 @@ export class AuthService {
     });
   }
 
-  /** MVP refresh: verify the 7d refresh token, re-issue the token pair. */
+  /**
+   * MVP refresh: verify the 7d refresh token, re-issue the token pair.
+   * Simplified — every call mints a fresh pair; rotation + reuse detection is
+   * phase-2 work. Tenant suspension IS re-checked here so a suspended tenant
+   * cannot self-renew forever.
+   */
   async refresh(refreshToken: string) {
     let payload: { sub: string; tenantId: string; type: string };
     try {
@@ -188,6 +207,11 @@ export class AuthService {
       throw new UnauthorizedException({ code: 'AUTH_TOKEN_INVALID' });
     }
     return this.prisma.runAsTenant(payload.tenantId, async (tx) => {
+      // Inside the tenant's own RLS scope the tenant row is visible.
+      const tenant = await tx.tenant.findUnique({ where: { id: payload.tenantId } });
+      if (!tenant || tenant.status !== 'ACTIVE') {
+        throw new ForbiddenException({ code: 'TENANT_SUSPENDED' });
+      }
       const identity = await this.loadIdentity(tx, payload.tenantId, payload.sub);
       return this.signTokens({ ...identity, tenantId: payload.tenantId });
     });
@@ -196,7 +220,7 @@ export class AuthService {
   /** GET /auth/me — fresh staff + role + perm view for the token holder. */
   async me(user: JwtUser) {
     return this.prisma.runAsTenant(user.tenantId, async (tx) => {
-      const { staff, roles, perms, orgScope } = await this.loadIdentity(
+      const { staff, roles, perms, orgScope, scope } = await this.loadIdentity(
         tx,
         user.tenantId,
         user.sub,
@@ -210,6 +234,7 @@ export class AuthService {
         tenantId: user.tenantId,
         roles: roles.map((r) => ({ code: r.code, name: r.name, dataScope: r.dataScope })),
         perms,
+        scope,
         orgScope,
       };
     });

@@ -37,7 +37,7 @@ const OWNER_URL =
 
 // ---- fixtures (all prefixed t3-) ----
 const T3 = '33333333-3333-4333-8333-333333333333'; // tenant A
-const T3B = '44444444-4444-4444-8444-444444444444'; // tenant B (mismatch check)
+const T3B = '44444444-4444-4444-8444-444444444444'; // tenant B (mismatch + suspend)
 const ORG_CO = '33333333-0000-4000-8000-0000000000c0';
 const ORG_BR = '33333333-0000-4000-8000-0000000000b1';
 const ROLE_ADMIN = '33333333-0000-4000-8000-00000000ad01';
@@ -46,6 +46,10 @@ const PERM_READ = '33333333-0000-4000-8000-00000000e601';
 const STAFF_ADMIN = '33333333-0000-4000-8000-0000000a0001';
 const STAFF_VIEWER = '33333333-0000-4000-8000-0000000b0002';
 const STAFF_DISABLED = '33333333-0000-4000-8000-0000000d0003';
+// tenant B fixtures — used to prove refresh dies when the tenant is suspended
+const ORG_B = '44444444-0000-4000-8000-0000000000c0';
+const ROLE_B_ADMIN = '44444444-0000-4000-8000-00000000ad01';
+const STAFF_B_ADMIN = '44444444-0000-4000-8000-0000000a0001';
 
 /** Spec-local route proving a non-IAM permission code is enforced. */
 @Controller('e2e-customer')
@@ -114,6 +118,28 @@ beforeAll(async () => {
      VALUES ($1, $2, $4, now(), now()), ($1, $3, $5, now(), now()), ($1, $6, $4, now(), now())
      ON CONFLICT DO NOTHING`,
     [T3, STAFF_ADMIN, STAFF_VIEWER, ROLE_ADMIN, ROLE_LIMITED, STAFF_DISABLED],
+  );
+  // tenant B: org + admin role + admin staff (suspension regression fixtures)
+  await owner.query(
+    `INSERT INTO org_unit (id, tenant_id, parent_id, name, type, created_at, updated_at)
+     VALUES ($1, $2, NULL, 'T3B Company', 'COMPANY', now(), now()) ON CONFLICT DO NOTHING`,
+    [ORG_B, T3B],
+  );
+  await owner.query(
+    `INSERT INTO role (id, tenant_id, code, name, data_scope, created_at, updated_at)
+     VALUES ($1, $2, 'admin', 'T3B Admin', 'ALL', now(), now()) ON CONFLICT DO NOTHING`,
+    [ROLE_B_ADMIN, T3B],
+  );
+  await owner.query(
+    `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
+     VALUES ($1, $2, $3, 't3b-admin', $4, 'T3B Admin', 'ACTIVE', now(), now())
+     ON CONFLICT (tenant_id, login) DO NOTHING`,
+    [STAFF_B_ADMIN, T3B, ORG_B, hash],
+  );
+  await owner.query(
+    `INSERT INTO staff_role (tenant_id, staff_id, role_id, created_at, updated_at)
+     VALUES ($1, $2, $3, now(), now()) ON CONFLICT DO NOTHING`,
+    [T3B, STAFF_B_ADMIN, ROLE_B_ADMIN],
   );
 
   const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -201,6 +227,30 @@ describe('auth flow', () => {
       .set('Authorization', `Bearer ${res.body.accessToken}`)
       .expect(200);
   });
+
+  it('refresh dies with 403 TENANT_SUSPENDED once the tenant is suspended', async () => {
+    // self-healing: a previous run may have left T3B suspended
+    await owner.query(`UPDATE tenant SET status = 'ACTIVE' WHERE id = $1`, [T3B]);
+    const login = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ tenantCode: 't3-other', login: 't3b-admin', password: 't3-pass' })
+      .expect(201);
+    const rtB = login.body.refreshToken;
+
+    // sanity: refresh works while ACTIVE
+    await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: rtB })
+      .expect(201);
+
+    // suspend the tenant — the same refresh token must now be refused
+    await owner.query(`UPDATE tenant SET status = 'SUSPENDED' WHERE id = $1`, [T3B]);
+    const res = await request(app.getHttpServer())
+      .post('/auth/refresh')
+      .send({ refreshToken: rtB })
+      .expect(403);
+    expect(res.body).toMatchObject({ code: 'TENANT_SUSPENDED' });
+  });
 });
 
 describe('permissions', () => {
@@ -270,6 +320,22 @@ describe('idempotency', () => {
       [T3],
     );
     expect(dup.rows[0].n).toBe(1);
+  });
+
+  it('same key against a DIFFERENT route → 409 (route is part of the key check)', async () => {
+    // 't3-idem-1' is COMPLETED from the previous test with method=POST,
+    // route=/iam/staff, requestHash=sha256(bodyA). Sending the IDENTICAL body
+    // to a different endpoint must still 409 — the stored route differs.
+    const bodyA = { login: 't3-idem1', name: 'Idem One', password: 'x', orgUnitId: ORG_BR };
+    const res = await request(app.getHttpServer())
+      .post('/iam/roles')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('Idempotency-Key', 't3-idem-1')
+      .send(bodyA)
+      .expect(409);
+    expect(res.body).toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
+    });
   });
 });
 

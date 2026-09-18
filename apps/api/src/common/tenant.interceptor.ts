@@ -40,6 +40,7 @@ export class TenantInterceptor implements NestInterceptor {
     const ctx = {
       tenantId: user.tenantId,
       staffId: user.sub,
+      scope: user.scope ?? 'SELF',
       orgScope: user.orgScope ?? [],
     };
     return defer(() => withTenant(ctx, () => next.handle()));

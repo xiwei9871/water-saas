@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Headers,
   NotFoundException,
@@ -9,13 +10,16 @@ import {
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { createHash } from 'node:crypto';
+import type { Request } from 'express';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { Permissions } from '../../common/permissions.decorator.js';
-import { currentTenant } from '../../common/tenant-context.js';
+import { conflictOnUnique } from '../../common/prisma-errors.js';
+import { currentTenant, orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
 const SAFE_SELECT = {
@@ -37,6 +41,32 @@ interface CreateStaffBody {
   roleIds?: string[];
 }
 
+const outOfScope = () =>
+  new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
+
+/**
+ * Write-path guard: the target staff's org (and any org being assigned) must
+ * be inside the caller's orgScope. ALL-scope callers bypass. This is what
+ * stops an ORG_SUBTREE iam:write holder from reaching into another branch.
+ */
+const assertOrgWritable = (ctx: TenantCtx, orgUnitId: string | null | undefined) => {
+  if (!orgInScope(ctx, orgUnitId)) throw outOfScope();
+};
+
+/**
+ * Privilege-escalation guard: only an admin ('*' perms) may hand out the
+ * 'admin' role — otherwise a limited iam:write user could grant themselves
+ * admin and own every permission after the next login.
+ */
+const assertNoElevation = (
+  roles: { code: string }[],
+  callerPerms: string[] | undefined,
+) => {
+  if (roles.some((r) => r.code === 'admin') && !(callerPerms ?? []).includes('*')) {
+    throw new ForbiddenException({ code: 'ROLE_ELEVATION_DENIED' });
+  }
+};
+
 @Controller('iam/staff')
 export class StaffController {
   constructor(
@@ -49,15 +79,14 @@ export class StaffController {
   @Permissions('iam:read')
   list(@Query('orgUnitId') orgUnitId?: string) {
     const ctx = currentTenant();
-    const orgFilter = orgUnitId ?? undefined;
-    if (orgFilter && !ctx.orgScope.includes(orgFilter)) {
-      return { items: [] };
+    if (orgUnitId && !orgInScope(ctx, orgUnitId)) {
+      return [];
     }
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       tx.staff.findMany({
         where: {
           tenantId: ctx.tenantId,
-          orgUnitId: orgFilter ?? { in: ctx.orgScope },
+          orgUnitId: orgUnitId ?? { in: ctx.orgScope },
         },
         select: SAFE_SELECT,
         orderBy: { login: 'asc' },
@@ -65,37 +94,54 @@ export class StaffController {
     );
   }
 
-  private async createStaffTx(tx: Prisma.TransactionClient, tenantId: string, staffId: string, body: CreateStaffBody) {
+  private async createStaffTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    callerPerms: string[] | undefined,
+    body: CreateStaffBody,
+  ) {
+    assertOrgWritable(ctx, body.orgUnitId);
     const org = await tx.orgUnit.findFirst({
-      where: { tenantId, id: body.orgUnitId! },
+      where: { tenantId: ctx.tenantId, id: body.orgUnitId! },
     });
     if (!org) throw new BadRequestException({ code: 'ORG_UNIT_NOT_FOUND' });
 
-    const roleIds = body.roleIds ?? [];
+    const roleIds = [...new Set(body.roleIds ?? [])];
     if (roleIds.length) {
-      const roles = await tx.role.findMany({ where: { tenantId, id: { in: roleIds } } });
+      const roles = await tx.role.findMany({
+        where: { tenantId: ctx.tenantId, id: { in: roleIds } },
+      });
       if (roles.length !== roleIds.length) {
         throw new BadRequestException({ code: 'ROLE_NOT_FOUND' });
       }
+      assertNoElevation(roles, callerPerms);
     }
 
     const passwordHash = await bcrypt.hash(body.password!, 10);
-    const staff = await tx.staff.create({
-      data: {
-        tenantId,
-        login: body.login!,
-        name: body.name!,
-        passwordHash,
-        orgUnitId: body.orgUnitId!,
-        status: 'ACTIVE',
-        createdBy: staffId,
-        updatedBy: staffId,
-      },
-      select: SAFE_SELECT,
-    });
+    const staff = await conflictOnUnique(
+      tx.staff.create({
+        data: {
+          tenantId: ctx.tenantId,
+          login: body.login!,
+          name: body.name!,
+          passwordHash,
+          orgUnitId: body.orgUnitId!,
+          status: 'ACTIVE',
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        },
+        select: SAFE_SELECT,
+      }),
+    );
     for (const roleId of roleIds) {
       await tx.staffRole.create({
-        data: { tenantId, staffId: staff.id, roleId, createdBy: staffId, updatedBy: staffId },
+        data: {
+          tenantId: ctx.tenantId,
+          staffId: staff.id,
+          roleId,
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        },
       });
     }
     return staff;
@@ -108,15 +154,20 @@ export class StaffController {
    */
   @Post()
   @Permissions('iam:write')
-  async create(@Body() body: CreateStaffBody, @Headers('idempotency-key') key?: string) {
+  async create(
+    @Body() body: CreateStaffBody,
+    @Req() req: Request,
+    @Headers('idempotency-key') key?: string,
+  ) {
     if (!body?.login || !body?.name || !body?.password || !body?.orgUnitId) {
       throw new BadRequestException({ code: 'STAFF_FIELDS_REQUIRED' });
     }
     const ctx = currentTenant();
+    const callerPerms = req.user?.perms;
 
     if (!key) {
       return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-        this.createStaffTx(tx, ctx.tenantId, ctx.staffId, body),
+        this.createStaffTx(tx, ctx, callerPerms, body),
       );
     }
 
@@ -124,7 +175,7 @@ export class StaffController {
     const result = await this.idem.runWithKey(
       ctx.tenantId,
       { key, method: 'POST', route: '/iam/staff', requestHash, responseStatus: 201 },
-      (tx) => this.createStaffTx(tx, ctx.tenantId, ctx.staffId, body),
+      (tx) => this.createStaffTx(tx, ctx, callerPerms, body),
     );
     return result.body;
   }
@@ -141,17 +192,23 @@ export class StaffController {
       status?: 'ACTIVE' | 'DISABLED';
       roleIds?: string[];
     },
+    @Req() req: Request,
   ) {
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.staff.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'STAFF_NOT_FOUND' });
+      // The target staff must live inside the caller's orgScope — no reaching
+      // across branches — and so must any org being assigned.
+      assertOrgWritable(ctx, existing.orgUnitId);
       if (body.orgUnitId) {
+        assertOrgWritable(ctx, body.orgUnitId);
         const org = await tx.orgUnit.findFirst({
           where: { tenantId: ctx.tenantId, id: body.orgUnitId },
         });
         if (!org) throw new BadRequestException({ code: 'ORG_UNIT_NOT_FOUND' });
       }
+      req.auditBefore = existing;
       const staff = await tx.staff.update({
         where: { tenantId_id: { tenantId: ctx.tenantId, id } },
         data: {
@@ -163,16 +220,18 @@ export class StaffController {
         select: SAFE_SELECT,
       });
       if (body.roleIds) {
+        const roleIds = [...new Set(body.roleIds)];
         const roles = await tx.role.findMany({
-          where: { tenantId: ctx.tenantId, id: { in: body.roleIds } },
+          where: { tenantId: ctx.tenantId, id: { in: roleIds } },
         });
-        if (roles.length !== body.roleIds.length) {
+        if (roles.length !== roleIds.length) {
           throw new BadRequestException({ code: 'ROLE_NOT_FOUND' });
         }
+        assertNoElevation(roles, req.user?.perms);
         await tx.staffRole.deleteMany({
           where: { tenantId: ctx.tenantId, staffId: id },
         });
-        for (const roleId of body.roleIds) {
+        for (const roleId of roleIds) {
           await tx.staffRole.create({
             data: {
               tenantId: ctx.tenantId,
@@ -191,7 +250,11 @@ export class StaffController {
   /** POST /iam/staff/:id/password — admin-initiated password reset. */
   @Post(':id/password')
   @Permissions('iam:write')
-  resetPassword(@Param('id') id: string, @Body() body: { password?: string }) {
+  resetPassword(
+    @Param('id') id: string,
+    @Body() body: { password?: string },
+    @Req() req: Request,
+  ) {
     if (!body?.password) {
       throw new BadRequestException({ code: 'PASSWORD_REQUIRED' });
     }
@@ -199,6 +262,8 @@ export class StaffController {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.staff.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'STAFF_NOT_FOUND' });
+      assertOrgWritable(ctx, existing.orgUnitId);
+      req.auditBefore = existing;
       const passwordHash = await bcrypt.hash(body.password!, 10);
       await tx.staff.update({
         where: { tenantId_id: { tenantId: ctx.tenantId, id } },

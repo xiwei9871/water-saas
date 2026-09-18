@@ -1,6 +1,7 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { toJsonSafe } from './json-safe.js';
+import { isUniqueViolation } from './prisma-errors.js';
 import { TenantPrismaService } from './tenant-prisma.js';
 
 export interface IdemMeta {
@@ -24,8 +25,18 @@ export interface IdemResult<T> {
 /** Sentinel: the PROCESSING insert hit a concurrent/finished key holder. */
 class IdemKeyRace extends Error {}
 
-const isUniqueViolation = (err: unknown): boolean =>
-  err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+/**
+ * A stored key may only be replayed for the exact same request shape:
+ * same body hash AND same method AND same route. Reusing a key against a
+ * different endpoint is a 409, not a silent replay of the wrong response.
+ */
+const mismatch = (
+  existing: { requestHash: string; method: string; route: string },
+  meta: IdemMeta,
+): boolean =>
+  existing.requestHash !== meta.requestHash ||
+  existing.method !== meta.method ||
+  existing.route !== meta.route;
 
 /**
  * Idempotency contract (spec: POST-with-key must not double-apply):
@@ -71,11 +82,11 @@ export class IdempotencyService {
     tenantId: string,
     meta: IdemMeta,
   ): Promise<IdemResult<T>> {
-    const { key, requestHash } = meta;
+    const { key } = meta;
     const existing = await tx.idempotencyKey.findUnique({
       where: { tenantId_key: { tenantId, key } },
     });
-    if (existing && existing.requestHash !== requestHash) {
+    if (existing && mismatch(existing, meta)) {
       throw new ConflictException({
         code: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
       });
@@ -102,7 +113,7 @@ export class IdempotencyService {
         where: { tenantId_key: { tenantId, key } },
       });
       if (existing) {
-        if (existing.requestHash !== requestHash) {
+        if (mismatch(existing, meta)) {
           throw new ConflictException({
             code: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
           });

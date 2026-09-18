@@ -1,4 +1,5 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { Observable, tap } from 'rxjs';
 import { toJsonSafe } from './json-safe.js';
@@ -20,12 +21,23 @@ const stripSecrets = (value: unknown): unknown => {
   return value;
 };
 
+/** Resource noun from the route: '/iam/staff/:id/password' → 'staff'. */
+const entityOf = (route: string): string => {
+  const seg = route
+    .split('/')
+    .filter((s) => s && s !== 'iam' && !s.startsWith(':'))[0];
+  return seg ?? route;
+};
+
 /**
  * Append-only audit trail: after a mutating request (POST/PUT/PATCH/DELETE)
- * succeeds, inserts one audit_log row with action=METHOD /route, entity=path
- * tail, entity_id from the result or path params, after=redacted request body
- * (plus result id), and the client IP. Best-effort — audit failures are
- * logged, never thrown into the response.
+ * succeeds, inserts one audit_log row with action=METHOD /route, entity=
+ * resource noun, entity_id from the result or :id param, before=pre-mutation
+ * snapshot (controllers stash the loaded row on `req.auditBefore`; endpoints
+ * without a loaded row — creates — leave before NULL), after=mutated row
+ * (the handler's return value, falling back to the request body when the
+ * handler returns nothing meaningful like {ok:true}), and the client IP.
+ * Best-effort — audit failures are logged, never thrown into the response.
  *
  * NOTE: ws_app has INSERT+SELECT only on audit_log (UPDATE/DELETE revoked).
  */
@@ -43,13 +55,26 @@ export class AuditInterceptor implements NestInterceptor {
     return next.handle().pipe(
       tap((result) => {
         const route = (req.route?.path as string | undefined) ?? req.path;
-        const segments = route.split('/').filter((s) => s && !s.startsWith(':'));
-        const entity = segments[segments.length - 1] ?? route;
+        const entity = entityOf(route);
         const resultId =
           result && typeof result === 'object'
             ? ((result as Record<string, unknown>).id as string | undefined)
             : undefined;
         const entityId = resultId ?? (req.params?.id as string | undefined) ?? null;
+
+        // Prefer the mutated row over the raw request body for `after`.
+        const meaningful =
+          result !== undefined &&
+          result !== null &&
+          typeof result === 'object' &&
+          (resultId !== undefined || Object.keys(result as object).length > 1);
+        const before: Prisma.InputJsonValue | typeof Prisma.JsonNull =
+          req.auditBefore == null
+            ? Prisma.JsonNull
+            : (toJsonSafe(stripSecrets(req.auditBefore)) as Prisma.InputJsonValue);
+        const after = toJsonSafe(
+          stripSecrets(meaningful ? result : { body: req.body, resultId }),
+        ) as Prisma.InputJsonValue;
 
         this.prisma
           .runAsTenant(user.tenantId, (tx) =>
@@ -60,7 +85,8 @@ export class AuditInterceptor implements NestInterceptor {
                 action: `${req.method} ${route}`,
                 entity,
                 entityId,
-                after: toJsonSafe(stripSecrets({ body: req.body, resultId }) as never),
+                before,
+                after,
                 ip: req.ip ?? null,
                 createdBy: user.sub,
                 updatedBy: user.sub,
