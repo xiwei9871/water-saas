@@ -175,6 +175,43 @@ export class MeterInstallationService {
         finalReading: body.finalReading.toString(),
       });
     }
+
+    // Fail closed BEFORE any mutation (RC audit I-2): a removal dated into
+    // a period whose settlement is already FINAL — or that already carries
+    // posted debt — would orphan the final_reading delta above the settled
+    // chain-end. That usage can never be billed (the period can't be
+    // re-settled and later periods see no installation). The period key
+    // follows the settlement convention (settlement.service.periodBounds):
+    // YYYYMM of the UTC month containing removedAt. Historical back-fills
+    // need a dedicated correction workflow — out of MVP scope.
+    const removedAt = body.removedAt ?? new Date();
+    const period = `${removedAt.getUTCFullYear()}${String(removedAt.getUTCMonth() + 1).padStart(2, '0')}`;
+    const [finalized, posted] = await Promise.all([
+      tx.consumptionSettlement.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: existing.waterAccountId,
+          period,
+          status: 'FINAL',
+        },
+        select: { id: true },
+      }),
+      tx.bill.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: existing.waterAccountId,
+          period,
+          status: { in: ['POSTED', 'PARTIAL_PAID', 'PAID'] },
+        },
+        select: { id: true },
+      }),
+    ]);
+    if (finalized || posted) {
+      throw new ConflictException({
+        code: 'SETTLEMENT_PERIOD_ALREADY_FINALIZED',
+        period,
+      });
+    }
     req.auditBefore = existing;
 
     // Guarded transition (see installTx): a concurrent remove loses the race
@@ -183,7 +220,7 @@ export class MeterInstallationService {
       where: { tenantId: ctx.tenantId, id, status: 'ACTIVE' },
       data: {
         status: 'REMOVED',
-        removedAt: body.removedAt ?? new Date(),
+        removedAt,
         finalReading: body.finalReading,
         updatedBy: ctx.staffId,
       },

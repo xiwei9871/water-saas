@@ -214,10 +214,19 @@ export class SettlementService {
   async generateTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: SettlementCreateBody) {
     const account = await tx.waterAccount.findFirst({
       where: { tenantId: ctx.tenantId, id: body.waterAccountId },
-      select: { id: true },
+      select: { id: true, status: true },
     });
     if (!account) {
       throw new BadRequestException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    }
+    // RC audit M-1: a CLOSED account must not gain new settlement activity —
+    // otherwise a FINAL settlement + unpostable DRAFT bill is left dangling
+    // (postOneBill's own CLOSED guard can never clean it up).
+    if (account.status === 'CLOSED') {
+      throw new ConflictException({
+        code: 'WATER_ACCOUNT_CLOSED',
+        waterAccountId: account.id,
+      });
     }
 
     // Scope first: a 409-before-403 order would leak whether
@@ -509,6 +518,19 @@ export class SettlementService {
     await this.assertAccountScope(tx, ctx, existing.waterAccountId, existing.period);
     if (existing.status !== 'DRAFT') {
       throw invalidTransition(existing.status, 'FINAL');
+    }
+    // RC audit M-1: a DRAFT orphaned by an account close can never become
+    // FINAL — closing with outstanding=0 is still allowed, but the leftover
+    // DRAFT stays DRAFT forever instead of entering the billing pipeline.
+    const acc = await tx.waterAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: existing.waterAccountId },
+      select: { status: true },
+    });
+    if (acc?.status === 'CLOSED') {
+      throw new ConflictException({
+        code: 'WATER_ACCOUNT_CLOSED',
+        waterAccountId: existing.waterAccountId,
+      });
     }
     req.auditBefore = existing;
     const flipped = await tx.consumptionSettlement.updateMany({

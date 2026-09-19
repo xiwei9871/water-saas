@@ -969,3 +969,93 @@ describe('errors + tenant isolation', () => {
     expect(res.body).toMatchObject({ code: 'WATER_ACCOUNT_NOT_FOUND' });
   });
 });
+
+/**
+ * RC Fix Cycle 1 — I-1 regression.
+ *
+ * anchorBefore/latestTrusted used to order same-read_date candidates by
+ * raw UUID — v4 ids carry no chronology, so ~50% of same-day pairs lost
+ * their anchor forever (ANCHOR_NOT_FOUND). The deterministic fixture
+ * below arranges the WORST case for any id-ordering: the true anchor has
+ * the lexically LARGER uuid and the EARLIER created_at; the actual has
+ * the smaller uuid and the later created_at.
+ */
+describe('RC-fix I-1: same-day readings anchor by chronology, never UUID', () => {
+  /**
+   * Force the adverse arrangement regardless of the uuid draw: the two
+   * readings share one read_date (the meter-reader-enters-a-stack case);
+   * the anchor gets the lexically LARGER uuid + the EARLIER created_at,
+   * the actual the smaller uuid + the later created_at. Anchor/actual
+   * sit in different periods so the span (P1, P2] is non-empty.
+   */
+  const adversePair = async (
+    label: string,
+    a: { inst: string; meter: string },
+    anchorPeriod: string,
+    actualPeriod: string,
+    readDate: string,
+  ) => {
+    const r1 = await seedReading(`${label}-r1`, a.inst, a.meter, '203001', readDate, '0');
+    const r2 = await seedReading(`${label}-r2`, a.inst, a.meter, '203001', readDate, '0');
+    const [anchorId, actualId] = r1 > r2 ? [r1, r2] : [r2, r1];
+    await owner.query(
+      `UPDATE meter_reading SET reading_value = '1000', period = $2,
+         created_at = $3::timestamptz WHERE id = $1`,
+      [anchorId, anchorPeriod, `${readDate}T00:00:00Z`],
+    );
+    await owner.query(
+      `UPDATE meter_reading SET reading_value = '1080', period = $2,
+         created_at = $3::timestamptz WHERE id = $1`,
+      [actualId, actualPeriod, `${readDate}T01:00:00Z`],
+    );
+    return { anchorId, actualId };
+  };
+
+  it('explicit actualReadingId: larger-uuid earlier-created anchor is found → ABSORBED', async () => {
+    await onboard('A14');
+    const { anchorId, actualId } = await adversePair(
+      'A14',
+      { inst: inst['A14'], meter: meter['A14'] },
+      '203001',
+      '203002',
+      '2030-01-10',
+    );
+    const sid = await seedSettlement('A14s', acct['A14'], '203002', 65, 'DRAFT');
+    await seedComponent(sid, inst['A14'], '1000', '1065', '65');
+
+    const res = await post('/reconciliations', {
+      waterAccountId: acct['A14'],
+      actualReadingId: actualId,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      anchorReadingId: anchorId,
+      actualReadingId: actualId,
+      actualTotalUsage: '80', // 1080 − 1000
+      previouslySettledUsage: '0', // DRAFT doesn't count
+      remainderUsage: '80',
+      status: 'ABSORBED',
+    });
+  });
+
+  it('implicit latestTrusted: the later-period smaller-uuid reading is the actual', async () => {
+    await onboard('A15');
+    const { anchorId, actualId } = await adversePair(
+      'A15',
+      { inst: inst['A15'], meter: meter['A15'] },
+      '203003',
+      '203004',
+      '2030-02-10',
+    );
+    const sid = await seedSettlement('A15s', acct['A15'], '203004', 65, 'DRAFT');
+    await seedComponent(sid, inst['A15'], '1000', '1065', '65');
+
+    const res = await post('/reconciliations', { waterAccountId: acct['A15'] });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      anchorReadingId: anchorId,
+      actualReadingId: actualId,
+      status: 'ABSORBED',
+    });
+  });
+});
