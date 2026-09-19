@@ -942,7 +942,14 @@ BEGIN
   END IF;
 END $$;
 
-GRANT CONNECT ON DATABASE watersaas TO ws_app;
+-- Grant CONNECT on whichever database this migration runs against —
+-- never a hard-coded name (RC audit I-3): a literal 'watersaas' fails on
+-- clusters where that database doesn't exist and silently grants the
+-- wrong database where it does.
+DO $$
+BEGIN
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO ws_app', current_database());
+END $$;
 GRANT USAGE ON SCHEMA public TO ws_app;
 GRANT USAGE ON SCHEMA public TO ws_owner;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ws_app;
