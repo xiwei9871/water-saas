@@ -484,6 +484,7 @@ export default function Settlements() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        scroll={{ x: 1100 }}
         pagination={{
           current: page,
           pageSize,

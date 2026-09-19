@@ -14,3 +14,7 @@ coverage/
 # SDD scratch
 .sdd/
 .superpowers/
+
+# Frontend UAT evidence (screenshots, traces, videos, local credentials)
+artifacts/uat/
+.playwright-cli/
