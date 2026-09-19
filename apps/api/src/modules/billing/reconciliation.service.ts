@@ -56,6 +56,7 @@ interface TrustedReading {
   installationId: string;
   period: string;
   readDate: Date;
+  createdAt: Date;
   readingValue: Prisma.Decimal;
 }
 
@@ -69,6 +70,7 @@ const READING_SELECT = {
   installationId: true,
   period: true,
   readDate: true,
+  createdAt: true,
   readingValue: true,
 } satisfies Prisma.MeterReadingSelect;
 
@@ -684,9 +686,9 @@ export class ReconciliationService {
   }
 
   /**
-   * Latest trusted reading of the account (period desc → readDate → id).
-   * take:1 per probe — a superseded top row is skipped and the NEXT
-   * candidate fetched (M7: never load-all-then-pick).
+   * Latest trusted reading of the account (period desc → readDate →
+   * createdAt → id). take:1 per probe — a superseded top row is skipped
+   * and the NEXT candidate fetched (M7: never load-all-then-pick).
    */
   private async latestTrusted(
     tx: Prisma.TransactionClient,
@@ -701,7 +703,12 @@ export class ReconciliationService {
           id: { notIn: skipped },
         },
         select: READING_SELECT,
-        orderBy: [{ period: 'desc' }, { readDate: 'desc' }, { id: 'desc' }],
+        orderBy: [
+          { period: 'desc' },
+          { readDate: 'desc' },
+          { createdAt: 'desc' },
+          { id: 'desc' },
+        ],
       });
       if (!row) return null;
       const valid = await this.dropSuperseded(tx, ctx, [row]);
@@ -728,9 +735,12 @@ export class ReconciliationService {
 
   /**
    * The anchor: the trusted reading immediately before `actual` —
-   * ordered strictly by (readDate, id), restricted to
+   * ordered by real chronology (readDate → createdAt → id), restricted to
    * `period <= actual.period` so a later-period row can never anchor a
    * past actual, while a same-period earlier actual still can.
+   * read_date is day-granular, so intra-day order falls to created_at —
+   * the id tie-break is ONLY a deterministic final comparator and must
+   * never carry time semantics (v4 uuids are random; RC audit I-1).
    * take:1 per probe; a superseded top row is skipped (M7).
    */
   private async anchorBefore(
@@ -748,11 +758,19 @@ export class ReconciliationService {
           period: { lte: actual.period },
           OR: [
             { readDate: { lt: actual.readDate } },
-            { readDate: actual.readDate, id: { lt: actual.id } },
+            {
+              readDate: actual.readDate,
+              createdAt: { lt: actual.createdAt },
+            },
+            {
+              readDate: actual.readDate,
+              createdAt: actual.createdAt,
+              id: { lt: actual.id },
+            },
           ],
         },
         select: READING_SELECT,
-        orderBy: [{ readDate: 'desc' }, { id: 'desc' }],
+        orderBy: [{ readDate: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
       });
       if (!row) return null;
       const valid = await this.dropSuperseded(tx, ctx, [row]);
