@@ -1,19 +1,23 @@
 import { App as AntdApp, ConfigProvider } from 'antd';
-import zhCN from 'antd/locale/zh_CN';
+import zhCN from 'antd/es/locale/zh_CN';
+import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import AdminLayout from './layouts/AdminLayout';
 import Login from './pages/Login';
+import Forbidden from './pages/Forbidden';
 import Placeholder from './pages/Placeholder';
 import { APP_ROUTES, leafRoutes } from './routes';
 import type { AppRoute } from './routes';
+
+dayjs.locale('zh-cn');
 
 /** Direct-URL guard — the menu hides denied entries but routes must too. */
 function PermRoute({ route }: { route: AppRoute }) {
   const { hasPerm } = useAuth();
   if (route.perms && !hasPerm(...route.perms)) {
-    return <Navigate to="/" replace />;
+    return <Forbidden />;
   }
   return <>{route.element ?? <Placeholder title={route.label} />}</>;
 }
@@ -35,7 +39,11 @@ function GroupRedirect({ route }: { route: AppRoute }) {
  */
 export default function App() {
   return (
-    <ConfigProvider locale={zhCN}>
+    <ConfigProvider
+      locale={zhCN}
+      modal={{ closable: { 'aria-label': '关闭' } }}
+      drawer={{ closable: { 'aria-label': '关闭' } }}
+    >
       <AntdApp>
         <AuthProvider>
           <BrowserRouter>

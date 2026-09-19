@@ -89,7 +89,7 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
       await button(planRow, '明细').click();
       let drawer = page.getByRole('dialog');
       await expect(drawer).toContainText('待抄 1'); await expect(drawer).toContainText('共 1');
-      await drawer.getByRole('button', { name: 'Close', exact: true }).click();
+      await drawer.getByRole('button', { name: '关闭', exact: true }).click();
       await button(planRow, '开始').click(); await expect(planRow).toContainText('进行中');
       await page.reload(); await ready(page); await expect(row(page, bookName)).toContainText('进行中');
       const count = await db(p => p.readingPlan.count({ where: { bookId: data.Book.id, period } }));
@@ -127,7 +127,7 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
       const drawer = page.getByRole('dialog');
       await expect(drawer.getByRole('row').filter({ hasText: '实读' })).not.toHaveCount(0);
       expect(data.Settlement.components.some((c: any) => c.sourceType === 'READING')).toBeTruthy();
-      await drawer.getByRole('button', { name: 'Close', exact: true }).click();
+      await drawer.getByRole('button', { name: '关闭', exact: true }).click();
       await button(settlementRow, '终审').click();
       await expect(page.getByText('终审后不可修改；错误终审通过补差处理。')).toBeVisible();
       await button(page.getByRole('tooltip'), '终审').click();
@@ -198,7 +198,7 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
       for (const kind of ['meter-daily', 'cashier-daily', 'ar-monthly', 'collected-monthly', 'recovery-rate']) {
         await test.step(kind, async () => {
           await page.goto('/report/' + kind); await ready(page);
-          if (kind === 'ar-monthly' || kind === 'recovery-rate') await date(main(page).getByPlaceholder('Select month', { exact: true }), month);
+          if (kind === 'ar-monthly' || kind === 'recovery-rate') await date(main(page).getByPlaceholder('请选择月份', { exact: true }), month);
           const result = await response(page, '/reports/' + kind, () => button(main(page), '查询').click(), 'GET');
           data[kind] = result;
           if (kind === 'meter-daily') {

@@ -22,8 +22,9 @@ for (const [role, config] of Object.entries(roles)) {
     await login(page, 'uat-' + role, 'uat12345');
     for (const path of config.denied) {
       await page.goto(path); await ready(page);
-      await expect(page).toHaveURL('http://127.0.0.1:4173/');
-      await expect(page.getByRole('heading', { name: '工作台' })).toBeVisible();
+      await expect(page).toHaveURL('http://127.0.0.1:4173' + path);
+      await expect(page.getByRole('main')).toContainText('无权限访问');
+      await expect(page.getByRole('button', { name: '返回工作台' })).toBeVisible();
     }
     for (const path of config.apis) {
       audit.allow('/api' + path, 403, 'GET');

@@ -1,7 +1,11 @@
 # v0.1.1 Frontend UAT
 
-Run from the repository root on `uat/playwright-v0.1.1` after verifying that
-`v0.1.1-mvp` is an ancestor. Product code must stay unchanged during round one.
+Run from the repository root after verifying that `v0.1.1-mvp` is an ancestor.
+Round one is preserved at `e8781a86181529ea3f4762d67eccb58a578bb5fd` on
+`uat/playwright-v0.1.1`. The UI fix cycle runs on `fix/uat-v0.1.1`: the original
+65 tests remain, with 12 regressions in `uat-fixes.spec.ts`. The original
+permission tests now expect a Chinese Forbidden page; date/drawer selectors
+use the globally configured Chinese labels.
 
 ## Environment
 
@@ -29,7 +33,8 @@ pnpm exec vite preview --host 127.0.0.1 --port 4173 --strictPort
 The application request route is always Chromium → 127.0.0.1:4173 → `/api`
 proxy → :3000. The audit fixture fails on fetch/XHR outside that origin/path.
 No API is mocked. SQL only prepares role accounts, selects a clean period and
-verifies duplicate-document counts. The NO_READ test uses explicitly marked
+verifies duplicate-document counts. The fix regressions also upsert one DRAFT
+tariff for deterministic column-width checks; it never participates in billing. The NO_READ test uses explicitly marked
 browser `/api` calls for its independent prerequisites. All happy path business
 creation and mutations happen through UI controls.
 

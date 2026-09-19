@@ -459,7 +459,7 @@ export default function Tariffs() {
 
   const columns: ColumnsType<TariffPlan> = [
     { title: '编码', dataIndex: 'code', key: 'code', width: 120 },
-    { title: '名称', dataIndex: 'name', key: 'name' },
+    { title: '名称', dataIndex: 'name', key: 'name', width: 200, minWidth: 200 },
     {
       title: '用水类别',
       dataIndex: 'usageCategory',
@@ -470,6 +470,7 @@ export default function Tariffs() {
       title: '生效区间',
       key: 'window',
       width: 200,
+      minWidth: 200,
       render: (_: unknown, r: TariffPlan) =>
         `${fmtDate(r.effectiveFrom)} ~ ${r.effectiveTo ? fmtDate(r.effectiveTo) : '长期'}`,
     },
@@ -487,6 +488,7 @@ export default function Tariffs() {
       dataIndex: 'createdAt',
       key: 'createdAt',
       width: 165,
+      minWidth: 165,
       render: fmtTime,
     },
     {
@@ -726,6 +728,7 @@ export default function Tariffs() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        scroll={{ x: 1400 }}
         pagination={{
           current: page,
           pageSize,

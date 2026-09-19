@@ -132,7 +132,7 @@ export default function AdminLayout() {
             </Button>
           </Space>
         </Header>
-        <Content style={{ margin: 16 }}>
+        <Content className="page-content" style={{ margin: 16 }}>
           <Outlet />
         </Content>
       </Layout>

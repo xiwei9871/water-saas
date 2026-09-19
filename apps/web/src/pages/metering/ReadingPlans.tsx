@@ -687,6 +687,7 @@ export default function ReadingPlans() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        scroll={{ x: 1300 }}
         pagination={{
           current: page,
           pageSize,

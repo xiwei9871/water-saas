@@ -1,5 +1,7 @@
 # v0.1.1 Frontend UAT Report
 
+原始验收结果保留如下；本次修复与复测结果见文末 [UAT Fix Cycle Result](#uat-fix-cycle-result)。
+
 ## Executive Summary
 
 Build: v0.1.1-mvp
@@ -46,10 +48,10 @@ P3: 1
 
 - 完整命令：`pnpm exec playwright test`；仅 Chromium，1 worker，retries=1。
 - 配置：1440×900 主场景，1280×800 / 1024×768 布局；失败保留 screenshot、trace、video。
-- HTML：[artifacts/uat/html-report/index.html](../artifacts/uat/html-report/index.html)
-- 原始结果：[results.json](../artifacts/uat/results.json)、[run log](../artifacts/uat/final-run.log)
-- 每次尝试：[attempt-summary.json](../artifacts/uat/attempt-summary.json)
-- 可检索证据：[evidence-index.json](../artifacts/uat/evidence-index.json)、[network-summary.json](../artifacts/uat/network-summary.json)
+- HTML：[artifacts/uat/fix-before/html-report/index.html](../artifacts/uat/fix-before/html-report/index.html)
+- 原始结果：[results.json](../artifacts/uat/fix-before/results.json)、[run log](../artifacts/uat/fix-before/final-run.log)
+- 每次尝试：[attempt-summary.json](../artifacts/uat/fix-before/attempt-summary.json)
+- 可检索证据：[evidence-index.json](../artifacts/uat/fix-before/evidence-index.json)、[network-summary.json](../artifacts/uat/fix-before/network-summary.json)
 - 脚本说明：[tests/uat/README.md](../tests/uat/README.md)；提取结果：`python3 tests/uat/summarize.py`。
 - 大型证据和本地 JWT 均在已 gitignore 的 `artifacts/uat/`，不提交；本地 HTML 的依赖资源保留完整。
 
@@ -121,7 +123,7 @@ P3: 1
 - Expected: “账单”标题可见；各筛选输入独立排列、文字不重叠。
 - Actual: 标题 DOM 存在但渲染宽度为0，Playwright `toBeVisible` 失败；客户和水表户筛选区域相互压叠。body 宽1440，scrollWidth=1440，故单纯 overflow 检测无法发现。
 - Reproducibility: Always（预跑、正式首次、retry均复现）。
-- Evidence: `artifacts/uat/test-results/navigation-B05-K01-smoke-billing-bills-chromium/` 及 `-retry1/` 下 `test-failed-1.png`、`trace.zip`、`video.webm`、`error-context.md`；补充 `artifacts/uat/bills-1440.png`。
+- Evidence: `artifacts/uat/fix-before/test-results/navigation-B05-K01-smoke-billing-bills-chromium/` 及 `-retry1/` 下 `test-failed-1.png`、`trace.zip`、`video.webm`、`error-context.md`；补充 `artifacts/uat/bills-1440.png`。
 - Business impact: 用户难以确认当前页面，筛选条件辨认/点击容易混淆；开账和收费链本轮仍可完成。
 - Suggested direction: 后续为标题保留宽度，将筛选区域独立换行，检查客户/水表户联动控件最小宽度；本轮未修改。
 
@@ -136,7 +138,7 @@ P3: 1
 - Expected: 标题“结算水量”完整可识别，筛选区不挤占标题。
 - Actual: 标题完全不可见；账期、表头文字出现换行。生成按钮仍可操作，body无横向溢出；1280下标题可见。
 - Reproducibility: Always（开发预跑、正式首次、retry均复现）。
-- Evidence: `artifacts/uat/test-results/responsive-B10-1024-settlement-list-chromium/` 及 `-retry1/` 的失败 screenshot/trace/video；`B10 1024 /settlement/list` 的 `layout-response` 记录1024/1024。
+- Evidence: `artifacts/uat/fix-before/test-results/responsive-B10-1024-settlement-list-chromium/` 及 `-retry1/` 的失败 screenshot/trace/video；`B10 1024 /settlement/list` 的 `layout-response` 记录1024/1024。
 - Business impact: 小屏业务人员缺少页面上下文；操作未被完全阻塞。
 - Suggested direction: 后续将标题与筛选分行，明确支持1024布局；不要只以body overflow作为响应式验收标准。
 
@@ -151,7 +153,7 @@ P3: 1
 - Expected: 名称正常横排或合理省略；必要时表格内部横向滚动。
 - Actual: “名称”表头与“UAT居民单价”逐字/极窄换行，单行记录显著增高；日期也拆行。无body overflow，操作按钮仍显示，因此几何自动断言PASS，人工截图检查发现此问题。
 - Reproducibility: Always（预跑及最终截图复现）。
-- Evidence: HTML 中 `B10 1024 /billing/tariffs` 的 `layout-screenshot`；提取文件 `artifacts/uat/evidence/responsive-B10-1024-billing-tariffs-attempt0-layout-screenshot.png`。
+- Evidence: HTML 中 `B10 1024 /billing/tariffs` 的 `layout-screenshot`；提取文件 `artifacts/uat/fix-before/evidence/responsive-B10-1024-billing-tariffs-attempt0-layout-screenshot.png`。
 - Business impact: 列表扫描效率下降，长列表下难以比较资费；不影响本轮金额计算。
 - Suggested direction: 后续为名称/日期等列设合理最小宽度和表格内部scroll，评估长业务编码下的布局。
 
@@ -258,3 +260,76 @@ SQL fixture不模拟业务 UI，通过页面点击发生的业务请求与响应
 UAT-PASS
 
 依据指定规则：P0=0且P1=0，P2/P3不阻止进入下一阶段。这并不表示没有缺陷或Playwright全绿：2个布局断言失败，另有人工截图/交互发现。建议下一轮修复并回归本报告5个finding；本轮按要求仅提交测试设施、测试代码与报告，禁止修产品bug。
+
+
+## UAT Fix Cycle Result
+
+### Scope and environment
+
+- Branch: `fix/uat-v0.1.1`，从更新后的 main `c096de2` 创建；main 产品树与 `v0.1.1-mvp` 相同，祖先检查成功。
+- Original UAT reference: `e8781a86181529ea3f4762d67eccb58a578bb5fd`。main 尚未包含 UAT 设施，因此本提交带入该提交的测试、清单与原报告。
+- 修复仅涉及 Web 共享布局、三个复杂表格的内部滚动/列宽、全局 locale 和 Forbidden 展示。API、核心计费/收费/补差逻辑、packages、schema 和 migration 均无修改。
+- 仅重建本会话专用 `water_uat_v011`，显式指定两个数据库 URL，重新执行全部7个 migration 和 seed；确认 `cd-water`、`xh-water`。
+- Production: `pnpm build` → `node dist/main` (:3000) + `vite preview` (:4173)。Chromium 153.0.8010.12，Playwright 1.63.0，所有浏览器业务请求经4173 `/api`代理，无 mock。
+
+### Full rerun
+
+执行：`pnpm exec playwright test`。2026-09-19 19:26:52—19:28:58（Asia/Shanghai），126.11秒，retries=1。
+
+| Group | Automated | Passed | Failed | Blocked | Flaky |
+|---|---:|---:|---:|---:|---:|
+| Original UAT tests | 65 | 65 | 0 | 0 | 0 |
+| New regression tests | 12 | 12 | 0 | 0 | 0 |
+| Total | 77 | 77 | 0 | 0 | 0 |
+
+77次首次尝试全部通过，未触发retry。保留原65项及业务金额断言，仅将旧的“无权限返回首页”预期更新为明确Forbidden，原Happy Path的日期/抽屉选择器同步中文。
+
+新增12项：账单1440/1280/1024三个检查；结算与计划1024两个检查；资费1024列宽；四类其它列表共享规则；全局中文控件；cashier/reader/reviewer三个Forbidden检查；未登录跳转登录。布局同时断言完整标题、可见筛选控件矩形不重叠、1024标题与toolbar分行、body不横向溢出。
+
+主链12个步骤全部PASS：Tariff、Onboard、Book、Plan、Reading、QC、Settlement、Billing、Payment、Receipt、Day close、Reports。新客户 `UAT客户-1789817217214`，账期202609；实抄12m³，单价3.00，开账/收款/销账均¥36.00，现金日结¥36.00，回收率100.00%。原测试中的双击防重复及刷新恢复仍通过。
+
+### Findings closure and before / after evidence
+
+| Finding | Result | Before | After |
+|---|---|---|---|
+| UAT-001 | FIXED | 1440账单标题宽0，筛选控件有1处重叠；1280/1024同样复现。 | 1440/1280标题宽32且scrollWidth=32；1024独占标题行；三个宽度重叠数均0，无body overflow。 |
+| UAT-002 | FIXED | 1024结算标题宽0；计划标题可用51px而内容需64px。 | 结算、计划标题均完整；标题bottom=122.14，toolbar top=134.14，分行且间隔12px；表格内部scroll。 |
+| UAT-003 | FIXED | 长资费名称单元格宽43px，文字高193px（行高22px）。 | 同一fixture宽204px，文字高17px，正常单行；名称/生效区间minWidth=200，创建时间minWidth=165；表格内部scroll.x=1400，无body overflow。 |
+| UAT-004 | FIXED | No data、Select date/month、20 / page、Close。 | 全局中文空态“暂无数据”、日期“请选择日期”、月份“请选择月份”、条/页、日历年/月/周、Modal/Drawer“关闭”。dayjs显式zh-cn；使用AntD ESM locale对象避免生产构建CJS包装对象未生效。 |
+| UAT-005 | FIXED | 三角色未授权直链静默跳 `/`。 | 保留请求URL，显示“403 · 无权限访问”和中文原因；刷新保持Forbidden；返回工作台按钮有效。受限组件不发起staff查询；显式越权GET/POST仍403，菜单过滤保持有效；未登录仍去login。 |
+
+| Finding | Before screenshot | After screenshot |
+|---|---|---|
+| UAT-001 | [before](../artifacts/uat/comparison/UAT-001-before.png) | [after](../artifacts/uat/comparison/UAT-001-after.png) |
+| UAT-002 | [before](../artifacts/uat/comparison/UAT-002-before.png) | [after](../artifacts/uat/comparison/UAT-002-after.png) |
+| UAT-003 | [before](../artifacts/uat/comparison/UAT-003-before.png) | [after](../artifacts/uat/comparison/UAT-003-after.png) |
+| UAT-004 | [before](../artifacts/uat/comparison/UAT-004-before.png) | [after](../artifacts/uat/comparison/UAT-004-after.png) |
+| UAT-005 | [before](../artifacts/uat/comparison/UAT-005-before.png) | [after](../artifacts/uat/comparison/UAT-005-after.png) |
+
+共享规则作用于AdminLayout直接子Card，未逐页塞margin。客户列表、水表档案、抄表册、收款记录1024也通过标题/toolbar/overflow回归。原1280×800与1024×768的六页布局、八个Modal检查全部通过；1440主页面Smoke全通过。截图已人工核对账单、结算、资费及Forbidden。日历具体中文文本另存 `locale-calendar-response` / `locale-month-response` 附件。
+
+### Browser / network and validation
+
+| Event | Count | Result |
+|---|---:|---|
+| HTTP_OK | 528 | PASS |
+| EXPECTED_HTTP_ERROR | 13 | 错误密码401×1，明确声明的越权403×12 |
+| console.error | 13 | 均逐条匹配上述预期负面响应 |
+| Unexpected console.error / pageerror | 0 | PASS |
+| HTTP 5xx / unexpected 4xx | 0 | PASS |
+| requestfailed / proxy bypass | 0 | PASS |
+
+`pnpm build`、Web lint、Playwright相关TypeScript noEmit与git diff空白检查均通过。构建保留既有bundle体积提示，本轮未做无关拆包优化。
+
+回归开发记录完整保留：旧生产构建运行新增12项，11 FAIL / 1 PASS（未登录守卫）；修复后首次定向运行11 PASS / 1 FAIL，原因是测试误设中文日历从周日开始、月份写“一月”。依据实际zh-cn格式改为周一开始及“1月…12月”，没有删除中文断言或扩大容差。定向重跑12 PASS，再重建数据库完成以上77项全绿。开发期失败与最终验收的retry/flaky分开记录。
+
+- [最终HTML report](../artifacts/uat/html-report/index.html)、[完整运行log](../artifacts/uat/fix-full-run.log)、[results.json](../artifacts/uat/results.json)
+- [全部attempt](../artifacts/uat/attempt-summary.json)、[证据索引](../artifacts/uat/evidence-index.json)、[网络汇总](../artifacts/uat/network-summary.json)
+- 原始验收：`artifacts/uat/fix-before/`；RED：`artifacts/uat/fix-red/`；首次定向检查：`artifacts/uat/fix-focused-01/`；12项GREEN：`artifacts/uat/fix-focused/`。
+- 失败截图/trace/video和修复前后截图均保留在被gitignore的本地artifacts目录，不提交大型二进制文件。报告中的artifact链接依赖本地证据目录。
+
+### Recommendation after fixes
+
+UAT-PASS
+
+Open findings: P0=0，P1=0，P2=0，P3=0（本轮五项均关闭）。上文原始严重程度计数属于修复前历史记录。本轮只修复与回归五项发现，不把原“Unautomated Checklist Items”补记为PASS。未merge main，未打tag。
