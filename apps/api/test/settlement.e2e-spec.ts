@@ -914,3 +914,44 @@ describe('RC-fix I-2: meter removal into a finalized period fails closed', () =>
   });
 });
 
+describe('RC-fix M-1: closed account gains no settlement activity', () => {
+  it('settlement create on CLOSED → 409 WATER_ACCOUNT_CLOSED; orphaned DRAFT finalize → 409', async () => {
+    const a = await onboard('X4', '2035-04-01', 0);
+    const st = await request(app.getHttpServer())
+      .post('/consumption-settlements')
+      .set(auth(adminToken))
+      .send({
+        waterAccountId: a.waterAccount.id,
+        period: '203504',
+        usageQty: 10,
+        estimateReason: 'rc-m1',
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post(`/water-accounts/${a.waterAccount.id}/close`)
+      .set(auth(adminToken))
+      .send({})
+      .expect(201);
+
+    // The orphaned DRAFT can never finalize — the zombie chain ends here.
+    const fin = await request(app.getHttpServer())
+      .post(`/consumption-settlements/${st.body.id}/finalize`)
+      .set(auth(adminToken));
+    expect(fin.status).toBe(409);
+    expect(fin.body).toMatchObject({ code: 'WATER_ACCOUNT_CLOSED' });
+
+    // And no new settlement can be created on the closed account.
+    const gen = await request(app.getHttpServer())
+      .post('/consumption-settlements')
+      .set(auth(adminToken))
+      .send({
+        waterAccountId: a.waterAccount.id,
+        period: '203505',
+        usageQty: 10,
+        estimateReason: 'rc-m1',
+      });
+    expect(gen.status).toBe(409);
+    expect(gen.body).toMatchObject({ code: 'WATER_ACCOUNT_CLOSED' });
+  });
+});

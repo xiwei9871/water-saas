@@ -153,6 +153,7 @@ const CODE_LABELS: Record<string, string> = {
   WATER_ACCOUNT_NOT_FOUND: '水表户不存在',
   ACCOUNT_STATUS_INVALID: '账户状态无效',
   ACCOUNT_CLOSED: '水表户已销户，无法操作',
+  WATER_ACCOUNT_CLOSED: '水表户已销户，无法生成结算',
   ACCOUNT_OUTSTANDING_BALANCE: '存在未结清余额或欠费，无法销户',
   INVALID_ACCOUNT_STATUS_TRANSITION: '当前账户状态不允许该操作',
   TRANSFER_TARGET_REQUIRED: '请选择过户目标客户或结算户',
