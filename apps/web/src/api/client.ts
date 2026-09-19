@@ -221,6 +221,7 @@ const CODE_LABELS: Record<string, string> = {
   ESTIMATE_USAGE_REQUIRED: '无历史用量可预估，请手工填写用量',
   SETTLEMENT_NOT_FOUND: '结算记录不存在',
   SETTLEMENT_ALREADY_EXISTS: '该水表户本期已生成结算',
+  SETTLEMENT_PERIOD_ALREADY_FINALIZED: '该账期已封结或已开账，无法在此账期拆表',
   INVALID_SETTLEMENT_STATUS_TRANSITION: '当前结算状态不允许该操作',
   NO_INSTALLATION_IN_PERIOD: '该账期内没有可用的表计安装记录',
   OVERRIDES_INVALID: '用量覆盖格式不正确',

@@ -828,3 +828,89 @@ describe('T7 review follow-ups: supersede exclusion + rollover', () => {
     expect(Number(c.usageQty)).toBe(25); // (100 − 90) + 15
   });
 });
+
+/**
+ * RC Fix Cycle 1 — I-2 + M-1 regression.
+ *
+ * I-2: removing a meter dated INTO an already-finalized period must fail
+ * closed — the final_reading delta above the settled chain-end would be
+ * permanently unbillable (the period can't be re-settled and the next
+ * period has no installation). Guard fires before ANY mutation.
+ * M-1: a CLOSED water account must not gain new settlement activity —
+ * create → 409 WATER_ACCOUNT_CLOSED, and a DRAFT left behind by a close
+ * can't be finalized either (historical FINALs are untouched).
+ */
+describe('RC-fix I-2: meter removal into a finalized period fails closed', () => {
+  it('FINAL-settled period → 409 SETTLEMENT_PERIOD_ALREADY_FINALIZED, installation + meter untouched', async () => {
+    const a = await onboard('X1', '2035-01-01', 0);
+    const st = await request(app.getHttpServer())
+      .post('/consumption-settlements')
+      .set(auth(adminToken))
+      .send({
+        waterAccountId: a.waterAccount.id,
+        period: '203501',
+        usageQty: 60,
+        estimateReason: 'rc-i2',
+      })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/consumption-settlements/${st.body.id}/finalize`)
+      .set(auth(adminToken))
+      .expect(201);
+
+    const res = await request(app.getHttpServer())
+      .post(`/meter-installations/${a.installation.id}/remove`)
+      .set(auth(adminToken))
+      .send({ finalReading: 999, removedAt: '2035-01-15' });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'SETTLEMENT_PERIOD_ALREADY_FINALIZED' });
+
+    // Fail-closed means literally nothing changed.
+    const after = await request(app.getHttpServer())
+      .get(`/meter-installations/${a.installation.id}`)
+      .set(auth(adminToken))
+      .expect(200);
+    expect(after.body.status).toBe('ACTIVE');
+    expect(after.body.finalReading).toBeNull();
+    expect(after.body.removedAt).toBeNull();
+    expect(after.body.meter.status).toBe('INSTALLED');
+  });
+
+  it('POSTED-billed period (no settlement row needed) → 409', async () => {
+    const a = await onboard('X2', '2035-02-01', 0);
+    const sa = (
+      await owner.query(
+        `SELECT settle_account_id::text AS id FROM water_account WHERE id = $1`,
+        [a.waterAccount.id],
+      )
+    ).rows[0].id as string;
+    await owner.query(
+      `INSERT INTO bill
+         (id, tenant_id, settle_account_id, water_account_id, period,
+          bill_kind, source_type, source_id, status, total_amount,
+          issued_at, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, '203502', 'NORMAL', 'MANUAL',
+               gen_random_uuid(), 'POSTED', 5000, now(), now(), now())`,
+      [T7A, sa, a.waterAccount.id],
+    );
+
+    const res = await request(app.getHttpServer())
+      .post(`/meter-installations/${a.installation.id}/remove`)
+      .set(auth(adminToken))
+      .send({ finalReading: 999, removedAt: '2035-02-15' });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'SETTLEMENT_PERIOD_ALREADY_FINALIZED' });
+  });
+
+  it('OPEN period → removal still succeeds (guard only fires on finalized periods)', async () => {
+    const a = await onboard('X3', '2035-03-01', 0);
+    const res = await request(app.getHttpServer())
+      .post(`/meter-installations/${a.installation.id}/remove`)
+      .set(auth(adminToken))
+      .send({ finalReading: 25, removedAt: '2035-03-15' })
+      .expect(201);
+    expect(res.body.status).toBe('REMOVED');
+    expect(res.body.meter.status).toBe('AVAILABLE');
+  });
+});
+
