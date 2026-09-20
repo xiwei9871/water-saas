@@ -58,6 +58,7 @@ async function seedTenant({ code, name }: TenantSeed) {
     'customer:write',
     'metering:read',
     'metering:write',
+    'metering:qc',
     'billing:read',
     'billing:write',
     'payment:read',
@@ -79,7 +80,7 @@ async function seedTenant({ code, name }: TenantSeed) {
   const rolePermBindings: Record<string, string[]> = {
     reader: ['customer:read', 'metering:read', 'metering:write'],
     cashier: ['customer:read', 'billing:read', 'payment:read', 'payment:write'],
-    reviewer: ['metering:read', 'billing:read', 'report:read'],
+    reviewer: ['metering:qc', 'metering:read', 'billing:read', 'report:read'],
   };
   for (const [roleCode, codes] of Object.entries(rolePermBindings)) {
     for (const code of codes) {

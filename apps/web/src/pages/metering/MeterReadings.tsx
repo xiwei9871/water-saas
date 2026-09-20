@@ -90,6 +90,9 @@ export default function MeterReadings() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
+  const canQc = canWrite || hasPerm('metering:qc');
+  const [searchInput, setSearchInput] = useState('');
+  const [query, setQuery] = useState('');
   const canIamRead = hasPerm('iam:read');
 
   const [rows, setRows] = useState<MeterReading[]>([]);
@@ -130,6 +133,7 @@ export default function MeterReadings() {
         const res = await api.get<MeterReading[]>('/meter-readings', {
           params: {
             take: size,
+            ...(query ? { q: query } : {}),
             skip: (p - 1) * size,
             ...(planItemId.trim() ? { planItemId: planItemId.trim() } : {}),
             ...(installationId.trim()
@@ -147,7 +151,7 @@ export default function MeterReadings() {
         setLoading(false);
       }
     },
-    [installationId, message, period, planItemId, qcStatus, resultType],
+    [installationId, message, period, planItemId, qcStatus, resultType, query],
   );
 
   useEffect(() => {
@@ -268,6 +272,9 @@ export default function MeterReadings() {
   };
 
   const columns: ColumnsType<MeterReading> = [
+    { title: '户号', key: 'account', width: 165, render: (_, r) => r.account?.accountNo ?? '—' },
+    { title: '客户', key: 'customer', width: 190, render: (_, r) => r.account?.customerName ?? '—' },
+    { title: '用水地址', key: 'addr', width: 220, render: (_, r) => r.account?.addr ?? '—' },
     {
       title: '账期',
       dataIndex: 'period',
@@ -310,7 +317,7 @@ export default function MeterReadings() {
       width: 100,
       render: (_: unknown, r: MeterReading) => (
         <Tooltip
-          title={r.qcAt ? `质检人 ${staffName(r.qcBy)} · ${fmtTime(r.qcAt)}` : undefined}
+          title={r.qcAt ? `质检人 ${(r.qcByName ?? staffName(r.qcBy))} · ${fmtTime(r.qcAt)}` : undefined}
         >
           <Tag color={QC_STATUS_COLORS[r.qcStatus]}>{QC_STATUS_LABELS[r.qcStatus]}</Tag>
         </Tooltip>
@@ -347,7 +354,7 @@ export default function MeterReadings() {
       dataIndex: 'operatorId',
       key: 'operatorId',
       width: 100,
-      render: staffName,
+      render: (_: unknown, r: MeterReading) => r.operatorName ?? staffName(r.operatorId),
     },
     {
       title: '录入时间',
@@ -359,11 +366,11 @@ export default function MeterReadings() {
     {
       title: '操作',
       key: 'actions',
-      width: canWrite ? 300 : 80,
+      width: canQc ? 300 : 80,
       render: (_: unknown, record: MeterReading) => {
         const superseded = !!record.supersededById;
         const qcActions =
-          canWrite && !superseded ? QC_ACTIONS_BY_STATUS[record.qcStatus] : [];
+          canQc && !superseded ? QC_ACTIONS_BY_STATUS[record.qcStatus] : [];
         const canSupersede =
           canWrite &&
           !superseded &&
@@ -424,6 +431,9 @@ export default function MeterReadings() {
       title="抄表记录 / 质检"
       extra={
         <Space wrap>
+          <Input.Search allowClear placeholder="搜索户号、客户或地址" style={{ width: 250 }}
+            value={searchInput} onChange={e => setSearchInput(e.target.value)}
+            onSearch={value => { setQuery(value.trim()); setPage(1); }} />
           <Input.Search
             allowClear
             placeholder="计划明细 ID"
@@ -509,6 +519,7 @@ export default function MeterReadings() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        scroll={{ x: 1900 }}
         pagination={{
           current: page,
           pageSize,
@@ -625,6 +636,10 @@ export default function MeterReadings() {
             size="small"
             column={1}
             items={[
+              { key: 'accountNo', label: '户号', children: detail.account?.accountNo ?? '—' },
+              { key: 'customer', label: '客户', children: detail.account?.customerName ?? '—' },
+              { key: 'address', label: '用水地址', children: detail.account?.addr ?? '—' },
+              { key: 'meterNo', label: '表号', children: detail.meterNo ?? '—' },
               {
                 key: 'id',
                 label: '记录 ID',
@@ -657,7 +672,7 @@ export default function MeterReadings() {
                       {QC_STATUS_LABELS[detail.qcStatus]}
                     </Tag>
                     {detail.qcAt &&
-                      `${staffName(detail.qcBy)} · ${fmtTime(detail.qcAt)}`}
+                      `${(detail.qcByName ?? staffName(detail.qcBy))} · ${fmtTime(detail.qcAt)}`}
                   </Space>
                 ),
               },
@@ -692,7 +707,7 @@ export default function MeterReadings() {
                   </Space>
                 ),
               },
-              { key: 'operator', label: '抄表人', children: staffName(detail.operatorId) },
+              { key: 'operator', label: '抄表人', children: detail.operatorName ?? staffName(detail.operatorId) },
               { key: 'photo', label: '照片凭证', children: detail.photoRef ?? '—' },
               { key: 'remark', label: '备注', children: detail.remark ?? '—' },
               { key: 'created', label: '录入时间', children: fmtTime(detail.createdAt) },

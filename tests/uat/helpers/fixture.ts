@@ -3,12 +3,14 @@ import { resolve } from 'node:path';
 const requireApi = createRequire(resolve('apps/api/package.json'));
 const { PrismaClient } = requireApi('@prisma/client');
 const bcrypt = requireApi('bcrypt');
-export const ownerUrl = 'postgresql://postgres:postgres@localhost:5432/water_uat_v011';
+const databaseName = process.env.UAT_DATABASE_NAME ?? 'water_uat_v011';
+if (!['water_uat_v011', 'water_pilot_fix_uat_v012'].includes(databaseName)) throw new Error('Refusing non-UAT database');
+export const ownerUrl = `postgresql://postgres:postgres@localhost:5432/${databaseName}`;
 export async function db<T>(run: (prisma: any) => Promise<T>): Promise<T> {
   const prisma = new PrismaClient({ datasourceUrl: ownerUrl });
   try {
     const [identity] = await prisma.$queryRawUnsafe('SELECT current_database() AS name');
-    if (identity.name !== 'water_uat_v011') throw new Error('Refusing non-UAT database');
+    if (identity.name !== databaseName) throw new Error('Refusing non-UAT database');
     return await run(prisma);
   } finally { await prisma.$disconnect(); }
 }

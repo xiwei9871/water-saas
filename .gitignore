@@ -18,3 +18,6 @@ coverage/
 # Frontend UAT evidence (screenshots, traces, videos, local credentials)
 artifacts/uat/
 .playwright-cli/
+
+# Persistent business Pilot evidence, database backups and local credentials
+artifacts/pilot/

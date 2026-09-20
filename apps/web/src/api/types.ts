@@ -383,6 +383,10 @@ export interface ReadingPlanProgress {
  * probe): non-null when a newer correction row points at this one.
  */
 export interface MeterReading {
+  account?: { accountNo: string; customerName: string; addr: string };
+  meterNo?: string;
+  operatorName?: string | null;
+  qcByName?: string | null;
   id: string;
   tenantId: string;
   planItemId: string | null;

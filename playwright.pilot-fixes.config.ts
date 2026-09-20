@@ -1,0 +1,2 @@
+import {defineConfig} from '@playwright/test';
+export default defineConfig({testDir:'tests/pilot-fixes',workers:1,retries:0,timeout:45000,expect:{timeout:6000},outputDir:'artifacts/pilot/fixes/test-results',reporter:[['list'],['html',{outputFolder:'artifacts/pilot/fixes/html-report',open:'never'}],['json',{outputFile:'artifacts/pilot/fixes/results.json'}]],use:{baseURL:'http://127.0.0.1:4173',channel:'chrome',viewport:{width:1440,height:900},locale:'zh-CN',timezoneId:'Asia/Shanghai',screenshot:'only-on-failure',trace:'retain-on-failure',video:'retain-on-failure'}});

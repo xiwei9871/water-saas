@@ -33,6 +33,25 @@ export const METER_READING_SELECT = {
   updatedAt: true,
 } satisfies Prisma.MeterReadingSelect;
 
+const READING_DISPLAY_SELECT = {
+  ...METER_READING_SELECT,
+  installation: {
+    select: {
+      waterAccount: {
+        select: {
+          accountNo: true,
+          addr: true,
+          customer: { select: { name: true } },
+        },
+      },
+      meter: { select: { meterNo: true } },
+    },
+  },
+} satisfies Prisma.MeterReadingSelect;
+type DisplayReading = Prisma.MeterReadingGetPayload<{
+  select: typeof READING_DISPLAY_SELECT;
+}>;
+
 type ReadResultType = 'ACTUAL' | 'REMOTE' | 'NO_READ';
 type QcStatus = 'PENDING' | 'PASSED' | 'REJECTED' | 'MANUAL_REVIEW';
 type ReadSource = 'WEB' | 'IMPORT' | 'APP' | 'REMOTE';
@@ -167,6 +186,7 @@ export class MeterReadingService {
       period?: string;
       resultType?: ReadResultType;
       qcStatus?: QcStatus;
+      q?: string;
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
@@ -178,13 +198,37 @@ export class MeterReadingService {
           period: q.period,
           resultType: q.resultType,
           qcStatus: q.qcStatus,
+          ...(q.q
+            ? {
+                installation: {
+                  waterAccount: {
+                    tenantId: ctx.tenantId,
+                    OR: [
+                      {
+                        accountNo: {
+                          contains: q.q,
+                          mode: 'insensitive' as const,
+                        },
+                      },
+                      { addr: { contains: q.q, mode: 'insensitive' as const } },
+                      {
+                        customer: {
+                          tenantId: ctx.tenantId,
+                          name: { contains: q.q, mode: 'insensitive' as const },
+                        },
+                      },
+                    ],
+                  },
+                },
+              }
+            : {}),
         },
-        select: METER_READING_SELECT,
+        select: READING_DISPLAY_SELECT,
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         take: q.take,
         skip: q.skip,
       });
-      return this.attachSupersededBy(tx, ctx, rows);
+      return this.attachSupersededBy(tx, ctx, await this.displayRows(tx, ctx, rows));
     });
   }
 
@@ -192,12 +236,45 @@ export class MeterReadingService {
     const row = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const found = await tx.meterReading.findFirst({
         where: { tenantId: ctx.tenantId, id },
-        select: METER_READING_SELECT,
+        select: READING_DISPLAY_SELECT,
       });
       if (!found) throw new NotFoundException({ code: 'READING_NOT_FOUND' });
-      return (await this.attachSupersededBy(tx, ctx, [found]))[0];
+      return (await this.attachSupersededBy(tx, ctx, await this.displayRows(tx, ctx, [found])))[0];
     });
     return row;
+  }
+
+  /** Display-only names within this tenant; never return full staff records. */
+  private async displayRows(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    rows: DisplayReading[],
+  ) {
+    const ids = [
+      ...new Set(
+        rows
+          .flatMap((r) => [r.operatorId, r.qcBy])
+          .filter((id): id is string => !!id),
+      ),
+    ];
+    const staff = ids.length
+      ? await tx.staff.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: ids } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const names = new Map(staff.map((s) => [s.id, s.name]));
+    return rows.map(({ installation, ...r }) => ({
+      ...r,
+      account: {
+        accountNo: installation.waterAccount.accountNo,
+        customerName: installation.waterAccount.customer.name,
+        addr: installation.waterAccount.addr,
+      },
+      meterNo: installation.meter.meterNo,
+      operatorName: names.get(r.operatorId) ?? null,
+      qcByName: r.qcBy ? (names.get(r.qcBy) ?? null) : null,
+    }));
   }
 
   /**

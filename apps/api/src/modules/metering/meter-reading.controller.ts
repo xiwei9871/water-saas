@@ -14,7 +14,7 @@ import type { Request } from 'express';
 import { assertDecimal, assertOptionalDate } from '../../common/decimal.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
-import { Permissions } from '../../common/permissions.decorator.js';
+import { AnyPermissions, Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
@@ -166,6 +166,7 @@ export class MeterReadingController {
     @Query('qcStatus') qcStatus?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
+    @Query('q') q?: string,
   ) {
     if (planItemId !== undefined) assertUuid(planItemId, 'planItemId');
     if (installationId !== undefined) assertUuid(installationId, 'installationId');
@@ -178,6 +179,7 @@ export class MeterReadingController {
     }
     return this.svc.list(currentTenant(), {
       ...pageArgs(take, skip),
+      q: q?.trim().slice(0, 200),
       planItemId,
       installationId,
       period,
@@ -320,7 +322,7 @@ export class MeterReadingController {
    * records that the read happened, not that it was good.
    */
   @Post(':id/qc')
-  @Permissions('metering:write')
+  @AnyPermissions('metering:qc', 'metering:write')
   qc(
     @Param('id') id: string,
     @Body() body: { action?: string },
