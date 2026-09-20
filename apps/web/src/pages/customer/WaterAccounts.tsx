@@ -255,6 +255,8 @@ export default function WaterAccounts() {
       );
       message.success('人数申报已保存，自下个账期起生效于阶梯计费');
       householdForm.setFieldsValue({ householdSize: undefined });
+      // 弹窗允许多次申报 —— 每次成功后换新幂等键（失败保留原键供重试回放）。
+      setIdemKey(newIdemKey());
       await loadHousehold(modal.account.id);
     } catch (err) {
       message.error(apiErrorText(err));

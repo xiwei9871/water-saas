@@ -183,10 +183,16 @@ export class WaterAccountService {
         },
       });
       if (!account) return null;
-      // Latest declared household size (any period) — display-only; billing
-      // reads the settlement snapshot, never this value.
+      // 当前人数 = 生效账期 ≤ 当前账期的最新申报 —— 未来生效的申报只在
+      // 历史列表可见，不冒充当前值。display-only；计费走结算快照。
+      const now = new Date();
+      const currentPeriod = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
       const profile = await tx.waterAccountHouseholdProfile.findFirst({
-        where: { tenantId: ctx.tenantId, waterAccountId: id },
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: id,
+          effectiveFromPeriod: { lte: currentPeriod },
+        },
         orderBy: { effectiveFromPeriod: 'desc' },
         select: { householdSize: true },
       });

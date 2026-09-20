@@ -21,3 +21,4 @@ artifacts/uat/
 
 # Persistent business Pilot evidence, database backups and local credentials
 artifacts/pilot/
+artifacts/uat-v02/
