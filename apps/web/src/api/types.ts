@@ -322,6 +322,11 @@ export interface OnboardResult {
 /* ------------------------------------------------------------------ */
 
 /** GET /reading-books */
+/** 抄表册节奏：MONTHLY 每月 / BIMONTHLY 双月（anchorPeriod 定奇偶）。 */
+export type BookCadence = 'MONTHLY' | 'BIMONTHLY';
+/** 表计通道：REMOTE_AUTO 仅登记元数据（本期无远传集成）。 */
+export type MeterChannel = 'MECHANICAL' | 'REMOTE_MANUAL' | 'REMOTE_AUTO';
+
 export interface ReadingBook {
   id: string;
   tenantId: string;
@@ -330,6 +335,10 @@ export interface ReadingBook {
   orgUnitId: string;
   readerId: string | null;
   scheduleDay: number | null;
+  cadence: BookCadence;
+  /** BIMONTHLY 必填，YYYYMM；MONTHLY 恒为 null。 */
+  anchorPeriod: string | null;
+  meterChannel: MeterChannel;
   createdAt: string;
   updatedAt: string;
 }

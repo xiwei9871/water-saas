@@ -262,7 +262,7 @@ export default function ReadingPlans() {
     }
     setSaving(true);
     try {
-      await api.post(
+      const res = await api.post<{ cadenceWarning?: string | null }>(
         '/reading-plans/generate',
         cleanBody({
           bookId: values.bookId,
@@ -272,7 +272,15 @@ export default function ReadingPlans() {
         }),
         { headers: { 'Idempotency-Key': genIdemKey } },
       );
-      message.success('抄表计划已生成');
+      // 非应抄期不硬拦（补抄是真实业务）—— 但必须醒目提示。
+      if (res.data.cadenceWarning === 'BOOK_NOT_DUE_THIS_PERIOD') {
+        message.warning(
+          `该抄表册按周期设置 ${values.period.format('YYYY-MM')} 不是计划抄表期（双月抄表），计划已生成`,
+          6,
+        );
+      } else {
+        message.success('抄表计划已生成');
+      }
       setGenOpen(false);
       await load(page, pageSize);
     } catch (err) {
