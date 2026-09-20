@@ -26,6 +26,8 @@ import {
 } from '../common';
 import { CustomerSelect, MeterSelect, SettleAccountSelect } from '../pickers';
 
+import UsageCategoryInput from './UsageCategoryInput';
+
 type CustMode = 'new' | 'existing';
 type SettleMode = 'default' | 'new' | 'existing';
 type MeterMode = 'new' | 'existing';
@@ -372,7 +374,7 @@ export default function Onboard() {
             label="用水类别"
             rules={[{ required: true, message: '请输入用水类别' }]}
           >
-            <Input placeholder="如 居民用水 / 商业用水" />
+            <UsageCategoryInput />
           </Form.Item>
           <Form.Item
             name="acctAddr"
