@@ -1,7 +1,7 @@
 /**
  * CSV line format for POST /meter-readings/import (one reading per line):
  *
- *   plan_item_id,result_type,reading_value,exception_code[,read_date]
+ *   plan_item_id,result_type,reading_value,exception_code[,read_date[,estimate_qty]]
  *
  * - plan_item_id  uuid of the reading_plan_item the reading lands on
  * - result_type   ACTUAL | REMOTE | NO_READ
@@ -9,6 +9,8 @@
  * - exception_code required for NO_READ (LOCKED | DIAL_DIRTY | FLOODED |
  *   OCCUPIED | STOPPED | BROKEN | SUSPECTED_THEFT | OTHER), empty otherwise
  * - read_date     optional ISO date; defaults to "now" when empty/absent
+ * - estimate_qty  optional NO_READ usage estimate (m³, not a dial) —
+ *   EMPTY/forbidden for ACTUAL/REMOTE
  *
  * An optional header line is auto-skipped (first cell literally
  * "plan_item_id", case-insensitive). Deliberately a plain split(',') with no

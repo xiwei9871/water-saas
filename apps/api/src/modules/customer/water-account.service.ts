@@ -7,14 +7,20 @@ import {
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
+import { isValidPeriod } from '../../common/reading-cadence.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import {
+  assertUsageCategory,
+  USAGE_CATEGORIES,
+} from '../../common/usage-categories.js';
 import { CustomerService, type CustomerBody } from './customer.service.js';
 import { MeterService, type MeterBody } from './meter.service.js';
 import { MeterInstallationService } from './meter-installation.service.js';
 import { SequenceService } from '../../common/sequence.service.js';
 import {
   SettleAccountService,
+  SETTLE_ACCOUNT_SELECT,
   type SettleAccountBody,
 } from './settle-account.service.js';
 
@@ -27,6 +33,7 @@ export const WATER_ACCOUNT_SELECT = {
   usageCategory: true,
   addr: true,
   status: true,
+  billable: true,
   openedAt: true,
   closedAt: true,
   createdAt: true,
@@ -87,7 +94,14 @@ export interface OnboardBody {
   customerId?: string;
   settleAccount?: SettleAccountBody;
   settleAccountId?: string;
-  account: { accountNo?: string; usageCategory: string; addr: string; openedAt?: Date };
+  account: {
+    accountNo?: string;
+    usageCategory: string;
+    addr: string;
+    openedAt?: Date;
+    /** 一户多人口申报 — written as an effective-dated profile row. */
+    householdSize?: number;
+  };
   meter?: MeterBody;
   meterId?: string;
   installation: {
@@ -96,6 +110,13 @@ export interface OnboardBody {
     reason?: 'NEW' | 'REPLACE' | 'FAULT' | 'PERIODIC_CHECK';
   };
 }
+
+/** Stable system-customer key for monitoring accounts (漏损分析计量点). */
+const MONITORING_SYSTEM_KEY = 'MONITORING_INTERNAL';
+
+/** 'YYYYMM' → period of a Date (UTC, matching settlement period semantics). */
+const periodOf = (d: Date) =>
+  `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 
 const invalidTransition = (from: string, to: string) =>
   new ConflictException({ code: 'INVALID_ACCOUNT_STATUS_TRANSITION', from, to });
@@ -145,17 +166,32 @@ export class WaterAccountService {
     );
   }
 
+  usageCategories(_ctx: TenantCtx) {
+    // Controlled category set (see common/usage-categories.ts) — the wire
+    // shape stays `string[]` for the picker.
+    return Promise.resolve([...USAGE_CATEGORIES]);
+  }
+
   async getById(ctx: TenantCtx, id: string) {
-    const row = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.waterAccount.findFirst({
+    const row = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const account = await tx.waterAccount.findFirst({
         where: { tenantId: ctx.tenantId, id },
         select: {
           ...WATER_ACCOUNT_SELECT,
           ...ACCOUNT_INCLUDE,
           ...INSTALLATION_TIMELINE,
         },
-      }),
-    );
+      });
+      if (!account) return null;
+      // Latest declared household size (any period) — display-only; billing
+      // reads the settlement snapshot, never this value.
+      const profile = await tx.waterAccountHouseholdProfile.findFirst({
+        where: { tenantId: ctx.tenantId, waterAccountId: id },
+        orderBy: { effectiveFromPeriod: 'desc' },
+        select: { householdSize: true },
+      });
+      return { ...account, householdSize: profile?.householdSize ?? null };
+    });
     if (!row) throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     return row;
   }
@@ -196,6 +232,7 @@ export class WaterAccountService {
     if (!body.customerId || !body.settleAccountId) {
       throw new BadRequestException({ code: 'WATER_ACCOUNT_FIELDS_REQUIRED' });
     }
+    assertUsageCategory(body.usageCategory);
     const customer = await tx.customer.findFirst({
       where: { tenantId: ctx.tenantId, id: body.customerId },
     });
@@ -215,6 +252,8 @@ export class WaterAccountService {
           customerId: body.customerId!,
           settleAccountId: body.settleAccountId!,
           usageCategory: body.usageCategory!,
+          // billable is derived from category (also enforced by DB CHECK).
+          billable: body.usageCategory !== 'MONITORING',
           addr: body.addr!,
           status: 'NORMAL',
           openedAt: body.openedAt ?? new Date(),
@@ -227,6 +266,172 @@ export class WaterAccountService {
   }
 
   /**
+   * Find-or-create the tenant's system customer for monitoring accounts.
+   * Keyed on `system_key` (UNIQUE), never on name — an operator-created
+   * customer named the same can't shadow it, and a concurrent first-create
+   * race degrades to a unique violation → re-read.
+   */
+  private async monitoringPrincipal(tx: Prisma.TransactionClient, ctx: TenantCtx) {
+    let customer = await tx.customer.findFirst({
+      where: { tenantId: ctx.tenantId, systemKey: MONITORING_SYSTEM_KEY },
+    });
+    if (!customer) {
+      try {
+        customer = await tx.customer.create({
+          data: {
+            tenantId: ctx.tenantId,
+            customerNo: 'SYS-MONITORING',
+            name: '本公司·监控表',
+            custType: 'ORG',
+            systemKey: MONITORING_SYSTEM_KEY,
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+        });
+      } catch (e) {
+        if (
+          !(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')
+        ) {
+          throw e;
+        }
+        customer = await tx.customer.findFirstOrThrow({
+          where: { tenantId: ctx.tenantId, systemKey: MONITORING_SYSTEM_KEY },
+        });
+      }
+    }
+    let settle = await tx.settleAccount.findFirst({
+      where: { tenantId: ctx.tenantId, settleNo: 'SYS-MONITORING' },
+      select: SETTLE_ACCOUNT_SELECT,
+    });
+    if (!settle) {
+      try {
+        settle = await this.settles.createTx(tx, ctx, {
+          settleNo: 'SYS-MONITORING',
+          name: '本公司·监控表',
+        });
+      } catch (e) {
+        if (
+          !(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')
+        ) {
+          throw e;
+        }
+        settle = await tx.settleAccount.findFirstOrThrow({
+          where: { tenantId: ctx.tenantId, settleNo: 'SYS-MONITORING' },
+          select: SETTLE_ACCOUNT_SELECT,
+        });
+      }
+    }
+    return { customer, settle };
+  }
+
+  /**
+   * Resolve the household profile effective for `period`: the latest row
+   * with effective_from_period <= period. Returns null when undeclared.
+   */
+  private async effectiveHouseholdSize(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+    period: string,
+  ) {
+    const row = await tx.waterAccountHouseholdProfile.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        waterAccountId,
+        effectiveFromPeriod: { lte: period },
+      },
+      orderBy: { effectiveFromPeriod: 'desc' },
+      select: { householdSize: true },
+    });
+    return row?.householdSize ?? null;
+  }
+
+  /**
+   * POST /water-accounts/:id/household-profiles — append an effective-dated
+   * declaration. Same-period duplicates → 409 (correct via PATCH instead).
+   */
+  async createHouseholdProfileTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+    body: { householdSize?: number; effectiveFromPeriod?: string },
+  ) {
+    await this.loadAccount(tx, ctx, waterAccountId);
+    if (
+      body.householdSize === undefined ||
+      !Number.isInteger(body.householdSize) ||
+      body.householdSize < 0
+    ) {
+      throw new BadRequestException({ code: 'INVALID_HOUSEHOLD_SIZE' });
+    }
+    if (!body.effectiveFromPeriod || !isValidPeriod(body.effectiveFromPeriod)) {
+      throw new BadRequestException({ code: 'INVALID_PERIOD' });
+    }
+    return tx.waterAccountHouseholdProfile
+      .create({
+        data: {
+          tenantId: ctx.tenantId,
+          waterAccountId,
+          householdSize: body.householdSize,
+          effectiveFromPeriod: body.effectiveFromPeriod,
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        },
+      })
+      .catch((e) => {
+        if (
+          e instanceof Prisma.PrismaClientKnownRequestError &&
+          e.code === 'P2002'
+        ) {
+          throw new ConflictException({ code: 'HOUSEHOLD_PROFILE_EXISTS' });
+        }
+        throw e;
+      });
+  }
+
+  /**
+   * PATCH /water-accounts/household-profiles/:profileId — amend a declared
+   * row. Already-generated settlements keep their snapshot (history intact);
+   * future settlements for that period pick up the corrected declaration.
+   */
+  async patchHouseholdProfileTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    profileId: string,
+    body: { householdSize?: number },
+    req: Request,
+  ) {
+    const existing = await tx.waterAccountHouseholdProfile.findFirst({
+      where: { tenantId: ctx.tenantId, id: profileId },
+    });
+    if (!existing) {
+      throw new NotFoundException({ code: 'HOUSEHOLD_PROFILE_NOT_FOUND' });
+    }
+    if (
+      body.householdSize === undefined ||
+      !Number.isInteger(body.householdSize) ||
+      body.householdSize < 0
+    ) {
+      throw new BadRequestException({ code: 'INVALID_HOUSEHOLD_SIZE' });
+    }
+    req.auditBefore = existing;
+    return tx.waterAccountHouseholdProfile.update({
+      where: { id: existing.id },
+      data: { householdSize: body.householdSize, updatedBy: ctx.staffId },
+    });
+  }
+
+  listHouseholdProfiles(ctx: TenantCtx, waterAccountId: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      await this.loadAccount(tx, ctx, waterAccountId);
+      return tx.waterAccountHouseholdProfile.findMany({
+        where: { tenantId: ctx.tenantId, waterAccountId },
+        orderBy: { effectiveFromPeriod: 'desc' },
+      });
+    });
+  }
+
+  /**
    * 立户向导 — one transaction creates/links customer + settle_account +
    * water_account + meter + ACTIVE installation (spec §2.1 / §4 onboard).
    * Every document number draws from sys_sequence inside this tx: a rollback
@@ -234,33 +439,43 @@ export class WaterAccountService {
    * half-written account.
    */
   async onboardTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: OnboardBody) {
-    // 1. customer — link existing or create new
-    let customer;
-    if (body.customerId) {
-      customer = await tx.customer.findFirst({
-        where: { tenantId: ctx.tenantId, id: body.customerId },
-      });
-      if (!customer) throw new BadRequestException({ code: 'CUSTOMER_NOT_FOUND' });
-    } else {
-      customer = await this.customers.createTx(tx, ctx, body.customer!);
-    }
+    assertUsageCategory(body.account.usageCategory);
+    const isMonitoring = body.account.usageCategory === 'MONITORING';
 
-    // 2. settle_account — link existing, create from payload, or default to
-    //    the customer's own name/phone (common 一户一结 case).
+    // 1+2. customer + settle_account — monitoring meters hang off the
+    //    tenant's system customer (MONITORING_INTERNAL); everything else
+    //    uses the normal link-or-create flow.
+    let customer;
     let settleAccount;
-    if (body.settleAccountId) {
-      settleAccount = await tx.settleAccount.findFirst({
-        where: { tenantId: ctx.tenantId, id: body.settleAccountId },
-      });
-      if (!settleAccount) {
-        throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
-      }
+    if (isMonitoring) {
+      const principal = await this.monitoringPrincipal(tx, ctx);
+      customer = principal.customer;
+      settleAccount = principal.settle;
     } else {
-      const settleBody: SettleAccountBody = body.settleAccount ?? {
-        name: customer.name,
-        phone: customer.phone ?? undefined,
-      };
-      settleAccount = await this.settles.createTx(tx, ctx, settleBody);
+      if (body.customerId) {
+        customer = await tx.customer.findFirst({
+          where: { tenantId: ctx.tenantId, id: body.customerId },
+        });
+        if (!customer) {
+          throw new BadRequestException({ code: 'CUSTOMER_NOT_FOUND' });
+        }
+      } else {
+        customer = await this.customers.createTx(tx, ctx, body.customer!);
+      }
+      if (body.settleAccountId) {
+        settleAccount = await tx.settleAccount.findFirst({
+          where: { tenantId: ctx.tenantId, id: body.settleAccountId },
+        });
+        if (!settleAccount) {
+          throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+        }
+      } else {
+        const settleBody: SettleAccountBody = body.settleAccount ?? {
+          name: customer.name,
+          phone: customer.phone ?? undefined,
+        };
+        settleAccount = await this.settles.createTx(tx, ctx, settleBody);
+      }
     }
 
     // 3. water_account
@@ -272,6 +487,26 @@ export class WaterAccountService {
       addr: body.account.addr,
       openedAt: body.account.openedAt,
     });
+
+    // 3b. 一户多人口申报 — first declaration effective from the open period.
+    if (body.account.householdSize !== undefined) {
+      if (
+        !Number.isInteger(body.account.householdSize) ||
+        body.account.householdSize < 0
+      ) {
+        throw new BadRequestException({ code: 'INVALID_HOUSEHOLD_SIZE' });
+      }
+      await tx.waterAccountHouseholdProfile.create({
+        data: {
+          tenantId: ctx.tenantId,
+          waterAccountId: waterAccount.id,
+          householdSize: body.account.householdSize,
+          effectiveFromPeriod: periodOf(waterAccount.openedAt ?? new Date()),
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        },
+      });
+    }
 
     // 4. meter — register new or reuse an existing AVAILABLE device
     let meter;
@@ -313,11 +548,18 @@ export class WaterAccountService {
   ) {
     const existing = await this.loadAccount(tx, ctx, id);
     if (existing.status === 'CLOSED') throw invalidTransition('CLOSED', 'PATCH');
+    if (body.usageCategory !== undefined) {
+      assertUsageCategory(body.usageCategory);
+    }
     req.auditBefore = existing;
     return tx.waterAccount.update({
       where: { tenantId_id: { tenantId: ctx.tenantId, id } },
       data: {
         usageCategory: body.usageCategory,
+        // Category change re-derives billable (DB CHECK enforces the pair).
+        ...(body.usageCategory !== undefined
+          ? { billable: body.usageCategory !== 'MONITORING' }
+          : {}),
         addr: body.addr,
         updatedBy: ctx.staffId,
       },

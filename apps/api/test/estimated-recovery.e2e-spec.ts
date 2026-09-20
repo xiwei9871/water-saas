@@ -22,8 +22,16 @@ const post = (path: string, body: object) =>
   request(app.getHttpServer()).post(path).auth(token, { type: 'bearer' }).send(body);
 const get = (path: string) => request(app.getHttpServer()).get(path).auth(token, { type: 'bearer' });
 
-beforeAll(async () => {
-  const tenant = await owner.tenant.create({ data: { code, name: '估水恢复回归', status: 'ACTIVE' } });
+/**
+ * Each fixture gets its OWN tenant: the v0.2 controlled-category set has
+ * only 4 billable values, and a tenant can hold one ACTIVE plan per
+ * category per window — several parallel fixtures on one tenant would
+ * overlap-block each other. A fresh tenant keeps every fixture fully
+ * isolated (its own plan, account, ladder cursor).
+ */
+async function freshTenant() {
+  const tcode = `${code}-${randomUUID().slice(0, 8)}`;
+  const tenant = await owner.tenant.create({ data: { code: tcode, name: '估水恢复回归', status: 'ACTIVE' } });
   tenantId = tenant.id;
   const org = await owner.orgUnit.create({ data: { tenantId, name: '测试营业所', type: 'COMPANY' } });
   const role = await owner.role.create({ data: { tenantId, code: 'admin', name: '管理员', dataScope: 'ALL' } });
@@ -31,11 +39,14 @@ beforeAll(async () => {
     login: 'admin', name: '回归管理员', passwordHash: await bcrypt.hash('recovery-pass', 10), status: 'ACTIVE' } });
   staffId = staff.id;
   await owner.staffRole.create({ data: { tenantId, staffId, roleId: role.id } });
+  token = (await request(app.getHttpServer()).post('/auth/login')
+    .send({ tenantCode: tcode, login: 'admin', password: 'recovery-pass' }).expect(201)).body.accessToken;
+}
+
+beforeAll(async () => {
   const module = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = module.createNestApplication();
   await app.listen(0, '127.0.0.1');
-  token = (await request(app.getHttpServer()).post('/auth/login')
-    .send({ tenantCode: code, login: 'admin', password: 'recovery-pass' }).expect(201)).body.accessToken;
 }, 30_000);
 afterAll(async () => { await app?.close(); await owner.$disconnect(); });
 
@@ -60,7 +71,8 @@ async function billAndPay(a: any, s: any, pay = true) {
   return bill;
 }
 async function accountFixture(maxDial: number | null, tiered = true, tierLimit = 260, firstPrice = '3') {
-  const category = `EXAMPLE-${randomUUID().slice(0, 8)}`;
+  await freshTenant();
+  const category = 'RES_METERED'; // controlled category — unique code keeps identity per fixture
   const fee = (await post('/fee-items', { code: category, name: '示例水费（非地方政策）', calcType: 'PER_QTY' }).expect(201)).body;
   const tiers = tiered
     ? [{ feeItemId: fee.id, tierNo: 1, fromQty: 0, toQty: tierLimit, unitPrice: firstPrice },

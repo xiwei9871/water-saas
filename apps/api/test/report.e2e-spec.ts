@@ -87,7 +87,7 @@ const get = (path: string, token = adminToken, status = 200) =>
 const post = (path: string, body: unknown, token = adminToken) =>
   request(app.getHttpServer()).post(path).set(auth(token)).send(body);
 
-const onboard = async (label: string, usageCategory = 'RESIDENTIAL') => {
+const onboard = async (label: string, usageCategory = 'RES_METERED') => {
   const res = await post('/water-accounts/onboard', {
     customer: { name: `T13 ${label} ${RUN}`, custType: 'PERSONAL' },
     account: { usageCategory, addr: `${label} Water St` },
@@ -306,6 +306,7 @@ beforeAll(async () => {
     'account_event',
     'meter_installation',
     'meter',
+    'water_account_household_profile',
     'water_account',
     'settle_account',
     'customer',
@@ -348,7 +349,7 @@ describe('fixtures: books + plans + readings', () => {
       await onboard(label);
     }
     // A commercial account for the byCategory split in ar-monthly.
-    await onboard('C1', 'COMMERCIAL');
+    await onboard('C1', 'NON_RES');
 
     const book1 = await post('/reading-books', {
       name: `T13 Book1 ${RUN}`,
@@ -475,7 +476,7 @@ describe('GET /reports/meter-daily', () => {
 describe('fixtures: payments + close + bills for the money reports', () => {
   it('seeds bills across periods/statuses and payments across days/channels', async () => {
     // ar-monthly predicate coverage for period 202610:
-    //   in: POSTED 10000, PARTIAL_PAID 4000 (RESIDENTIAL), POSTED 6000 (COMMERCIAL)
+    //   in: POSTED 10000, PARTIAL_PAID 4000 (RES_METERED), POSTED 6000 (NON_RES)
     //   out: DRAFT, REVERSED-status, REVERSAL-kind, other period (202611 POSTED).
     await seedBill('bill1', acct['A1'], settleAcct['A1'], '202610', {
       status: 'POSTED',
@@ -629,8 +630,8 @@ describe('GET /reports/ar-monthly', () => {
     const res = (await get('/reports/ar-monthly?period=202610')).body;
     expect(res.period).toBe('202610');
     expect(res.billed).toBe('20000'); // 10000 + 4000 + 6000
-    expect(res.byCategory.RESIDENTIAL).toEqual({ count: 2, amount: '14000' });
-    expect(res.byCategory.COMMERCIAL).toEqual({ count: 1, amount: '6000' });
+    expect(res.byCategory.RES_METERED).toEqual({ count: 2, amount: '14000' });
+    expect(res.byCategory.NON_RES).toEqual({ count: 1, amount: '6000' });
     const nov = (await get('/reports/ar-monthly?period=202611')).body;
     expect(nov.billed).toBe('7777');
     const empty = (await get('/reports/ar-monthly?period=202612')).body;

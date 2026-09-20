@@ -287,13 +287,28 @@ export class BillService {
       });
     }
 
-    const feeItems = await loadFeeItems(tx, ctx, original.tariffPlanId);
+    // Reprice against the ORIGINAL plan — including its household-scale
+    // params — and the original settlement's frozen household snapshot,
+    // never the account's current declaration.
+    const plan = await tx.tariffPlan.findFirstOrThrow({
+      where: { tenantId: ctx.tenantId, id: original.tariffPlanId },
+      select: { id: true, baseHousehold: true, perPersonQty: true },
+    });
+    const feeItems = await loadFeeItems(tx, ctx, plan);
+    const sourceSettlement =
+      original.sourceType === 'SETTLEMENT' && original.sourceId
+        ? await tx.consumptionSettlement.findFirst({
+            where: { tenantId: ctx.tenantId, id: original.sourceId },
+            select: { householdSizeSnapshot: true },
+          })
+        : null;
     const ytd = await ytdBeforeQty(tx, ctx, original.waterAccountId, original.period);
     let result;
     try {
       result = computeBill({
         usageQty: body.usageQty,
         ytdBeforeQty: ytd,
+        householdSize: sourceSettlement?.householdSizeSnapshot ?? null,
         feeItems,
       });
     } catch (err) {

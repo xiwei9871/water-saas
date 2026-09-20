@@ -11,12 +11,14 @@ import {
   Req,
 } from '@nestjs/common';
 import type { Request } from 'express';
+import { Prisma } from '@prisma/client';
 import { assertDecimal, assertOptionalDate } from '../../common/decimal.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { assertUsageCategory } from '../../common/usage-categories.js';
 import { assertUuid } from '../../common/uuid.js';
 import {
   TariffPlanService,
@@ -71,6 +73,8 @@ interface TariffPlanWireBody {
   effectiveFrom?: unknown;
   effectiveTo?: unknown;
   tiers?: TierWireBody[];
+  baseHousehold?: unknown;
+  perPersonQty?: unknown;
 }
 
 interface NewVersionWireBody {
@@ -78,7 +82,30 @@ interface NewVersionWireBody {
   effectiveTo?: unknown;
   name?: string;
   tiers?: TierWireBody[];
+  baseHousehold?: unknown;
+  perPersonQty?: unknown;
 }
+
+/** undefined → undefined; null → null; else positive-int or 400. */
+const asOptionalInt = (
+  v: unknown,
+  field: string,
+): number | null | undefined => {
+  if (v === undefined || v === null) return v as undefined | null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new BadRequestException({ code: 'TARIFF_HOUSEHOLD_SCALE_INVALID', field });
+  }
+  return n;
+};
+
+const asOptionalDecimal = (
+  v: unknown,
+  field: string,
+): Prisma.Decimal | null | undefined => {
+  if (v === undefined || v === null) return v as undefined | null;
+  return assertDecimal(v, field, { min: 0 });
+};
 
 /** Wire → TierInput; structural ladder rules live in the service. */
 const parseTier = (raw: TierWireBody, i: number): TierInput => {
@@ -135,6 +162,7 @@ export class TariffPlanController {
     if (status !== undefined && !TARIFF_STATUSES.has(status)) {
       throw new BadRequestException({ code: 'TARIFF_STATUS_INVALID' });
     }
+    if (usageCategory !== undefined) assertUsageCategory(usageCategory);
     return this.svc.list(currentTenant(), {
       ...pageArgs(take, skip),
       usageCategory,
@@ -179,6 +207,8 @@ export class TariffPlanController {
       effectiveFrom: asDay(body.effectiveFrom, 'effectiveFrom'),
       effectiveTo: asOptionalDay(body.effectiveTo, 'effectiveTo'),
       tiers: parseTiers(body.tiers) ?? [],
+      baseHousehold: asOptionalInt(body.baseHousehold, 'baseHousehold'),
+      perPersonQty: asOptionalDecimal(body.perPersonQty, 'perPersonQty'),
     };
     const ctx = currentTenant();
     return withOptionalIdem(
@@ -207,6 +237,8 @@ export class TariffPlanController {
       tiers?: TierWireBody[];
       code?: string;
       usageCategory?: string;
+      baseHousehold?: unknown;
+      perPersonQty?: unknown;
     },
     @Req() req: Request,
   ) {
@@ -214,6 +246,9 @@ export class TariffPlanController {
     if (body?.name !== undefined && (typeof body.name !== 'string' || !body.name.trim())) {
       throw new BadRequestException({ code: 'TARIFF_NAME_INVALID' });
     }
+    // An unknown category is malformed input (422) — checked before the
+    // immutability verdict so garbage never masquerades as a legal edit.
+    if (body?.usageCategory !== undefined) assertUsageCategory(body.usageCategory);
     const parsed: TariffPlanPatchBody = {
       name: body?.name?.trim(),
       effectiveFrom:
@@ -223,6 +258,8 @@ export class TariffPlanController {
       effectiveTo: asOptionalDay(body?.effectiveTo, 'effectiveTo'),
       tiers: parseTiers(body?.tiers),
       immutables: IMMUTABLE_KEYS.filter((k) => body?.[k] !== undefined),
+      baseHousehold: asOptionalInt(body?.baseHousehold, 'baseHousehold'),
+      perPersonQty: asOptionalDecimal(body?.perPersonQty, 'perPersonQty'),
     };
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
@@ -299,6 +336,8 @@ export class TariffPlanController {
       effectiveTo: asOptionalDay(body.effectiveTo, 'effectiveTo'),
       name: body.name?.trim(),
       tiers: parseTiers(body.tiers),
+      baseHousehold: asOptionalInt(body.baseHousehold, 'baseHousehold'),
+      perPersonQty: asOptionalDecimal(body.perPersonQty, 'perPersonQty'),
     };
     const ctx = currentTenant();
     return withOptionalIdem(

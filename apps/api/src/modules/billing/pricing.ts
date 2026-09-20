@@ -94,14 +94,20 @@ export const lockAccountForUpdate = async (
  * Fee items are resolved in bulk; a tier referencing a missing fee item is
  * a config bug and surfaces as a DomainError downstream (never silently
  * skipped).
+ *
+ * `plan` carries the household-scale policy (一户多人口申报): when
+ * per_person_qty is configured it is injected as `householdScale` on every
+ * PER_QTY item — the engine shifts finite tier bounds by
+ * (size − baseHousehold) × perPersonQty. Single-tier items have no finite
+ * bound, so flat fees (污水费) are naturally unaffected.
  */
 export const loadFeeItems = async (
   tx: Prisma.TransactionClient,
   ctx: TenantCtx,
-  tariffPlanId: string,
+  plan: { id: string; baseHousehold: number | null; perPersonQty: Prisma.Decimal | null },
 ): Promise<FeeItemInput[]> => {
   const tiers = await tx.tariffTier.findMany({
-    where: { tenantId: ctx.tenantId, tariffPlanId },
+    where: { tenantId: ctx.tenantId, tariffPlanId: plan.id },
     orderBy: [{ feeItemId: 'asc' }, { tierNo: 'asc' }],
   });
   if (tiers.length === 0) return [];
@@ -125,6 +131,10 @@ export const loadFeeItems = async (
       code: item.code,
       calcType: item.calcType,
       tiers: [],
+      householdScale:
+        item.calcType === 'PER_QTY' && plan.perPersonQty !== null
+          ? { baseHousehold: plan.baseHousehold ?? 4, perPersonQty: plan.perPersonQty }
+          : undefined,
     };
     entry.tiers.push({
       tierNo: t.tierNo,

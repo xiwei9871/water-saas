@@ -68,6 +68,8 @@ interface ReadingWireBody {
   planItemId?: string;
   resultType?: string;
   readingValue?: unknown;
+  /** NO_READ only: operator-estimated usage in m³ (not a dial). */
+  estimateQty?: unknown;
   exceptionCode?: string;
   readDate?: unknown;
   source?: string;
@@ -78,7 +80,8 @@ interface ReadingWireBody {
 /**
  * Wire → ReadingInput (spec §2.2 shape rules):
  *  - ACTUAL/REMOTE: readingValue required (decimal ≥ 0), exceptionCode banned
- *  - NO_READ:       exceptionCode required (enum), readingValue must be absent
+ *  - NO_READ:       exceptionCode required (enum), readingValue must be absent,
+ *                   estimateQty optional (≥0 usage estimate, not a dial)
  */
 const parseReadingInput = (
   body: ReadingWireBody | undefined,
@@ -93,6 +96,7 @@ const parseReadingInput = (
   }
   let readingValue: ReadingInput['readingValue'];
   let exceptionCode: ReadingInput['exceptionCode'];
+  let estimateQty: ReadingInput['estimateQty'];
   if (resultType === 'NO_READ') {
     if (body.readingValue !== undefined && body.readingValue !== null) {
       throw new BadRequestException({ code: 'READING_VALUE_NOT_ALLOWED' });
@@ -107,6 +111,9 @@ const parseReadingInput = (
       });
     }
     exceptionCode = body.exceptionCode as ReadingInput['exceptionCode'];
+    if (body.estimateQty !== undefined && body.estimateQty !== null) {
+      estimateQty = assertDecimal(body.estimateQty, 'estimateQty', { min: 0 });
+    }
   } else {
     if (body.readingValue === undefined || body.readingValue === null) {
       throw new BadRequestException({ code: 'READING_VALUE_REQUIRED' });
@@ -114,6 +121,9 @@ const parseReadingInput = (
     readingValue = assertDecimal(body.readingValue, 'readingValue', { min: 0 });
     if (body.exceptionCode !== undefined && body.exceptionCode !== null) {
       throw new BadRequestException({ code: 'EXCEPTION_CODE_NOT_ALLOWED' });
+    }
+    if (body.estimateQty !== undefined && body.estimateQty !== null) {
+      throw new BadRequestException({ code: 'ESTIMATE_QTY_ONLY_FOR_NO_READ' });
     }
   }
   if (body.source !== undefined && !READ_SOURCES.has(body.source)) {
@@ -123,6 +133,7 @@ const parseReadingInput = (
     planItemId: assertUuid(body.planItemId, 'planItemId'),
     resultType: resultType as ReadingInput['resultType'],
     readingValue,
+    estimateQty,
     exceptionCode,
     readDate: assertOptionalDate(body.readDate, 'readDate'),
     source: (body.source as ReadingInput['source']) ?? defaultSource,
@@ -258,11 +269,11 @@ export class MeterReadingController {
 
     if (typeof body?.csv === 'string' && body.csv.trim()) {
       for (const { row, cells } of parseReadingCsv(body.csv)) {
-        if (cells.length < 4 || cells.length > 5) {
+        if (cells.length < 4 || cells.length > 6) {
           preFailed.push({
             row,
             code: 'ROW_MALFORMED',
-            error: `expected 4-5 columns, got ${cells.length}`,
+            error: `expected 4-6 columns, got ${cells.length}`,
           });
           continue;
         }
@@ -278,6 +289,7 @@ export class MeterReadingController {
                 readingValue: cells[2] || undefined,
                 exceptionCode: cells[3] || undefined,
                 readDate: cells[4] || undefined,
+                estimateQty: cells[5] || undefined,
               },
               'IMPORT',
             ),

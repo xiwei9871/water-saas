@@ -121,6 +121,9 @@ export interface RepricePeriod {
   period: string;
   allocatedUsage: Decimal;
   feeItems: FeeItemInput[];
+  /** Settlement snapshot for this period — history must use the
+   *  declaration effective THEN, never the account's current value. */
+  householdSize?: number | null;
 }
 
 export interface RepriceBreakdownRow {
@@ -169,6 +172,7 @@ export function reprice(input: {
     const result = computeBill({
       usageQty: p.allocatedUsage,
       ytdBeforeQty: ytd,
+      householdSize: p.householdSize,
       feeItems: p.feeItems,
     });
     breakdown.push({

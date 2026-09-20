@@ -94,7 +94,7 @@ const get = (path: string, token = adminToken, status = 200) =>
 const onboard = async (label: string) => {
   const res = await post('/water-accounts/onboard', {
     customer: { name: `T11 ${label} ${RUN}`, custType: 'PERSONAL' },
-    account: { usageCategory: 'RESIDENTIAL', addr: `${label} Water St` },
+    account: { usageCategory: 'RES_METERED', addr: `${label} Water St` },
     meter: { brand: 't11-brand', caliber: 'DN15' },
     installation: { initialReading: 0, installedAt: '2026-01-01' },
   }).expect(201);
@@ -284,6 +284,7 @@ beforeAll(async () => {
     'account_event',
     'meter_installation',
     'meter',
+    'water_account_household_profile',
     'water_account',
     'settle_account',
     'customer',
@@ -329,7 +330,7 @@ describe('fixtures: fee items + plan + accounts + readings', () => {
     const plan = await post('/tariff-plans', {
       code: `RES-${RUN}`,
       name: '居民水价',
-      usageCategory: 'RESIDENTIAL',
+      usageCategory: 'RES_METERED',
       effectiveFrom: '2026-01-01',
       tiers: [
         { feeItemId: waterItem, tierNo: 1, fromQty: 0, toQty: 180, unitPrice: '3.0' },

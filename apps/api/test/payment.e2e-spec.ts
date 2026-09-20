@@ -86,7 +86,7 @@ const post = (path: string, body: unknown, token = adminToken) =>
 const get = (path: string, token = adminToken, status = 200) =>
   request(app.getHttpServer()).get(path).set(auth(token)).expect(status);
 
-const onboard = async (label: string, usageCategory = 'RESIDENTIAL') => {
+const onboard = async (label: string, usageCategory = 'RES_METERED') => {
   const res = await post('/water-accounts/onboard', {
     customer: { name: `T12 ${label} ${RUN}`, custType: 'PERSONAL' },
     account: { usageCategory, addr: `${label} Water St` },
@@ -268,6 +268,7 @@ beforeAll(async () => {
     'account_event',
     'meter_installation',
     'meter',
+    'water_account_household_profile',
     'water_account',
     'settle_account',
     'customer',
@@ -892,7 +893,7 @@ describe('review: probe credit surface + closed-account reversal guard', () => {
     const plan = await post('/tariff-plans', {
       code: `PLAN12-${RUN}`,
       name: 'T12 定额价',
-      usageCategory: 'RESIDENTIAL',
+      usageCategory: 'RES_METERED',
       effectiveFrom: '2026-01-01',
       tiers: [{ feeItemId: fixedItem, tierNo: 1, fromQty: 0, toQty: null, unitPrice: '80' }],
     }).expect(201);

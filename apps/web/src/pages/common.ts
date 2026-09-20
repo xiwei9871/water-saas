@@ -18,6 +18,20 @@ export const CUST_TYPE_LABELS: Record<CustType, string> = {
   ORG: '单位',
 };
 
+/** 受控用水类别 —— 与 API 侧 common/usage-categories.ts 的固定集合一致；
+ * 服务端 422 INVALID_USAGE_CATEGORY + DB CHECK 双重兜底。 */
+export const USAGE_CATEGORY_LABELS: Record<string, string> = {
+  RES_METERED: '居民（户表）',
+  RES_SHARED: '居民（非户表）',
+  NON_RES: '非居民',
+  SPECIAL: '特种',
+  MONITORING: '监控表',
+};
+
+export const USAGE_CATEGORY_OPTIONS = Object.entries(USAGE_CATEGORY_LABELS).map(
+  ([value, label]) => ({ value, label }),
+);
+
 export const ACCOUNT_STATUS_LABELS: Record<AccountStatus, string> = {
   NORMAL: '正常',
   SUSPENDED: '暂停',

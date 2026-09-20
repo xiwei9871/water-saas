@@ -505,7 +505,7 @@ export class ReconciliationService {
         });
       }
       planIds.push(plan.id);
-      feeItemsPerPeriod.push(await loadFeeItems(tx, ctx, plan.id));
+      feeItemsPerPeriod.push(await loadFeeItems(tx, ctx, plan));
     }
 
     const allocated = allocateUsage({
@@ -522,6 +522,9 @@ export class ReconciliationService {
           period: s.period,
           allocatedUsage: allocated[i],
           feeItems: feeItemsPerPeriod[i],
+          // Each period reprices at ITS OWN frozen household snapshot —
+          // a mid-span declaration change must not rewrite earlier bills.
+          householdSize: s.householdSizeSnapshot,
         })),
       });
     } catch (err) {

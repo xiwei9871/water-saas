@@ -39,7 +39,14 @@ import type {
   TariffTier,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { cleanBody, fmtDate, fmtTime, newIdemKey } from '../common';
+import {
+  cleanBody,
+  fmtDate,
+  fmtTime,
+  newIdemKey,
+  USAGE_CATEGORY_LABELS,
+  USAGE_CATEGORY_OPTIONS,
+} from '../common';
 import { CALC_TYPE_LABELS, TARIFF_STATUS_COLORS, TARIFF_STATUS_LABELS } from './common';
 
 interface TierRow {
@@ -465,6 +472,7 @@ export default function Tariffs() {
       dataIndex: 'usageCategory',
       key: 'usageCategory',
       width: 110,
+      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
     },
     {
       title: '生效区间',
@@ -777,11 +785,11 @@ export default function Tariffs() {
               <Form.Item
                 name="usageCategory"
                 label="用水类别"
-                rules={[{ required: true, message: '请输入用水类别' }]}
+                rules={[{ required: true, message: '请选择用水类别' }]}
                 style={{ width: '50%' }}
-                extra="须与水表户的用水类别一致，如 居民用水"
+                extra="须与水表户的用水类别一致"
               >
-                <Input placeholder="如 居民用水" />
+                <Select options={USAGE_CATEGORY_OPTIONS} placeholder="选择用水类别" />
               </Form.Item>
             </Space.Compact>
           )}

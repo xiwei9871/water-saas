@@ -20,6 +20,7 @@ export const METER_READING_SELECT = {
   readDate: true,
   resultType: true,
   readingValue: true,
+  estimateQty: true,
   exceptionCode: true,
   supersedesReadingId: true,
   qcStatus: true,
@@ -77,6 +78,8 @@ export interface ReadingInput {
   readingValue?: Prisma.Decimal;
   /** NO_READ: required ExceptionCode. Others: undefined. */
   exceptionCode?: ExceptionCode;
+  /** NO_READ only: operator-entered estimated usage (m³, not a dial). */
+  estimateQty?: Prisma.Decimal;
   readDate?: Date;
   source: ReadSource;
   photoRef?: string | null;
@@ -684,6 +687,8 @@ export class MeterReadingService {
           readDate: input.readDate ?? new Date(),
           resultType: input.resultType,
           readingValue: input.readingValue ?? null,
+          // A quantity estimate, never a dial — carries no readingValue.
+          estimateQty: input.estimateQty ?? null,
           exceptionCode: input.exceptionCode ?? null,
           qcStatus: 'PENDING',
           source: input.source,

@@ -82,7 +82,7 @@ const onboard = async (label: string) => {
     .set(auth(adminToken))
     .send({
       customer: { name: `T6 ${label} ${RUN}`, custType: 'PERSONAL' },
-      account: { usageCategory: 'RESIDENTIAL', addr: `${label} Water St` },
+      account: { usageCategory: 'RES_METERED', addr: `${label} Water St` },
       meter: { brand: 't6-brand', caliber: 'DN15' },
       installation: { initialReading: 0 },
     })
@@ -245,7 +245,7 @@ describe('fixtures: accounts + book + plan', () => {
         .send({
           customerId: dCust.id,
           settleAccountId: dSettle.id,
-          usageCategory: 'RESIDENTIAL',
+          usageCategory: 'RES_METERED',
           addr: 'D Water St',
         })
         .expect(201)
@@ -940,5 +940,78 @@ describe('T6 review follow-ups', () => {
       .send({ action: 'reject' });
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'READING_SUPERSEDED' });
+  });
+});
+
+describe('v0.2: reader estimateQty on NO_READ', () => {
+  it('shape rules: ACTUAL/REMOTE + estimateQty → 400; NO_READ + estimateQty accepted', async () => {
+    await genPlan('p6', '202703');
+    for (const c of [
+      {
+        body: { planItemId: itemOf('p6', 'A'), resultType: 'ACTUAL', readingValue: 5, estimateQty: 9 },
+        code: 'ESTIMATE_QTY_ONLY_FOR_NO_READ',
+      },
+      {
+        body: { planItemId: itemOf('p6', 'A'), resultType: 'NO_READ', exceptionCode: 'LOCKED', estimateQty: 'abc' },
+        code: 'INVALID_DECIMAL',
+      },
+    ]) {
+      const res = await request(app.getHttpServer())
+        .post('/meter-readings')
+        .set(auth(adminToken))
+        .send(c.body);
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: c.code });
+    }
+
+    const ok = await request(app.getHttpServer())
+      .post('/meter-readings')
+      .set(auth(adminToken))
+      .send({ planItemId: itemOf('p6', 'A'), resultType: 'NO_READ', exceptionCode: 'LOCKED', estimateQty: 30 })
+      .expect(201);
+    expect(ok.body.resultType).toBe('NO_READ');
+    expect(ok.body.readingValue).toBeNull();
+    expect(Number(ok.body.estimateQty)).toBe(30);
+  });
+
+  it('CSV sixth column estimate_qty imports; old 4/5-column rows still work', async () => {
+    await genPlan('p7', '202704');
+    const csv = [
+      'plan_item_id,result_type,reading_value,exception_code,read_date,estimate_qty',
+      `${itemOf('p7', 'A')},ACTUAL,41.5,,,`,
+      `${itemOf('p7', 'B')},NO_READ,,LOCKED,2026-04-05,22`,
+      `${itemOf('p7', 'C')},NO_READ,,LOCKED`, // legacy 4-column shape
+    ].join('\n');
+    const res = await request(app.getHttpServer())
+      .post('/meter-readings/import')
+      .set(auth(adminToken))
+      .send({ csv })
+      .expect(201);
+    expect(res.body.created).toBe(3);
+    const byItem = Object.fromEntries(
+      res.body.readings.map((r: { planItemId: string; estimateQty: string | null }) => [
+        r.planItemId,
+        r.estimateQty,
+      ]),
+    );
+    expect(byItem[itemOf('p7', 'B')]).toBe('22');
+    expect(byItem[itemOf('p7', 'C')]).toBeNull();
+  });
+
+  it('CSV ACTUAL + estimate_qty is a failed row (all-or-nothing)', async () => {
+    await genPlan('p8', '202705');
+    const csv = [
+      `${itemOf('p8', 'A')},ACTUAL,10,,,7`, // illegal combo → row fails
+      `${itemOf('p8', 'B')},NO_READ,,LOCKED,,15`, // valid — must NOT land
+    ].join('\n');
+    const res = await request(app.getHttpServer())
+      .post('/meter-readings/import')
+      .set(auth(adminToken))
+      .send({ csv });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'IMPORT_VALIDATION_FAILED', created: 0 });
+    expect(res.body.failed[0].code).toBe('ESTIMATE_QTY_ONLY_FOR_NO_READ');
+    const p = await progress(plans['p8'].id);
+    expect(p).toMatchObject({ PENDING: 3, READ: 0, NO_READ: 0 });
   });
 });

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
+import { isBookDue, type BookCadence } from '../../common/reading-cadence.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
@@ -171,9 +172,15 @@ export class ReadingPlanService {
       throw new BadRequestException({ code: 'GENERATE_FIELDS_REQUIRED' });
     }
     const locked = await tx.$queryRaw<
-      { id: string; org_unit_id: string; reader_id: string | null }[]
+      {
+        id: string;
+        org_unit_id: string;
+        reader_id: string | null;
+        cadence: string;
+        anchor_period: string | null;
+      }[]
     >`
-      SELECT id, org_unit_id, reader_id FROM reading_book
+      SELECT id, org_unit_id, reader_id, cadence, anchor_period FROM reading_book
       WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${body.bookId}::uuid
       FOR UPDATE`;
     if (locked.length === 0) {
@@ -285,7 +292,17 @@ export class ReadingPlanService {
       select: PLAN_ITEM_SELECT,
       orderBy: { seqNo: 'asc' },
     });
-    return { ...plan, items };
+    // Non-due periods (e.g. an off-cycle catch-up on a BIMONTHLY book) are
+    // legal operational cases — warn, never block. The backend owns the
+    // due math; the UI only surfaces this flag.
+    const cadenceWarning = isBookDue(
+      book.cadence as BookCadence,
+      book.anchor_period,
+      body.period,
+    )
+      ? null
+      : 'BOOK_NOT_DUE_THIS_PERIOD';
+    return { ...plan, items, cadenceWarning };
   }
 
   /**

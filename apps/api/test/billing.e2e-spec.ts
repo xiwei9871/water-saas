@@ -76,7 +76,10 @@ const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
 // Run-scoped suffix: the test DB keeps rows between runs, so business
 // codes/categories differ per run.
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-const UC2 = `T10U2-${RUN}`; // usage_category with no plan until the retry test
+// SPECIAL is the controlled category this suite leaves plan-less until
+// the retry test creates+activates one (was a run-scoped free-form value
+// before the v0.2 controlled-category contract).
+const UC2 = 'SPECIAL';
 
 const post = (path: string, body: unknown, token = adminToken) =>
   request(app.getHttpServer()).post(path).set(auth(token)).send(body);
@@ -245,6 +248,7 @@ beforeAll(async () => {
     'account_event',
     'meter_installation',
     'meter',
+    'water_account_household_profile',
     'water_account',
     'settle_account',
     'customer',
@@ -291,7 +295,7 @@ describe('fixtures: fee items + plan + accounts + settlements', () => {
     const plan = await post('/tariff-plans', {
       code: `RES-${RUN}`,
       name: '居民水价',
-      usageCategory: 'RESIDENTIAL',
+      usageCategory: 'RES_METERED',
       effectiveFrom: '2026-01-01',
       tiers: [
         { feeItemId: waterItem, tierNo: 1, fromQty: 0, toQty: 180, unitPrice: '3.0' },
@@ -304,7 +308,7 @@ describe('fixtures: fee items + plan + accounts + settlements', () => {
   });
 
   it('onboards A1 (RESIDENTIAL) + A2 (no-plan category) and seeds FINAL settlements', async () => {
-    await onboard('A1', 'RESIDENTIAL');
+    await onboard('A1', 'RES_METERED');
     await onboard('A2', UC2);
 
     // A1: 202606 usage 100 (billed POSTED below), 202607 usage 200
@@ -725,7 +729,7 @@ describe('review fixes: org scope, close-vs-post, input bounds', () => {
     ).body.accessToken as string;
 
     // Fresh account + FINAL settlement + a POSTED bill to reverse.
-    await onboard('A5', 'RESIDENTIAL');
+    await onboard('A5', 'RES_METERED');
     await seedSettlement('A5-10', acct['A5'], '202610', 40);
     const r = await post('/billing-runs', { period: '202610' }).expect(201);
     const posted = await post(`/billing-runs/${r.body.id}/post`, {}).expect(201);
@@ -764,7 +768,7 @@ describe('review fixes: org scope, close-vs-post, input bounds', () => {
   });
 
   it('a DRAFT bill blocks close; posting onto a CLOSED account records ACCOUNT_CLOSED', async () => {
-    await onboard('A4', 'RESIDENTIAL');
+    await onboard('A4', 'RES_METERED');
     await seedSettlement('A4-08', acct['A4'], '202608', 25);
     const r1 = await post('/billing-runs', { period: '202608' }).expect(201);
 
@@ -795,5 +799,112 @@ describe('review fixes: org scope, close-vs-post, input bounds', () => {
     });
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'BILL_USAGE_QTY_SCALE' });
+  });
+});
+
+describe('v0.2: monitoring skip + household-scaled pricing', () => {
+  it('MONITORING settlement is skipped — never a bill, never a failure, out of counters', async () => {
+    const mon = await post('/water-accounts/onboard', {
+      account: { usageCategory: 'MONITORING', addr: 'DMA-09 入口' },
+      meter: { brand: 't10-brand' },
+      installation: { initialReading: 0 },
+    }).expect(201);
+    const st = await post('/consumption-settlements', {
+      waterAccountId: mon.body.waterAccount.id,
+      period: '202609',
+      usageQty: 40,
+      estimateReason: 'monitoring period usage',
+    }).expect(201);
+    await post(`/consumption-settlements/${st.body.id}/finalize`, {}).expect(201);
+
+    const res = await post('/billing-runs', { period: '202609' }).expect(201);
+    // Excluded from the run's denominator entirely — not a failure record.
+    expect(res.body.totalCount).toBe(0);
+    expect(res.body.failedCount).toBe(0);
+    const bills = await owner.query(
+      `SELECT count(*)::int AS n FROM bill
+       WHERE tenant_id = $1 AND source_type = 'SETTLEMENT' AND source_id = $2`,
+      [T10A, st.body.id],
+    );
+    expect(bills.rows[0].n).toBe(0);
+  });
+
+  it('household=5 shifts tier bound 216→267 (baseHousehold 4, +51/person); 230 prices flat', async () => {
+    const fee = (
+      await post('/fee-items', {
+        code: `WATER-HH-${RUN}`,
+        name: '水费',
+        calcType: 'PER_QTY',
+      }).expect(201)
+    ).body;
+    const plan = await post('/tariff-plans', {
+      code: `RESHH-${RUN}`,
+      name: '居民户表价',
+      usageCategory: 'RES_SHARED',
+      effectiveFrom: '2026-01-01',
+      baseHousehold: 4,
+      perPersonQty: '51',
+      tiers: [
+        { feeItemId: fee.id, tierNo: 1, fromQty: 0, toQty: 216, unitPrice: '3' },
+        { feeItemId: fee.id, tierNo: 2, fromQty: 216, toQty: null, unitPrice: '5' },
+      ],
+    }).expect(201);
+    await post(`/tariff-plans/${plan.body.id}/activate`, {}).expect(201);
+
+    const a = await post('/water-accounts/onboard', {
+      customer: { name: `T10 HH ${RUN}`, custType: 'PERSONAL' },
+      account: { usageCategory: 'RES_SHARED', addr: 'hh st', householdSize: 5 },
+      meter: { brand: 't10-brand' },
+      installation: { initialReading: 0 },
+    }).expect(201);
+    const st = await post('/consumption-settlements', {
+      waterAccountId: a.body.waterAccount.id,
+      period: '202609',
+      usageQty: 230,
+      estimateReason: 'hh scale test',
+    }).expect(201);
+    expect(st.body.householdSizeSnapshot).toBe(5);
+    await post(`/consumption-settlements/${st.body.id}/finalize`, {}).expect(201);
+
+    const run = await post('/billing-runs', { period: '202609' }).expect(201);
+    // The monitoring settlement is skipped → only the household account counts.
+    expect(run.body.totalCount).toBe(1);
+    await post(`/billing-runs/${run.body.id}/post`, {}).expect(201);
+
+    const bill = (
+      await owner.query(
+        `SELECT total_amount::text AS t FROM bill
+         WHERE tenant_id = $1 AND source_type = 'SETTLEMENT' AND source_id = $2`,
+        [T10A, st.body.id],
+      )
+    ).rows[0];
+    // 5人 → bound 216+51=267; 230 ≤ 267 → all at 3.00 → 690.00
+    expect(bill.t).toBe('69000');
+
+    // Sanity: the same plan at household=4 would cross the bound —
+    // 216×3 + 14×5 = 718.00 — proving the shift priced it.
+    const a4 = await post('/water-accounts/onboard', {
+      customer: { name: `T10 HH4 ${RUN}`, custType: 'PERSONAL' },
+      account: { usageCategory: 'RES_SHARED', addr: 'hh4 st', householdSize: 4 },
+      meter: { brand: 't10-brand' },
+      installation: { initialReading: 0 },
+    }).expect(201);
+    const st4 = await post('/consumption-settlements', {
+      waterAccountId: a4.body.waterAccount.id,
+      period: '202610',
+      usageQty: 230,
+      estimateReason: 'hh4 scale test',
+    }).expect(201);
+    await post(`/consumption-settlements/${st4.body.id}/finalize`, {}).expect(201);
+    const run2 = await post('/billing-runs', { period: '202610' }).expect(201);
+    await post(`/billing-runs/${run2.body.id}/post`, {}).expect(201);
+    const bill4 = (
+      await owner.query(
+        `SELECT total_amount::text AS t FROM bill
+         WHERE tenant_id = $1 AND source_type = 'SETTLEMENT' AND source_id = $2`,
+        [T10A, st4.body.id],
+      )
+    ).rows[0];
+    expect(bill4.t).toBe('71800');
   });
 });

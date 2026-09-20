@@ -34,6 +34,8 @@ import {
   cleanBody,
   fmtDate,
   newIdemKey,
+  USAGE_CATEGORY_LABELS,
+  USAGE_CATEGORY_OPTIONS,
 } from '../common';
 import {
   AccountStatusTag,
@@ -335,6 +337,7 @@ export default function WaterAccounts() {
       dataIndex: 'usageCategory',
       key: 'usageCategory',
       width: 110,
+      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
     },
     {
       title: '地址',
@@ -562,9 +565,9 @@ export default function WaterAccounts() {
           <Form.Item
             name="usageCategory"
             label="用水类别"
-            rules={[{ required: true, message: '请输入用水类别' }]}
+            rules={[{ required: true, message: '请选择用水类别' }]}
           >
-            <Input placeholder="如 居民用水 / 商业用水" />
+            <Select options={USAGE_CATEGORY_OPTIONS} placeholder="选择用水类别" />
           </Form.Item>
           <Form.Item
             name="addr"
@@ -597,9 +600,9 @@ export default function WaterAccounts() {
           <Form.Item
             name="usageCategory"
             label="用水类别"
-            rules={[{ required: true, message: '请输入用水类别' }]}
+            rules={[{ required: true, message: '请选择用水类别' }]}
           >
-            <Input />
+            <Select options={USAGE_CATEGORY_OPTIONS} />
           </Form.Item>
           <Form.Item
             name="addr"

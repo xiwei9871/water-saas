@@ -99,6 +99,9 @@ export class ReadingBookController {
           ? null
           : assertUuid(body.readerId, 'readerId'),
       scheduleDay: scheduleDayOf(body.scheduleDay),
+      cadence: body.cadence,
+      anchorPeriod: body.anchorPeriod,
+      meterChannel: body.meterChannel,
     };
     const ctx = currentTenant();
     return withOptionalIdem(
@@ -128,6 +131,9 @@ export class ReadingBookController {
       orgUnitId: body.orgUnitId,
       readerId: body.readerId,
       scheduleDay: scheduleDayOf(body.scheduleDay),
+      cadence: body.cadence,
+      anchorPeriod: body.anchorPeriod,
+      meterChannel: body.meterChannel,
     };
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>

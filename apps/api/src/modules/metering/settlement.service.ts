@@ -21,6 +21,7 @@ export const SETTLEMENT_SELECT = {
   estimateMethod: true,
   estimateBasis: true,
   estimateReason: true,
+  householdSizeSnapshot: true,
   status: true,
   createdAt: true,
   updatedAt: true,
@@ -291,6 +292,7 @@ export class SettlementService {
     const instIds = installations.map((i) => i.id);
     const prevChain = await this.prevChain(tx, ctx, body.waterAccountId, instIds, body.period);
     const readings = await this.validReadings(tx, ctx, instIds, body.period);
+    const readerEstimates = await this.readerEstimates(tx, ctx, instIds, body.period);
     const history = await this.historyUsages(tx, ctx, body.waterAccountId, body.period);
     const suggested = estimateAvg3(history);
     const suggestedPrisma =
@@ -404,14 +406,26 @@ export class SettlementService {
     }
 
     // Pass 2: resolve the estimated components.
+    // Priority (v0.2): explicit settlement override > reader-entered
+    // estimate (NO_READ.estimate_qty) > AUTO_AVG3. Audit markers:
+    //   MANUAL + sourceReadingId = null  → settle-time operator override
+    //   MANUAL + sourceReadingId = row   → reader's entry estimate
+    //   AUTO_AVG3                        → system suggestion
     let manualApplied = false;
     for (const draft of drafts) {
       if (draft.sourceType !== 'ESTIMATE') continue;
       const override = overrideMap.get(draft.installationId);
+      const readerEstimate = readerEstimates.get(draft.installationId);
       let usage: Prisma.Decimal;
       if (override !== undefined) {
         usage = override;
         draft.method = 'MANUAL';
+        draft.sourceReadingId = null;
+        manualApplied = true;
+      } else if (readerEstimate !== undefined) {
+        usage = readerEstimate.qty;
+        draft.method = 'MANUAL';
+        draft.sourceReadingId = readerEstimate.readingId;
         manualApplied = true;
       } else if (suggestedPrisma !== null) {
         usage = suggestedPrisma;
@@ -459,6 +473,19 @@ export class SettlementService {
         } satisfies Prisma.InputJsonValue)
       : Prisma.DbNull;
 
+    // Freeze the household declaration effective for this period — billing
+    // must never read the account's current value (later declarations must
+    // not reprice history).
+    const householdProfile = await tx.waterAccountHouseholdProfile.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        waterAccountId: body.waterAccountId,
+        effectiveFromPeriod: { lte: body.period },
+      },
+      orderBy: { effectiveFromPeriod: 'desc' },
+      select: { householdSize: true },
+    });
+
     let settlement;
     try {
       settlement = await tx.consumptionSettlement.create({
@@ -471,6 +498,7 @@ export class SettlementService {
           estimateMethod: isEstimated ? estimateMethod : null,
           estimateBasis,
           estimateReason: isEstimated ? body.estimateReason : null,
+          householdSizeSnapshot: householdProfile?.householdSize ?? null,
           status: 'DRAFT',
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
@@ -777,6 +805,40 @@ export class SettlementService {
       }
     }
     return valid;
+  }
+
+  /**
+   * Operator-entered NO_READ estimates for this period, latest per
+   * installation. A REJECTED NO_READ row's estimate is untrusted (QC said
+   * the visit record is wrong) — only PENDING/PASSED/MANUAL_REVIEW count.
+   * estimate_qty is a quantity, never a dial — used as the ESTIMATE
+   * component's usage ahead of AVG3, with sourceReadingId linking back.
+   */
+  private async readerEstimates(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    installationIds: string[],
+    period: string,
+  ) {
+    const rows = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        installationId: { in: installationIds },
+        period,
+        resultType: 'NO_READ',
+        estimateQty: { not: null },
+        qcStatus: { not: 'REJECTED' },
+      },
+      select: { id: true, installationId: true, estimateQty: true },
+      orderBy: [{ readDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    const map = new Map<string, { readingId: string; qty: Prisma.Decimal }>();
+    for (const r of rows) {
+      if (!map.has(r.installationId) && r.estimateQty !== null) {
+        map.set(r.installationId, { readingId: r.id, qty: r.estimateQty });
+      }
+    }
+    return map;
   }
 
   /**

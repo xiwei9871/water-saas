@@ -161,7 +161,7 @@ describe('onboard wizard (立户)', () => {
       .set(auth(adminToken))
       .send({
         customer: { name: 'T4 Alice', custType: 'PERSONAL', phone: '13800000001' },
-        account: { usageCategory: 'RESIDENTIAL', addr: '1 Water St' },
+        account: { usageCategory: 'RES_METERED', addr: '1 Water St' },
         meter: { brand: 't4-brand', caliber: 'DN15' },
         installation: { initialReading: 12.5 },
       })
@@ -215,7 +215,7 @@ describe('onboard wizard (立户)', () => {
     const key = `t4-onboard-${RUN}`;
     const body = {
       customer: { name: `T4 Idem ${RUN}`, custType: 'ORG' },
-      account: { usageCategory: 'COMMERCIAL', addr: '2 Water St' },
+      account: { usageCategory: 'NON_RES', addr: '2 Water St' },
       meter: { brand: 't4-brand' },
       installation: { initialReading: 0 },
     };
@@ -252,7 +252,7 @@ describe('onboard wizard (立户)', () => {
       .post('/water-accounts/onboard')
       .set(auth(adminToken))
       .set('Idempotency-Key', key)
-      .send({ ...body, account: { usageCategory: 'OTHER', addr: 'x' } })
+      .send({ ...body, account: { usageCategory: 'SPECIAL', addr: 'x' } })
       .expect(409);
     expect(conflict.body).toMatchObject({
       code: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
@@ -265,7 +265,7 @@ describe('onboard wizard (立户)', () => {
       .post('/water-accounts/onboard')
       .set(auth(adminToken))
       .send({
-        account: { usageCategory: 'R', addr: 'a' },
+        account: { usageCategory: 'RES_METERED', addr: 'a' },
         meter: {},
         installation: { initialReading: 0 },
       })
@@ -276,7 +276,7 @@ describe('onboard wizard (立户)', () => {
       .set(auth(adminToken))
       .send({
         customer: { name: 'x', custType: 'PERSONAL' },
-        account: { usageCategory: 'R', addr: 'a' },
+        account: { usageCategory: 'RES_METERED', addr: 'a' },
         meter: {},
         meterId: meterId,
         installation: { initialReading: 0 },
@@ -288,7 +288,7 @@ describe('onboard wizard (立户)', () => {
       .set(auth(adminToken))
       .send({
         customer: { name: 'x', custType: 'PERSONAL' },
-        account: { usageCategory: 'R', addr: 'a' },
+        account: { usageCategory: 'RES_METERED', addr: 'a' },
         meter: {},
         installation: {},
       })
@@ -299,7 +299,7 @@ describe('onboard wizard (立户)', () => {
       .set(auth(adminToken))
       .send({
         customer: { name: 'x', custType: 'ALIEN' },
-        account: { usageCategory: 'R', addr: 'a' },
+        account: { usageCategory: 'RES_METERED', addr: 'a' },
         meter: {},
         installation: { initialReading: 0 },
       })
@@ -309,7 +309,7 @@ describe('onboard wizard (立户)', () => {
       .set(auth(adminToken))
       .send({
         customer: { name: 'x', custType: 'PERSONAL' },
-        account: { usageCategory: 'R', addr: 'a' },
+        account: { usageCategory: 'RES_METERED', addr: 'a' },
         meter: {},
         installation: { initialReading: -1 },
       })
@@ -574,5 +574,109 @@ describe('tenant isolation + permissions', () => {
       .send({ name: 'x', custType: 'PERSONAL' })
       .expect(403);
     expect(res.body).toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+});
+
+describe('v0.2: monitoring meter onboard （监控表）', () => {
+  it('MONITORING onboards with NO customer body — system customer + billable=false', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        account: { usageCategory: 'MONITORING', addr: 'DMA-01 入口' },
+        meter: { brand: 't4-brand', caliber: 'DN50' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+
+    const { customer, settleAccount, waterAccount } = res.body;
+    expect(customer.systemKey).toBe('MONITORING_INTERNAL');
+    expect(settleAccount.settleNo).toBe('SYS-MONITORING');
+    expect(waterAccount.usageCategory).toBe('MONITORING');
+    expect(waterAccount.billable).toBe(false);
+
+    // Second monitoring meter REUSES the same system customer/settle account.
+    const res2 = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        account: { usageCategory: 'MONITORING', addr: 'DMA-02 入口' },
+        meter: { brand: 't4-brand' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+    expect(res2.body.customer.id).toBe(customer.id);
+    expect(res2.body.settleAccount.id).toBe(settleAccount.id);
+  });
+
+  it('MONITORING with a supplied customer/settleAccount → 400 (not silently ignored)', async () => {
+    for (const extra of [
+      { customer: { name: 'x', custType: 'ORG' } },
+      { customerId: '99999999-9999-4999-8999-999999999999' },
+      { settleAccount: { name: 'x' } },
+      { settleAccountId: '99999999-9999-4999-8999-999999999999' },
+    ]) {
+      const res = await request(app.getHttpServer())
+        .post('/water-accounts/onboard')
+        .set(auth(adminToken))
+        .send({
+          account: { usageCategory: 'MONITORING', addr: 'DMA-x' },
+          meter: { brand: 't4-brand' },
+          installation: { initialReading: 0 },
+          ...extra,
+        });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('billable derives from category — PATCH to MONITORING flips it, and back', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `T4 Cat ${RUN}`, custType: 'PERSONAL' },
+        account: { usageCategory: 'RES_METERED', addr: 'cat flip st' },
+        meter: { brand: 't4-brand' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+    const id = res.body.waterAccount.id;
+    expect(res.body.waterAccount.billable).toBe(true);
+
+    const toMon = await request(app.getHttpServer())
+      .patch(`/water-accounts/${id}`)
+      .set(auth(adminToken))
+      .send({ usageCategory: 'MONITORING' })
+      .expect(200);
+    expect(toMon.body.billable).toBe(false);
+
+    const back = await request(app.getHttpServer())
+      .patch(`/water-accounts/${id}`)
+      .set(auth(adminToken))
+      .send({ usageCategory: 'SPECIAL' })
+      .expect(200);
+    expect(back.body.billable).toBe(true);
+  });
+
+  it('unknown usageCategory → 422 INVALID_USAGE_CATEGORY on create + onboard', async () => {
+    const ghost = '99999999-9999-4999-8999-999999999999';
+    const direct = await request(app.getHttpServer())
+      .post('/water-accounts')
+      .set(auth(adminToken))
+      .send({ customerId: ghost, settleAccountId: ghost, usageCategory: 'RESIDENTIAL', addr: 'a' });
+    expect(direct.status).toBe(422);
+    expect(direct.body).toMatchObject({ code: 'INVALID_USAGE_CATEGORY' });
+
+    const wiz = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: 'x', custType: 'PERSONAL' },
+        account: { usageCategory: 'BOGUS', addr: 'a' },
+        meter: { brand: 't4-brand' },
+        installation: { initialReading: 0 },
+      });
+    expect(wiz.status).toBe(422);
+    expect(wiz.body).toMatchObject({ code: 'INVALID_USAGE_CATEGORY' });
   });
 });
