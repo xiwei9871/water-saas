@@ -546,7 +546,7 @@ describe('tariff plan create + tier ladder validation', () => {
   it('list filters by usageCategory/status; ghost detail → 404', async () => {
     const list = (
       await request(app.getHttpServer())
-        .get(`/tariff-plans?usageCategory=${UC}&status=DRAFT`)
+        .get(`/tariff-plans?usageCategory=${UC}&status=DRAFT&take=200`)
         .set(auth(adminToken))
         .expect(200)
     ).body;
