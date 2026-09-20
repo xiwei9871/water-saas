@@ -832,6 +832,9 @@ export class SettlementService {
       select: { id: true, installationId: true, estimateQty: true },
       orderBy: [{ readDate: 'desc' }, { createdAt: 'desc' }],
     });
+    // NO_READ rows are NOT_SUPERSEDABLE (meter-reading.service.ts) — a redo
+    // is a new entry on the item, never a superseding child — so no
+    // superseded-child probe is needed here.
     const map = new Map<string, { readingId: string; qty: Prisma.Decimal }>();
     for (const r of rows) {
       if (!map.has(r.installationId) && r.estimateQty !== null) {

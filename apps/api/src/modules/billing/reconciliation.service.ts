@@ -206,10 +206,19 @@ export class ReconciliationService {
         id: true,
         usageCategory: true,
         settleAccountId: true,
+        billable: true,
       },
     });
     if (!account) {
       throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    }
+    // Non-billable (MONITORING) accounts never bill, so there is nothing to
+    // reconcile — refuse before any outcome leg could mint an adjustment bill.
+    if (!account.billable) {
+      throw new ConflictException({
+        code: 'ACCOUNT_NOT_BILLABLE',
+        waterAccountId: account.id,
+      });
     }
 
     // Serialization anchor: the row lock must precede every state read

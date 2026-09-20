@@ -323,7 +323,7 @@ export class WaterAccountController {
     };
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      this.svc.patchHouseholdProfileTx(tx, ctx, profileId, parsed, req),
+      this.svc.patchHouseholdProfileTx(tx, ctx, id, profileId, parsed, req),
     );
   }
 

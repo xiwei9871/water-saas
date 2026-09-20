@@ -403,12 +403,13 @@ export class WaterAccountService {
   async patchHouseholdProfileTx(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
+    waterAccountId: string,
     profileId: string,
     body: { householdSize?: number },
     req: Request,
   ) {
     const existing = await tx.waterAccountHouseholdProfile.findFirst({
-      where: { tenantId: ctx.tenantId, id: profileId },
+      where: { tenantId: ctx.tenantId, id: profileId, waterAccountId },
     });
     if (!existing) {
       throw new NotFoundException({ code: 'HOUSEHOLD_PROFILE_NOT_FOUND' });

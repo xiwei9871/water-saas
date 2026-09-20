@@ -679,4 +679,62 @@ describe('v0.2: monitoring meter onboard （监控表）', () => {
     expect(wiz.status).toBe(422);
     expect(wiz.body).toMatchObject({ code: 'INVALID_USAGE_CATEGORY' });
   });
+
+  it('household profile PATCH is scoped to the route account (cross-account → 404)', async () => {
+    const onboard = async (tag: string) =>
+      (
+        await request(app.getHttpServer())
+          .post('/water-accounts/onboard')
+          .set(auth(adminToken))
+          .send({
+            customer: { name: `T4 HH ${tag} ${RUN}`, custType: 'PERSONAL' },
+            account: { usageCategory: 'RES_METERED', addr: `hh ${tag} st` },
+            meter: { brand: 't4-brand' },
+            installation: { initialReading: 0 },
+          })
+          .expect(201)
+      ).body.waterAccount.id as string;
+    const a = await onboard('a');
+    const b = await onboard('b');
+    const prof = (
+      await request(app.getHttpServer())
+        .post(`/water-accounts/${b}/household-profiles`)
+        .set(auth(adminToken))
+        .send({ householdSize: 4, effectiveFromPeriod: '202601' })
+        .expect(201)
+    ).body;
+
+    // B's profile id under A's route → 404, not a silent cross-account write.
+    const cross = await request(app.getHttpServer())
+      .patch(`/water-accounts/${a}/household-profiles/${prof.id}`)
+      .set(auth(adminToken))
+      .send({ householdSize: 9 });
+    expect(cross.status).toBe(404);
+    expect(cross.body).toMatchObject({ code: 'HOUSEHOLD_PROFILE_NOT_FOUND' });
+
+    const ok = await request(app.getHttpServer())
+      .patch(`/water-accounts/${b}/household-profiles/${prof.id}`)
+      .set(auth(adminToken))
+      .send({ householdSize: 9 })
+      .expect(200);
+    expect(Number(ok.body.householdSize)).toBe(9);
+  });
+
+  it('reconciliation on a MONITORING account → 409 ACCOUNT_NOT_BILLABLE', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        account: { usageCategory: 'MONITORING', addr: `DMA-recon ${RUN}` },
+        meter: { brand: 't4-brand' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+    const recon = await request(app.getHttpServer())
+      .post('/reconciliations')
+      .set(auth(adminToken))
+      .send({ waterAccountId: res.body.waterAccount.id });
+    expect(recon.status).toBe(409);
+    expect(recon.body).toMatchObject({ code: 'ACCOUNT_NOT_BILLABLE' });
+  });
 });

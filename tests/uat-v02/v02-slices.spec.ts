@@ -402,6 +402,20 @@ test('S4 NO_READ 预计用水量：不伪造表码 + 结算来源标识', async 
   // UI：结算详情 —— 预估方式=抄表员预计用量，分量来源=抄表员估水。
   await page.goto('/settlement/list');
   await ready(page);
+  // 级联过滤定位本账号 —— 列表按账期排序，重跑累积的数据会把本期挤出首页。
+  await main(page).locator('.ant-select').filter({ hasText: '按客户过滤' }).click();
+  await page.keyboard.type(`UAT抄表-${stamp}`);
+  await page
+    .locator('.ant-select-dropdown:visible')
+    .getByText(`UAT抄表-${stamp}（`, { exact: false })
+    .first()
+    .click();
+  await main(page).locator('.ant-select').filter({ hasText: '按水表户过滤' }).click();
+  await page
+    .locator('.ant-select-dropdown:visible')
+    .getByText(S.acctD.waterAccount.accountNo, { exact: false })
+    .first()
+    .click();
   const sRow = row(page, S.acctD.waterAccount.accountNo).filter({ hasText: '2026-02' });
   await button(sRow, '详情').click();
   const sDlg = page.getByRole('dialog');
