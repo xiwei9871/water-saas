@@ -1,4 +1,5 @@
 import {
+  Alert,
   App as AntdApp,
   Button,
   Card,
@@ -63,12 +64,14 @@ interface WizardValues {
   reason?: InstallReason;
 }
 
-const STEPS = [
-  { title: '客户', description: '新建或选择已有客户' },
-  { title: '结算户', description: '默认同户主 / 新建 / 已有' },
-  { title: '水表户', description: '用水类别与地址' },
-  { title: '水表安装', description: '挂表与初始读数' },
+const CONTENT_STEPS = [
+  { content: 0, title: '客户', description: '新建或选择已有客户' },
+  { content: 1, title: '结算户', description: '默认同户主 / 新建 / 已有' },
+  { content: 2, title: '水表户', description: '用水地址与户号' },
+  { content: 3, title: '水表安装', description: '挂表与初始读数' },
 ];
+/** 监控表：无客户/结算户步骤 —— 服务端自动挂靠系统客户，永不计费。 */
+const MONITORING_CONTENTS = [2, 3];
 
 /**
  * 立户向导：一条事务建出 客户 + 结算户 + 水表户 + 水表 + ACTIVE 装表记录。
@@ -88,10 +91,20 @@ export default function Onboard() {
   const custMode = Form.useWatch('custMode', form) ?? 'new';
   const settleMode = Form.useWatch('settleMode', form) ?? 'default';
   const meterMode = Form.useWatch('meterMode', form) ?? 'new';
+  const usageCategory = Form.useWatch('acctUsageCategory', form);
+  const isMonitoring = usageCategory === 'MONITORING';
 
-  /** Fields to validate per step, given the currently selected modes. */
-  const stepFields = (s: number): (keyof WizardValues)[] => {
-    switch (s) {
+  const visibleSteps = isMonitoring
+    ? CONTENT_STEPS.filter((s) => MONITORING_CONTENTS.includes(s.content))
+    : CONTENT_STEPS;
+
+  // 切到监控表后原始 step 可能越界（原在客户/结算户步）——渲染期收拢，
+  // 不改 state；切回普通类别后回到原本所在步骤。
+  const safeStep = Math.min(step, visibleSteps.length - 1);
+
+  /** Fields to validate per CONTENT step, given the currently selected modes. */
+  const stepFields = (content: number): (keyof WizardValues)[] => {
+    switch (content) {
       case 0:
         return custMode === 'new'
           ? ['custName', 'custType', 'custIdType', 'custIdNo', 'custPhone', 'custAddr']
@@ -103,7 +116,7 @@ export default function Onboard() {
             ? ['settleAccountId']
             : [];
       case 2:
-        return ['acctUsageCategory', 'acctAddr', 'acctAccountNo', 'acctOpenedAt'];
+        return ['acctAddr', 'acctAccountNo', 'acctOpenedAt'];
       default:
         return [
           ...(meterMode === 'new'
@@ -116,9 +129,11 @@ export default function Onboard() {
     }
   };
 
+  const currentContent = visibleSteps[safeStep].content;
+
   const next = async () => {
     try {
-      await form.validateFields(stepFields(step));
+      await form.validateFields(stepFields(currentContent));
     } catch {
       return; // inline field errors are already shown
     }
@@ -128,7 +143,10 @@ export default function Onboard() {
   const submit = async () => {
     let values: WizardValues;
     try {
-      values = await form.validateFields();
+      values = await form.validateFields([
+        'acctUsageCategory',
+        ...visibleSteps.flatMap((s) => stepFields(s.content)),
+      ]);
     } catch {
       return;
     }
@@ -145,27 +163,31 @@ export default function Onboard() {
         reason: values.reason,
       }),
     };
-    // 客户二选一：新建 payload 或引用已有 customerId
-    if (custMode === 'new') {
-      body.customer = cleanBody({
-        name: values.custName,
-        custType: values.custType,
-        idType: values.custIdType,
-        idNo: values.custIdNo,
-        phone: values.custPhone,
-        addr: values.custAddr,
-      });
-    } else {
-      body.customerId = values.customerId;
-    }
-    // 结算户：default → 两个字段都不带（服务端按户主姓名/电话自动开立）
-    if (settleMode === 'new') {
-      body.settleAccount = cleanBody({
-        name: values.settleName,
-        phone: values.settlePhone,
-      });
-    } else if (settleMode === 'existing') {
-      body.settleAccountId = values.settleAccountId;
+    // 监控表：不带任何客户/结算户字段 —— 服务端自动挂靠系统客户；
+    // 带过去反而会被 400 拒绝（防止业务方误以为是自己的客户数据）。
+    if (!isMonitoring) {
+      // 客户二选一：新建 payload 或引用已有 customerId
+      if (custMode === 'new') {
+        body.customer = cleanBody({
+          name: values.custName,
+          custType: values.custType,
+          idType: values.custIdType,
+          idNo: values.custIdNo,
+          phone: values.custPhone,
+          addr: values.custAddr,
+        });
+      } else {
+        body.customerId = values.customerId;
+      }
+      // 结算户：default → 两个字段都不带（服务端按户主姓名/电话自动开立）
+      if (settleMode === 'new') {
+        body.settleAccount = cleanBody({
+          name: values.settleName,
+          phone: values.settlePhone,
+        });
+      } else if (settleMode === 'existing') {
+        body.settleAccountId = values.settleAccountId;
+      }
     }
     // 水表二选一：登记新表或引用已有 AVAILABLE 表
     if (meterMode === 'new') {
@@ -258,7 +280,6 @@ export default function Onboard() {
 
   return (
     <Card title="立户向导">
-      <Steps current={step} items={STEPS} style={{ marginBottom: 24 }} />
       {/* 各步常驻挂载（隐藏而非卸载），提交时 validateFields 才能覆盖全部字段；
           模式互斥的字段仍随 radio 卸载，从而不被误校验。 */}
       <Form
@@ -270,9 +291,32 @@ export default function Onboard() {
           settleMode: 'default',
           meterMode: 'new',
           reason: 'NEW',
+          acctOpenedAt: dayjs(),
         }}
       >
-        <div style={{ display: step === 0 ? 'block' : 'none' }}>
+        <Form.Item
+          name="acctUsageCategory"
+          label="用水类别"
+          rules={[{ required: true, message: '请选择用水类别' }]}
+          style={{ maxWidth: 360 }}
+        >
+          <UsageCategoryInput />
+        </Form.Item>
+        {isMonitoring && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="监控表仅用于计量与区域漏损分析"
+            description="监控表户口不开账单、不涉及收费；立户时无需填写客户与结算户，系统将自动挂靠公司系统客户「本公司·监控表」。"
+          />
+        )}
+        <Steps
+          current={safeStep}
+          items={visibleSteps}
+          style={{ marginBottom: 24 }}
+        />
+        <div style={{ display: currentContent === 0 ? 'block' : 'none' }}>
           <Form.Item name="custMode" label="客户来源">
             <Radio.Group
               options={[
@@ -327,7 +371,7 @@ export default function Onboard() {
           )}
         </div>
 
-        <div style={{ display: step === 1 ? 'block' : 'none' }}>
+        <div style={{ display: currentContent === 1 ? 'block' : 'none' }}>
           <Form.Item name="settleMode" label="结算户">
             <Radio.Group
               options={[
@@ -368,14 +412,7 @@ export default function Onboard() {
           )}
         </div>
 
-        <div style={{ display: step === 2 ? 'block' : 'none' }}>
-          <Form.Item
-            name="acctUsageCategory"
-            label="用水类别"
-            rules={[{ required: true, message: '请输入用水类别' }]}
-          >
-            <UsageCategoryInput />
-          </Form.Item>
+        <div style={{ display: currentContent === 2 ? 'block' : 'none' }}>
           <Form.Item
             name="acctAddr"
             label="用水地址"
@@ -395,7 +432,7 @@ export default function Onboard() {
           </Form.Item>
         </div>
 
-        <div style={{ display: step === 3 ? 'block' : 'none' }}>
+        <div style={{ display: currentContent === 3 ? 'block' : 'none' }}>
           <Form.Item name="meterMode" label="水表">
             <Radio.Group
               options={[
@@ -463,13 +500,19 @@ export default function Onboard() {
       </Form>
 
       <Space style={{ marginTop: 8 }}>
-        {step > 0 && <Button onClick={() => setStep((s) => s - 1)}>上一步</Button>}
-        {step < STEPS.length - 1 && (
-          <Button type="primary" onClick={() => void next()}>
+        {safeStep > 0 && (
+          <Button onClick={() => setStep(safeStep - 1)}>上一步</Button>
+        )}
+        {safeStep < visibleSteps.length - 1 && (
+          <Button
+            type="primary"
+            disabled={!usageCategory}
+            onClick={() => void next()}
+          >
             下一步
           </Button>
         )}
-        {step === STEPS.length - 1 && (
+        {safeStep === visibleSteps.length - 1 && (
           <Button type="primary" loading={submitting} onClick={() => void submit()}>
             提交立户
           </Button>

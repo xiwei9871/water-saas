@@ -336,8 +336,17 @@ export default function WaterAccounts() {
       title: '用水类别',
       dataIndex: 'usageCategory',
       key: 'usageCategory',
-      width: 110,
-      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+      width: 150,
+      render: (v: string, row) => (
+        <>
+          {USAGE_CATEGORY_LABELS[v] ?? v}
+          {row.billable === false && (
+            <Tag color="blue" style={{ marginLeft: 6 }}>
+              不计费
+            </Tag>
+          )}
+        </>
+      ),
     },
     {
       title: '地址',

@@ -226,6 +226,8 @@ export interface WaterAccount {
   customerId: string;
   settleAccountId: string;
   usageCategory: string;
+  /** 监控表恒为 false（服务端/数据库双重约束），不参与开账。 */
+  billable: boolean;
   addr: string;
   status: AccountStatus;
   openedAt: string | null;
