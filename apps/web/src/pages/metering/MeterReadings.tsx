@@ -301,12 +301,19 @@ export default function MeterReadings() {
     {
       title: '读数 / 异常',
       key: 'value',
-      width: 130,
+      width: 150,
       render: (_: unknown, r: MeterReading) =>
         r.resultType === 'NO_READ' ? (
-          <Tag color="orange">
-            {r.exceptionCode ? EXCEPTION_CODE_LABELS[r.exceptionCode] : r.exceptionCode}
-          </Tag>
+          <Space size={4}>
+            <Tag color="orange">
+              {r.exceptionCode ? EXCEPTION_CODE_LABELS[r.exceptionCode] : r.exceptionCode}
+            </Tag>
+            {r.estimateQty != null && (
+              <Tooltip title="抄表员预计用量，非表码">
+                <Tag color="cyan">估 {r.estimateQty} m³</Tag>
+              </Tooltip>
+            )}
+          </Space>
         ) : (
           (r.readingValue ?? '—')
         ),

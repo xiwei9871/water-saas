@@ -424,6 +424,8 @@ export interface MeterReading {
   resultType: ReadResultType;
   readingValue: string | null;
   exceptionCode: ExceptionCode | null;
+  /** 仅 NO_READ 可携带：抄表员预计用量（m³，非表码）。 */
+  estimateQty: string | null;
   supersedesReadingId: string | null;
   supersededById: string | null;
   qcStatus: QcStatus;

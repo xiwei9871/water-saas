@@ -6,6 +6,7 @@ import {
   UnorderedListOutlined,
 } from '@ant-design/icons';
 import {
+  Alert,
   App as AntdApp,
   Button,
   Card,
@@ -37,6 +38,7 @@ import type {
   ReadingPlan,
   ReadingPlanDetail,
   ReadingPlanItem,
+  MeterReading,
   ReadingPlanProgress,
   ReadResultType,
   Staff,
@@ -72,6 +74,7 @@ interface EntryFormValues {
   resultType: ReadResultType;
   readingValue?: string;
   exceptionCode?: string;
+  estimateQty?: string;
   readDate?: dayjs.Dayjs;
   remark?: string;
 }
@@ -80,6 +83,7 @@ interface BatchRowState {
   resultType: ReadResultType;
   readingValue: string;
   exceptionCode?: string;
+  estimateQty?: string;
 }
 
 const ITEM_STATUS_OPTIONS = (['PENDING', 'READ', 'NO_READ', 'SKIPPED'] as const).map(
@@ -136,6 +140,9 @@ export default function ReadingPlans() {
   const [entrySaving, setEntrySaving] = useState(false);
   const [entryForm] = Form.useForm<EntryFormValues>();
   const entryResultType = Form.useWatch('resultType', entryForm);
+  const entryEstimateQty = Form.useWatch('estimateQty', entryForm);
+  // 上次实读表码 —— 仅用于“模拟表码”展示，绝不写入读数。
+  const [entryLastDial, setEntryLastDial] = useState<string | null>(null);
 
   // ---- 批量录入 ----
   const [batchOpen, setBatchOpen] = useState(false);
@@ -360,6 +367,21 @@ export default function ReadingPlans() {
     entryForm.setFieldsValue({ resultType: 'ACTUAL' });
     setEntryIdemKey(newIdemKey());
     setEntryItem(item);
+    setEntryLastDial(null);
+    // 表盘模拟提示需要上次实读 —— 服务端正排取最新一条非替代的实读。
+    if (item.plannedInstallationId) {
+      api
+        .get<MeterReading[]>('/meter-readings', {
+          params: { installationId: item.plannedInstallationId },
+        })
+        .then((res) => {
+          const last = res.data.find(
+            (r) => r.resultType !== 'NO_READ' && !r.supersededById && r.readingValue,
+          );
+          setEntryLastDial(last?.readingValue ?? null);
+        })
+        .catch(() => setEntryLastDial(null));
+    }
   };
 
   const submitEntry = async () => {
@@ -379,7 +401,12 @@ export default function ReadingPlans() {
           resultType: values.resultType,
           // 形状规则：ACTUAL/REMOTE 带 readingValue，NO_READ 带 exceptionCode。
           ...(values.resultType === 'NO_READ'
-            ? { exceptionCode: values.exceptionCode }
+            ? {
+                exceptionCode: values.exceptionCode,
+                ...(values.estimateQty && values.estimateQty.trim() !== ''
+                  ? { estimateQty: values.estimateQty.trim() }
+                  : {}),
+              }
             : { readingValue: values.readingValue }),
           readDate: values.readDate?.format('YYYY-MM-DD'),
           remark: values.remark,
@@ -429,8 +456,19 @@ export default function ReadingPlans() {
       const r = batchRows.get(item.id);
       if (!r) continue;
       if (r.resultType === 'NO_READ') {
+        if (r.estimateQty && r.estimateQty.trim() !== '' && !DECIMAL_RULE.pattern.test(r.estimateQty.trim())) {
+          message.error(`第 ${item.seqNo} 行估水量格式不正确（最多 4 位小数）`);
+          return;
+        }
         if (r.exceptionCode) {
-          items.push({ planItemId: item.id, resultType: 'NO_READ', exceptionCode: r.exceptionCode });
+          items.push({
+            planItemId: item.id,
+            resultType: 'NO_READ',
+            exceptionCode: r.exceptionCode,
+            ...(r.estimateQty && r.estimateQty.trim() !== ''
+              ? { estimateQty: r.estimateQty.trim() }
+              : {}),
+          });
         }
       } else if (r.readingValue.trim()) {
         if (!DECIMAL_RULE.pattern.test(r.readingValue.trim())) {
@@ -842,19 +880,55 @@ export default function ReadingPlans() {
               <Input placeholder="如 123.5" />
             </Form.Item>
           ) : (
-            <Form.Item
-              name="exceptionCode"
-              label="未抄见原因"
-              rules={[{ required: true, message: '请选择未抄见原因' }]}
-            >
-              <Select
-                options={EXCEPTION_CODES.map((c) => ({
-                  value: c,
-                  label: EXCEPTION_CODE_LABELS[c],
-                }))}
-                placeholder="选择原因"
-              />
-            </Form.Item>
+            <>
+              <Form.Item
+                name="exceptionCode"
+                label="未抄见原因"
+                rules={[{ required: true, message: '请选择未抄见原因' }]}
+              >
+                <Select
+                  options={EXCEPTION_CODES.map((c) => ({
+                    value: c,
+                    label: EXCEPTION_CODE_LABELS[c],
+                  }))}
+                  placeholder="选择原因"
+                />
+              </Form.Item>
+              <Form.Item
+                name="estimateQty"
+                label="预计用水量（估水，可空）"
+                rules={[DECIMAL_RULE]}
+                extra="抄表员对本期的预计用量，结算时优先于'近三月均量'采用"
+              >
+                <Input placeholder="如 30（m³）" />
+              </Form.Item>
+              {(() => {
+                const est = Number(entryEstimateQty);
+                const hasEst =
+                  !!entryEstimateQty &&
+                  entryEstimateQty.trim() !== '' &&
+                  Number.isFinite(est);
+                return (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message={
+                      <>
+                        <div>表码：未抄见（不产生真实表码记录）</div>
+                        <div>预计用量：{hasEst ? `${est} m³` : '未填写'}</div>
+                        {hasEst && entryLastDial != null && (
+                          <div>
+                            参考模拟表码：{(Number(entryLastDial) + est).toFixed(0)}
+                            （= 上次实读 {entryLastDial} + {est}，仅抄表核对参考，不写入系统）
+                          </div>
+                        )}
+                      </>
+                    }
+                  />
+                );
+              })()}
+            </>
           )}
           <Form.Item name="readDate" label="抄表日期" extra="留空取当前时间">
             <DatePicker style={{ width: '100%' }} />
@@ -908,25 +982,34 @@ export default function ReadingPlans() {
               ),
             },
             {
-              title: '读数 / 未抄见原因',
+              title: '读数 / 未抄见原因 / 估水',
               key: 'value',
-              width: 200,
+              width: 240,
               render: (_: unknown, item: ReadingPlanItem) => {
                 const r = batchRows.get(item.id);
                 if (!r) return null;
                 return r.resultType === 'NO_READ' ? (
-                  <Select
-                    size="small"
-                    style={{ width: '100%' }}
-                    allowClear
-                    placeholder="未抄见原因"
-                    value={r.exceptionCode}
-                    options={EXCEPTION_CODES.map((c) => ({
-                      value: c,
-                      label: EXCEPTION_CODE_LABELS[c],
-                    }))}
-                    onChange={(v) => setBatchRow(item.id, { exceptionCode: v })}
-                  />
+                  <Space.Compact block>
+                    <Select
+                      size="small"
+                      style={{ width: '55%' }}
+                      allowClear
+                      placeholder="未抄见原因"
+                      value={r.exceptionCode}
+                      options={EXCEPTION_CODES.map((c) => ({
+                        value: c,
+                        label: EXCEPTION_CODE_LABELS[c],
+                      }))}
+                      onChange={(v) => setBatchRow(item.id, { exceptionCode: v })}
+                    />
+                    <Input
+                      size="small"
+                      style={{ width: '45%' }}
+                      placeholder="估水 m³（可空）"
+                      value={r.estimateQty ?? ''}
+                      onChange={(e) => setBatchRow(item.id, { estimateQty: e.target.value })}
+                    />
+                  </Space.Compact>
                 ) : (
                   <Input
                     size="small"
