@@ -243,6 +243,22 @@ export interface WaterAccount {
   };
 }
 
+/** GET /water-accounts/:id — 在列表行基础上附带当前（展示用）人数。
+ * 计费永远走结算快照，不读这个值。 */
+export interface WaterAccountDetail extends WaterAccount {
+  householdSize: number | null;
+}
+
+/** GET /water-accounts/:id/household-profiles — 一户多人口申报历史。 */
+export interface HouseholdProfile {
+  id: string;
+  waterAccountId: string;
+  householdSize: number;
+  /** 生效账期 YYYYMM */
+  effectiveFromPeriod: string;
+  createdAt: string;
+}
+
 /** GET /meters */
 export interface Meter {
   id: string;
@@ -459,6 +475,8 @@ export interface ConsumptionSettlement {
   estimateMethod: EstimateMethod | null;
   estimateBasis: EstimateBasis | null;
   estimateReason: string | null;
+  /** 立账时冻结的人口快照 —— 历史重算/补差的唯一依据。 */
+  householdSizeSnapshot: number | null;
   status: SettlementStatus;
   createdAt: string;
   updatedAt: string;
@@ -531,6 +549,10 @@ export interface TariffPlan {
   /** DATE columns — ISO strings. */
   effectiveFrom: string;
   effectiveTo: string | null;
+  /** 一户多人口：基准人数（null = 不启用人数扩展）。 */
+  baseHousehold: number | null;
+  /** 每超出基准 1 人，各阶梯年度基数的扩展量（m³/年，decimal 字符串）。 */
+  perPersonQty: string | null;
   status: TariffStatus;
   createdAt: string;
   updatedAt: string;

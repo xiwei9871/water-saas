@@ -7,6 +7,7 @@ import {
   Descriptions,
   Form,
   Input,
+  InputNumber,
   Radio,
   Result,
   Select,
@@ -50,6 +51,7 @@ interface WizardValues {
   acctAddr: string;
   acctAccountNo?: string;
   acctOpenedAt?: dayjs.Dayjs;
+  acctHouseholdSize?: number;
   meterMode: MeterMode;
   meterId?: string;
   meterNo?: string;
@@ -156,6 +158,7 @@ export default function Onboard() {
         addr: values.acctAddr,
         accountNo: values.acctAccountNo,
         openedAt: values.acctOpenedAt?.format('YYYY-MM-DD'),
+        householdSize: isMonitoring ? undefined : values.acctHouseholdSize,
       }),
       installation: cleanBody({
         initialReading: values.initialReading,
@@ -430,6 +433,15 @@ export default function Onboard() {
           <Form.Item name="acctOpenedAt" label="开户日期">
             <DatePicker style={{ width: '100%' }} />
           </Form.Item>
+          {!isMonitoring && usageCategory?.startsWith('RES_') && (
+            <Form.Item
+              name="acctHouseholdSize"
+              label="用水人数"
+              extra="居民户一户多人口申报；留空则按资费方案的基准人数计费，后续可在水表户管理中补报"
+            >
+              <InputNumber min={1} max={99} precision={0} style={{ width: '100%' }} />
+            </Form.Item>
+          )}
         </div>
 
         <div style={{ display: currentContent === 3 ? 'block' : 'none' }}>

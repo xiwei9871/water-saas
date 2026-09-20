@@ -19,6 +19,7 @@ import {
   Drawer,
   Form,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
   Select,
@@ -66,6 +67,9 @@ interface TariffFormValues {
   usageCategory?: string;
   effectiveFrom: dayjs.Dayjs;
   effectiveTo?: dayjs.Dayjs | null;
+  /** 一户多人口：基准人数（默认 4）+ 每超出 1 人各级阶梯年度基数扩展量（m³/年）。 */
+  baseHousehold?: number;
+  perPersonQty?: string;
   groups?: TierGroup[];
 }
 
@@ -215,6 +219,8 @@ export default function Tariffs() {
         name: plan.name,
         effectiveFrom: dayjs(plan.effectiveFrom),
         effectiveTo: plan.effectiveTo ? dayjs(plan.effectiveTo) : null,
+        baseHousehold: plan.baseHousehold ?? undefined,
+        perPersonQty: plan.perPersonQty ?? undefined,
         groups: tiersToGroups(plan.tiers),
       });
       setModal({ kind: 'edit', plan });
@@ -231,6 +237,8 @@ export default function Tariffs() {
         name: plan.name,
         effectiveFrom: undefined,
         effectiveTo: plan.effectiveTo ? dayjs(plan.effectiveTo) : null,
+        baseHousehold: plan.baseHousehold ?? undefined,
+        perPersonQty: plan.perPersonQty ?? undefined,
         groups: tiersToGroups(plan.tiers),
       });
       setIdemKey(newIdemKey());
@@ -329,6 +337,16 @@ export default function Tariffs() {
     }
     setSaving(true);
     try {
+      // 人数扩展参数：两个都填才生效；留空则不带，服务端存 NULL（不启用）。
+      const household =
+        values.baseHousehold != null &&
+        values.perPersonQty != null &&
+        values.perPersonQty.trim() !== ''
+          ? {
+              baseHousehold: values.baseHousehold,
+              perPersonQty: values.perPersonQty.trim(),
+            }
+          : {};
       if (modal?.kind === 'create') {
         await api.post(
           '/tariff-plans',
@@ -338,6 +356,7 @@ export default function Tariffs() {
             usageCategory: values.usageCategory,
             effectiveFrom: values.effectiveFrom.format('YYYY-MM-DD'),
             effectiveTo: values.effectiveTo ? values.effectiveTo.format('YYYY-MM-DD') : undefined,
+            ...household,
             tiers: flattenTiers(values.groups),
           }),
           { headers: { 'Idempotency-Key': idemKey } },
@@ -349,6 +368,11 @@ export default function Tariffs() {
           effectiveFrom: values.effectiveFrom.format('YYYY-MM-DD'),
           // PATCH 语义：null = 清除生效截止（开放区间）。
           effectiveTo: values.effectiveTo ? values.effectiveTo.format('YYYY-MM-DD') : null,
+          baseHousehold: values.baseHousehold ?? null,
+          perPersonQty:
+            values.perPersonQty && values.perPersonQty.trim() !== ''
+              ? values.perPersonQty.trim()
+              : null,
           tiers: flattenTiers(values.groups),
         });
         message.success('资费方案已更新');
@@ -360,6 +384,7 @@ export default function Tariffs() {
             effectiveFrom: values.effectiveFrom.format('YYYY-MM-DD'),
             // null = 长期有效；undefined 会被服务端解释为“继承源方案截止日”。
             effectiveTo: values.effectiveTo ? values.effectiveTo.format('YYYY-MM-DD') : null,
+            ...household,
             tiers: flattenTiers(values.groups),
           }),
           { headers: { 'Idempotency-Key': idemKey } },
@@ -816,6 +841,25 @@ export default function Tariffs() {
               extra="留空表示长期有效"
             >
               <DatePicker style={{ width: '100%' }} />
+            </Form.Item>
+          </Space.Compact>
+          <Space.Compact block>
+            <Form.Item
+              name="baseHousehold"
+              label="基准人数（一户多人口）"
+              style={{ width: '50%', marginRight: 8 }}
+              extra="与下方每人扩展量成对填写"
+            >
+              <InputNumber min={1} max={20} precision={0} placeholder="如 4" style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item
+              name="perPersonQty"
+              label="每人年度扩展量（m³/年）"
+              style={{ width: '50%' }}
+              extra="申报人数超基准时，各级阶梯年度基数整体右移"
+              rules={[{ pattern: DEC4, message: '非负数字，最多 4 位小数' }]}
+            >
+              <Input placeholder="如 51" />
             </Form.Item>
           </Space.Compact>
           <Form.Item label="阶梯配置">{tierEditor}</Form.Item>

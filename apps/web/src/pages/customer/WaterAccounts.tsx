@@ -12,6 +12,7 @@ import {
   DatePicker,
   Form,
   Input,
+  InputNumber,
   Modal,
   Select,
   Space,
@@ -26,13 +27,17 @@ import { api, apiErrorText } from '../../api/client';
 import type {
   AccountStatus,
   Customer,
+  HouseholdProfile,
   WaterAccount,
+  WaterAccountDetail,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
   ACCOUNT_STATUS_LABELS,
   cleanBody,
   fmtDate,
+  fmtPeriod,
+  fmtTime,
   newIdemKey,
   USAGE_CATEGORY_LABELS,
   USAGE_CATEGORY_OPTIONS,
@@ -49,6 +54,7 @@ type ModalState =
   | { kind: 'create' }
   | { kind: 'edit'; account: WaterAccount }
   | { kind: 'transfer'; account: WaterAccount }
+  | { kind: 'household'; account: WaterAccount }
   | { kind: EventKind; account: WaterAccount }
   | null;
 
@@ -92,6 +98,11 @@ interface EventFormValues {
   remark?: string;
 }
 
+interface HouseholdFormValues {
+  householdSize: number;
+  effectiveMonth: dayjs.Dayjs;
+}
+
 /**
  * 水表户：户号精确搜索 + 状态/客户过滤 + 开户 + 编辑 + 生命周期操作
  * （暂停/恢复/销户/过户，各走独立 POST + account_event）。
@@ -123,6 +134,10 @@ export default function WaterAccounts() {
   const [editForm] = Form.useForm<EditFormValues>();
   const [transferForm] = Form.useForm<TransferFormValues>();
   const [eventForm] = Form.useForm<EventFormValues>();
+  const [householdForm] = Form.useForm<HouseholdFormValues>();
+  const [hhLoading, setHhLoading] = useState(false);
+  const [hhCurrent, setHhCurrent] = useState<number | null>(null);
+  const [hhProfiles, setHhProfiles] = useState<HouseholdProfile[]>([]);
 
   // Same-route navigations only swap the query string — keep the filters in
   // sync so 抽屉里的“查看全部”链接总是生效。setState 走 microtask，不在
@@ -192,6 +207,60 @@ export default function WaterAccounts() {
   const openModal = (m: NonNullable<ModalState>) => {
     setIdemKey(newIdemKey()); // 每次打开表单生成一次幂等键
     setModal(m);
+  };
+
+  const loadHousehold = useCallback(async (accountId: string) => {
+    setHhLoading(true);
+    try {
+      const [detail, profiles] = await Promise.all([
+        api.get<WaterAccountDetail>(`/water-accounts/${accountId}`),
+        api.get<HouseholdProfile[]>(
+          `/water-accounts/${accountId}/household-profiles`,
+        ),
+      ]);
+      setHhCurrent(detail.data.householdSize);
+      setHhProfiles(profiles.data);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setHhLoading(false);
+    }
+  }, [message]);
+
+  const openHousehold = (account: WaterAccount) => {
+    householdForm.setFieldsValue({ effectiveMonth: dayjs() });
+    setHhCurrent(null);
+    setHhProfiles([]);
+    openModal({ kind: 'household', account });
+    void loadHousehold(account.id);
+  };
+
+  const submitHousehold = async () => {
+    let values: HouseholdFormValues;
+    try {
+      values = await householdForm.validateFields();
+    } catch {
+      return;
+    }
+    if (modal?.kind !== 'household') return;
+    setSaving(true);
+    try {
+      await api.post(
+        `/water-accounts/${modal.account.id}/household-profiles`,
+        {
+          householdSize: values.householdSize,
+          effectiveFromPeriod: values.effectiveMonth.format('YYYYMM'),
+        },
+        { headers: { 'Idempotency-Key': idemKey } },
+      );
+      message.success('人数申报已保存，自下个账期起生效于阶梯计费');
+      householdForm.setFieldsValue({ householdSize: undefined });
+      await loadHousehold(modal.account.id);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const submitCreate = async () => {
@@ -391,6 +460,11 @@ export default function WaterAccounts() {
                       }}
                     >
                       编辑
+                    </Button>
+                  )}
+                  {!closed && record.billable !== false && (
+                    <Button size="small" onClick={() => openHousehold(record)}>
+                      人数
                     </Button>
                   )}
                   {!closed && (
@@ -691,6 +765,92 @@ export default function WaterAccounts() {
             <Input.TextArea rows={2} />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 一户多人口申报 */}
+      <Modal
+        open={modal?.kind === 'household'}
+        title={
+          modal?.kind === 'household'
+            ? `用水人数申报 — ${modal.account.accountNo}`
+            : ''
+        }
+        okText="提交申报"
+        cancelText="关闭"
+        confirmLoading={saving}
+        onOk={() => void submitHousehold()}
+        onCancel={() => setModal(null)}
+        width={640}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="申报按账期生效，不回溯改历史账单"
+          description="申报记录自生效账期起参与阶梯水价计算（人数档位由资费方案的基准人数与每人扩展量决定）。历史账单与历史结算不受后续申报影响。"
+        />
+        <p style={{ color: '#666' }}>
+          当前申报人数：<strong>{hhCurrent ?? '—'}</strong>
+          <span style={{ marginLeft: 8, color: '#999' }}>
+            （展示值；实际计费以各账期结算快照为准）
+          </span>
+        </p>
+        <Form form={householdForm} layout="inline" style={{ marginBottom: 16 }}>
+          <Form.Item
+            name="householdSize"
+            label="用水人数"
+            rules={[{ required: true, message: '请输入人数' }]}
+          >
+            <InputNumber min={1} max={99} precision={0} placeholder="人" />
+          </Form.Item>
+          <Form.Item
+            name="effectiveMonth"
+            label="生效账期"
+            rules={[{ required: true, message: '请选择生效账期' }]}
+          >
+            <DatePicker picker="month" allowClear={false} />
+          </Form.Item>
+        </Form>
+        <Table<HouseholdProfile>
+          rowKey="id"
+          size="small"
+          loading={hhLoading}
+          dataSource={hhProfiles}
+          pagination={false}
+          locale={{ emptyText: '尚未申报，按资费基准人数计费' }}
+          columns={[
+            {
+              title: '生效账期',
+              dataIndex: 'effectiveFromPeriod',
+              render: (p: string, row) => {
+                const currentPeriod = dayjs().format('YYYYMM');
+                return (
+                  <>
+                    {fmtPeriod(p)}
+                    {p <= currentPeriod &&
+                      row.id ===
+                        hhProfiles.find((r) => r.effectiveFromPeriod <= currentPeriod)
+                          ?.id && (
+                        <Tag color="green" style={{ marginLeft: 6 }}>
+                          当前生效
+                        </Tag>
+                      )}
+                    {p > currentPeriod && (
+                      <Tag style={{ marginLeft: 6 }}>未生效</Tag>
+                    )}
+                  </>
+                );
+              },
+            },
+            { title: '人数', dataIndex: 'householdSize', width: 80 },
+            {
+              title: '申报时间',
+              dataIndex: 'createdAt',
+              render: (v: string) => fmtTime(v),
+            },
+          ]}
+        />
       </Modal>
     </Card>
   );
