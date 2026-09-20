@@ -303,7 +303,7 @@ export default function Cashier() {
       <Space wrap style={{ marginBottom: 16 }}>
         {canCustomerRead ? (
           <>
-            <span style={{ width: 220, display: 'inline-block' }}>
+            <span className="cashier-picker" style={{ width: 220, display: 'inline-block' }}>
               <CustomerSelect
                 value={customerId}
                 onChange={(v) => {
@@ -313,7 +313,7 @@ export default function Cashier() {
                 placeholder="先选客户"
               />
             </span>
-            <span style={{ width: 280, display: 'inline-block' }}>
+            <span className="cashier-picker" style={{ width: 280, display: 'inline-block' }}>
               <WaterAccountSelect
                 customerId={customerId}
                 value={waterAccountId}

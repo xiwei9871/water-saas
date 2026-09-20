@@ -372,6 +372,7 @@ export default function Reconciliations() {
           showIcon
           style={{ marginBottom: 16 }}
           message="以最新可信实抄为终点、上一次可信实抄为锚点，对区间内已结算水量进行校准：可吸收进当期草稿结算，或对已出账区间生成调账账单。"
+          description="恢复实抄低于此前估计止度时，应先校正已出账估水，再生成恢复实抄当期的结算。已收款不代表无需补差；减收调整不会自动执行现金退款。"
         />
         <Form form={createForm} layout="vertical">
           {canCustomerRead ? (

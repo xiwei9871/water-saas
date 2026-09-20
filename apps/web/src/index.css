@@ -25,6 +25,12 @@ body {
   min-width: 0;
 }
 
+/* Counter pickers live in the card body; long selected labels must stay
+   inside their declared width instead of covering the adjacent picker. */
+.cashier-picker > .ant-select {
+  width: 100%;
+}
+
 .page-content > .ant-card > .ant-card-head {
   padding-block: 16px;
 }

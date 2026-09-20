@@ -102,6 +102,13 @@ interface ComponentDraft {
   suggestedUsageQty?: Prisma.Decimal | null;
 }
 
+interface DialCheckpoint {
+  value: Prisma.Decimal;
+  sourceType: ComponentSourceType;
+  period: string;
+  sourceReadingId: string | null;
+}
+
 /**
  * ConsumptionSettlement （结算水量） — one header per water_account × period
  * with one component per contributing meter_installation (spec §2.3).
@@ -306,10 +313,25 @@ export class SettlementService {
     const drafts: ComponentDraft[] = [];
     const estimatedInsts: InstallationRow[] = [];
     for (const inst of installations) {
-      const prev = prevChain.get(inst.id) ?? inst.initialReading;
+      const checkpoint = prevChain.get(inst.id);
+      const prev = checkpoint?.value ?? inst.initialReading;
       const removedInPeriod =
         inst.status === 'REMOVED' && inst.removedAt !== null && inst.removedAt < end;
       const valid = readings.get(inst.id);
+      const actualEnd = removedInPeriod && inst.finalReading !== null
+        ? inst.finalReading : valid?.readingValue;
+      // An estimated end is not a physical dial: maxDial cannot turn an
+      // over-estimate into a rollover. Correct billed estimates first.
+      if (checkpoint?.sourceType === 'ESTIMATE' && actualEnd?.lt(prev)) {
+        throw new ConflictException({
+          code: 'ESTIMATE_RECOVERY_REQUIRES_RECONCILIATION',
+          waterAccountId: body.waterAccountId,
+          installationId: inst.id,
+          period: body.period,
+          estimatedReadingValue: prev.toString(),
+          actualReadingValue: actualEnd.toString(),
+        });
+      }
       if (removedInPeriod && inst.finalReading !== null) {
         // 拆表 final_reading is the end-of-life dial fact — it wins over any
         // earlier in-period reading on this installation.
@@ -611,7 +633,9 @@ export class SettlementService {
    * prev chain: each installation's latest component end_reading_value
    * from a settlement with period < current (NULL synthetic/manual ends
    * skipped). Rows arrive latest-first, so the first hit per installation
-   * wins.
+   * wins. A completed adjustment also establishes a trusted actual dial
+   * checkpoint: its usage has already been repriced, even if the actual
+   * period did not have a settlement yet. Never mutate frozen components.
    */
   private async prevChain(
     tx: Prisma.TransactionClient,
@@ -634,15 +658,73 @@ export class SettlementService {
       select: {
         installationId: true,
         endReadingValue: true,
+        sourceType: true,
+        sourceReadingId: true,
         createdAt: true,
         settlement: { select: { period: true } },
       },
       orderBy: [{ settlement: { period: 'desc' } }, { createdAt: 'desc' }],
     });
-    const prev = new Map<string, Prisma.Decimal>();
+    const prev = new Map<string, DialCheckpoint>();
     for (const c of prior) {
       if (!prev.has(c.installationId) && c.endReadingValue !== null) {
-        prev.set(c.installationId, c.endReadingValue);
+        prev.set(c.installationId, {
+          value: c.endReadingValue,
+          sourceType: c.sourceType,
+          period: c.settlement.period,
+          sourceReadingId: c.sourceReadingId,
+        });
+      }
+    }
+
+    const applied = await tx.reconciliation.findMany({
+      where: { tenantId: ctx.tenantId, waterAccountId, status: 'APPLIED', toPeriod: { lte: period } },
+      select: { actualReadingId: true },
+    });
+    if (applied.length === 0) return prev;
+    const actuals = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: { in: applied.map((r) => r.actualReadingId) },
+        installationId: { in: installationIds },
+        period: { lte: period },
+        resultType: { in: ['ACTUAL', 'REMOTE'] },
+        qcStatus: 'PASSED',
+        readingValue: { not: null },
+      },
+      select: { id: true, installationId: true, period: true, readingValue: true, readDate: true, createdAt: true },
+      orderBy: [{ period: 'desc' }, { readDate: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
+    });
+    if (actuals.length === 0) return prev;
+    const priorReadingIds = [...prev.values()].flatMap((p) => p.sourceReadingId ? [p.sourceReadingId] : []);
+    const priorReadings = priorReadingIds.length ? await tx.meterReading.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: priorReadingIds } },
+      select: { id: true, readDate: true, createdAt: true },
+    }) : [];
+    const priorById = new Map(priorReadings.map((r) => [r.id, r]));
+    const children = await tx.meterReading.findMany({
+      where: { tenantId: ctx.tenantId, supersedesReadingId: { in: [...actuals.map((r) => r.id), ...priorReadingIds] } },
+      select: { supersedesReadingId: true },
+    });
+    const superseded = new Set(children.map((r) => r.supersedesReadingId));
+    const seen = new Set<string>();
+    for (const actual of actuals) {
+      if (superseded.has(actual.id) || actual.readingValue === null || seen.has(actual.installationId)) continue;
+      seen.add(actual.installationId);
+      const prior = prev.get(actual.installationId);
+      if (prior && actual.period === prior.period && prior.sourceType !== 'ESTIMATE') {
+        // A same-month component may already consume usage AFTER this
+        // checkpoint. Keep that newer physical dial. Correcting a superseded
+        // source reading, however, must replace the stale frozen dial.
+        const source = prior.sourceReadingId ? priorById.get(prior.sourceReadingId) : undefined;
+        if (!source || (prior.sourceReadingId && !superseded.has(prior.sourceReadingId) &&
+          (source.readDate > actual.readDate ||
+            (+source.readDate === +actual.readDate && source.createdAt >= actual.createdAt)))) continue;
+      }
+      if (!prior || actual.period >= prior.period) {
+        prev.set(actual.installationId, {
+          value: actual.readingValue, sourceType: 'READING', period: actual.period, sourceReadingId: actual.id,
+        });
       }
     }
     return prev;
