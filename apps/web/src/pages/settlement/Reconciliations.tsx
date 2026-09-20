@@ -53,6 +53,38 @@ const RESULT_TEXT: Record<ReconStatus, string> = {
   MANUAL_REVIEW: '已记录为待人工复核（换表或表码回退）',
 };
 
+/** 剩余用量带符号展示：+ 少抄（需补收）/ − 多抄（需冲减）。 */
+const signedQty = (v: string | null) => {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return v;
+  return (
+    <span style={{ color: n > 0 ? '#cf1322' : n < 0 ? '#1677ff' : undefined }}>
+      {n > 0 ? `+${v}` : v} m³
+    </span>
+  );
+};
+
+/** 把技术状态翻译为业务人员能看懂的一句话。 */
+const reconSummary = (d: Reconciliation): string => {
+  const remainder = Number(d.remainderUsage ?? 0);
+  const adj = Number(d.adjustmentAmountCent ?? 0) / 100;
+  switch (d.status) {
+    case 'ABSORBED':
+      return `区间实际比已结算多 ${Math.abs(remainder)} m³，差额已并入当期草稿结算，随本期账单一并收取，不产生额外调账单。`;
+    case 'APPLIED':
+      if (adj > 0)
+        return `区间实际用量多于已出账，按资费重算后需补收 ¥${adj.toFixed(2)}，已生成补收调账单。`;
+      if (adj < 0)
+        return `区间实际用量少于已出账（此前估水偏多），按资费重算后冲减 ¥${Math.abs(adj).toFixed(2)}，已生成冲减调账单用于抵减欠费；已收款部分不会自动退现金。`;
+      return '按资费重算后差额为零，不产生任何调账。';
+    case 'MANUAL_REVIEW':
+      return '恢复实抄的表码低于此前估计止度（可能换表或表码回退），系统未改动任何结算与账单，请人工核对后处理。';
+    default:
+      return '草稿记录，尚未执行重算。';
+  }
+};
+
 /**
  * 补差（Reconciliation）：两次可信实抄之间的校准 —— 列表 + 发起
  * （留空取最新可信实抄）+ 详情抽屉。写操作走 billing:write。
@@ -208,8 +240,9 @@ export default function Reconciliations() {
       title: '剩余用量',
       dataIndex: 'remainderUsage',
       key: 'remainderUsage',
-      width: 95,
+      width: 105,
       align: 'right',
+      render: signedQty,
     },
     {
       title: '调账金额',
@@ -217,7 +250,15 @@ export default function Reconciliations() {
       key: 'adjustmentAmountCent',
       width: 105,
       align: 'right',
-      render: (v: string | null) => fmtCent(v),
+      render: (v: string | null) => {
+        const n = Number(v ?? 0) / 100;
+        if (!v || !Number.isFinite(n) || n === 0) return fmtCent(v);
+        return (
+          <span style={{ color: n > 0 ? '#cf1322' : '#1677ff' }}>
+            {n > 0 ? `补收 ¥${n.toFixed(2)}` : `冲减 ¥${Math.abs(n).toFixed(2)}`}
+          </span>
+        );
+      },
     },
     {
       title: '状态',
@@ -475,11 +516,6 @@ export default function Reconciliations() {
                 children: detail.previouslySettledUsage,
               },
               {
-                key: 'remainder',
-                label: '剩余用量',
-                children: detail.remainderUsage,
-              },
-              {
                 key: 'absorbed',
                 label: '吸收至结算',
                 children: shortId(detail.absorbedSettlementId),
@@ -500,11 +536,25 @@ export default function Reconciliations() {
                 children: fmtCent(detail.adjustmentAmountCent),
               },
               {
+                key: 'remainder',
+                label: '剩余用量',
+                children: signedQty(detail.remainderUsage),
+              },
+              {
                 key: 'created',
                 label: '创建时间',
                 children: fmtTime(detail.createdAt),
               },
             ]}
+          />
+        )}
+        {detail && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginTop: 16 }}
+            message="业务含义"
+            description={reconSummary(detail)}
           />
         )}
       </Drawer>
