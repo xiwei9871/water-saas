@@ -21,6 +21,7 @@ export const SETTLEMENT_SELECT = {
   estimateMethod: true,
   estimateBasis: true,
   estimateReason: true,
+  householdSizeSnapshot: true,
   status: true,
   createdAt: true,
   updatedAt: true,
@@ -100,6 +101,13 @@ interface ComponentDraft {
   method?: EstimateMethod;
   /** The AVG3 suggestion shown to the operator (null = no history). */
   suggestedUsageQty?: Prisma.Decimal | null;
+}
+
+interface DialCheckpoint {
+  value: Prisma.Decimal;
+  sourceType: ComponentSourceType;
+  period: string;
+  sourceReadingId: string | null;
 }
 
 /**
@@ -284,6 +292,7 @@ export class SettlementService {
     const instIds = installations.map((i) => i.id);
     const prevChain = await this.prevChain(tx, ctx, body.waterAccountId, instIds, body.period);
     const readings = await this.validReadings(tx, ctx, instIds, body.period);
+    const readerEstimates = await this.readerEstimates(tx, ctx, instIds, body.period);
     const history = await this.historyUsages(tx, ctx, body.waterAccountId, body.period);
     const suggested = estimateAvg3(history);
     const suggestedPrisma =
@@ -306,10 +315,25 @@ export class SettlementService {
     const drafts: ComponentDraft[] = [];
     const estimatedInsts: InstallationRow[] = [];
     for (const inst of installations) {
-      const prev = prevChain.get(inst.id) ?? inst.initialReading;
+      const checkpoint = prevChain.get(inst.id);
+      const prev = checkpoint?.value ?? inst.initialReading;
       const removedInPeriod =
         inst.status === 'REMOVED' && inst.removedAt !== null && inst.removedAt < end;
       const valid = readings.get(inst.id);
+      const actualEnd = removedInPeriod && inst.finalReading !== null
+        ? inst.finalReading : valid?.readingValue;
+      // An estimated end is not a physical dial: maxDial cannot turn an
+      // over-estimate into a rollover. Correct billed estimates first.
+      if (checkpoint?.sourceType === 'ESTIMATE' && actualEnd?.lt(prev)) {
+        throw new ConflictException({
+          code: 'ESTIMATE_RECOVERY_REQUIRES_RECONCILIATION',
+          waterAccountId: body.waterAccountId,
+          installationId: inst.id,
+          period: body.period,
+          estimatedReadingValue: prev.toString(),
+          actualReadingValue: actualEnd.toString(),
+        });
+      }
       if (removedInPeriod && inst.finalReading !== null) {
         // 拆表 final_reading is the end-of-life dial fact — it wins over any
         // earlier in-period reading on this installation.
@@ -382,14 +406,26 @@ export class SettlementService {
     }
 
     // Pass 2: resolve the estimated components.
+    // Priority (v0.2): explicit settlement override > reader-entered
+    // estimate (NO_READ.estimate_qty) > AUTO_AVG3. Audit markers:
+    //   MANUAL + sourceReadingId = null  → settle-time operator override
+    //   MANUAL + sourceReadingId = row   → reader's entry estimate
+    //   AUTO_AVG3                        → system suggestion
     let manualApplied = false;
     for (const draft of drafts) {
       if (draft.sourceType !== 'ESTIMATE') continue;
       const override = overrideMap.get(draft.installationId);
+      const readerEstimate = readerEstimates.get(draft.installationId);
       let usage: Prisma.Decimal;
       if (override !== undefined) {
         usage = override;
         draft.method = 'MANUAL';
+        draft.sourceReadingId = null;
+        manualApplied = true;
+      } else if (readerEstimate !== undefined) {
+        usage = readerEstimate.qty;
+        draft.method = 'MANUAL';
+        draft.sourceReadingId = readerEstimate.readingId;
         manualApplied = true;
       } else if (suggestedPrisma !== null) {
         usage = suggestedPrisma;
@@ -437,6 +473,19 @@ export class SettlementService {
         } satisfies Prisma.InputJsonValue)
       : Prisma.DbNull;
 
+    // Freeze the household declaration effective for this period — billing
+    // must never read the account's current value (later declarations must
+    // not reprice history).
+    const householdProfile = await tx.waterAccountHouseholdProfile.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        waterAccountId: body.waterAccountId,
+        effectiveFromPeriod: { lte: body.period },
+      },
+      orderBy: { effectiveFromPeriod: 'desc' },
+      select: { householdSize: true },
+    });
+
     let settlement;
     try {
       settlement = await tx.consumptionSettlement.create({
@@ -449,6 +498,7 @@ export class SettlementService {
           estimateMethod: isEstimated ? estimateMethod : null,
           estimateBasis,
           estimateReason: isEstimated ? body.estimateReason : null,
+          householdSizeSnapshot: householdProfile?.householdSize ?? null,
           status: 'DRAFT',
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
@@ -611,7 +661,9 @@ export class SettlementService {
    * prev chain: each installation's latest component end_reading_value
    * from a settlement with period < current (NULL synthetic/manual ends
    * skipped). Rows arrive latest-first, so the first hit per installation
-   * wins.
+   * wins. A completed adjustment also establishes a trusted actual dial
+   * checkpoint: its usage has already been repriced, even if the actual
+   * period did not have a settlement yet. Never mutate frozen components.
    */
   private async prevChain(
     tx: Prisma.TransactionClient,
@@ -634,15 +686,73 @@ export class SettlementService {
       select: {
         installationId: true,
         endReadingValue: true,
+        sourceType: true,
+        sourceReadingId: true,
         createdAt: true,
         settlement: { select: { period: true } },
       },
       orderBy: [{ settlement: { period: 'desc' } }, { createdAt: 'desc' }],
     });
-    const prev = new Map<string, Prisma.Decimal>();
+    const prev = new Map<string, DialCheckpoint>();
     for (const c of prior) {
       if (!prev.has(c.installationId) && c.endReadingValue !== null) {
-        prev.set(c.installationId, c.endReadingValue);
+        prev.set(c.installationId, {
+          value: c.endReadingValue,
+          sourceType: c.sourceType,
+          period: c.settlement.period,
+          sourceReadingId: c.sourceReadingId,
+        });
+      }
+    }
+
+    const applied = await tx.reconciliation.findMany({
+      where: { tenantId: ctx.tenantId, waterAccountId, status: 'APPLIED', toPeriod: { lte: period } },
+      select: { actualReadingId: true },
+    });
+    if (applied.length === 0) return prev;
+    const actuals = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: { in: applied.map((r) => r.actualReadingId) },
+        installationId: { in: installationIds },
+        period: { lte: period },
+        resultType: { in: ['ACTUAL', 'REMOTE'] },
+        qcStatus: 'PASSED',
+        readingValue: { not: null },
+      },
+      select: { id: true, installationId: true, period: true, readingValue: true, readDate: true, createdAt: true },
+      orderBy: [{ period: 'desc' }, { readDate: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
+    });
+    if (actuals.length === 0) return prev;
+    const priorReadingIds = [...prev.values()].flatMap((p) => p.sourceReadingId ? [p.sourceReadingId] : []);
+    const priorReadings = priorReadingIds.length ? await tx.meterReading.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: priorReadingIds } },
+      select: { id: true, readDate: true, createdAt: true },
+    }) : [];
+    const priorById = new Map(priorReadings.map((r) => [r.id, r]));
+    const children = await tx.meterReading.findMany({
+      where: { tenantId: ctx.tenantId, supersedesReadingId: { in: [...actuals.map((r) => r.id), ...priorReadingIds] } },
+      select: { supersedesReadingId: true },
+    });
+    const superseded = new Set(children.map((r) => r.supersedesReadingId));
+    const seen = new Set<string>();
+    for (const actual of actuals) {
+      if (superseded.has(actual.id) || actual.readingValue === null || seen.has(actual.installationId)) continue;
+      seen.add(actual.installationId);
+      const prior = prev.get(actual.installationId);
+      if (prior && actual.period === prior.period && prior.sourceType !== 'ESTIMATE') {
+        // A same-month component may already consume usage AFTER this
+        // checkpoint. Keep that newer physical dial. Correcting a superseded
+        // source reading, however, must replace the stale frozen dial.
+        const source = prior.sourceReadingId ? priorById.get(prior.sourceReadingId) : undefined;
+        if (!source || (prior.sourceReadingId && !superseded.has(prior.sourceReadingId) &&
+          (source.readDate > actual.readDate ||
+            (+source.readDate === +actual.readDate && source.createdAt >= actual.createdAt)))) continue;
+      }
+      if (!prior || actual.period >= prior.period) {
+        prev.set(actual.installationId, {
+          value: actual.readingValue, sourceType: 'READING', period: actual.period, sourceReadingId: actual.id,
+        });
       }
     }
     return prev;
@@ -695,6 +805,43 @@ export class SettlementService {
       }
     }
     return valid;
+  }
+
+  /**
+   * Operator-entered NO_READ estimates for this period, latest per
+   * installation. A REJECTED NO_READ row's estimate is untrusted (QC said
+   * the visit record is wrong) — only PENDING/PASSED/MANUAL_REVIEW count.
+   * estimate_qty is a quantity, never a dial — used as the ESTIMATE
+   * component's usage ahead of AVG3, with sourceReadingId linking back.
+   */
+  private async readerEstimates(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    installationIds: string[],
+    period: string,
+  ) {
+    const rows = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        installationId: { in: installationIds },
+        period,
+        resultType: 'NO_READ',
+        estimateQty: { not: null },
+        qcStatus: { not: 'REJECTED' },
+      },
+      select: { id: true, installationId: true, estimateQty: true },
+      orderBy: [{ readDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    // NO_READ rows are NOT_SUPERSEDABLE (meter-reading.service.ts) — a redo
+    // is a new entry on the item, never a superseding child — so no
+    // superseded-child probe is needed here.
+    const map = new Map<string, { readingId: string; qty: Prisma.Decimal }>();
+    for (const r of rows) {
+      if (!map.has(r.installationId) && r.estimateQty !== null) {
+        map.set(r.installationId, { readingId: r.id, qty: r.estimateQty });
+      }
+    }
+    return map;
   }
 
   /**

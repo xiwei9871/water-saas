@@ -127,7 +127,9 @@ const POSTED_STATUSES = ['POSTED', 'PARTIAL_PAID', 'PAID'] as const;
  *        REPLACEMENT + prior ADJUSTMENT bills (C2 — prior corrections
  *        are real debt; counting them is what makes successive
  *        reconciliations converge instead of double-correcting).
- *        adjustment = 0 → APPLIED with no bill.
+ *        adjustment = 0 and effective per-period quantities unchanged → APPLIED
+ *        with no bill. A quantity-only correction retains a zero-value
+ *        adjustment document so later annual-tier pricing can recover it.
  *
  * Immutability: FINAL settlements and POSTED bills are NEVER mutated
  * (spec §1.3/§2.4) — the adjustment appends a new document. The recon
@@ -204,10 +206,19 @@ export class ReconciliationService {
         id: true,
         usageCategory: true,
         settleAccountId: true,
+        billable: true,
       },
     });
     if (!account) {
       throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    }
+    // Non-billable (MONITORING) accounts never bill, so there is nothing to
+    // reconcile — refuse before any outcome leg could mint an adjustment bill.
+    if (!account.billable) {
+      throw new ConflictException({
+        code: 'ACCOUNT_NOT_BILLABLE',
+        waterAccountId: account.id,
+      });
     }
 
     // Serialization anchor: the row lock must precede every state read
@@ -503,7 +514,7 @@ export class ReconciliationService {
         });
       }
       planIds.push(plan.id);
-      feeItemsPerPeriod.push(await loadFeeItems(tx, ctx, plan.id));
+      feeItemsPerPeriod.push(await loadFeeItems(tx, ctx, plan));
     }
 
     const allocated = allocateUsage({
@@ -520,6 +531,9 @@ export class ReconciliationService {
           period: s.period,
           allocatedUsage: allocated[i],
           feeItems: feeItemsPerPeriod[i],
+          // Each period reprices at ITS OWN frozen household snapshot —
+          // a mid-span declaration change must not rewrite earlier bills.
+          householdSize: s.householdSizeSnapshot,
         })),
       });
     } catch (err) {
@@ -552,7 +566,32 @@ export class ReconciliationService {
       postedChargeCent,
       adjustmentAmountCent,
     });
-    if (adjustmentAmountCent === 0n) {
+    // Compare with the latest effective quantities, not only the frozen
+    // settlements: a zero-money revision may restore an earlier estimate.
+    const priorAdjustments = await tx.bill.findMany({
+      where: { tenantId: ctx.tenantId, waterAccountId: account.id,
+        billKind: 'ADJUSTMENT', sourceType: 'RECONCILIATION',
+        status: { in: [...POSTED_STATUSES] }, period: { lte: actual.period } },
+      select: { id: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    const priorItems = priorAdjustments.length ? await tx.billItem.findMany({
+      where: { tenantId: ctx.tenantId, billId: { in: priorAdjustments.map((b) => b.id) },
+        itemType: 'ADJUSTMENT' },
+      select: { billId: true, description: true, qty: true },
+    }) : [];
+    const priorDelta = new Map<string, Prisma.Decimal>();
+    for (const bill of priorAdjustments) {
+      for (const item of priorItems.filter((i) => i.billId === bill.id)) {
+        const sourcePeriod = /^reconcile (\d{6})$/.exec(item.description ?? '')?.[1];
+        if (sourcePeriod && item.qty !== null && !priorDelta.has(sourcePeriod)) {
+          priorDelta.set(sourcePeriod, item.qty);
+        }
+      }
+    }
+    const quantityChanged = span.some((s, i) =>
+      !allocated[i].equals(s.totalUsageQty.plus(priorDelta.get(s.period) ?? 0)),
+    );
+    if (adjustmentAmountCent === 0n && !quantityChanged) {
       return { ...recon, adjustmentBill: null };
     }
 

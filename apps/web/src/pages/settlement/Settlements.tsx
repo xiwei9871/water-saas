@@ -337,10 +337,15 @@ export default function Settlements() {
       title: '来源',
       dataIndex: 'sourceType',
       key: 'sourceType',
-      width: 80,
-      render: (t: ConsumptionComponent['sourceType']) => (
-        <Tag color={COMPONENT_SOURCE_COLORS[t]}>{COMPONENT_SOURCE_LABELS[t]}</Tag>
-      ),
+      width: 110,
+      render: (t: ConsumptionComponent['sourceType'], c) =>
+        t === 'ESTIMATE' && c.sourceReadingId ? (
+          <Tooltip title={`抄表员在未抄见时给出的预计用量，来源读数 ${c.sourceReadingId.slice(0, 8)}…`}>
+            <Tag color="cyan">抄表员估水</Tag>
+          </Tooltip>
+        ) : (
+          <Tag color={COMPONENT_SOURCE_COLORS[t]}>{COMPONENT_SOURCE_LABELS[t]}</Tag>
+        ),
     },
     {
       title: '上期读数',
@@ -559,8 +564,13 @@ export default function Settlements() {
                       {
                         key: 'method',
                         label: '预估方式',
+                        // MANUAL 再分流：分量带 sourceReadingId = 抄表员估水，
+                        // 否则 = 结算页人工覆盖；AUTO_AVG3 = 近三月均量。
                         children: detail.estimateMethod
-                          ? ESTIMATE_METHOD_LABELS[detail.estimateMethod]
+                          ? detail.estimateMethod === 'MANUAL' &&
+                            detail.components.some((c) => c.sourceReadingId)
+                            ? '抄表员预计用量'
+                            : ESTIMATE_METHOD_LABELS[detail.estimateMethod]
                           : '—',
                       },
                       {

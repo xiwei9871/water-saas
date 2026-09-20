@@ -50,6 +50,7 @@ interface OnboardWireBody {
     usageCategory?: string;
     addr?: string;
     openedAt?: unknown;
+    householdSize?: unknown;
   };
   meter?: MeterBody & { maxDial?: unknown };
   meterId?: string;
@@ -102,6 +103,13 @@ export class WaterAccountController {
       status: status as 'NORMAL' | 'SUSPENDED' | 'CLOSED' | undefined,
       accountNo,
     });
+  }
+
+  /** Category suggestions for onboarding; no billing write/read privilege required. */
+  @Get('usage-categories')
+  @Permissions('customer:read')
+  usageCategories() {
+    return this.svc.usageCategories(currentTenant());
   }
 
   @Get(':id')
@@ -158,9 +166,15 @@ export class WaterAccountController {
     @Headers('idempotency-key') key?: string,
   ) {
     // ---- shape validation (deterministic, safe outside the idem fn) ----
+    const isMonitoring = body?.account?.usageCategory === 'MONITORING';
     const hasCustomer = !!body?.customer;
     const hasCustomerId = !!body?.customerId;
-    if (hasCustomer === hasCustomerId) {
+    // Monitoring meters hang off the system customer — caller supplies
+    // none, and a supplied one would be silently ignored, so refuse it.
+    if (isMonitoring && (hasCustomer || hasCustomerId)) {
+      throw new BadRequestException({ code: 'MONITORING_NO_CUSTOMER' });
+    }
+    if (!isMonitoring && hasCustomer === hasCustomerId) {
       throw new BadRequestException({ code: 'ONBOARD_CUSTOMER_XOR' });
     }
     if (body.customer && (!body.customer.name || !body.customer.custType)) {
@@ -169,10 +183,15 @@ export class WaterAccountController {
     if (body.customer?.custType && !CUST_TYPES.has(body.customer.custType)) {
       throw new BadRequestException({ code: 'CUST_TYPE_INVALID' });
     }
-    if (body.settleAccount && body.settleAccountId) {
+    // Same ignore-vs-refuse rule for settle accounts: monitoring uses the
+    // internal system settle account, caller input must not be accepted.
+    if (isMonitoring && (body.settleAccount || body.settleAccountId)) {
+      throw new BadRequestException({ code: 'MONITORING_NO_CUSTOMER' });
+    }
+    if (!isMonitoring && body.settleAccount && body.settleAccountId) {
       throw new BadRequestException({ code: 'ONBOARD_SETTLE_ACCOUNT_XOR' });
     }
-    if (body.settleAccount && !body.settleAccount.name) {
+    if (!isMonitoring && body.settleAccount && !body.settleAccount.name) {
       throw new BadRequestException({ code: 'SETTLE_ACCOUNT_FIELDS_REQUIRED' });
     }
     if (!body.account?.usageCategory || !body.account?.addr) {
@@ -205,6 +224,16 @@ export class WaterAccountController {
         usageCategory: body.account.usageCategory,
         addr: body.account.addr,
         openedAt: assertOptionalDate(body.account.openedAt, 'account.openedAt'),
+        householdSize:
+          body.account.householdSize !== undefined
+            ? (() => {
+                const n = Number(body.account.householdSize);
+                if (!Number.isInteger(n) || n < 0) {
+                  throw new BadRequestException({ code: 'INVALID_HOUSEHOLD_SIZE' });
+                }
+                return n;
+              })()
+            : undefined,
       },
       meter: body.meter
         ? {
@@ -230,6 +259,71 @@ export class WaterAccountController {
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
       (tx) => this.svc.onboardTx(tx, ctx, parsed),
+    );
+  }
+
+  /** GET /water-accounts/:id/household-profiles — declaration history. */
+  @Get(':id/household-profiles')
+  @Permissions('customer:read')
+  householdProfiles(@Param('id') id: string) {
+    return this.svc.listHouseholdProfiles(
+      currentTenant(),
+      assertUuid(id, 'id'),
+    );
+  }
+
+  /**
+   * POST /water-accounts/:id/household-profiles — append an effective-dated
+   * household declaration (一户多人口申报). Same-period duplicates → 409.
+   */
+  @Post(':id/household-profiles')
+  @Permissions('customer:write')
+  createHouseholdProfile(
+    @Param('id') id: string,
+    @Body() body: { householdSize?: unknown; effectiveFromPeriod?: unknown },
+    @Req() req: Request,
+    @Headers('idempotency-key') key?: string,
+  ) {
+    assertUuid(id, 'id');
+    const parsed = {
+      householdSize:
+        body?.householdSize === undefined ? undefined : Number(body.householdSize),
+      effectiveFromPeriod:
+        typeof body?.effectiveFromPeriod === 'string'
+          ? body.effectiveFromPeriod
+          : undefined,
+    };
+    const ctx = currentTenant();
+    return withOptionalIdem(
+      this.prisma,
+      this.idem,
+      ctx,
+      { key, method: 'POST', route: req.path, body, responseStatus: 201 },
+      (tx) => this.svc.createHouseholdProfileTx(tx, ctx, id, parsed),
+    );
+  }
+
+  /**
+   * PATCH /water-accounts/:id/household-profiles/:profileId — correct a
+   * declared value. Settlements already generated keep their snapshot.
+   */
+  @Patch(':id/household-profiles/:profileId')
+  @Permissions('customer:write')
+  patchHouseholdProfile(
+    @Param('id') id: string,
+    @Param('profileId') profileId: string,
+    @Body() body: { householdSize?: unknown },
+    @Req() req: Request,
+  ) {
+    assertUuid(id, 'id');
+    assertUuid(profileId, 'profileId');
+    const parsed = {
+      householdSize:
+        body?.householdSize === undefined ? undefined : Number(body.householdSize),
+    };
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.patchHouseholdProfileTx(tx, ctx, id, profileId, parsed, req),
     );
   }
 

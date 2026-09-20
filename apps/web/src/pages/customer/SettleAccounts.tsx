@@ -34,6 +34,7 @@ import {
   cleanPatch,
   fmtTime,
   newIdemKey,
+  USAGE_CATEGORY_LABELS,
 } from '../common';
 import { AccountStatusTag } from '../pickers';
 
@@ -223,7 +224,12 @@ export default function SettleAccounts() {
         <Link to={`/customer/water-accounts?accountNo=${encodeURIComponent(no)}`}>{no}</Link>
       ),
     },
-    { title: '用水类别', dataIndex: 'usageCategory', key: 'usageCategory' },
+    {
+      title: '用水类别',
+      dataIndex: 'usageCategory',
+      key: 'usageCategory',
+      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+    },
     {
       title: '状态',
       dataIndex: 'status',

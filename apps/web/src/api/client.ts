@@ -232,6 +232,7 @@ const CODE_LABELS: Record<string, string> = {
   DUPLICATE_OVERRIDE: '用量覆盖存在重复的安装记录',
   PREV_EXCEEDS_MAX_DIAL: '上期读数超出表计最大量程，请先修正读数链',
   NEGATIVE_USAGE: '读数倒挂且无法按量程翻转解释，请先更正读数',
+  ESTIMATE_RECOVERY_REQUIRES_RECONCILIATION: '实抄止度低于此前估计止度，请先到“补差管理”校正已出账估水，再生成本期结算；这不是水表翻转',
   PREVIEW_FIELDS_REQUIRED: '请选择水表户并填写账期',
   // billing domain — reconciliation
   RECONCILIATION_STATUS_INVALID: '补差状态无效',

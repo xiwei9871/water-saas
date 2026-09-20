@@ -412,6 +412,9 @@ model Customer {
   idNo       String?  @map("id_no")
   phone      String?
   addr       String?
+  // Stable identity for system-owned customers (e.g. 'MONITORING_INTERNAL').
+  // Regular customers keep NULL — Postgres unique treats NULLs as distinct.
+  systemKey  String?  @map("system_key")
   createdAt  DateTime @default(now()) @map("created_at")
   createdBy  String?  @map("created_by") @db.Uuid
   updatedAt  DateTime @updatedAt @map("updated_at")
@@ -421,6 +424,7 @@ model Customer {
 
   @@unique([tenantId, customerNo])
   @@unique([tenantId, id])
+  @@unique([tenantId, systemKey])
   @@map("customer")
 }
 
@@ -453,6 +457,7 @@ model WaterAccount {
   usageCategory   String        @map("usage_category")
   addr            String
   status          AccountStatus @default(NORMAL)
+  billable        Boolean       @default(true)
   openedAt        DateTime?     @map("opened_at") @db.Date
   closedAt        DateTime?     @map("closed_at") @db.Date
   createdAt       DateTime      @default(now()) @map("created_at")
@@ -465,6 +470,7 @@ model WaterAccount {
   readingPlanItems   ReadingPlanItem[]
   bills              Bill[]
   meterInstallations MeterInstallation[]
+  householdProfiles  WaterAccountHouseholdProfile[]
 
   @@unique([tenantId, accountNo])
   @@unique([tenantId, id])
@@ -472,6 +478,30 @@ model WaterAccount {
   @@index([tenantId, settleAccountId])
   @@index([tenantId, usageCategory])
   @@map("water_account")
+}
+
+/**
+ * Effective-dated household population declaration (一户多人口申报).
+ * Sole source of truth — `consumption_settlement.household_size_snapshot`
+ * freezes the row effective at generation, so later declarations never
+ * reprice history. `water_account` intentionally keeps no current-value
+ * column (would drift); API responses resolve the latest effective row.
+ */
+model WaterAccountHouseholdProfile {
+  id                  String   @id @default(uuid()) @db.Uuid
+  tenantId            String   @map("tenant_id") @db.Uuid
+  waterAccountId      String   @map("water_account_id") @db.Uuid
+  householdSize       Int      @map("household_size")
+  effectiveFromPeriod String   @map("effective_from_period") @db.Char(6)
+  createdAt           DateTime @default(now()) @map("created_at")
+  createdBy           String?  @map("created_by") @db.Uuid
+  updatedAt           DateTime @updatedAt @map("updated_at")
+  updatedBy           String?  @map("updated_by") @db.Uuid
+
+  waterAccount WaterAccount @relation(fields: [tenantId, waterAccountId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, waterAccountId, effectiveFromPeriod])
+  @@map("water_account_household_profile")
 }
 
 model Meter {
@@ -554,6 +584,12 @@ model ReadingBook {
   orgUnitId   String   @map("org_unit_id") @db.Uuid
   readerId    String?  @map("reader_id") @db.Uuid
   scheduleDay Int?     @map("schedule_day")
+  // MONTHLY | BIMONTHLY — book-level cadence (一册同节奏).
+  cadence      String   @default("MONTHLY")
+  // BIMONTHLY anchor YYYYMM — sets the odd/even month rhythm.
+  anchorPeriod String?  @map("anchor_period") @db.Char(6)
+  // MECHANICAL | REMOTE_MANUAL | REMOTE_AUTO (REMOTE_AUTO = metadata only).
+  meterChannel String   @default("MECHANICAL") @map("meter_channel")
   createdAt   DateTime @default(now()) @map("created_at")
   createdBy   String?  @map("created_by") @db.Uuid
   updatedAt   DateTime @updatedAt @map("updated_at")
@@ -636,6 +672,9 @@ model MeterReading {
   readDate            DateTime       @map("read_date") @db.Date
   resultType          ReadResultType @map("result_type")
   readingValue        Decimal?       @map("reading_value") @db.Decimal(18, 4)
+  // Operator-entered estimated usage (m³) — NO_READ rows only. A quantity,
+  // never a dial: does not enter the trusted-reading chain.
+  estimateQty         Decimal?       @map("estimate_qty") @db.Decimal(18, 4)
   exceptionCode       ExceptionCode? @map("exception_code")
   supersedesReadingId String?        @map("supersedes_reading_id") @db.Uuid
   qcStatus            QcStatus       @default(PENDING) @map("qc_status")
@@ -670,6 +709,11 @@ model ConsumptionSettlement {
   estimateMethod EstimateMethod?  @map("estimate_method")
   estimateBasis  Json?            @map("estimate_basis") @db.JsonB
   estimateReason String?          @map("estimate_reason")
+  // Frozen at generation: household size effective for `period` from
+  // water_account_household_profile. Billing MUST use this snapshot, never
+  // the account's current declaration — history must not be repriced by a
+  // later population change.
+  householdSizeSnapshot Int?      @map("household_size_snapshot")
   status         SettlementStatus @default(DRAFT)
   createdAt      DateTime         @default(now()) @map("created_at")
   createdBy      String?          @map("created_by") @db.Uuid
@@ -783,6 +827,10 @@ model TariffPlan {
   effectiveFrom DateTime     @map("effective_from") @db.Date
   effectiveTo   DateTime?    @map("effective_to") @db.Date
   status        TariffStatus @default(DRAFT)
+  // 一户多人口申报: base household size and per-extra-person annual m³
+  // increment for tiered PER_QTY items (Chengdu: 4 / 51).
+  baseHousehold Int?      @map("base_household")
+  perPersonQty  Decimal?  @map("per_person_qty") @db.Decimal(18, 4)
   createdAt     DateTime     @default(now()) @map("created_at")
   createdBy     String?      @map("created_by") @db.Uuid
   updatedAt     DateTime     @updatedAt @map("updated_at")

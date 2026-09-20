@@ -9,6 +9,7 @@ import type { Request } from 'express';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { assertUsageCategory } from '../../common/usage-categories.js';
 
 export const TARIFF_PLAN_SELECT = {
   id: true,
@@ -19,6 +20,8 @@ export const TARIFF_PLAN_SELECT = {
   effectiveFrom: true,
   effectiveTo: true,
   status: true,
+  baseHousehold: true,
+  perPersonQty: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.TariffPlanSelect;
@@ -54,6 +57,10 @@ export interface TariffPlanCreateBody {
   effectiveFrom: Date;
   effectiveTo?: Date | null;
   tiers: TierInput[];
+  /** 一户多人口申报: base household (default 4 when perPersonQty set). */
+  baseHousehold?: number | null;
+  /** Annual m³ added to every finite tier bound per extra person. */
+  perPersonQty?: Prisma.Decimal | null;
 }
 
 export interface TariffPlanPatchBody {
@@ -65,6 +72,9 @@ export interface TariffPlanPatchBody {
   tiers?: TierInput[];
   /** Immutable wire keys the caller sent (code/usageCategory). */
   immutables: string[];
+  /** Calculation facts — DRAFT-only edits (frozen on ACTIVE/billed). */
+  baseHousehold?: number | null;
+  perPersonQty?: Prisma.Decimal | null;
 }
 
 export interface NewVersionBody {
@@ -75,6 +85,9 @@ export interface NewVersionBody {
   name?: string;
   /** undefined = copy source tiers verbatim; otherwise validated as create. */
   tiers?: TierInput[];
+  /** undefined = copy the source's household-scale params. */
+  baseHousehold?: number | null;
+  perPersonQty?: Prisma.Decimal | null;
 }
 
 const versionExists = () =>
@@ -169,6 +182,8 @@ export class TariffPlanService {
     body: TariffPlanCreateBody,
   ) {
     this.assertWindow(body.effectiveFrom, body.effectiveTo ?? null);
+    assertUsageCategory(body.usageCategory);
+    this.assertHouseholdScale(body.baseHousehold, body.perPersonQty);
     await this.assertTiersValid(tx, ctx, body.tiers);
     const dup = await tx.tariffPlan.findFirst({
       where: {
@@ -186,6 +201,8 @@ export class TariffPlanService {
       usageCategory: body.usageCategory,
       effectiveFrom: body.effectiveFrom,
       effectiveTo: body.effectiveTo ?? null,
+      baseHousehold: body.baseHousehold,
+      perPersonQty: body.perPersonQty,
       tiers: body.tiers,
     });
     return this.withTiers(tx, ctx, plan);
@@ -224,6 +241,8 @@ export class TariffPlanService {
         body.name !== undefined ||
         body.effectiveFrom !== undefined ||
         body.tiers !== undefined ||
+        body.baseHousehold !== undefined ||
+        body.perPersonQty !== undefined ||
         body.immutables.length > 0
       ) {
         throw frozen('ACTIVE plans only allow effectiveTo edits');
@@ -279,6 +298,14 @@ export class TariffPlanService {
     const mergedTo =
       body.effectiveTo === undefined ? existing.effectiveTo : body.effectiveTo;
     this.assertWindow(mergedFrom, mergedTo);
+    this.assertHouseholdScale(
+      body.baseHousehold === undefined
+        ? existing.baseHousehold
+        : body.baseHousehold,
+      body.perPersonQty === undefined
+        ? existing.perPersonQty
+        : body.perPersonQty,
+    );
     if (body.tiers !== undefined) {
       await this.assertTiersValid(tx, ctx, body.tiers);
     }
@@ -302,6 +329,16 @@ export class TariffPlanService {
           name: body.name,
           effectiveFrom: body.effectiveFrom,
           effectiveTo: body.effectiveTo === undefined ? undefined : body.effectiveTo,
+          // Same normalization as insertPlan: enabling perPersonQty without
+          // an explicit baseHousehold defaults the base to 4.
+          baseHousehold:
+            body.baseHousehold === undefined
+              ? body.perPersonQty != null && existing.baseHousehold == null
+                ? 4
+                : undefined
+              : body.baseHousehold,
+          perPersonQty:
+            body.perPersonQty === undefined ? undefined : body.perPersonQty,
           updatedBy: ctx.staffId,
         },
       });
@@ -477,6 +514,10 @@ export class TariffPlanService {
       usageCategory: src.usageCategory,
       effectiveFrom: body.effectiveFrom,
       effectiveTo,
+      baseHousehold:
+        body.baseHousehold === undefined ? src.baseHousehold : body.baseHousehold,
+      perPersonQty:
+        body.perPersonQty === undefined ? src.perPersonQty : body.perPersonQty,
       tiers,
     });
     return this.withTiers(tx, ctx, plan);
@@ -663,6 +704,8 @@ export class TariffPlanService {
       usageCategory: string;
       effectiveFrom: Date;
       effectiveTo: Date | null;
+      baseHousehold?: number | null;
+      perPersonQty?: Prisma.Decimal | null;
       tiers: TierInput[];
     },
   ) {
@@ -675,6 +718,12 @@ export class TariffPlanService {
           usageCategory: data.usageCategory,
           effectiveFrom: data.effectiveFrom,
           effectiveTo: data.effectiveTo,
+          // perPersonQty set → baseHousehold defaults to 4 (一户四人基数).
+          baseHousehold:
+            data.perPersonQty != null && data.baseHousehold == null
+              ? 4
+              : data.baseHousehold,
+          perPersonQty: data.perPersonQty,
           status: 'DRAFT',
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
@@ -686,6 +735,39 @@ export class TariffPlanService {
     } catch (err) {
       if (isUniqueViolation(err)) throw versionExists();
       throw err;
+    }
+  }
+
+  /**
+   * Household-scale params are calculation facts: perPersonQty requires a
+   * positive value and implies a baseHousehold (defaulted to 4 at write).
+   * baseHousehold without perPersonQty is a no-op config — allowed but
+   * normalized to null by refusing it (keeps "scaling enabled?" binary).
+   */
+  private assertHouseholdScale(
+    baseHousehold: number | null | undefined,
+    perPersonQty: Prisma.Decimal | null | undefined,
+  ) {
+    if (perPersonQty == null) {
+      if (baseHousehold != null) {
+        throw new BadRequestException({
+          code: 'TARIFF_HOUSEHOLD_SCALE_INVALID',
+          reason: 'baseHousehold requires perPersonQty',
+        });
+      }
+      return;
+    }
+    if (!perPersonQty.isFinite() || perPersonQty.lte(0)) {
+      throw new BadRequestException({
+        code: 'TARIFF_HOUSEHOLD_SCALE_INVALID',
+        reason: 'perPersonQty must be > 0',
+      });
+    }
+    if (baseHousehold != null && (!Number.isInteger(baseHousehold) || baseHousehold < 1)) {
+      throw new BadRequestException({
+        code: 'TARIFF_HOUSEHOLD_SCALE_INVALID',
+        reason: 'baseHousehold must be a positive integer',
+      });
     }
   }
 

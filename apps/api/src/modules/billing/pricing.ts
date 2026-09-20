@@ -94,14 +94,20 @@ export const lockAccountForUpdate = async (
  * Fee items are resolved in bulk; a tier referencing a missing fee item is
  * a config bug and surfaces as a DomainError downstream (never silently
  * skipped).
+ *
+ * `plan` carries the household-scale policy (一户多人口申报): when
+ * per_person_qty is configured it is injected as `householdScale` on every
+ * PER_QTY item — the engine shifts finite tier bounds by
+ * (size − baseHousehold) × perPersonQty. Single-tier items have no finite
+ * bound, so flat fees (污水费) are naturally unaffected.
  */
 export const loadFeeItems = async (
   tx: Prisma.TransactionClient,
   ctx: TenantCtx,
-  tariffPlanId: string,
+  plan: { id: string; baseHousehold: number | null; perPersonQty: Prisma.Decimal | null },
 ): Promise<FeeItemInput[]> => {
   const tiers = await tx.tariffTier.findMany({
-    where: { tenantId: ctx.tenantId, tariffPlanId },
+    where: { tenantId: ctx.tenantId, tariffPlanId: plan.id },
     orderBy: [{ feeItemId: 'asc' }, { tierNo: 'asc' }],
   });
   if (tiers.length === 0) return [];
@@ -125,6 +131,10 @@ export const loadFeeItems = async (
       code: item.code,
       calcType: item.calcType,
       tiers: [],
+      householdScale:
+        item.calcType === 'PER_QTY' && plan.perPersonQty !== null
+          ? { baseHousehold: plan.baseHousehold ?? 4, perPersonQty: plan.perPersonQty }
+          : undefined,
     };
     entry.tiers.push({
       tierNo: t.tierNo,
@@ -145,14 +155,15 @@ export const loadFeeItems = async (
  * year (period >= YYYY01 AND period < current).
  *
  * Only billKind=NORMAL settlement usage counts on the settlement side:
- * REVERSAL/ADJUSTMENT bills are ORIGINAL_BILL-sourced corrections, not
+ * REVERSAL and ORIGINAL_BILL-sourced ADJUSTMENT bills are not
  * new consumption, and a REVERSED original drops out (reversed usage
  * leaves the ladder). REPLACEMENT bills carry no settlement link, so
  * their corrected usage is recovered from the bill items themselves —
  * only PER_QTY items carry a qty (FIXED/PERCENT never do), so summing
  * non-null item qty on POSTED-side replacements is exactly the corrected
  * consumption. Without it, a mid-year replace() would silently drop the
- * corrected usage out of every later bill's ladder.
+ * corrected usage out of every later bill's ladder. RECONCILIATION-sourced
+ * adjustments replace effective source-period usage with the latest correction.
  */
 export const ytdBeforeQty = async (
   tx: Prisma.TransactionClient,
@@ -176,13 +187,10 @@ export const ytdBeforeQty = async (
   const settlements = bills.length
     ? await tx.consumptionSettlement.findMany({
         where: { tenantId: ctx.tenantId, id: { in: bills.map((b) => b.sourceId) } },
-        select: { totalUsageQty: true },
+        select: { period: true, totalUsageQty: true },
       })
     : [];
-  const settled = settlements.reduce(
-    (acc, s) => acc.plus(s.totalUsageQty),
-    new Prisma.Decimal(0),
-  );
+  const usageByPeriod = new Map(settlements.map((s) => [s.period, s.totalUsageQty]));
   const replacements = await tx.bill.findMany({
     where: {
       tenantId: ctx.tenantId,
@@ -191,21 +199,58 @@ export const ytdBeforeQty = async (
       status: { in: [...posted] },
       period: { gte: yearStart, lt: period },
     },
-    select: { id: true },
+    select: { id: true, period: true },
   });
-  if (replacements.length === 0) return settled;
-  const items = await tx.billItem.findMany({
+  const items = replacements.length ? await tx.billItem.findMany({
     where: {
       tenantId: ctx.tenantId,
       billId: { in: replacements.map((b) => b.id) },
       qty: { not: null },
     },
-    select: { qty: true },
+    select: { billId: true, qty: true },
+  }) : [];
+  const replacementPeriods = new Map(replacements.map((b) => [b.id, b.period]));
+  for (const item of items) {
+    const p = replacementPeriods.get(item.billId)!;
+    usageByPeriod.set(p, (usageByPeriod.get(p) ?? new Prisma.Decimal(0)).plus(item.qty ?? 0));
+  }
+
+  // Reconciliation items persist a quantity delta relative to the frozen
+  // settlement, not relative to a previous adjustment. The LATEST correction
+  // for each source period therefore replaces its effective usage; summing
+  // successive deltas would reduce the annual cursor twice. Attribute to the
+  // source period, never the adjustment bill's issue period (cross-year fix).
+  const adjustments = await tx.bill.findMany({
+    where: { tenantId: ctx.tenantId, waterAccountId, billKind: 'ADJUSTMENT',
+      sourceType: 'RECONCILIATION', status: { in: [...posted] }, period: { lte: period } },
+    select: { id: true },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   });
-  return items.reduce(
-    (acc, it) => acc.plus(it.qty ?? 0),
-    settled,
-  );
+  if (adjustments.length) {
+    const corrections = await tx.billItem.findMany({
+      where: { tenantId: ctx.tenantId, billId: { in: adjustments.map((b) => b.id) }, itemType: 'ADJUSTMENT' },
+      select: { billId: true, description: true, qty: true },
+    });
+    const frozen = await tx.consumptionSettlement.findMany({
+      where: { tenantId: ctx.tenantId, waterAccountId, period: { gte: yearStart, lt: period } },
+      select: { period: true, totalUsageQty: true },
+    });
+    const frozenByPeriod = new Map(frozen.map((s) => [s.period, s.totalUsageQty]));
+    const corrected = new Set<string>();
+    for (const bill of adjustments) {
+      for (const item of corrections.filter((i) => i.billId === bill.id)) {
+        // This is the existing immutable, service-written per-period format
+        // from ReconciliationService, including pre-fix adjustment documents.
+        const sourcePeriod = /^reconcile (\d{6})$/.exec(item.description ?? '')?.[1];
+        if (!sourcePeriod || sourcePeriod < yearStart || sourcePeriod >= period || corrected.has(sourcePeriod)) continue;
+        const original = frozenByPeriod.get(sourcePeriod);
+        if (original === undefined || item.qty === null || !usageByPeriod.has(sourcePeriod)) continue;
+        usageByPeriod.set(sourcePeriod, original.plus(item.qty));
+        corrected.add(sourcePeriod);
+      }
+    }
+  }
+  return [...usageByPeriod.values()].reduce((sum, qty) => sum.plus(qty), new Prisma.Decimal(0));
 };
 
 /**

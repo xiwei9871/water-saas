@@ -226,6 +226,8 @@ export interface WaterAccount {
   customerId: string;
   settleAccountId: string;
   usageCategory: string;
+  /** 监控表恒为 false（服务端/数据库双重约束），不参与开账。 */
+  billable: boolean;
   addr: string;
   status: AccountStatus;
   openedAt: string | null;
@@ -239,6 +241,22 @@ export interface WaterAccount {
     name: string;
     status: AccountStatus;
   };
+}
+
+/** GET /water-accounts/:id — 在列表行基础上附带当前（展示用）人数。
+ * 计费永远走结算快照，不读这个值。 */
+export interface WaterAccountDetail extends WaterAccount {
+  householdSize: number | null;
+}
+
+/** GET /water-accounts/:id/household-profiles — 一户多人口申报历史。 */
+export interface HouseholdProfile {
+  id: string;
+  waterAccountId: string;
+  householdSize: number;
+  /** 生效账期 YYYYMM */
+  effectiveFromPeriod: string;
+  createdAt: string;
 }
 
 /** GET /meters */
@@ -304,6 +322,11 @@ export interface OnboardResult {
 /* ------------------------------------------------------------------ */
 
 /** GET /reading-books */
+/** 抄表册节奏：MONTHLY 每月 / BIMONTHLY 双月（anchorPeriod 定奇偶）。 */
+export type BookCadence = 'MONTHLY' | 'BIMONTHLY';
+/** 表计通道：REMOTE_AUTO 仅登记元数据（本期无远传集成）。 */
+export type MeterChannel = 'MECHANICAL' | 'REMOTE_MANUAL' | 'REMOTE_AUTO';
+
 export interface ReadingBook {
   id: string;
   tenantId: string;
@@ -312,6 +335,10 @@ export interface ReadingBook {
   orgUnitId: string;
   readerId: string | null;
   scheduleDay: number | null;
+  cadence: BookCadence;
+  /** BIMONTHLY 必填，YYYYMM；MONTHLY 恒为 null。 */
+  anchorPeriod: string | null;
+  meterChannel: MeterChannel;
   createdAt: string;
   updatedAt: string;
 }
@@ -383,6 +410,10 @@ export interface ReadingPlanProgress {
  * probe): non-null when a newer correction row points at this one.
  */
 export interface MeterReading {
+  account?: { accountNo: string; customerName: string; addr: string };
+  meterNo?: string;
+  operatorName?: string | null;
+  qcByName?: string | null;
   id: string;
   tenantId: string;
   planItemId: string | null;
@@ -393,6 +424,8 @@ export interface MeterReading {
   resultType: ReadResultType;
   readingValue: string | null;
   exceptionCode: ExceptionCode | null;
+  /** 仅 NO_READ 可携带：抄表员预计用量（m³，非表码）。 */
+  estimateQty: string | null;
   supersedesReadingId: string | null;
   supersededById: string | null;
   qcStatus: QcStatus;
@@ -453,6 +486,8 @@ export interface ConsumptionSettlement {
   estimateMethod: EstimateMethod | null;
   estimateBasis: EstimateBasis | null;
   estimateReason: string | null;
+  /** 立账时冻结的人口快照 —— 历史重算/补差的唯一依据。 */
+  householdSizeSnapshot: number | null;
   status: SettlementStatus;
   createdAt: string;
   updatedAt: string;
@@ -525,6 +560,10 @@ export interface TariffPlan {
   /** DATE columns — ISO strings. */
   effectiveFrom: string;
   effectiveTo: string | null;
+  /** 一户多人口：基准人数（null = 不启用人数扩展）。 */
+  baseHousehold: number | null;
+  /** 每超出基准 1 人，各阶梯年度基数的扩展量（m³/年，decimal 字符串）。 */
+  perPersonQty: string | null;
   status: TariffStatus;
   createdAt: string;
   updatedAt: string;

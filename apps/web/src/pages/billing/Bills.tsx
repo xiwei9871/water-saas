@@ -99,6 +99,10 @@ export default function Bills() {
 
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [billCtx, setBillCtx] = useState<{
+    settle: { householdSizeSnapshot: number | null } | null;
+    plan: { baseHousehold: number | null; perPersonQty: string | null } | null;
+  } | null>(null);
 
   const [replaceFor, setReplaceFor] = useState<Bill | null>(null);
   const [replaceIdemKey, setReplaceIdemKey] = useState('');
@@ -162,9 +166,31 @@ export default function Bills() {
     const seq = ++detailSeq.current;
     setDetailLoading(true);
     setDetail(null);
+    setBillCtx(null);
     try {
       const res = await api.get<BillDetail>(`/bills/${row.id}`);
-      if (seq === detailSeq.current) setDetail(res.data);
+      if (seq !== detailSeq.current) return;
+      setDetail(res.data);
+      // 结算来源的账单补取计费口径：人数快照 + 资费人数参数（详情展示用）。
+      if (res.data.sourceType === 'SETTLEMENT' && res.data.sourceId) {
+        const [settle, plan] = await Promise.all([
+          api
+            .get<{ householdSizeSnapshot: number | null }>(
+              `/consumption-settlements/${res.data.sourceId}`,
+            )
+            .then((r) => r.data)
+            .catch(() => null),
+          res.data.tariffPlanId
+            ? api
+                .get<{ baseHousehold: number | null; perPersonQty: string | null }>(
+                  `/tariff-plans/${res.data.tariffPlanId}`,
+                )
+                .then((r) => r.data)
+                .catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        if (seq === detailSeq.current) setBillCtx({ settle, plan });
+      }
     } catch (err) {
       if (seq === detailSeq.current) message.error(apiErrorText(err));
     } finally {
@@ -624,6 +650,30 @@ export default function Bills() {
                 },
               ]}
             />
+            {(() => {
+              const snap = billCtx?.settle?.householdSizeSnapshot;
+              const base = billCtx?.plan?.baseHousehold;
+              const per = Number(billCtx?.plan?.perPersonQty ?? NaN);
+              if (snap == null || base == null || !Number.isFinite(per)) return null;
+              const extra = Math.max(0, snap - base) * per;
+              return (
+                <Descriptions
+                  bordered
+                  size="small"
+                  column={3}
+                  style={{ marginTop: 12 }}
+                  items={[
+                    { key: 'hh', label: '户籍人数（结算快照）', children: snap },
+                    { key: 'base', label: '基准人数', children: base },
+                    {
+                      key: 'ext',
+                      label: '阶梯年度基数扩展',
+                      children: extra > 0 ? `+${extra} m³/年` : '不扩展',
+                    },
+                  ]}
+                />
+              );
+            })()}
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>账单明细</div>
             <Table<BillItem>
               rowKey="id"

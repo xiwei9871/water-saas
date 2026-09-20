@@ -495,13 +495,20 @@ export default function Reports({ kind }: { kind: ReportKind }) {
           <Card size="small" style={{ maxWidth: 360 }}>
             <Statistic
               title="回收率（实收 / 应收）"
-              value={recovery?.rate === null || recovery === null ? '—' : `${(Number(recovery.rate) * 100).toFixed(2)}%`}
+              value={recovery?.rate === null || recovery === null || Number(recovery.billed) < 0 ? '—' : `${(Number(recovery.rate) * 100).toFixed(2)}%`}
               valueStyle={{ fontSize: 32 }}
             />
+            {recovery !== null && Number(recovery.billed) < 0 && (
+              <Alert type="warning" showIcon message="净应收为负，本期回收率不适用"
+                description="本期调减金额大于正常应收。请结合应收、实收金额或截止月累计口径查看，不宜用负比例评价收缴表现。" />
+            )}
             {recovery?.rate === null && recovery !== null && (
               <Tag color="orange">应收为 0，回收率无意义</Tag>
             )}
           </Card>
+          <Alert type="info" showIcon style={{ marginTop: 12 }}
+            message="统计口径：应收按账单账期统计，实收按收款日期统计（含红冲）。"
+            description="本月收回历史欠费会计入本月实收，不代表本月账单的缴清比例。可选择截止月查看累计口径。" />
         </>
       )}
     </Card>

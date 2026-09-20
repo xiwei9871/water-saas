@@ -83,7 +83,7 @@ const onboard = async (label: string, installedAt: string, initialReading: numbe
     .set(auth(adminToken))
     .send({
       customer: { name: `T7 ${label} ${RUN}`, custType: 'PERSONAL' },
-      account: { usageCategory: 'RESIDENTIAL', addr: `${label} Water St` },
+      account: { usageCategory: 'RES_METERED', addr: `${label} Water St` },
       meter: { brand: 't7-brand', caliber: 'DN15' },
       installation: { initialReading, installedAt },
     })
@@ -806,7 +806,7 @@ describe('T7 review follow-ups: supersede exclusion + rollover', () => {
         .set(auth(adminToken))
         .send({
           customer: { name: `T7 R ${RUN}`, custType: 'PERSONAL' },
-          account: { usageCategory: 'RESIDENTIAL', addr: 'R Water St' },
+          account: { usageCategory: 'RES_METERED', addr: 'R Water St' },
           meter: { brand: 't7-brand', caliber: 'DN15', maxDial: 100 },
           installation: { initialReading: 90, installedAt: '2026-10-01' },
         })
@@ -953,5 +953,170 @@ describe('RC-fix M-1: closed account gains no settlement activity', () => {
       });
     expect(gen.status).toBe(409);
     expect(gen.body).toMatchObject({ code: 'WATER_ACCOUNT_CLOSED' });
+  });
+});
+
+describe('v0.2: reader NO_READ estimate precedence', () => {
+  it('reader estimateQty fills the ESTIMATE component (MANUAL + sourceReadingId → row)', async () => {
+    const a = await onboard('H1', '2035-01-01', 0);
+    acct['H1'] = a.waterAccount.id;
+    inst['H1'] = a.installation.id;
+    await request(app.getHttpServer())
+      .post(`/reading-books/${bookId}/meters`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: acct['H1'] })
+      .expect(201);
+
+    // 203501: NO_READ carrying a reader estimate of 12 m³.
+    await genPlan('h1jan', '203501');
+    const noRead = (
+      await request(app.getHttpServer())
+        .post('/meter-readings')
+        .set(auth(adminToken))
+        .send({
+          planItemId: itemOf('h1jan', 'H1'),
+          resultType: 'NO_READ',
+          exceptionCode: 'LOCKED',
+          estimateQty: '12',
+        })
+        .expect(201)
+    ).body;
+    expect(noRead.readingValue).toBeNull();
+    expect(Number(noRead.estimateQty)).toBe(12);
+
+    const s1 = await settle('H1', '203501', { estimateReason: '锁门' }).expect(201);
+    const c1 = componentOf(s1.body, inst['H1']);
+    expect(c1.sourceType).toBe('ESTIMATE');
+    expect(c1.usageQty).toBe('12');
+    expect(c1.sourceReadingId).toBe(noRead.id); // provenance → the NO_READ row
+    expect(s1.body.estimateMethod).toBe('MANUAL');
+    // Simulated dial = prev 0 + estimate 12 — the component's end IS the
+    // synthetic reading (prev + qty), not a persisted physical dial.
+    expect(c1.endReadingValue).toBe('12');
+  });
+
+  it('explicit settlement override beats the reader estimate', async () => {
+    await genPlan('h1feb', '203502');
+    await request(app.getHttpServer())
+      .post('/meter-readings')
+      .set(auth(adminToken))
+      .send({
+        planItemId: itemOf('h1feb', 'H1'),
+        resultType: 'NO_READ',
+        exceptionCode: 'LOCKED',
+        estimateQty: '20',
+      })
+      .expect(201);
+
+    const s2 = await settle('H1', '203502', {
+      usageQty: 33,
+      estimateReason: '人工核定33',
+    }).expect(201);
+    const c2 = componentOf(s2.body, inst['H1']);
+    expect(c2.usageQty).toBe('33');
+    expect(c2.sourceReadingId).toBeNull(); // settle-stage override — no reading link
+    expect(s2.body.estimateMethod).toBe('MANUAL');
+  });
+
+  it('NO_READ without estimateQty falls through to AVG3/manual-required', async () => {
+    await genPlan('h1mar', '203503');
+    await request(app.getHttpServer())
+      .post('/meter-readings')
+      .set(auth(adminToken))
+      .send({
+        planItemId: itemOf('h1mar', 'H1'),
+        resultType: 'NO_READ',
+        exceptionCode: 'OCCUPIED',
+      })
+      .expect(201);
+    // H1's history is all ESTIMATE components — AVG3 has no basis → 400.
+    const res = await settle('H1', '203503', { estimateReason: 'x' });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'ESTIMATE_USAGE_REQUIRED' });
+  });
+
+  it('ACTUAL/REMOTE rows reject estimateQty; NO_READ rejects readingValue', async () => {
+    await genPlan('h1apr', '203504');
+    const item = itemOf('h1apr', 'H1');
+    const bad = await request(app.getHttpServer())
+      .post('/meter-readings')
+      .set(auth(adminToken))
+      .send({ planItemId: item, resultType: 'ACTUAL', readingValue: 50, estimateQty: 5 });
+    expect(bad.status).toBe(400);
+    expect(bad.body).toMatchObject({ code: 'ESTIMATE_QTY_ONLY_FOR_NO_READ' });
+    const noDial = await request(app.getHttpServer())
+      .post('/meter-readings')
+      .set(auth(adminToken))
+      .send({ planItemId: item, resultType: 'NO_READ', exceptionCode: 'LOCKED', readingValue: 50 });
+    expect(noDial.status).toBe(400);
+  });
+});
+
+describe('v0.2: household profile → settlement snapshot', () => {
+  it('onboard householdSize writes the opening profile; snapshot lands on the settlement', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `T7 H2 ${RUN}`, custType: 'PERSONAL' },
+        account: { usageCategory: 'RES_METERED', addr: 'H2 St', householdSize: 5 },
+        meter: { brand: 't7-brand' },
+        installation: { initialReading: 0, installedAt: '2035-01-01' },
+      })
+      .expect(201);
+    acct['H2'] = res.body.waterAccount.id;
+
+    const s = await settle('H2', '203501', { usageQty: 10, estimateReason: 'x' }).expect(201);
+    expect(s.body.householdSizeSnapshot).toBe(5);
+  });
+
+  it('a later declaration moves the NEXT period only — earlier snapshot frozen', async () => {
+    await request(app.getHttpServer())
+      .post(`/water-accounts/${acct['H2']}/household-profiles`)
+      .set(auth(adminToken))
+      .send({ householdSize: 6, effectiveFromPeriod: '203502' })
+      .expect(201);
+
+    const s2 = await settle('H2', '203502', { usageQty: 10, estimateReason: 'x' }).expect(201);
+    expect(s2.body.householdSizeSnapshot).toBe(6);
+
+    // The earlier settlement's snapshot is untouched history.
+    const earlier = (
+      await request(app.getHttpServer())
+        .get(`/consumption-settlements?waterAccountId=${acct['H2']}&period=203501`)
+        .set(auth(adminToken))
+        .expect(200)
+    ).body[0];
+    expect(earlier.householdSizeSnapshot).toBe(5);
+  });
+
+  it('profile wire validation: bad period/size → 400; same-period duplicate → 409', async () => {
+    const base = `/water-accounts/${acct['H2']}/household-profiles`;
+    for (const body of [
+      { householdSize: 4, effectiveFromPeriod: '203513' },
+      { householdSize: 4, effectiveFromPeriod: 'xx' },
+      { householdSize: 2.5, effectiveFromPeriod: '203503' },
+      { householdSize: -1, effectiveFromPeriod: '203503' },
+    ]) {
+      await request(app.getHttpServer()).post(base).set(auth(adminToken)).send(body).expect(400);
+    }
+    await request(app.getHttpServer())
+      .post(base)
+      .set(auth(adminToken))
+      .send({ householdSize: 4, effectiveFromPeriod: '203503' })
+      .expect(201);
+    const dup = await request(app.getHttpServer())
+      .post(base)
+      .set(auth(adminToken))
+      .send({ householdSize: 7, effectiveFromPeriod: '203503' });
+    expect(dup.status).toBe(409);
+    expect(dup.body).toMatchObject({ code: 'HOUSEHOLD_PROFILE_EXISTS' });
+  });
+
+  it('no declaration → snapshot is null (billing then uses unscaled tiers)', async () => {
+    const a = await onboard('H3', '2035-01-01', 0);
+    acct['H3'] = a.waterAccount.id;
+    const s = await settle('H3', '203501', { usageQty: 10, estimateReason: 'x' }).expect(201);
+    expect(s.body.householdSizeSnapshot).toBeNull();
   });
 });

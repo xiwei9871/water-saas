@@ -21,6 +21,15 @@ export interface FeeItemInput {
   code: string;
   calcType: FeeCalcType;
   tiers: TariffTier[];
+  /**
+   * Household-population tier scaling (一户多人口申报): when present AND
+   * `ComputeBillInput.householdSize` exceeds `baseHousehold`, every finite
+   * `toQty` boundary shifts right by
+   * `(householdSize - baseHousehold) × perPersonQty` (annual m³). The
+   * unbounded top tier (`toQty = null`) never moves. Flat/single-tier items
+   * are unaffected in practice since their only bound is null.
+   */
+  householdScale?: { baseHousehold: number; perPersonQty: Decimal };
 }
 
 /**
@@ -44,12 +53,37 @@ export interface ComputeBillInput {
   usageQty: Decimal;
   /** Consumption already billed this calendar year before this bill. */
   ytdBeforeQty: Decimal;
+  /**
+   * Declared household population snapshot for the billed period (see
+   * `FeeItemInput.householdScale`). null/undefined → no scaling.
+   */
+  householdSize?: number | null;
   feeItems: FeeItemInput[];
 }
 
 export interface ComputeBillResult {
   items: BillItemDraft[];
   totalAmountCent: bigint;
+}
+
+/**
+ * Shift every finite `toQty` boundary right by
+ * `max(0, householdSize - baseHousehold) × perPersonQty`.
+ * `toQty = null` (unbounded top tier) and `fromQty` never move —
+ * `tieredAmount` allocates by `toQty` + cursor, so shifted bounds alone
+ * widen each tier's capacity consistently.
+ */
+function scaleTierBounds(
+  tiers: TariffTier[],
+  scale: NonNullable<FeeItemInput['householdScale']>,
+  householdSize: number,
+): TariffTier[] {
+  const extra = Math.max(0, householdSize - scale.baseHousehold);
+  const shift = scale.perPersonQty.times(extra);
+  if (shift.isZero()) return tiers;
+  return tiers.map((t) =>
+    t.toQty === null ? t : { ...t, toQty: t.toQty.plus(shift) },
+  );
 }
 
 function singleTier(fi: FeeItemInput): TariffTier {
@@ -96,7 +130,7 @@ function singleTier(fi: FeeItemInput): TariffTier {
  * - plus `TARIFF_NO_TIERS` / `TARIFF_TIERS_EXHAUSTED` from tieredAmount.
  */
 export function computeBill(input: ComputeBillInput): ComputeBillResult {
-  const { usageQty, ytdBeforeQty, feeItems } = input;
+  const { usageQty, ytdBeforeQty, householdSize, feeItems } = input;
   if (!usageQty.isFinite()) {
     throw new DomainError('INVALID_QTY', `usageQty must be finite, got ${usageQty}`);
   }
@@ -115,6 +149,30 @@ export function computeBill(input: ComputeBillInput): ComputeBillResult {
       `ytdBeforeQty must be >= 0, got ${ytdBeforeQty}`,
     );
   }
+  if (
+    householdSize != null &&
+    (!Number.isInteger(householdSize) || householdSize < 0)
+  ) {
+    throw new DomainError(
+      'INVALID_HOUSEHOLD_SIZE',
+      `householdSize must be a non-negative integer, got ${householdSize}`,
+    );
+  }
+  for (const fi of feeItems) {
+    const s = fi.householdScale;
+    if (!s) continue;
+    if (
+      !Number.isInteger(s.baseHousehold) ||
+      s.baseHousehold < 1 ||
+      !s.perPersonQty.isFinite() ||
+      s.perPersonQty.lt(0)
+    ) {
+      throw new DomainError(
+        'INVALID_HOUSEHOLD_SCALE',
+        `fee item ${fi.code}: householdScale requires integer baseHousehold >= 1 and finite perPersonQty >= 0`,
+      );
+    }
+  }
 
   const items: BillItemDraft[] = [];
 
@@ -128,7 +186,11 @@ export function computeBill(input: ComputeBillInput): ComputeBillResult {
         );
       }
       if (usageQty.isZero()) continue;
-      for (const p of tieredAmount(usageQty, ytdBeforeQty, fi.tiers).parts) {
+      const tiers =
+        fi.householdScale && householdSize != null
+          ? scaleTierBounds(fi.tiers, fi.householdScale, householdSize)
+          : fi.tiers;
+      for (const p of tieredAmount(usageQty, ytdBeforeQty, tiers).parts) {
         items.push({
           feeItemCode: fi.code,
           itemType: 'NORMAL',

@@ -37,7 +37,7 @@ export class BrowserAudit {
   allow(path: string, status: number, method = 'POST') { this.expected.push({ path, status, method }); }
   unexpected() {
     return this.events.filter(e => {
-      if (e.kind === 'CONSOLE_ERROR' && /Failed to load resource.*(?:400|401|403|409)/.test(String(e.text))) {
+      if (e.kind === 'CONSOLE_ERROR' && /Failed to load resource.*(?:400|401|403|404|409)/.test(String(e.text))) {
         return !this.events.some(h => h.kind === 'EXPECTED_HTTP_ERROR' && h.url === e.url && String(e.text).includes(String(h.status)));
       }
       return ['CONSOLE_ERROR', 'PAGE_ERROR', 'FAILED_REQUEST', 'PROXY_BYPASS', 'UNEXPECTED_HTTP_ERROR'].includes(e.kind);

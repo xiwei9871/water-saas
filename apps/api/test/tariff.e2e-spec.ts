@@ -80,9 +80,12 @@ let waterAccountId = '';
 const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
 
 // Run-scoped suffix: the test DB keeps business rows + idempotency keys
-// between runs, so codes/keys/usage-categories differ per run.
+// between runs, so codes/keys differ per run. Usage categories are the
+// controlled v0.2 set — cross-run ACTIVE-plan isolation comes from the
+// beforeAll retire sweep, not from run-scoped category names.
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-const UC = `T8R-${RUN}`; // usage_category unique to this run
+const UC = 'RES_METERED'; // controlled category for this suite
+const UC2 = 'NON_RES'; // a second controlled category (free-overlap probe)
 
 const day = (iso: string) => iso; // readability alias for YYYY-MM-DD literals
 
@@ -219,6 +222,15 @@ beforeAll(async () => {
       T8B,
       ROLE_B_ADMIN,
     ],
+  );
+
+  // Leftover ACTIVE plans from earlier runs would overlap-block this
+  // suite's activations — retire them so the controlled-category set
+  // stays usable run over run.
+  await owner.query(
+    `UPDATE tariff_plan SET status = 'RETIRED', updated_at = now()
+     WHERE tenant_id = ANY($1::uuid[]) AND status = 'ACTIVE'`,
+    [[T8A, T8B]],
   );
 
   const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -368,6 +380,19 @@ describe('tariff plan create + tier ladder validation', () => {
     }
   });
 
+  it('usageCategory is a controlled set: unknown values → 422 INVALID_USAGE_CATEGORY', async () => {
+    for (const usageCategory of ['RESIDENTIAL', 'COMMERCIAL', 'OTHER', 'res_metered']) {
+      const res = await createPlan({ ...base(), usageCategory, tiers: waterTiers() });
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({ code: 'INVALID_USAGE_CATEGORY' });
+    }
+    // The list filter validates too — a garbage category is not a no-op match.
+    await request(app.getHttpServer())
+      .get('/tariff-plans?usageCategory=RESIDENTIAL')
+      .set(auth(adminToken))
+      .expect(422);
+  });
+
   it('tier ladder rules: non-contiguous / first≠0 / closed last / bad range / ghost item → 400', async () => {
     const cases: [string, Record<string, unknown>[]][] = [
       // first tier must start at 0
@@ -483,6 +508,35 @@ describe('tariff plan create + tier ladder validation', () => {
     expect(res.body.tiers).toHaveLength(3);
   });
 
+  it('household-scale params: stored on create; invalid values → 400', async () => {
+    const res = await createPlan({
+      ...base(),
+      code: `RES-HH-${RUN}`,
+      effectiveFrom: day('2026-03-01'),
+      tiers: waterTiers(),
+      baseHousehold: 4,
+      perPersonQty: '51',
+    }).expect(201);
+    expect(res.body.baseHousehold).toBe(4);
+    expect(Number(res.body.perPersonQty)).toBe(51);
+
+    for (const [patch, code] of [
+      [{ baseHousehold: 0 }, 'TARIFF_HOUSEHOLD_SCALE_INVALID'],
+      [{ baseHousehold: 2.5 }, 'TARIFF_HOUSEHOLD_SCALE_INVALID'],
+      [{ baseHousehold: 'many' }, 'TARIFF_HOUSEHOLD_SCALE_INVALID'],
+      [{ perPersonQty: -1 }, 'INVALID_DECIMAL'],
+      [{ perPersonQty: 'abc' }, 'INVALID_DECIMAL'],
+    ] as const) {
+      const bad = await createPlan({ ...base(), code: `RES-HH2-${RUN}`, effectiveFrom: day('2026-04-01'), tiers: waterTiers(), ...patch });
+      expect(bad.status).toBe(400);
+      expect(bad.body).toMatchObject({ code });
+    }
+    // patch of the params on a DRAFT persists.
+    const upd = await patchPlan(res.body.id, { perPersonQty: '60' });
+    expect(upd.status).toBe(200);
+    expect(Number(upd.body.perPersonQty)).toBe(60);
+  });
+
   it('duplicate (tenant, code, effective_from) → 409 TARIFF_PLAN_VERSION_EXISTS', async () => {
     const res = await createPlan({ ...base(), tiers: waterTiers() });
     expect(res.status).toBe(409);
@@ -492,7 +546,7 @@ describe('tariff plan create + tier ladder validation', () => {
   it('list filters by usageCategory/status; ghost detail → 404', async () => {
     const list = (
       await request(app.getHttpServer())
-        .get(`/tariff-plans?usageCategory=${UC}&status=DRAFT`)
+        .get(`/tariff-plans?usageCategory=${UC}&status=DRAFT&take=200`)
         .set(auth(adminToken))
         .expect(200)
     ).body;
@@ -553,11 +607,16 @@ describe('DRAFT edits', () => {
   });
 
   it('code/usageCategory → 400 immutable; effectiveTo < effectiveFrom → 400', async () => {
-    for (const body of [{ code: 'X' }, { usageCategory: 'OTHER' }]) {
+    // A VALID different category reaches the immutability verdict (400);
+    // an invalid one is 422 INVALID_USAGE_CATEGORY, checked first.
+    for (const body of [{ code: 'X' }, { usageCategory: UC2 }]) {
       const res = await patchPlan(plan['main'], body);
       expect(res.status).toBe(400);
       expect(res.body).toMatchObject({ code: 'TARIFF_IMMUTABLE_FIELD' });
     }
+    const badCat = await patchPlan(plan['main'], { usageCategory: 'OTHER' });
+    expect(badCat.status).toBe(422);
+    expect(badCat.body).toMatchObject({ code: 'INVALID_USAGE_CATEGORY' });
     const bad = await patchPlan(plan['main'], { effectiveTo: day('2025-01-01') });
     expect(bad.status).toBe(400);
     expect(bad.body).toMatchObject({ code: 'TARIFF_WINDOW_INVALID' });
@@ -650,7 +709,7 @@ describe('activate + ACTIVE edit rules + overlap', () => {
     const other = await createPlan({
       code: `COM-${RUN}`,
       name: '商业水价',
-      usageCategory: `COM-${RUN}`,
+      usageCategory: UC2,
       effectiveFrom: day('2026-03-01'),
       tiers: waterTiers(),
     }).expect(201);

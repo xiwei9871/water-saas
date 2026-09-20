@@ -7,7 +7,7 @@ test.beforeAll(async () => { await roleFixtures(); });
 const roles = {
   reader: { visible: ['客户管理', '抄表管理'], hidden: ['收费管理', '系统管理', '计费管理', '报表'], denied: ['/system/staff', '/payment/counter', '/billing/tariffs', '/customer/onboard'], apis: ['/iam/staff', '/payments'], readOnly: '/customer/customers', absent: '新建客户' },
   cashier: { visible: ['客户管理', '计费管理', '收费管理'], hidden: ['抄表管理', '系统管理', '报表'], denied: ['/system/staff', '/metering/readings', '/customer/onboard'], apis: ['/iam/staff', '/meter-readings'], readOnly: '/billing/tariffs', absent: '新建资费方案' },
-  reviewer: { visible: ['抄表管理', '计费管理', '报表'], hidden: ['客户管理', '收费管理', '系统管理'], denied: ['/system/staff', '/payment/counter', '/customer/onboard'], apis: ['/iam/staff', '/payments'], readOnly: '/metering/readings', absent: '通过' },
+  reviewer: { visible: ['抄表管理', '计费管理', '报表'], hidden: ['客户管理', '收费管理', '系统管理'], denied: ['/system/staff', '/payment/counter', '/customer/onboard'], apis: ['/iam/staff', '/payments'], readOnly: '/metering/readings', absent: '更正' },
 };
 for (const [role, config] of Object.entries(roles)) {
   test(`J02 J03 J04 ${role} menus and read-only controls`, async ({ page }, info) => {

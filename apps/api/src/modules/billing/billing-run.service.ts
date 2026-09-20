@@ -81,11 +81,15 @@ interface SettlementRow {
   waterAccountId: string;
   totalUsageQty: Prisma.Decimal;
   isEstimated: boolean;
+  householdSizeSnapshot: number | null;
 }
 
 interface AccountFacts {
   usageCategory: string;
   settleAccountId: string;
+  /** MONITORING accounts settle for usage analytics but never bill —
+   *  the run skips them instead of recording a tariff failure. */
+  billable: boolean;
 }
 
 /**
@@ -206,6 +210,7 @@ export class BillingRunService {
         waterAccountId: true,
         totalUsageQty: true,
         isEstimated: true,
+        householdSizeSnapshot: true,
       },
       orderBy: [{ waterAccountId: 'asc' }, { id: 'asc' }],
     });
@@ -217,6 +222,10 @@ export class BillingRunService {
     const dueDays = await billDueDays(tx, ctx);
 
     const failures: RunFailure[] = [];
+    // billable=false (MONITORING) settlements are intentionally outside the
+    // run's denominator — skipped, never a failure and never "success"
+    // counted against the billable population.
+    let skipped = 0;
     for (const s of settlements) {
       const acc = accounts.get(s.waterAccountId);
       if (!acc) {
@@ -225,6 +234,10 @@ export class BillingRunService {
           stage: 'generate',
           code: 'WATER_ACCOUNT_NOT_FOUND',
         });
+        continue;
+      }
+      if (!acc.billable) {
+        skipped++;
         continue;
       }
       // Already billed — a NORMAL bill for this settlement exists (any
@@ -268,10 +281,10 @@ export class BillingRunService {
     const updated = await tx.billingRun.update({
       where: { id: run.id },
       data: {
-        totalCount: settlements.length,
+        totalCount: settlements.length - skipped,
         // Already-billed settlements are successes even before posting —
         // their bills exist and will stand posted by their own run.
-        successCount: settlements.length - failures.length - drafted,
+        successCount: settlements.length - skipped - failures.length - drafted,
         failedCount: failures.length,
         failedSettlementIds: failures as unknown as Prisma.InputJsonValue,
         updatedBy: ctx.staffId,
@@ -460,12 +473,16 @@ export class BillingRunService {
     if (waterAccountIds.length === 0) return new Map();
     const rows = await tx.waterAccount.findMany({
       where: { tenantId: ctx.tenantId, id: { in: [...new Set(waterAccountIds)] } },
-      select: { id: true, usageCategory: true, settleAccountId: true },
+      select: { id: true, usageCategory: true, settleAccountId: true, billable: true },
     });
     return new Map(
       rows.map((r) => [
         r.id,
-        { usageCategory: r.usageCategory, settleAccountId: r.settleAccountId },
+        {
+          usageCategory: r.usageCategory,
+          settleAccountId: r.settleAccountId,
+          billable: r.billable,
+        },
       ]),
     );
   }
@@ -496,7 +513,7 @@ export class BillingRunService {
     // config — a per-settlement failure record, not an abort of the run.
     let feeItems;
     try {
-      feeItems = await loadFeeItems(tx, ctx, plan.id);
+      feeItems = await loadFeeItems(tx, ctx, plan);
     } catch (err) {
       if (err instanceof BadRequestException) {
         throw new RecordedFailure('FEE_ITEM_NOT_FOUND', err.message);
@@ -507,6 +524,9 @@ export class BillingRunService {
     const result = computeBill({
       usageQty: s.totalUsageQty,
       ytdBeforeQty: ytd,
+      // The frozen settlement snapshot — historical repricing must not
+      // read the account's current (mutable) household profile.
+      householdSize: s.householdSizeSnapshot,
       feeItems,
     });
     const dueDate = new Date(
@@ -562,6 +582,7 @@ export class BillingRunService {
         waterAccountId: true,
         totalUsageQty: true,
         isEstimated: true,
+        householdSizeSnapshot: true,
       },
     });
     if (!s) throw new RecordedFailure('SETTLEMENT_NOT_FINAL');
@@ -569,6 +590,10 @@ export class BillingRunService {
       await this.loadAccountFacts(tx, ctx, [s.waterAccountId])
     ).get(s.waterAccountId);
     if (!acc) throw new RecordedFailure('WATER_ACCOUNT_NOT_FOUND');
+    // A MONITORING settlement can never land in failed_settlement_ids —
+    // createTx skips it before pricing — but a defensive no-op keeps the
+    // retry path consistent if data was seeded around the API.
+    if (!acc.billable) return;
     const existing = await tx.bill.findFirst({
       where: {
         tenantId: ctx.tenantId,

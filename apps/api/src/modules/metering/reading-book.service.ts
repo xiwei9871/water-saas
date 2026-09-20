@@ -3,10 +3,18 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
+import {
+  isValidPeriod,
+  BOOK_CADENCES,
+  METER_CHANNELS,
+  type BookCadence,
+  type MeterChannel,
+} from '../../common/reading-cadence.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
@@ -19,6 +27,9 @@ export const READING_BOOK_SELECT = {
   orgUnitId: true,
   readerId: true,
   scheduleDay: true,
+  cadence: true,
+  anchorPeriod: true,
+  meterChannel: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ReadingBookSelect;
@@ -36,6 +47,9 @@ export interface ReadingBookBody {
   orgUnitId?: string;
   readerId?: string | null;
   scheduleDay?: number | null;
+  cadence?: BookCadence;
+  anchorPeriod?: string | null;
+  meterChannel?: MeterChannel;
 }
 
 export interface ReadingBookPatchBody {
@@ -43,6 +57,9 @@ export interface ReadingBookPatchBody {
   orgUnitId?: string;
   readerId?: string | null;
   scheduleDay?: number | null;
+  cadence?: BookCadence;
+  anchorPeriod?: string | null;
+  meterChannel?: MeterChannel;
 }
 
 export interface BookMemberBody {
@@ -158,11 +175,42 @@ export class ReadingBookService {
     }
   }
 
+  /**
+   * Cadence/meterChannel/anchorPeriod wire validation — mirrors the DB
+   * CHECKs so bad input is a 422 here, never a 500 from the constraint.
+   * For PATCH the caller passes the MERGED cadence/anchor (patch value
+   * falling back to the stored row) so switching MONTHLY→BIMONTHLY
+   * without an anchor is refused too.
+   */
+  private validateCadence(
+    cadence: BookCadence | undefined,
+    anchorPeriod: string | null | undefined,
+    meterChannel: MeterChannel | undefined,
+  ) {
+    if (cadence !== undefined && !BOOK_CADENCES.includes(cadence)) {
+      throw new UnprocessableEntityException({ code: 'INVALID_CADENCE' });
+    }
+    if (meterChannel !== undefined && !METER_CHANNELS.includes(meterChannel)) {
+      throw new UnprocessableEntityException({ code: 'INVALID_METER_CHANNEL' });
+    }
+    if (
+      anchorPeriod !== undefined &&
+      anchorPeriod !== null &&
+      !isValidPeriod(anchorPeriod)
+    ) {
+      throw new UnprocessableEntityException({ code: 'INVALID_ANCHOR_PERIOD' });
+    }
+    if (cadence === 'BIMONTHLY' && (anchorPeriod ?? null) === null) {
+      throw new UnprocessableEntityException({ code: 'BIMONTHLY_ANCHOR_REQUIRED' });
+    }
+  }
+
   /** POST — book_no from sys_sequence ('B' prefix) unless explicitly supplied. */
   async createTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: ReadingBookBody) {
     if (!body.name || !body.orgUnitId) {
       throw new BadRequestException({ code: 'BOOK_FIELDS_REQUIRED' });
     }
+    this.validateCadence(body.cadence, body.anchorPeriod, body.meterChannel);
     await this.assertRefs(tx, ctx, body);
     const bookNo =
       body.bookNo?.trim() ||
@@ -176,6 +224,9 @@ export class ReadingBookService {
           orgUnitId: body.orgUnitId,
           readerId: body.readerId ?? null,
           scheduleDay: body.scheduleDay ?? null,
+          cadence: body.cadence ?? 'MONTHLY',
+          anchorPeriod: body.anchorPeriod ?? null,
+          meterChannel: body.meterChannel ?? 'MECHANICAL',
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
         },
@@ -193,6 +244,11 @@ export class ReadingBookService {
     req: Request,
   ) {
     const existing = await this.assertBookInScope(tx, ctx, id);
+    this.validateCadence(
+      body.cadence ?? (existing.cadence as BookCadence),
+      body.anchorPeriod === undefined ? existing.anchorPeriod : body.anchorPeriod,
+      body.meterChannel,
+    );
     await this.assertRefs(tx, ctx, body);
     req.auditBefore = existing;
     return tx.readingBook.update({
@@ -202,6 +258,9 @@ export class ReadingBookService {
         orgUnitId: body.orgUnitId,
         readerId: body.readerId === undefined ? undefined : body.readerId,
         scheduleDay: body.scheduleDay === undefined ? undefined : body.scheduleDay,
+        cadence: body.cadence,
+        anchorPeriod: body.anchorPeriod === undefined ? undefined : body.anchorPeriod,
+        meterChannel: body.meterChannel,
         updatedBy: ctx.staffId,
       },
       select: READING_BOOK_SELECT,

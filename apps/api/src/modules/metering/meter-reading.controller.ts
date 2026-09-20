@@ -14,7 +14,7 @@ import type { Request } from 'express';
 import { assertDecimal, assertOptionalDate } from '../../common/decimal.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
-import { Permissions } from '../../common/permissions.decorator.js';
+import { AnyPermissions, Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
@@ -68,6 +68,8 @@ interface ReadingWireBody {
   planItemId?: string;
   resultType?: string;
   readingValue?: unknown;
+  /** NO_READ only: operator-estimated usage in m³ (not a dial). */
+  estimateQty?: unknown;
   exceptionCode?: string;
   readDate?: unknown;
   source?: string;
@@ -78,7 +80,8 @@ interface ReadingWireBody {
 /**
  * Wire → ReadingInput (spec §2.2 shape rules):
  *  - ACTUAL/REMOTE: readingValue required (decimal ≥ 0), exceptionCode banned
- *  - NO_READ:       exceptionCode required (enum), readingValue must be absent
+ *  - NO_READ:       exceptionCode required (enum), readingValue must be absent,
+ *                   estimateQty optional (≥0 usage estimate, not a dial)
  */
 const parseReadingInput = (
   body: ReadingWireBody | undefined,
@@ -93,6 +96,7 @@ const parseReadingInput = (
   }
   let readingValue: ReadingInput['readingValue'];
   let exceptionCode: ReadingInput['exceptionCode'];
+  let estimateQty: ReadingInput['estimateQty'];
   if (resultType === 'NO_READ') {
     if (body.readingValue !== undefined && body.readingValue !== null) {
       throw new BadRequestException({ code: 'READING_VALUE_NOT_ALLOWED' });
@@ -107,6 +111,9 @@ const parseReadingInput = (
       });
     }
     exceptionCode = body.exceptionCode as ReadingInput['exceptionCode'];
+    if (body.estimateQty !== undefined && body.estimateQty !== null) {
+      estimateQty = assertDecimal(body.estimateQty, 'estimateQty', { min: 0 });
+    }
   } else {
     if (body.readingValue === undefined || body.readingValue === null) {
       throw new BadRequestException({ code: 'READING_VALUE_REQUIRED' });
@@ -114,6 +121,9 @@ const parseReadingInput = (
     readingValue = assertDecimal(body.readingValue, 'readingValue', { min: 0 });
     if (body.exceptionCode !== undefined && body.exceptionCode !== null) {
       throw new BadRequestException({ code: 'EXCEPTION_CODE_NOT_ALLOWED' });
+    }
+    if (body.estimateQty !== undefined && body.estimateQty !== null) {
+      throw new BadRequestException({ code: 'ESTIMATE_QTY_ONLY_FOR_NO_READ' });
     }
   }
   if (body.source !== undefined && !READ_SOURCES.has(body.source)) {
@@ -123,6 +133,7 @@ const parseReadingInput = (
     planItemId: assertUuid(body.planItemId, 'planItemId'),
     resultType: resultType as ReadingInput['resultType'],
     readingValue,
+    estimateQty,
     exceptionCode,
     readDate: assertOptionalDate(body.readDate, 'readDate'),
     source: (body.source as ReadingInput['source']) ?? defaultSource,
@@ -166,6 +177,7 @@ export class MeterReadingController {
     @Query('qcStatus') qcStatus?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
+    @Query('q') q?: string,
   ) {
     if (planItemId !== undefined) assertUuid(planItemId, 'planItemId');
     if (installationId !== undefined) assertUuid(installationId, 'installationId');
@@ -178,6 +190,7 @@ export class MeterReadingController {
     }
     return this.svc.list(currentTenant(), {
       ...pageArgs(take, skip),
+      q: q?.trim().slice(0, 200),
       planItemId,
       installationId,
       period,
@@ -256,11 +269,11 @@ export class MeterReadingController {
 
     if (typeof body?.csv === 'string' && body.csv.trim()) {
       for (const { row, cells } of parseReadingCsv(body.csv)) {
-        if (cells.length < 4 || cells.length > 5) {
+        if (cells.length < 4 || cells.length > 6) {
           preFailed.push({
             row,
             code: 'ROW_MALFORMED',
-            error: `expected 4-5 columns, got ${cells.length}`,
+            error: `expected 4-6 columns, got ${cells.length}`,
           });
           continue;
         }
@@ -276,6 +289,7 @@ export class MeterReadingController {
                 readingValue: cells[2] || undefined,
                 exceptionCode: cells[3] || undefined,
                 readDate: cells[4] || undefined,
+                estimateQty: cells[5] || undefined,
               },
               'IMPORT',
             ),
@@ -320,7 +334,7 @@ export class MeterReadingController {
    * records that the read happened, not that it was good.
    */
   @Post(':id/qc')
-  @Permissions('metering:write')
+  @AnyPermissions('metering:qc', 'metering:write')
   qc(
     @Param('id') id: string,
     @Body() body: { action?: string },
