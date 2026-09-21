@@ -1,6 +1,6 @@
 # E5 Remote Reading V1 — Domain Design v1.0
 
-> 状态：Domain Gate 评审稿（Domain Gate 待审）
+> 状态：Domain Gate PASS · Frozen
 > 层级：L1 Core · 版本：v0.2.x
 > 上游基线：docs/PRODUCT_MAP.md §7.2、`product-map/E5_REMOTE_READING_V1.md`（Product Gate PASS · Frozen）
 > 验证基线：main @ `f69f719`（v0.2.0-mvp）
@@ -95,7 +95,9 @@ SYSTEM Remote reading → result_type = REMOTE
 
 UI 遇到 null 显示"系统远传"。**不要**人为制造假 Staff。
 
-## 3. Domain Objects（核心 4 + 1）
+## 3. Domain Objects（核心 5 + 1）
+
+远传不是抽象"读数源"，本质是智能/远传水表**设备接入**——设备身份、安装位置、GIS 最小模型现在进入领域设计（但不建设 IoT/GIS 平台）。
 
 ### 3.1 RemoteSource
 
@@ -114,7 +116,7 @@ status          ACTIVE | DISABLED
 timezone        IANA，如 Asia/Shanghai（必填）
 config          JSONB
 credentialRef   nullable（vault:// / env:// / secret:// 引用）
-orgUnitId       nullable（见 §34 scope）
+orgUnitId       nullable（见 §31 scope）
 createdAt / createdBy
 updatedAt / updatedBy
 ```
@@ -123,9 +125,40 @@ updatedAt / updatedBy
 - **timezone 必须存在**：县级水司导出文件常见 `2026-09-21 08:30:00` 无 offset，Adapter 必须知道如何解释；数据自带 offset 时用数据自己的。
 - **credentialRef** 只存引用，禁止 password/apiSecret/accessToken 明文入库；FILE_IMPORT 无需 credentialRef。
 
-### 3.2 RemoteDeviceBinding
+### 3.2 RemoteDevice
 
-E5 最关键的数据模型之一。
+智能设备身份层——不把设备身份塞在 Binding 里。现实中的远传设备可能有厂商 deviceId、厂商表号、IMEI、ICCID、DevEUI、通信模块号、集中器+通道号、型号、厂商 metadata；且**水表不换、通信模块可能换**。
+
+```
+RemoteDevice
+────────────────────────
+id                    内部 UUID
+tenantId
+remoteSourceId
+vendorDeviceKey       厂商主身份，必填
+vendorMeterNo         可选
+communicationId       IMEI / DevEUI / 模块号，可选
+model                 可选
+status                ACTIVE | DISABLED
+metadata              JSONB（厂商扩展信息）
+createdAt / createdBy
+updatedAt / updatedBy
+```
+
+唯一：`UNIQUE(tenantId, remoteSourceId, vendorDeviceKey)`。
+
+**为什么不能把 deviceId 写死在 Meter 上**：通信模块和水表不是一个东西——水表 M001 不换、NB-IoT 模块 C001 坏了换 C002，是两次 binding 而不是换表：
+
+```
+C001  2025-01 → 2026-06  → Installation A
+C002  2026-06 → 当前      → Installation A
+```
+
+架构**不依赖** `vendorDeviceKey = meterNo`——两者可能恰好相同，但不能假设。
+
+### 3.3 RemoteDeviceBinding
+
+E5 最关键的数据模型之一——"这台设备在什么时候对应哪个安装事实"。
 
 ```
 RemoteDeviceBinding
@@ -133,17 +166,23 @@ RemoteDeviceBinding
 id
 tenantId
 remoteSourceId
-vendorDeviceKey
+remoteDeviceId        → RemoteDevice
 installationId
 effectiveFrom
-effectiveTo     nullable
+effectiveTo           nullable
 createdAt / createdBy
 updatedAt / updatedBy
 ```
 
-**`remoteSourceId` 必须进入 binding identity**——两个厂商完全可能都有 `deviceKey = 1000001`。正确 identity 是 `source + vendorDeviceKey`。
+**`remoteSourceId` 必须进入 binding identity**——两个厂商完全可能都有 `deviceKey = 1000001`。正确身份链：
 
-### 3.3 RawRemoteEvent
+```
+厂商平台 → RemoteDevice（厂商认得的智能设备）
+        → RemoteDeviceBinding（设备何时对应哪个安装事实）
+        → MeterInstallation（哪块物理水表装在哪个户）
+```
+
+### 3.4 RawRemoteEvent
 
 ```
 RawRemoteEvent
@@ -153,33 +192,56 @@ tenantId
 remoteSourceId
 externalEventKey
 canonicalPayloadHash
-vendorDeviceKey
-businessPeriod          YYYYMM（见 §9）
-collectedAt
+vendorDeviceKey          原始厂商 device key（留痕）
+businessPeriod           YYYYMM（见 §7）
+collectedAt              timestamptz（见 §4）
 readingValue
-vendorQuality           nullable
-rawPayload              JSONB
-canonicalPayload        JSONB
+vendorQuality            nullable
+rawPayload               JSONB
+canonicalPayload         JSONB
 processingStatus
-resolvedBindingId       nullable
-currentIssueCode        nullable
-currentIssueAt          nullable
+resolvedRemoteDeviceId   nullable（解析成功后记录）
+resolvedBindingId        nullable
+currentIssueCode         nullable
+currentIssueAt           nullable
 receivedAt
 createdAt / createdBy
 updatedAt / updatedBy
 ```
 
-### 3.4 MeterReading 扩展
+Raw Event 保留原始 `vendorDeviceKey`；解析成功同时记录 `resolvedRemoteDeviceId` 与 `resolvedBindingId`——原始输入与解析结果分栏留痕。
+
+### 3.5 MeterInstallation 位置/GIS 最小模型（扩展现有表）
+
+"表在哪里"描述的是安装点——位置归属 `MeterInstallation`，不属于 RemoteDevice 也不属于 Meter：
+
+```
+MeterInstallation（现有模型增加）
++ latitude          Decimal(9,6)  nullable
++ longitude         Decimal(10,6) nullable
++ coordinateSystem  nullable      WGS84 | GCJ02 | BD09
++ locationSource    nullable      MANUAL | GPS | IMPORT
++ locationRemark    nullable      例：院门右侧水表井第二块
+```
+
+- **V1 不引入 PostGIS**。
+- **coordinateSystem 必须有**（中国场景）：`30.572310, 104.066520` 不带坐标系，未来上图可能偏几百米。
+- **位置分三级**：A. 业务地址 = 现有 `WaterAccount.addr`（营业地址）；B. 精确安装位置 = 本组经纬度字段（工作人员找表）；C. `locationRemark` 位置描述（"院门右侧水表井第二块"——郊县实际使用中有时比坐标更有价值）。现场照片 `photoRef` 后续可挂到安装点。
+- **GIS 是安装点属性，不是表资产永久属性**：同一表井十年换三块表，坐标不变、installation 在变。
+- WaterAccount 360° 将来可展示"地址 + 坐标 + 坐标系 + 位置描述 + 查看位置"。
+- **明确不做**：地图工作台、管线、阀门、DMA、空间查询、GIS 图层编辑——不突破 Product Map 的 GIS 边界。普通水表页"📍查看位置"调地图显 pin 属于正常产品功能，不算重 GIS。
+
+### 3.6 MeterReading 扩展
 
 ```
 MeterReading
 + sourceEventId   UUID nullable
   FK (tenantId, sourceEventId) → RawRemoteEvent(tenantId, id)
   UNIQUE(tenantId, sourceEventId)     — 一个 RawEvent 最多一个 Reading
-+ operatorId → nullable（见 §23 DB CHECK）
++ operatorId → nullable（见 §21 DB CHECK）
 ```
 
-### 3.5 RemoteEventProcessLog（+1 辅助对象）
+### 3.7 RemoteEventProcessLog（+1 辅助对象）
 
 Product Gate 已冻结"每次处理/重放变化可审计"：UNBOUND→replay、FAILED→replay、CONFLICT→IGNORED/CONVERTED。只存 `RawRemoteEvent.status` 无法回答：谁重放的、失败过几次、何时绑定成功、谁决定保留人工值。所以必须有 append-only 处理日志：
 
@@ -202,7 +264,7 @@ createdAt
 
 hardening 与现有 `audit_log` 同模式：`REVOKE UPDATE / DELETE / TRUNCATE`。
 
-## 4. Binding 时间语义
+## 4. Binding 时间语义与绝对时间冻结
 
 统一**半开区间 `[effectiveFrom, effectiveTo)`**：
 
@@ -213,6 +275,14 @@ hardening 与现有 `audit_log` 同模式：`REVOKE UPDATE / DELETE / TRUNCATE`�
 事件 collectedAt = 2026-05-10 → 永远归旧表，即使今天已是新表。
 ```
 
+**时间存储冻结**：新 Remote 表的 `collectedAt / effectiveFrom / effectiveTo / receivedAt` 统一为 **`timestamptz`（UTC 绝对时间）**。外部数据按 `RemoteSource.timezone` 解析为绝对时间入库：
+
+```
+2026-09-21 08:00:00 + Asia/Shanghai → 2026-09-21T00:00:00Z
+```
+
+数据库内部一切比较都是 absolute time；**展示时**才 UTC → source timezone → 当地时间。否则 Vendor API 自带 offset、CSV 不带 offset、服务器时区混杂必然踩坑。
+
 ## 5. DB 防 binding overlap（不能只靠 service）
 
 推荐 PostgreSQL exclusion constraint（migration 用 `btree_gist` extension），`effectiveTo = NULL` 视为 infinity：
@@ -221,12 +291,12 @@ hardening 与现有 `audit_log` 同模式：`REVOKE UPDATE / DELETE / TRUNCATE`�
 EXCLUDE USING gist (
   tenant_id WITH =,
   remote_source_id WITH =,
-  vendor_device_key WITH =,
-  tsrange(effective_from, effective_to, '[)') WITH &&
+  remote_device_id WITH =,
+  tstzrange(effective_from, effective_to, '[)') WITH &&
 )
 ```
 
-第二条同样冻结：**同一 Source 下，同一 Installation 同一时刻只能对应一个 canonical device key**：
+第二条同样冻结：**同一 Source 下，同一 Installation 同一时刻只能对应一个 canonical device**：
 
 ```
 tenant + source + installation + time range 不得 overlap
@@ -373,29 +443,31 @@ MeterReading
 
 **Adapter 不调用 `MeterReadingService`**；由 `RemoteEventProcessor` 调 kernel-owned `RemoteReadingWriter`。File / API Pull / Webhook 走完全相同的业务路径。
 
-## 14. Binding Resolution
+## 14. Binding Resolution（两步：先设备、后绑定）
 
 ```
-sourceId + vendorDeviceKey + collectedAt
-        ↓
-RemoteDeviceBinding
-WHERE sourceId = ?
-  AND vendorDeviceKey = ?
-  AND effectiveFrom <= collectedAt
-  AND (effectiveTo IS NULL OR collectedAt < effectiveTo)
+Step 1  deviceKey → RemoteDevice
+        WHERE tenantId=? AND remoteSourceId=? AND vendorDeviceKey=?
+        0 → UNBOUND（device 未注册）；1 → 继续
+
+Step 2  remoteDeviceId + collectedAt → RemoteDeviceBinding
+        WHERE remoteDeviceId = ?
+          AND effectiveFrom <= collectedAt
+          AND (effectiveTo IS NULL OR collectedAt < effectiveTo)
 ```
 
-DB 已防 overlap → 结果只能 0 或 1。0 → `UNBOUND`；1 → 进入 Plan Resolution。
+DB 已防 overlap → 结果只能 0 或 1。0 → `UNBOUND`；1 → 记录 `resolvedRemoteDeviceId / resolvedBindingId`，进入 Plan Resolution。
 
-## 15. Plan Resolution
+## 15. Plan Resolution（两阶段，plannedInstallationId 优先）
 
-Binding → installation → waterAccount，再以 `waterAccountId + businessPeriod` 找 ReadingPlanItem：
+Binding → installation → waterAccount。候选 = `waterAccountId + businessPeriod` 的 ReadingPlanItem，然后**优先用 `plannedInstallationId` 精确匹配**：
 
 | 结果 | 行为 |
 |---|---|
-| 0 个 | `WAITING_PLAN`，不创建 MeterReading |
-| 1 个 | 继续 |
-| >1 个 | 数据配置异常：`FAILED` `code=PLAN_ITEM_AMBIGUOUS`，**不猜** |
+| `plannedInstallationId = binding.installationId` 命中 1 个 | 使用该 item |
+| exact=0，但 account+period 只有 1 个候选 item | fallback 使用该 item（兼容"plan 生成后月中换表、plannedInstallationId 还是旧表"——现有业务本就允许按当前安装关系抄新表） |
+| 0 个候选 | `WAITING_PLAN`，不创建 MeterReading |
+| 候选 >1 且不能唯一确定 | `FAILED` `code=PLAN_ITEM_AMBIGUOUS`，**不猜** |
 
 ## 16. Remote V1 不允许 plan-less reading（invariant）
 
@@ -618,37 +690,33 @@ Vendor API Pull / Webhook / FileImport 都只实现 Adapter——避免五年后
 ## 33. 最终 schema 关系
 
 ```
-RemoteSource
+RemoteSource                    "哪个厂商平台"
     │
     ├───────────────┐
     ▼               ▼
-RawRemoteEvent   RemoteDeviceBinding
+RemoteDevice    RawRemoteEvent  "厂商认得的设备" / 原始事件
     │               │
-    │               ▼
-    │          MeterInstallation
-    │               │
-    │               ▼
-    │           WaterAccount
-    │
-    ├──── RemoteEventProcessLog
-    │
-    ▼
-MeterReading
-sourceEventId
-    │
-    ▼
-ReadingPlanItem
-    │
-    ▼
-    QC
-    │
-    ▼
-Settlement
-    │
-    └── Reconciliation
+    ▼               ├── resolvedRemoteDeviceId
+RemoteDeviceBinding ├── resolvedBindingId
+"设备何时服务      └── RemoteEventProcessLog
+  哪个安装点"              │
+    │                     ▼
+    ▼               MeterReading（sourceEventId）
+MeterInstallation           │
+"哪块水表何时装在哪"          ▼
+    │                  ReadingPlanItem
+    ├──── Meter              │
+    │     "物理水表"          ▼
+    │                        QC
+    ├──── WaterAccount        │
+    │     "业务水表户"         ▼
+    │                     Settlement
+    └──── Location              │
+    （地址/坐标/位置描述）        ▼
+                        Reconciliation
 ```
 
-与现有架构自然延伸，不另造"远传结算系统"。
+身份链：厂商 ID → 智能设备 → 安装绑定 → 物理水表 → 水表户 → 地理位置 → 读数 → 账务。这是未来 WaterAccount 360° / 智能表管理的基础资产链，与现有架构自然延伸，不另造"远传结算系统"。
 
 ## 34. Domain Gate 必测不变量
 
@@ -700,23 +768,27 @@ Settlement
 |---|---|
 | T1 | Enums + schema + migration + RLS + DB invariants |
 | T2 | RemoteSource CRUD |
-| T3 | RemoteDeviceBinding + effective period + exclusion constraint |
+| T3 | RemoteDevice CRUD + RemoteDeviceBinding + effective period + exclusion constraint |
 | T4 | RawRemoteEvent ingest + externalEventKey + payload conflict |
 | T5 | RemoteEventProcessLog + replay state machine |
 | T6 | BindingResolver + PlanResolver |
 | T7 | RemoteReadingWriter + sourceEventId + SYSTEM actor |
 | T8 | FileImportAdapter CSV/XLSX |
-| T9 | UI: Source / Binding / Events / Replay |
+| T9 | UI: Source / Device / Binding / Events / Replay |
 | T10 | CONFLICT resolution UI |
 | T11 | Late remote → QC → Reconciliation |
 | T12 | Playwright Pilot UAT |
 
 ## Domain Gate 结论（待评审确认）
 
-E5 设计收敛为 7 个构件：`RemoteSource` / `RawRemoteEvent` / `RemoteEventProcessLog` / `RemoteDeviceBinding` / `RemoteAdapter` / `RemoteEventProcessor` / `RemoteReadingWriter`。
+E5 设计收敛为 8 个构件：`RemoteSource` / `RemoteDevice` / `RemoteDeviceBinding` / `RawRemoteEvent` / `RemoteEventProcessLog` / `RemoteAdapter` / `RemoteEventProcessor` / `RemoteReadingWriter`，外加 `MeterInstallation` 位置扩展。
 
-相对 Product Spec 的三个关键 Domain 层决定：
+相对 Product Spec 的关键 Domain 层决定：
 
-1. **`WAITING_PLAN`**：不允许 Remote 经 `planItemId = null` 绕过营业计划与 org scope；
-2. **`sourceEventId` + nullable `operatorId`**：真正区分"系统远传事实"和"人工录入"；
-3. **`RemoteEventProcessLog`**：否则 UNBOUND/replay/CONFLICT/key-conflict 的冻结审计要求实现不了。
+1. **`RemoteDevice` 独立设备身份层**：厂商 deviceKey/IMEI/DevEUI/模块号与业务水表解耦，通信模块独立更换不重造资产；
+2. **`WAITING_PLAN`**：不允许 Remote 经 `planItemId = null` 绕过营业计划与 org scope；
+3. **`sourceEventId` + nullable `operatorId`**：真正区分"系统远传事实"和"人工录入"；
+4. **`RemoteEventProcessLog`**：否则 UNBOUND/replay/CONFLICT/key-conflict 的冻结审计要求实现不了；
+5. **`MeterInstallation` 最小位置模型**：坐标+坐标系+来源+位置描述进数据层，但不做 GIS 平台；
+6. **PlanResolver 用 `plannedInstallationId` 优先匹配**，单候选 fallback，多候选才 AMBIGUOUS；
+7. **时间统一 `timestamptz` 绝对时间**，展示时经 source timezone 本地化。

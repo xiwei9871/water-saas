@@ -237,8 +237,9 @@ MeterReading(resultType=REMOTE)
 - 所有远传数据必须先形成 Raw Event，再进入 MeterReading；
 - Raw Event 的 identity 与 raw payload 不可变；处理状态可演进，但每次变化/重放必须留审计；
 - 幂等模型：Adapter 输出 `externalEventKey`，唯一约束 `(tenantId, remoteSourceId, externalEventKey)`；厂商有稳定事件 ID 直接用，没有则对规范化字段做 deterministic fingerprint。同 key 同 canonical payload = 幂等重放；同 key **不同** payload = `EVENT_KEY_CONFLICT`，不覆盖原事件、不生成读数，进异常处理；
+- 设备身份分层：`RemoteSource → RemoteDevice（厂商设备身份）→ RemoteDeviceBinding → MeterInstallation`；`MeterInstallation` 增加最小位置模型（经纬度+坐标系 WGS84/GCJ02/BD09+来源+位置描述），不做 IoT/GIS 平台；
 - 设备绑定 effective-dated（`effectiveFrom/effectiveTo`）：事件按 `collectedAt` 归属当时有效的安装段，厂商补传历史数据不落新表；
-- 设备未绑定水表时进入"待绑定/异常"，不能猜；
+- 设备未绑定水表时进入"待绑定/异常"，不能猜；数据先于本期计划到达 → `WAITING_PLAN`，远传读数必须绑定计划项；
 - 晚到 REMOTE 撞上已 QC PASSED 的人工实抄 → 进入 CONFLICT，复核员裁决后才产生更正读数，账务不自动变化；
 - 晚到 REMOTE 撞上已 FINAL 的估水结算 → QC PASSED 后成为 trusted reading，复用既有 Reconciliation/Adjustment 补差，FINAL Settlement / POSTED Bill 不原地修改；
 - 异常读数仍走 QC；

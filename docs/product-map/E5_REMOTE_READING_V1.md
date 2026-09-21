@@ -35,6 +35,7 @@
 7. **远传断采回退**：本期某户无远传数据 → 计划项保持 PENDING，人工照常补抄/NO_READ 估水，远传链路故障不阻塞营业。
 8. **重复数据**：同一文件重复上传、同一 Webhook 重发 → 幂等命中，不产生第二行事件、不产生第二条读数。
 9. **晚到数据 vs 已确认人工实抄**：厂商补传历史数据到达时该位置已有 QC PASSED 的人工读数 → 事件落库并进入 CONFLICT，由复核员裁决，账务不自动变化。
+10. **数据先于计划到达**：厂商文件已导入但本期抄表计划还没生成 → 事件进入"等待计划"（WAITING_PLAN），计划生成后重放转换，不算失败。
 
 ## Business Rules
 
@@ -44,8 +45,9 @@
 2. 所有远传数据必须先落 Raw Event，再由转换层生成 `MeterReading(resultType='REMOTE')`；不允许跳过 Raw Event。
 3. Raw Event 的 **identity 与 raw payload 永不可修改**；处理状态（processing state）允许演进，但每次状态变化/重放必须留审计。原始事实不可变，处理结果可演进——schema 形式（current-status 列 / 处理日志表）由 Domain 设计阶段决定，产品层不锁表结构。
 4. 幂等模型：Adapter 输出 `externalEventKey`，唯一约束 `(tenantId, remoteSourceId, externalEventKey)`。厂商有稳定事件 ID/流水号时直接使用；没有时 Adapter 对规范化后的 `deviceKey + collectedAt + readingValue + 必要业务字段` 做 deterministic fingerprint。**冲突语义**：同 key + canonical payload 相同 = `IDEMPOTENT_REPLAY`，返回原事件；同 key + canonical payload **不同** = `EVENT_KEY_CONFLICT`——不覆盖原 Raw Event、不生成读数，进入人工/Adapter 异常处理（厂商拿同一 eventId 重发修订数据时不得静默吞掉）。
-5. 设备绑定 **effective-dated**：`RemoteDeviceBinding { vendorDeviceKey, installationId, effectiveFrom, effectiveTo }`。事件按 `collectedAt` 解析当时有效的绑定段——厂商补传的历史数据落在事件发生时的安装上，不按当前绑定归属。
-6. 设备未绑定（collectedAt 不在任何绑定段内）→ 事件状态 `UNBOUND`，进入待绑定队列；补绑定后允许重放生成读数，重放是同一事件的再处理，不产生重复。
+5. 设备身份与绑定分层：厂商设备身份登记为 `RemoteDevice`（vendorDeviceKey/通信标识等）；`RemoteDeviceBinding { remoteDevice, installationId, effectiveFrom, effectiveTo }` **effective-dated**。事件按 `collectedAt` 解析当时有效的绑定段——厂商补传的历史数据落在事件发生时的安装上，不按当前绑定归属。
+6. 设备未绑定（collectedAt 不在任何绑定段内，或设备未登记）→ 事件状态 `UNBOUND`，进入待绑定队列；补绑定后允许重放生成读数，重放是同一事件的再处理，不产生重复。
+6b. 事件到达但该户本期抄表计划项不存在 → `WAITING_PLAN`；计划生成后显式重放转换。远传读数必须绑定计划项，不允许绕过营业计划产生游离读数。
 7. 一个 Raw Event 至多生成一条 MeterReading（`eventId` 唯一关联）；该读数仍可能被 supersede 更正，但 supersede 链写 MeterReading，不回写 Raw Event。
 8. REMOTE 读数与 ACTUAL 同权进入 QC；QC 拒绝 → 该读数不进结算，等人工处理。
 9. **CONFLICT**：同一业务位置已有 `ACTUAL` 且 `QC=PASSED` 时，晚到 REMOTE 仅落 Raw Event 并进入 `CONFLICT`——不自动覆盖、不自动 supersede、不改变 plan item/effective reading/settlement。复核员明确"采用远传值"→ 创建更正读数/supersede；"保留人工值"→ conflict 关闭留痕。
@@ -58,23 +60,26 @@
 
 | 对象 | 状态机 | 说明 |
 |---|---|---|
-| RemoteSource | ACTIVE / DISABLED | 接入配置：type=FILE/API_PULL/WEBHOOK，厂商标识、凭据引用（不落明文）、拉取参数 |
-| RemoteDeviceBinding | effective-dated 段（effectiveFrom/effectiveTo） | vendorDeviceKey → installation 绑定；换表产生新绑定段，旧段封闭保留；同一设备同一时刻至多一段生效 |
-| RawRemoteEvent | RECEIVED → UNBOUND / CONVERTED / FAILED / CONFLICT / IGNORED | payload 原文 + 解析字段 + externalEventKey + 来源；payload immutable，状态演进有审计 |
+| RemoteSource | ACTIVE / DISABLED | 接入配置：type=FILE/API_PULL/WEBHOOK，厂商标识、凭据引用（不落明文）、拉取参数、时区 |
+| RemoteDevice | ACTIVE / DISABLED | 厂商认得的智能设备身份：vendorDeviceKey（必填）+ 厂商表号/IMEI/DevEUI/模块号/型号/metadata（可选）；与业务水表解耦，通信模块独立更换 |
+| RemoteDeviceBinding | effective-dated 段（effectiveFrom/effectiveTo） | remoteDevice → installation 绑定；换表/换模块产生新绑定段，旧段封闭保留；同一设备同一时刻至多一段生效 |
+| MeterInstallation（既有） | 沿用 | 增加最小位置模型：经纬度 + 坐标系 + 来源 + 位置描述（见 Domain Design §3.5） |
+| RawRemoteEvent | RECEIVED → UNBOUND / WAITING_PLAN / CONVERTED / FAILED / CONFLICT / IGNORED | payload 原文 + 解析字段 + externalEventKey + 来源；payload immutable，状态演进有审计 |
 | MeterReading（既有） | 沿用 | `resultType='REMOTE'`，`source` 记录来源 Adapter，`sourceEventId` 回链 Raw Event |
 
 状态流转要点：
 
 - `RECEIVED → CONVERTED`：正常路径（当时绑定段命中，无冲突）；
-- `RECEIVED → UNBOUND`：`collectedAt` 无有效绑定段；`UNBOUND → CONVERTED`：补绑定后重放成功；
+- `RECEIVED → UNBOUND`：`collectedAt` 无有效绑定段或设备未登记；`UNBOUND → CONVERTED`：补绑定后重放成功；
+- `RECEIVED/UNBOUND → WAITING_PLAN`：绑定命中但该户本期计划项未生成；`WAITING_PLAN → CONVERTED`：计划生成后重放转换；
 - `RECEIVED/UNBOUND → CONFLICT`：转换时发现该位置已有 QC PASSED 的 ACTUAL；`CONFLICT → CONVERTED`：复核员裁决采用远传（生成更正读数）；`CONFLICT → IGNORED`：复核员保留人工值，事件关闭留痕；
 - `IGNORED` 仅从 CONFLICT 裁决进入——同 key 重复到达是 IDEMPOTENT_REPLAY，不产生新事件行，不走状态机；
 - `→ FAILED`：解析失败/数据非法（保留原因，允许修复后重放——重放仍走幂等键，不产生重复）；
-- UNBOUND/FAILED/CONFLICT 事件可重放或人工裁决，重放是同一事件的再处理，不是新事件。
+- UNBOUND/WAITING_PLAN/FAILED 事件可重放，CONFLICT 走人工裁决；重放是同一事件的再处理，不是新事件。
 
 ## UI Entry
 
-- **抄表 → 远传接入**：Source 列表（类型/厂商/状态/最近采集时间/成功率）、绑定管理（含有效期段）、事件流水（按状态过滤：全部/待绑定/失败/冲突/已转换）。
+- **抄表 → 远传接入**：Source 列表（类型/厂商/状态/最近采集时间/成功率）、设备档案（RemoteDevice）、绑定管理（含有效期段）、事件流水（按状态过滤：全部/待绑定/等待计划/失败/冲突/已转换）。
 - **CONFLICT 裁决入口**：事件流水或 QC 视图内，复核员对冲突事件选择"采用远传值"（生成更正读数进 QC 链）或"保留人工值"（关闭冲突）。
 - **抄表计划详情**：远传户在明细行上显示来源标识（REMOTE + 采集时间），与人工实抄区分。
 - **QC 队列**：REMOTE 读数与 ACTUAL 同列，`sourceEventId` 可点开看原始事件。
