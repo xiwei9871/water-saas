@@ -4,6 +4,7 @@
 > 层级：L1 Core · 版本：v0.2.x（近期优先）
 > 冻结日期：2026-09-21
 > 上游基线：docs/PRODUCT_MAP.md §7.2、§11.2
+> Domain 设计：E5_REMOTE_READING_DOMAIN_DESIGN.md
 
 ## User
 
