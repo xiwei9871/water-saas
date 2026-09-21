@@ -236,10 +236,11 @@ MeterReading(resultType=REMOTE)
 - Adapter 绝不能直接写 Settlement/Bill；
 - 所有远传数据必须先形成 Raw Event，再进入 MeterReading；
 - Raw Event 的 identity 与 raw payload 不可变；处理状态可演进，但每次变化/重放必须留审计；
-- 幂等模型：Adapter 输出 `externalEventKey`，唯一约束 `(tenantId, remoteSourceId, externalEventKey)`；厂商有稳定事件 ID 直接用，没有则对规范化字段做 deterministic fingerprint；
+- 幂等模型：Adapter 输出 `externalEventKey`，唯一约束 `(tenantId, remoteSourceId, externalEventKey)`；厂商有稳定事件 ID 直接用，没有则对规范化字段做 deterministic fingerprint。同 key 同 canonical payload = 幂等重放；同 key **不同** payload = `EVENT_KEY_CONFLICT`，不覆盖原事件、不生成读数，进异常处理；
 - 设备绑定 effective-dated（`effectiveFrom/effectiveTo`）：事件按 `collectedAt` 归属当时有效的安装段，厂商补传历史数据不落新表；
 - 设备未绑定水表时进入"待绑定/异常"，不能猜；
 - 晚到 REMOTE 撞上已 QC PASSED 的人工实抄 → 进入 CONFLICT，复核员裁决后才产生更正读数，账务不自动变化；
+- 晚到 REMOTE 撞上已 FINAL 的估水结算 → QC PASSED 后成为 trusted reading，复用既有 Reconciliation/Adjustment 补差，FINAL Settlement / POSTED Bill 不原地修改；
 - 异常读数仍走 QC；
 - 远传失败后允许人工补抄；
 - V1 不做协议栈、集中器、固件升级、远程阀控、设备运维平台。
@@ -258,11 +259,15 @@ Bill POSTED → 自动检查预存余额 → 按冻结排序 Allocation → 全�
 
 示例：欠费 80，客户交 200 → 清欠 80（Allocation），余款 120 记 TOP_UP；新账单 POSTED 130 → 自动抵扣 120，账单剩 10，余额 0，状态 PARTIAL_PAID。**复用现有 Allocation，不另造第二套销账逻辑。**
 
-**抵扣排序冻结**：`period ASC → postedAt ASC → id ASC`；未来引入 dueDate 后升级为 `dueDate ASC → postedAt ASC → id ASC`。
+**一次柜台资金事件冻结**：客户交 200 是一次 cash inflow / 一次 cashier transaction / 一张收据；Allocation 80 与 TOP_UP 120 是**资金用途拆分**，DayClose 不得计成两笔现金收入；收据解释为"本次收款 200：欠费销账 80，转预存 120"。
+
+**抵扣排序冻结**：`dueDate ASC → period ASC → issuedAt ASC → id ASC`（dueDate 为空时回退 period）——与现有 Bill 模型对齐。
 
 **现金口径冻结**：TOP_UP=现金实收；APPLY=内部销账（非现金，不二次计入实收）；REFUND=现金流出；REVERSAL 按被冲事实反向。DayClose/报表必须分列现金收款、预存充值、退款/冲正、预存抵扣（非现金信息项）。
 
 **红冲联动冻结**：账单 reversal/replacement 时，其上预存 APPLY 追加反向 ledger 恢复余额，原 APPLY 不修改；混合支付按现金/预存各自来源分别逆转。
+
+**已消耗 TOP_UP 保护冻结**：未被 APPLY 消耗的 TOP_UP 可按权限 REVERSAL；已部分/全部被消耗的 TOP_UP 拒绝直接全额冲正（`PREPAYMENT_ALREADY_APPLIED`），须先回退相关 Bill/APPLY 或对当前可用余额 REFUND——余额永不为负，V1 不自动反向展开跨账单 APPLY 链。
 
 **资金归属冻结**：WaterAccount 改挂结算户时预存余额不自动迁移；有余额时 UI 必须警告；跨结算户转移（TRANSFER_OUT/IN）不属于 V1。
 
@@ -363,9 +368,9 @@ v0.3 不以新增复杂业务规则为主，而是在 v0.2.x 完成郊县关键�
 
 ### 11.2 Remote Reading 与 Prepayment 的冻结逻辑
 
-**Remote Reading V1**：只解决"远传数据可信进入现有抄表主链"：外部平台 → Adapter → 原始采集事件 → Meter 绑定 → REMOTE Reading → QC → Settlement。原始事件 identity/payload 不可变、按 externalEventKey 幂等、绑定按 collectedAt 取有效时段；晚到数据与已确认人工实抄冲突时进入 CONFLICT 人工裁决；不把厂商协议栈、固件、指令下发和完整设备运维平台提前到 V1。
+**Remote Reading V1**：只解决"远传数据可信进入现有抄表主链"：外部平台 → Adapter → 原始采集事件 → Meter 绑定 → REMOTE Reading → QC → Settlement。原始事件 identity/payload 不可变、按 externalEventKey 幂等（同 key 异 payload 报 EVENT_KEY_CONFLICT）、绑定按 collectedAt 取有效时段；晚到数据与已确认人工实抄冲突时进入 CONFLICT 人工裁决，对已终审估水则走既有 Reconciliation 补差；不把厂商协议栈、固件、指令下发和完整设备运维平台提前到 V1。
 
-**Prepayment V1**：以 SettleAccount 为账户，使用 append-only ledger（TOP_UP / APPLY / REFUND / REVERSAL）；余额是流水汇总结果而不是可随意改写字段。客户资金先清现有欠费、余款才形成余额；账单 POSTED 后通过 Allocation 自动抵扣（period → postedAt → id）；账单红冲时追加反向流水恢复余额；现金实收与预存抵扣在日结/报表中严格分列；结算户余额不随水表户改挂迁移。不提前做银行代扣、第三方支付或复杂资金池。
+**Prepayment V1**：以 SettleAccount 为账户，使用 append-only ledger（TOP_UP / APPLY / REFUND / REVERSAL）；余额是流水汇总结果而不是可随意改写字段。客户资金先清现有欠费、余款才形成余额（一次柜台收款=一次现金流入=一张收据，清欠+转预存是用途拆分）；账单 POSTED 后通过 Allocation 自动抵扣（dueDate → period → issuedAt → id）；账单红冲时追加反向流水恢复余额，已消耗 TOP_UP 禁止全额冲正；现金实收与预存抵扣在日结/报表中严格分列；结算户余额不随水表户改挂迁移。不提前做银行代扣、第三方支付或复杂资金池。
 
 ## 12. 版本治理与验收门禁
 
