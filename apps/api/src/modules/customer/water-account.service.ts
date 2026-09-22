@@ -119,6 +119,7 @@ export interface OnboardBody {
 
 /** Stable system-customer key for monitoring accounts (漏损分析计量点). */
 const MONITORING_SYSTEM_KEY = 'MONITORING_INTERNAL';
+const MONITORING_SETTLE_NO = 'SYS-MONITORING';
 
 /** 'YYYYMM' → period of a Date (UTC, matching settlement period semantics). */
 const periodOf = (d: Date) =>
@@ -331,20 +332,24 @@ export class WaterAccountService {
       where: { tenantId: ctx.tenantId, id: body.customerId },
     });
     if (!customer) throw new BadRequestException({ code: 'CUSTOMER_NOT_FOUND' });
-    // E8 P1: binding to an EXISTING customer is a target-reference — the
-    // caller must be able to read that customer (D2 rule). The tenant's
-    // monitoring system principal (MONITORING_INTERNAL) is an internal
-    // object created lazily by monitoring onboard, exempt so scoped staff
-    // can still onboard MONITORING meters — it is never operator data.
-    if (customer.systemKey !== MONITORING_SYSTEM_KEY) {
-      await assertCustomerReadScopeTx(tx, ctx, body.customerId);
-    }
     const settle = await tx.settleAccount.findFirst({
       where: { tenantId: ctx.tenantId, id: body.settleAccountId },
     });
     if (!settle) throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
-    // The account binds a financial anchor — same strict scope as E6.
-    await assertSettleScopeTx(tx, ctx, body.settleAccountId);
+    this.assertSystemPrincipalPair(
+      body.usageCategory === 'MONITORING',
+      customer.systemKey === MONITORING_SYSTEM_KEY,
+      settle.settleNo === MONITORING_SETTLE_NO,
+    );
+    if (body.usageCategory !== 'MONITORING') {
+      // E8 P1: binding an EXISTING customer/settle is a target-reference —
+      // the caller must be able to read that customer (D2 rule) and the
+      // settle must satisfy the strict E6 scope. The system pair skips
+      // this intentionally: it is internal plumbing for MONITORING
+      // accounts, never operator data, and must not depend on org scope.
+      await assertCustomerReadScopeTx(tx, ctx, body.customerId);
+      await assertSettleScopeTx(tx, ctx, body.settleAccountId);
+    }
     const accountNo =
       body.accountNo?.trim() ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'account_no', 'A', ctx.staffId));
@@ -367,6 +372,27 @@ export class WaterAccountService {
         select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
       }),
     );
+  }
+
+  /**
+   * E8 RC2: the monitoring system principal is a CLOSED pair —
+   * customer.systemKey=MONITORING_INTERNAL + settle.settleNo=SYS-MONITORING
+   * may only appear TOGETHER and only on MONITORING accounts. A normal
+   * account bound to either half (or a MONITORING account without the
+   * complete pair) is an invalid business binding → 400, not 403: this is
+   * not an org-scope judgement.
+   */
+  private assertSystemPrincipalPair(
+    isMonitoringAccount: boolean,
+    isSystemCustomer: boolean,
+    isSystemSettle: boolean,
+  ) {
+    const invalid = isMonitoringAccount
+      ? !(isSystemCustomer && isSystemSettle)
+      : isSystemCustomer || isSystemSettle;
+    if (invalid) {
+      throw new BadRequestException({ code: 'SYSTEM_PRINCIPAL_NOT_ALLOWED' });
+    }
   }
 
   /**
@@ -404,13 +430,13 @@ export class WaterAccountService {
       }
     }
     let settle = await tx.settleAccount.findFirst({
-      where: { tenantId: ctx.tenantId, settleNo: 'SYS-MONITORING' },
+      where: { tenantId: ctx.tenantId, settleNo: MONITORING_SETTLE_NO },
       select: SETTLE_ACCOUNT_SELECT,
     });
     if (!settle) {
       try {
         settle = await this.settles.createTx(tx, ctx, {
-          settleNo: 'SYS-MONITORING',
+          settleNo: MONITORING_SETTLE_NO,
           name: '本公司·监控表',
         });
       } catch (e) {
@@ -420,7 +446,7 @@ export class WaterAccountService {
           throw e;
         }
         settle = await tx.settleAccount.findFirstOrThrow({
-          where: { tenantId: ctx.tenantId, settleNo: 'SYS-MONITORING' },
+          where: { tenantId: ctx.tenantId, settleNo: MONITORING_SETTLE_NO },
           select: SETTLE_ACCOUNT_SELECT,
         });
       }
@@ -686,22 +712,52 @@ export class WaterAccountService {
   ) {
     const existing = await this.loadAccount(tx, ctx, id);
     if (existing.status === 'CLOSED') throw invalidTransition('CLOSED', 'TRANSFER');
+    // Resolve the POST-TRANSFER principal flags — the pair rule applies
+    // to the resulting (customer, settle) combination, not only to the
+    // fields being changed.
+    let targetSystemCustomer: boolean;
     if (body.customerId !== undefined) {
       const c = await tx.customer.findFirst({
         where: { tenantId: ctx.tenantId, id: body.customerId },
       });
       if (!c) throw new BadRequestException({ code: 'CUSTOMER_NOT_FOUND' });
-      // E8 P1: target reference scope — source-account scope (loadAccount
-      // above) does NOT license pointing the account at a customer the
-      // caller can't read.
-      await assertCustomerReadScopeTx(tx, ctx, body.customerId);
+      targetSystemCustomer = c.systemKey === MONITORING_SYSTEM_KEY;
+    } else {
+      const c = await tx.customer.findFirst({
+        where: { tenantId: ctx.tenantId, id: existing.customerId },
+        select: { systemKey: true },
+      });
+      targetSystemCustomer = c?.systemKey === MONITORING_SYSTEM_KEY;
     }
+    let targetSystemSettle: boolean;
     if (body.settleAccountId !== undefined) {
       const s = await tx.settleAccount.findFirst({
         where: { tenantId: ctx.tenantId, id: body.settleAccountId },
       });
       if (!s) throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
-      await assertSettleScopeTx(tx, ctx, body.settleAccountId);
+      targetSystemSettle = s.settleNo === MONITORING_SETTLE_NO;
+    } else {
+      const s = await tx.settleAccount.findFirst({
+        where: { tenantId: ctx.tenantId, id: existing.settleAccountId },
+        select: { settleNo: true },
+      });
+      targetSystemSettle = s?.settleNo === MONITORING_SETTLE_NO;
+    }
+    this.assertSystemPrincipalPair(
+      existing.usageCategory === 'MONITORING',
+      targetSystemCustomer,
+      targetSystemSettle,
+    );
+    if (existing.usageCategory !== 'MONITORING') {
+      // E8 P1: target reference scope — source-account scope (loadAccount
+      // above) does NOT license pointing the account at a customer/settle
+      // the caller can't read.
+      if (body.customerId !== undefined) {
+        await assertCustomerReadScopeTx(tx, ctx, body.customerId);
+      }
+      if (body.settleAccountId !== undefined) {
+        await assertSettleScopeTx(tx, ctx, body.settleAccountId);
+      }
     }
     req.auditBefore = existing;
 

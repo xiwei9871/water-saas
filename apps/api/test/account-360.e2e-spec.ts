@@ -331,10 +331,26 @@ describe('read-scope: water-accounts / outstanding', () => {
   });
 
   it('scoped list hides out-of-scope; explicit accountNo cannot resurrect', async () => {
+    // customerId-scoped queries keep the positive assertions deterministic
+    // regardless of how many fixtures previous runs left in the DB.
+    const byCustomer = async (customerId: string) =>
+      (
+        await get(
+          `/water-accounts?customerId=${customerId}`,
+          branchToken,
+        ).expect(200)
+      ).body.map((a: { id: string }) => a.id);
+    expect(await byCustomer(acctA.waterAccount.customerId)).toContain(
+      acctA.waterAccount.id,
+    );
+    expect(await byCustomer(acctOff.waterAccount.customerId)).toContain(
+      acctOff.waterAccount.id,
+    ); // off-book permissive
+    expect(await byCustomer(acctB.waterAccount.customerId)).not.toContain(
+      acctB.waterAccount.id,
+    );
     const list = await get('/water-accounts?take=200', branchToken).expect(200);
     const ids = list.body.map((a: { id: string }) => a.id);
-    expect(ids).toContain(acctA.waterAccount.id);
-    expect(ids).toContain(acctOff.waterAccount.id); // off-book permissive
     expect(ids).not.toContain(acctB.waterAccount.id);
 
     expect(acctB.waterAccount.accountNo).toBeDefined();
@@ -403,11 +419,19 @@ describe('read-scope: customers (D2)', () => {
   });
 
   it('list hides all-out-of-scope customers; detail 403', async () => {
-    const list = await get('/customers?take=200', branchToken).expect(200);
-    const ids = list.body.map((c: { id: string }) => c.id);
-    expect(ids).toContain(onlyA.customerId);
-    expect(ids).toContain(sharedCustomerId); // ≥1 visible account
-    expect(ids).not.toContain(onlyB.customerId);
+    // RUN-scoped name filters — the test DB accumulates fixtures across
+    // runs, so an unfiltered take=200 page is not guaranteed to contain
+    // this run's rows.
+    const byName = async (n: string) =>
+      (
+        await get(
+          `/customers?name=${encodeURIComponent(`T18 ${n} ${RUN}`)}`,
+          branchToken,
+        ).expect(200)
+      ).body.map((c: { id: string }) => c.id);
+    expect(await byName('cuA')).toContain(onlyA.customerId);
+    expect(await byName('cuShared')).toContain(sharedCustomerId); // ≥1 visible account
+    expect(await byName('cuB')).not.toContain(onlyB.customerId);
     await get(`/customers/${onlyB.customerId}`, branchToken).expect(403);
   });
 
@@ -467,11 +491,18 @@ describe('read-scope: settle-accounts (E6 strict)', () => {
   });
 
   it('list hides strict-out-of-scope settles; detail + patch → 403', async () => {
-    const list = await get('/settle-accounts?take=200', branchToken).expect(200);
-    const ids = list.body.map((s: { id: string }) => s.id);
-    expect(ids).toContain(settleA);
-    expect(ids).not.toContain(settleB);
-    expect(ids).not.toContain(sharedSettle); // ANY out-of-scope → hidden
+    // name filters (settle inherits the customer name at onboard) keep the
+    // assertions deterministic across accumulated fixture runs.
+    const byName = async (n: string) =>
+      (
+        await get(
+          `/settle-accounts?name=${encodeURIComponent(`T18 ${n} ${RUN}`)}`,
+          branchToken,
+        ).expect(200)
+      ).body.map((s: { id: string }) => s.id);
+    expect(await byName('stA')).toContain(settleA);
+    expect(await byName('stB')).not.toContain(settleB);
+    expect(await byName('stShared')).not.toContain(sharedSettle); // ANY out-of-scope → hidden
     await get(`/settle-accounts/${settleB}`, branchToken).expect(403);
     await get(`/settle-accounts/${sharedSettle}`, branchToken).expect(403);
     await patch(`/settle-accounts/${settleB}`, { phone: '1' }, branchToken).expect(403);
@@ -966,5 +997,154 @@ describe('release-gate: payment-activity field minimization (P1)', () => {
     expect(Object.keys(row.payment).sort()).toEqual(
       ['cashierId', 'channel', 'id', 'paymentNo', 'receivedAt', 'status'].sort(),
     );
+  });
+});
+
+/**
+ * Release-gate RC2 regression (P1): the monitoring system pair
+ * (customer.systemKey=MONITORING_INTERNAL + settle.settleNo=SYS-MONITORING)
+ * is a CLOSED internal principal — only usable together, only on
+ * MONITORING accounts. Binding it to a normal account is a 400
+ * SYSTEM_PRINCIPAL_NOT_ALLOWED, not a scope question.
+ */
+describe('release-gate: system principal pair is closed (P1 RC2)', () => {
+  let sysCustomerId: string;
+  let sysSettleId: string;
+  let ordCustomerId: string;
+  let ordSettleId: string;
+  let branchSettle: string; // in-scope settle for the branch probe
+
+  const acct = (over: Record<string, unknown>) => ({
+    customerId: ordCustomerId,
+    settleAccountId: ordSettleId,
+    usageCategory: 'RES_METERED',
+    addr: 'rc2 st',
+    ...over,
+  });
+
+  beforeAll(async () => {
+    // materialize the system pair via a real MONITORING onboard
+    const mon = await post('/water-accounts/onboard', {
+      account: { usageCategory: 'MONITORING', addr: 'gatehouse' },
+      meter: { brand: 't18-brand', caliber: 'DN15' },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
+    }).expect(201);
+    sysCustomerId = mon.body.waterAccount.customerId;
+    sysSettleId = mon.body.waterAccount.settleAccountId;
+    const ord = await onboard('rc2Ord');
+    ordCustomerId = ord.waterAccount.customerId;
+    ordSettleId = ord.waterAccount.settleAccountId;
+    const b = await onboard('rc2Br');
+    await coverAccount(ORG_BRANCH_A, b.waterAccount.id, 'rc2Br');
+    branchSettle = b.waterAccount.settleAccountId;
+  });
+
+  it('normal account + system customer → 400 SYSTEM_PRINCIPAL_NOT_ALLOWED', async () => {
+    const res = await post(
+      '/water-accounts',
+      acct({ customerId: sysCustomerId }),
+    ).expect(400);
+    expect(res.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+  });
+
+  it('normal account + system settle → 400', async () => {
+    const res = await post(
+      '/water-accounts',
+      acct({ settleAccountId: sysSettleId }),
+    ).expect(400);
+    expect(res.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+  });
+
+  it('normal account + full system pair → 400 (pair does not rescue it)', async () => {
+    const res = await post(
+      '/water-accounts',
+      acct({ customerId: sysCustomerId, settleAccountId: sysSettleId }),
+    ).expect(400);
+    expect(res.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+  });
+
+  it('scoped caller + system customer → 400 (never a scope bypass)', async () => {
+    const res = await post(
+      '/water-accounts',
+      acct({ customerId: sysCustomerId, settleAccountId: branchSettle }),
+      branchToken,
+    ).expect(400);
+    expect(res.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+  });
+
+  it('MONITORING + full system pair via POST /water-accounts → 201', async () => {
+    const res = await post(
+      '/water-accounts',
+      acct({
+        usageCategory: 'MONITORING',
+        customerId: sysCustomerId,
+        settleAccountId: sysSettleId,
+      }),
+    ).expect(201);
+    expect(res.body.usageCategory).toBe('MONITORING');
+    expect(res.body.billable).toBe(false);
+  });
+
+  it('MONITORING + half-system pair → 400 (both directions)', async () => {
+    const r1 = await post(
+      '/water-accounts',
+      acct({
+        usageCategory: 'MONITORING',
+        customerId: sysCustomerId,
+        settleAccountId: ordSettleId,
+      }),
+    ).expect(400);
+    expect(r1.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+    const r2 = await post(
+      '/water-accounts',
+      acct({
+        usageCategory: 'MONITORING',
+        customerId: ordCustomerId,
+        settleAccountId: sysSettleId,
+      }),
+    ).expect(400);
+    expect(r2.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+    // fully ordinary pair is also invalid for MONITORING
+    const r3 = await post(
+      '/water-accounts',
+      acct({ usageCategory: 'MONITORING' }),
+    ).expect(400);
+    expect(r3.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+  });
+
+  it('MONITORING onboard still refuses caller-supplied customer/settle', async () => {
+    const base = {
+      account: { usageCategory: 'MONITORING', addr: 'x' },
+      meter: { brand: 't18-brand', caliber: 'DN15' },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
+    };
+    const r1 = await post('/water-accounts/onboard', {
+      ...base,
+      customerId: ordCustomerId,
+    }).expect(400);
+    expect(r1.body.code).toBe('MONITORING_NO_CUSTOMER');
+    const r2 = await post('/water-accounts/onboard', {
+      ...base,
+      customer: { name: 'x', custType: 'PERSONAL' },
+      settleAccountId: sysSettleId,
+    }).expect(400);
+    expect(r2.body.code).toBe('MONITORING_NO_CUSTOMER');
+  });
+
+  it('transfer to a system principal → 400 (same closed-pair rule)', async () => {
+    const src = await onboard('rc2Tr');
+    await coverAccount(ORG_BRANCH_A, src.waterAccount.id, 'rc2Tr');
+    const r1 = await post(
+      `/water-accounts/${src.waterAccount.id}/transfer`,
+      { customerId: sysCustomerId },
+      branchToken,
+    ).expect(400);
+    expect(r1.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+    const r2 = await post(
+      `/water-accounts/${src.waterAccount.id}/transfer`,
+      { settleAccountId: sysSettleId },
+      branchToken,
+    ).expect(400);
+    expect(r2.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
   });
 });
