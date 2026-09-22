@@ -1,6 +1,6 @@
 # Epic E7 — Meter Lifecycle UI V1（表计生命周期）
 
-> 状态：Draft — Product/Domain Gate 评审中
+> 状态：Product Gate PASS · Frozen（2026-09-22）
 > 层级：L1 Core · 版本：v0.3.x（紧随 E6）
 > 起草日期：2026-09-22
 > 上游基线：docs/PRODUCT_MAP.md §2.1/§2.2/§2.3/§2.7

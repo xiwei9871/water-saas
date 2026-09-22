@@ -1,6 +1,6 @@
 # E7 Meter Lifecycle V1 — Domain Design v0.1（Draft）
 
-> 状态：Draft — 交 Product/Domain Gate 评审
+> 状态：Gate PASS · Frozen（2026-09-22，三项决策已拍板 + 并发条款并入）
 > 日期：2026-09-22 · Base：`main @ 03ff08e`
 > 冻结原则：**不新增表、不改结算/抄表引擎**。E7 是把已存在的生命周期能力收口成原子用例 + 补 org scope + 补销户漏洞 + 对象中心 UI。
 
@@ -37,35 +37,43 @@
 
 ```jsonc
 {
-  "newMeterId": "uuid",            // 必填，须 AVAILABLE
-  "finalReading": "1234.5",        // 必填，旧表止码 ≥ 旧 installation.initial_reading
-  "initialReading": "0",           // 必填，新表始码（显式——两块物理表表盘独立）
+  "newMeterId": "uuid",            // 必填，须 AVAILABLE，不得等于旧表
+  "oldFinalReading": "1234.5",     // 必填，旧表止码 ≥ 旧 installation.initial_reading
+  "newInitialReading": "0",        // 必填，新表始码（两块物理表表盘独立，严禁默认相等）
   "replacedAt": "2026-09-22T10:00:00Z", // 可选，默认 now；旧 removedAt = 新 installedAt
   "reason": "REPLACE"              // 可选 ∈ REPLACE|FAULT|PERIODIC_CHECK，默认 REPLACE；NEW 拒绝
 }
 ```
 
-### 3.2 事务内步骤（严格顺序）
+字段名冻结为 `oldFinalReading`/`newInitialReading`——命名上即隔离两块表，杜绝"新表起码=旧表止码"的隐式默认或业务校验。
+
+### 3.2 事务内步骤（严格顺序，冻结）
 
 ```
 1. load installation（tenant+id）→ NOT_FOUND
-2. assert installation.status = ACTIVE → INSTALLATION_NOT_ACTIVE
-3. org scope 断言（§5）
-4. 校验：finalReading ≥ initial_reading；replacedAt ≥ installedAt；
-   replacedAt 所在期间无 FINAL settlement / POSTED-side bill
-   （复用 removeTx 同一份 fail-closed 逻辑——抽共享私有方法，
-   不复制粘贴第三遍）
-5. load newMeter → METER_NOT_FOUND；status 断言 AVAILABLE
-   （guarded flip 兜底并发）
-6. load waterAccount → CLOSED → ACCOUNT_CLOSED（SUSPENDED 放行）
-7. guarded flip：installation ACTIVE→REMOVED（removedAt=replacedAt,
-   final_reading）——并发拆/换在此输
-8. guarded flip：oldMeter → AVAILABLE；newMeter AVAILABLE→INSTALLED
-9. binding 关闭（复用 removeTx 的 binding-close+orphan 检查）
-10. create new installation（status=ACTIVE, installedAt=replacedAt,
+2. org scope 断言（§5）
+3. lock water_account FOR UPDATE → recheck status：
+   CLOSED → ACCOUNT_CLOSED（C1 竞态的序列化点，与 close 互斥）
+4. lock old installation FOR UPDATE → recheck ACTIVE
+   → INSTALLATION_NOT_ACTIVE
+5. 校验域：finalReading ≥ initial_reading；replacedAt ≥ installedAt；
+   oldMeter.id ≠ newMeter.id → SAME_METER_REPLACE；
+   replacedAt 期间无 FINAL settlement / POSTED-side bill
+   （抽共享 assertRemovalPeriodOpenTx——remove/replace 复用）
+6. load oldMeter → recheck status = INSTALLED（与 installation ACTIVE
+   互为印证；数据漂移即拒，不自愈）
+7. load newMeter → recheck AVAILABLE → METER_NOT_AVAILABLE
+8. guarded flip：installation ACTIVE→REMOVED（removedAt=replacedAt,
+   final_reading）
+9. guarded flip：oldMeter INSTALLED→AVAILABLE；
+   newMeter AVAILABLE→INSTALLED（并发抢表 count=0 → METER_NOT_AVAILABLE）
+10. binding 关闭（复用 removeTx 的 close+orphan 检查）
+11. create new installation（ACTIVE, installedAt=replacedAt,
     initialReading, reason, 同 waterAccountId）
-11. newMeter.parentMeterId ??= oldMeterId（谱系，仅当为空）
+12. newMeter.parentMeterId ??= oldMeterId
 ```
+
+任一环节失败整笔回滚；binding 绝不自动迁移到新 installation。
 
 ### 3.3 不变量（事务级）
 
@@ -116,9 +124,16 @@
 | SUSPENDED | ✓ | ✓ | ✓ | 停催是账务态，物理表务不停 |
 | CLOSED | ✗（已有 `ACCOUNT_CLOSED`） | ✓ | ✗ | 销户后拆表必须可行——设备回收路径 |
 
-**销户拦截（新）**：`transitionTx` 目标 CLOSED 时先查 ACTIVE installation：
+**销户拦截（已冻结）**：`transitionTx` 目标 CLOSED 时先查 ACTIVE installation：
 - 存在 → `ACCOUNT_HAS_ACTIVE_INSTALLATION` 409，提示先拆表。
-- 这是**行为变更**（main 允许带表销户）。理由：`final_reading` 是拆表强制事实，带表销户使该事实永远无法补录且表永久卡 INSTALLED（设备资产流失）。审批项：若评审认为销户拦截破坏既有流程，回退方案是允许销户但 meter 停留 INSTALLED + UAT 记录——不推荐。
+- 正确业务顺序：拆/换完成 → 0 ACTIVE → 销户。
+
+**并发条款（C1 冻结）**：这不是裸 `count()` 检查——close 与 install/replace 必须对同一 water_account 事务级互斥：
+
+- `transitionTx`（目标 CLOSED）：`water_account FOR UPDATE` → 在锁内重查 ACTIVE installation → 拒或翻状态。
+- `installTx` / `replaceTx`：先 `water_account FOR UPDATE` → 锁内重查 `status ≠ CLOSED` 再建 installation。
+- 锁同向（都先锁 account 行），无死锁环；序列化结果只有两种合法终态：
+  `CLOSED + 无 ACTIVE` 或 `未 CLOSED + ACTIVE`，绝不出现 `CLOSED + ACTIVE`。
 
 ## 7. RemoteDeviceBinding
 
@@ -145,13 +160,16 @@
 - `water-account.service.ts` `transitionTx`：CLOSED 目标时 ACTIVE-installation 检查。
 - web：`WaterAccounts` 详情水表区；`Meters` 详情抽屉 + replace modal；types 补 `replace` wire。
 
-## 10. 并发与一致性论证
+## 10. 并发与一致性论证（冻结锁序）
 
-- `replace ‖ replace`（同 installation）：step 7 guarded flip 序列化，输家 `INSTALLATION_NOT_ACTIVE`。
-- `replace ‖ remove`（同 installation）：同上。
-- `replace ‖ payment/settlement`：读数事实挂 installation 行，replacedAt 期界 fail-closed 挡住已结算期；未结算期内换表本合法，结算生成时按双 component 自然处理。
-- `install ‖ install`（同 meter）：既有 guarded flip（count=0 → METER_NOT_AVAILABLE），replace 的 step 8 同构。
-- 死锁：replace 的锁序 installation→meters→binding 与 remove 同向；不同 installation 的两个 replace 无共享行。
+统一方向：`water_account → meter_installation → meter(s) → remote_device_binding`。
+
+- **C1 `close ‖ install`**：两边都先取 water_account FOR UPDATE 再读对方关心的状态——close 在锁内数 ACTIVE、install 在锁内验 `status≠CLOSED`。谁后拿锁谁看到已提交的真相，合法终态只有 `CLOSED+无表` 或 `未CLOSED+有表`。
+- **C2 `replace ‖ remove`**（同 installation）：guarded flip `ACTIVE→REMOVED` 序列化，只有一个成功；不会双关/重复 final_reading/orphan。
+- **C3 `replace ‖ replace`**（同 installation）：同上，且 step 11 只跑一次——不会出现同一旧表换出两个新 ACTIVE。
+- **C4 `install ‖ install / replace`**（抢同一 AVAILABLE meter）：meter guarded flip `AVAILABLE→INSTALLED` count=0 者 → `METER_NOT_AVAILABLE`。
+- `replace ‖ payment/settlement`：读数事实挂 installation 行；replacedAt 期界 fail-closed 挡已结算期；未结算期换表合法，结算按双 component 自然处理。
+- removeTx 现有顺序是 installation→meter→binding，**改造时把 water_account 锁提到最前**（install/replace/remove 统一），不引入反向边。
 
 ## 11. DB 不变量
 
@@ -179,6 +197,13 @@
 10. org scope：Branch A staff 对 Branch B 户 remove/replace → 403 `ORG_OUT_OF_SCOPE`；installation list 过滤；meter detail 内嵌 installations 过滤；无册户不受限；跨租户仍隔离。
 11. 期中换表 → settlement 双 component（旧段=final_reading、新段自 initial_reading）——回归既有引擎。
 12. 一户多表：双 ACTIVE fixture → list 返回全部 + detail 当前表=最新 installed_at。
+
+**并发矩阵（冻结，C1–C4 为必测）**
+
+- **C1 `close ‖ install`**：合法终态仅 `CLOSED+无ACTIVE` 或 `未CLOSED+有ACTIVE`；绝不 `CLOSED+ACTIVE`。
+- **C2 `replace ‖ remove`**（同 installation）：恰一个成功；无双关闭/重复 final_reading/orphan。
+- **C3 `replace ‖ replace`**（同 installation）：恰一个成功；不产生两个新 ACTIVE。
+- **C4 `install ‖ install`**（抢同一块 AVAILABLE meter）：恰一个成功；meter 只有一个 ACTIVE 关联。
 
 **Playwright UAT（对应对应 §Acceptance S1–S10 切片）**
 
