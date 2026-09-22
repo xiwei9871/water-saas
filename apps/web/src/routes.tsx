@@ -1,4 +1,5 @@
 import {
+  AlertOutlined,
   DashboardOutlined,
   FileTextOutlined,
   GoldOutlined,
@@ -19,6 +20,7 @@ import Meters from './pages/customer/Meters';
 import Onboard from './pages/customer/Onboard';
 import SettleAccounts from './pages/customer/SettleAccounts';
 import WaterAccounts from './pages/customer/WaterAccounts';
+import Exceptions from './pages/exception/Exceptions';
 import MeterReadings from './pages/metering/MeterReadings';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
@@ -65,6 +67,14 @@ export const APP_ROUTES: AppRoute[] = [
     label: '工作台',
     icon: <DashboardOutlined />,
     element: <Workbench />,
+  },
+  {
+    key: 'exceptions',
+    path: '/exceptions',
+    label: '异常中心',
+    icon: <AlertOutlined />,
+    perms: ['exception:read'],
+    element: <Exceptions />,
   },
   {
     key: 'customer',

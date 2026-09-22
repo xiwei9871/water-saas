@@ -1190,3 +1190,69 @@ export type PaymentActivityRow = {
       > | null;
     }
 );
+
+// ---------------------------------------------------------------------------
+// E9 Exception Center
+// ---------------------------------------------------------------------------
+
+export type ExceptionSeverity = 'BLOCKING' | 'WARNING' | 'INFO';
+export type ExceptionAnchor = 'ACCOUNT' | 'TENANT' | 'REMOTE_SOURCE';
+export type WorkItemStatus = 'OPEN' | 'ACK' | 'IGNORED' | 'RESOLVED';
+
+export type ExceptionItem = {
+  key: string;
+  type: string;
+  severity: ExceptionSeverity;
+  anchor: ExceptionAnchor;
+  waterAccountId: string | null;
+  remoteSourceId: string | null;
+  anchorRef: { kind: string; id: string };
+  period: string | null;
+  summary: string;
+  episode: {
+    id: string | null;
+    status: WorkItemStatus;
+    assigneeId: string | null;
+    note: string | null;
+    acknowledgedAt: string | null;
+    resolvedAt: string | null;
+    since: string | null;
+  };
+};
+
+export type ExceptionList = {
+  items: ExceptionItem[];
+  total: number;
+  page: number;
+  take: number;
+  asOf: string;
+};
+
+export type ExceptionDetail = {
+  fact: Omit<ExceptionItem, 'episode'>;
+  episode: {
+    id: string;
+    status: WorkItemStatus;
+    assigneeId: string | null;
+    note: string | null;
+    acknowledgedAt: string | null;
+    resolvedAt: string | null;
+    createdAt: string;
+  } | null;
+  history: {
+    id: string;
+    status: WorkItemStatus;
+    resolutionSource: 'AUTO' | 'MANUAL' | null;
+    note: string | null;
+    createdAt: string;
+    clearedAt: string | null;
+  }[];
+};
+
+export type ExceptionSummary = {
+  open: number;
+  acknowledged: number;
+  suppressedIgnored: number;
+  activeFacts: number;
+  asOf: string;
+};

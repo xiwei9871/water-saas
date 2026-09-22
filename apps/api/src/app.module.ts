@@ -17,6 +17,7 @@ import { PaymentModule } from './modules/payment/payment.module.js';
 import { PrepaymentModule } from './modules/prepayment/prepayment.module.js';
 import { RemoteModule } from './modules/remote/remote.module.js';
 import { ReportModule } from './modules/report/report.module.js';
+import { ExceptionModule } from './modules/exception/exception.module.js';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { ReportModule } from './modules/report/report.module.js';
     BillingModule,
     PaymentModule,
     ReportModule,
+    ExceptionModule,
     IntegrationModule,
   ],
   controllers: [AppController],

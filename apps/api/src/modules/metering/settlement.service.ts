@@ -8,6 +8,7 @@ import {
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { estimateAvg3 } from '@ws/billing-core';
+import { estimateStreaksTx } from '../../common/estimate-streak.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
   assertAccountScopeTx as assertAccountCoverageTx,
@@ -647,32 +648,13 @@ export class SettlementService {
     }));
   }
 
-  /**
-   * Per-settlement trailing count of consecutive estimated settlements —
-   * the 补抄台账 counter (spec §2.3, tenant param
-   * `max_consecutive_estimates` is evaluated by the report, not here).
-   * Measured over the account's settlement rows ordered by period; a
-   * missing (unsettled) month does not reset the streak — the meter still
-   * wasn't actually read.
-   */
+  /** Streak math lives in common/estimate-streak.ts (E9 shares it). */
   private async estimateStreaks(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     waterAccountIds: string[],
   ) {
-    const rows = await tx.consumptionSettlement.findMany({
-      where: { tenantId: ctx.tenantId, waterAccountId: { in: waterAccountIds } },
-      select: { id: true, waterAccountId: true, period: true, isEstimated: true },
-      orderBy: [{ waterAccountId: 'asc' }, { period: 'asc' }],
-    });
-    const streak = new Map<string, number>();
-    const run = new Map<string, number>();
-    for (const r of rows) {
-      const cur = r.isEstimated ? (run.get(r.waterAccountId) ?? 0) + 1 : 0;
-      run.set(r.waterAccountId, cur);
-      streak.set(r.id, cur);
-    }
-    return streak;
+    return estimateStreaksTx(tx, ctx.tenantId, waterAccountIds);
   }
 
   /**
