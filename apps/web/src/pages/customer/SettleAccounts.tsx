@@ -16,6 +16,7 @@ import {
   Space,
   Spin,
   Table,
+  Tag,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -23,6 +24,8 @@ import { Link } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   AccountStatus,
+  PrepaymentBalance,
+  PrepaymentEntriesPage,
   SettleAccount,
   SettleAccountDetail,
   WaterAccountRef,
@@ -32,10 +35,12 @@ import {
   ACCOUNT_STATUS_LABELS,
   cleanBody,
   cleanPatch,
+  fmtCent,
   fmtTime,
   newIdemKey,
   USAGE_CATEGORY_LABELS,
 } from '../common';
+import { PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from '../payment/common';
 import { AccountStatusTag } from '../pickers';
 
 interface SettleFormValues {
@@ -73,6 +78,9 @@ export default function SettleAccounts() {
 
   const [detail, setDetail] = useState<SettleAccountDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  // E6：详情抽屉联动的预存余额 + 最近流水。
+  const [prepay, setPrepay] = useState<PrepaymentBalance | null>(null);
+  const [prepayEntries, setPrepayEntries] = useState<PrepaymentEntriesPage | null>(null);
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -158,6 +166,8 @@ export default function SettleAccounts() {
   const openDetail = async (row: SettleAccount) => {
     setDetailLoading(true);
     setDetail(null);
+    setPrepay(null);
+    setPrepayEntries(null);
     try {
       const res = await api.get<SettleAccountDetail>(`/settle-accounts/${row.id}`);
       setDetail(res.data);
@@ -165,6 +175,19 @@ export default function SettleAccounts() {
       message.error(apiErrorText(err));
     } finally {
       setDetailLoading(false);
+    }
+    // 预存视图是旁路信息 —— 无 payment:read 权限时静默省略，不阻塞详情。
+    try {
+      const [bal, entries] = await Promise.all([
+        api.get<PrepaymentBalance>(`/prepayments/balance?settleAccountId=${row.id}`),
+        api.get<PrepaymentEntriesPage>(
+          `/prepayments/entries?settleAccountId=${row.id}&take=20`,
+        ),
+      ]);
+      setPrepay(bal.data);
+      setPrepayEntries(entries.data);
+    } catch {
+      /* permission/edge — 预存区块静默省略 */
     }
   };
 
@@ -385,6 +408,86 @@ export default function SettleAccounts() {
               dataSource={detail.waterAccounts}
               pagination={false}
             />
+            {prepay && (
+              <>
+                <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
+                  预存余额：<b>{fmtCent(prepay.balance)}</b>
+                  {prepay.lots.length > 0 && (
+                    <span style={{ fontWeight: 400, color: '#888' }}>
+                      （{prepay.lots.length} 个未耗批次）
+                    </span>
+                  )}
+                </div>
+                <Table
+                  rowKey="topUpEntryId"
+                  size="small"
+                  dataSource={prepay.lots}
+                  pagination={false}
+                  locale={{ emptyText: '无预存批次' }}
+                  columns={[
+                    {
+                      title: '批次',
+                      dataIndex: 'topUpEntryId',
+                      render: (v: string) => (
+                        <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                          {v.slice(0, 8)}…
+                        </span>
+                      ),
+                    },
+                    {
+                      title: '充值额',
+                      dataIndex: 'amount',
+                      align: 'right',
+                      render: (v: string) => fmtCent(v),
+                    },
+                    {
+                      title: '剩余',
+                      dataIndex: 'remaining',
+                      align: 'right',
+                      render: (v: string) => <b>{fmtCent(v)}</b>,
+                    },
+                    {
+                      title: '充值时间',
+                      dataIndex: 'createdAt',
+                      render: fmtTime,
+                    },
+                  ]}
+                />
+                <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
+                  最近预存流水
+                </div>
+                <Table
+                  rowKey="id"
+                  size="small"
+                  dataSource={prepayEntries?.items ?? []}
+                  pagination={false}
+                  locale={{ emptyText: '无流水' }}
+                  columns={[
+                    {
+                      title: '时间',
+                      dataIndex: 'createdAt',
+                      width: 165,
+                      render: fmtTime,
+                    },
+                    {
+                      title: '类型',
+                      dataIndex: 'type',
+                      width: 100,
+                      render: (t: keyof typeof PREPAY_ENTRY_LABELS) => (
+                        <Tag color={PREPAY_ENTRY_COLORS[t]}>{PREPAY_ENTRY_LABELS[t]}</Tag>
+                      ),
+                    },
+                    {
+                      title: '金额',
+                      dataIndex: 'amount',
+                      width: 110,
+                      align: 'right',
+                      render: (v: string) => fmtCent(v),
+                    },
+                  ]}
+                />
+              </>
+            )}
           </>
         )}
       </Drawer>

@@ -33,7 +33,14 @@ import type {
 import { useAuth } from '../../auth/AuthContext';
 import { fmtCent, fmtTime, newIdemKey } from '../common';
 import { SettleAccountSelect, StaffSelect } from '../pickers';
-import { PAY_CHANNEL_COLORS, PAY_CHANNEL_LABELS, PAYMENT_STATUS_COLORS, PAYMENT_STATUS_LABELS } from './common';
+import {
+  PAY_CHANNEL_COLORS,
+  PAY_CHANNEL_LABELS,
+  PAYMENT_STATUS_COLORS,
+  PAYMENT_STATUS_LABELS,
+  PREPAY_ENTRY_COLORS,
+  PREPAY_ENTRY_LABELS,
+} from './common';
 
 const UUID_RE =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -55,6 +62,8 @@ export default function Payments() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('payment:write');
+  // E6：含预存腿的冲正可由 prepayment:reverse 触发（服务端按收款事实判定）。
+  const canReverse = canWrite || hasPerm('prepayment:reverse');
   const canIamRead = hasPerm('iam:read');
   const canCustomerRead = hasPerm('customer:read');
 
@@ -195,6 +204,14 @@ export default function Payments() {
 
   const allocColumns: ColumnsType<PaymentAlloc> = [
     {
+      title: '来源',
+      dataIndex: 'source',
+      key: 'source',
+      width: 80,
+      render: (s: PaymentAlloc['source']) =>
+        s === 'PREPAYMENT' ? <Tag color="blue">预存</Tag> : <Tag>现金</Tag>,
+    },
+    {
       title: '账单 ID',
       dataIndex: 'billId',
       key: 'billId',
@@ -282,7 +299,7 @@ export default function Payments() {
           <Button size="small" icon={<SearchOutlined />} onClick={() => void openDetail(record)}>
             详情
           </Button>
-          {canWrite && record.reversalOfId === null && (
+          {canReverse && record.reversalOfId === null && (
             <Popconfirm
               title={`红冲收款 ${fmtCent(record.amount)}？`}
               description="追加一条负额收款（原单状态不变、原收据作废），相关账单欠费恢复。"
@@ -480,6 +497,48 @@ export default function Payments() {
               pagination={false}
               locale={{ emptyText: '无分摊明细' }}
             />
+            {(detail.prepaymentEntries?.length ?? 0) > 0 && (
+              <>
+                <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
+                  预存流水（本笔资金用途）
+                </div>
+                <Table
+                  rowKey="id"
+                  size="small"
+                  dataSource={detail.prepaymentEntries}
+                  pagination={false}
+                  columns={[
+                    {
+                      title: '类型',
+                      dataIndex: 'type',
+                      width: 100,
+                      render: (t: string) => (
+                        <Tag color={PREPAY_ENTRY_COLORS[t as keyof typeof PREPAY_ENTRY_COLORS]}>
+                          {PREPAY_ENTRY_LABELS[t as keyof typeof PREPAY_ENTRY_LABELS]}
+                        </Tag>
+                      ),
+                    },
+                    {
+                      title: '金额',
+                      dataIndex: 'amount',
+                      width: 120,
+                      align: 'right',
+                      render: (v: string) => fmtCent(v),
+                    },
+                    {
+                      title: '批次/关联',
+                      key: 'ref',
+                      render: (_: unknown, e: (typeof detail.prepaymentEntries)[number]) => (
+                        <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                          {e.originTopUpId ? `批次 ${e.originTopUpId.slice(0, 8)}… ` : ''}
+                          {e.reason ?? ''}
+                        </span>
+                      ),
+                    },
+                  ]}
+                />
+              </>
+            )}
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>收据</div>
             {receipt ? (
               <Descriptions
@@ -507,9 +566,9 @@ export default function Payments() {
             ) : (
               <Tag>无收据（红冲收款不开发票）</Tag>
             )}
-            {canWrite && (
+            {canReverse && (
               <Space style={{ marginTop: 16 }}>
-                {receipt && !receipt.voidFlag && (
+                {receipt && !receipt.voidFlag && canWrite && (
                   <Button
                     icon={<PrinterOutlined />}
                     loading={printing}

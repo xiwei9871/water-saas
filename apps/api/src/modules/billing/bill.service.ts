@@ -11,11 +11,13 @@ import type { Request } from 'express';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import {
   computeBill,
   feeItemIdMap,
   insertBillItems,
   loadFeeItems,
+  lockAccountForUpdate,
   lockPlanForUpdate,
   ytdBeforeQty,
 } from './pricing.js';
@@ -98,7 +100,10 @@ const CORRECTABLE_STATUSES = new Set(['POSTED', 'PARTIAL_PAID']);
  */
 @Injectable()
 export class BillService {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly prepay: PrepaymentService,
+  ) {}
 
   list(
     ctx: TenantCtx,
@@ -153,7 +158,7 @@ export class BillService {
     id: string,
     req: Request,
   ) {
-    const original = await this.loadCorrectable(tx, ctx, id, notReversable);
+    const original = await this.loadBillHead(tx, ctx, id, notReversable);
     await this.assertAccountScope(tx, ctx, original.waterAccountId, original.period);
     req.auditBefore = original;
 
@@ -174,24 +179,41 @@ export class BillService {
       });
     }
 
+    // E6 lock order (domain §14): water_account → settle_account →
+    // tariff_plan → bill — the settle row is the prepayment-fund lock.
+    await lockAccountForUpdate(tx, ctx, original.waterAccountId);
+    await this.prepay.lockSettleAccountForUpdate(tx, ctx, original.settleAccountId);
     if (original.tariffPlanId) {
       await lockPlanForUpdate(tx, ctx, original.tariffPlanId);
     }
+    // TOCTOU fix: the correctability decision is re-made on the LOCKED
+    // row — a concurrent cash payment may have flipped the bill to
+    // pure-cash PAID since loadBillHead read it.
+    const locked = await this.lockBillForUpdate(tx, ctx, id);
+    await this.assertCorrectableLocked(tx, ctx, id, locked.status, notReversable);
     const flip = await tx.bill.updateMany({
       where: {
         tenantId: ctx.tenantId,
         id,
-        status: { in: [...CORRECTABLE_STATUSES] as BillStatus[] },
+        // Row lock is held, so status cannot move — the guard is pure
+        // defense-in-depth for the correctable set.
+        status: { in: [...CORRECTABLE_STATUSES, 'PAID'] as BillStatus[] },
       },
       data: { status: 'REVERSED', updatedBy: ctx.staffId },
     });
     if (flip.count === 0) {
-      const cur = await tx.bill.findFirst({
-        where: { tenantId: ctx.tenantId, id },
-        select: { status: true },
-      });
-      throw notReversable(cur?.status ?? 'gone', 'lost guarded transition race');
+      throw notReversable(locked.status, 'lost guarded transition race');
     }
+
+    // E6 (domain §10/§20): restore every PREPAYMENT APPLY via append-only
+    // REVERSAL(+restore) + mirror allocation(-restore); the cash leg
+    // keeps its own reversedBillCredit → payment-reversal path.
+    await this.prepay.reverseAppliedForBillTx(
+      tx,
+      ctx,
+      id,
+      'bill reversal',
+    );
 
     const items = await tx.billItem.findMany({
       where: { tenantId: ctx.tenantId, billId: id },
@@ -261,7 +283,7 @@ export class BillService {
     body: { usageQty: Prisma.Decimal },
     req: Request,
   ) {
-    const original = await this.loadCorrectable(tx, ctx, id, notReplaceable);
+    const original = await this.loadBillHead(tx, ctx, id, notReplaceable);
     await this.assertAccountScope(tx, ctx, original.waterAccountId, original.period);
     req.auditBefore = original;
     if (!original.tariffPlanId) {
@@ -318,22 +340,35 @@ export class BillService {
       throw err;
     }
 
+    // Same frozen lock order as reverseTx: water → settle → plan → bill.
+    await lockAccountForUpdate(tx, ctx, original.waterAccountId);
+    await this.prepay.lockSettleAccountForUpdate(tx, ctx, original.settleAccountId);
     await lockPlanForUpdate(tx, ctx, original.tariffPlanId);
+    // TOCTOU fix: re-decide on the LOCKED row — a concurrent cash
+    // payment may have sealed the bill to pure-cash PAID since the
+    // head read.
+    const locked = await this.lockBillForUpdate(tx, ctx, id);
+    await this.assertCorrectableLocked(tx, ctx, id, locked.status, notReplaceable);
     const flip = await tx.bill.updateMany({
       where: {
         tenantId: ctx.tenantId,
         id,
-        status: { in: [...CORRECTABLE_STATUSES] as BillStatus[] },
+        status: { in: [...CORRECTABLE_STATUSES, 'PAID'] as BillStatus[] },
       },
       data: { status: 'REVERSED', updatedBy: ctx.staffId },
     });
     if (flip.count === 0) {
-      const cur = await tx.bill.findFirst({
-        where: { tenantId: ctx.tenantId, id },
-        select: { status: true },
-      });
-      throw notReplaceable(cur?.status ?? 'gone', 'lost guarded transition race');
+      throw notReplaceable(locked.status, 'lost guarded transition race');
     }
+
+    // Restore the original's PREPAYMENT APPLY before the REPLACEMENT
+    // re-applies the freed balance below.
+    await this.prepay.reverseAppliedForBillTx(
+      tx,
+      ctx,
+      id,
+      'bill replacement',
+    );
 
     let replacement;
     try {
@@ -373,6 +408,16 @@ export class BillService {
       result.items.map((i) => i.feeItemCode),
     );
     await insertBillItems(tx, ctx, replacement.id, result.items, idMap);
+    // E6 (domain §9): the REPLACEMENT is a new payable POSTED debt —
+    // it consumes prepayment in this same tx.
+    if (replacement.totalAmount > 0n) {
+      await this.prepay.applyForPostedDebtTx(tx, ctx, original.settleAccountId);
+      // Re-read — the APPLY recompute may have flipped the status.
+      replacement = await tx.bill.findFirstOrThrow({
+        where: { tenantId: ctx.tenantId, id: replacement.id },
+        select: BILL_SELECT,
+      });
+    }
     return this.withItems(tx, ctx, replacement);
   }
 
@@ -390,16 +435,32 @@ export class BillService {
       select: BILL_ITEM_SELECT,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
-    return { ...bill, items };
+    // E6: allocations on the bill with their source attribution — a
+    // PREPAYMENT alloc links the funding ledger entry (APPLY on apply,
+    // REVERSAL-of-APPLY on restore), so the UI can trace balance ⇄ debt.
+    const allocs = await tx.paymentAlloc.findMany({
+      where: { tenantId: ctx.tenantId, billId: bill.id },
+      select: {
+        id: true,
+        source: true,
+        paymentId: true,
+        prepaymentEntryId: true,
+        amount: true,
+        createdAt: true,
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    return { ...bill, items, allocs };
   }
 
   /**
-   * Load the bill and enforce the correctable contract shared by reverse
-   * and replace: POSTED|PARTIAL_PAID only, and never on a REVERSAL-kind
-   * bill (a reversal's mirror is itself a correction — reversing it would
-   * mint a positive charge out of thin air).
+   * Existence + kind probe shared by reverse and replace — never decides
+   * correctability. The status read here is a snapshot: a concurrent
+   * cash payment can still flip the bill to pure-cash PAID before we
+   * take the row lock, so the final decision happens in
+   * assertCorrectableLocked AFTER `SELECT … FOR UPDATE`.
    */
-  private async loadCorrectable(
+  private async loadBillHead(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     id: string,
@@ -412,10 +473,57 @@ export class BillService {
     if (bill.billKind === 'REVERSAL') {
       throw reject(bill.status, 'REVERSAL bills cannot be corrected');
     }
-    if (!CORRECTABLE_STATUSES.has(bill.status)) {
+    // REVERSED is terminal — a snapshot read can never be stale on it,
+    // so the early reject preserves the historical error precedence
+    // (NOT_REVERSABLE/NOT_REPLACEABLE before ALREADY_* dup checks).
+    if (bill.status === 'REVERSED') {
       throw reject(bill.status);
     }
     return bill;
+  }
+
+  /**
+   * `SELECT … FOR UPDATE` on the bill — the last row in the frozen lock
+   * order (water_account → settle_account → tariff_plan → bill). Status
+   * returned here is the locked truth for the correctability decision.
+   */
+  private async lockBillForUpdate(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+  ): Promise<{ status: BillStatus; billKind: BillRow['billKind'] }> {
+    const rows = await tx.$queryRaw<
+      { status: BillStatus; billKind: BillRow['billKind'] }[]
+    >`
+      SELECT status::text AS status, bill_kind::text AS "billKind"
+      FROM bill
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
+      FOR UPDATE`;
+    if (!rows.length) throw new NotFoundException({ code: 'BILL_NOT_FOUND' });
+    return rows[0];
+  }
+
+  /**
+   * Final correctability check — must run while the bill row lock is
+   * held. POSTED|PARTIAL_PAID are always correctable; PAID only when an
+   * effective PREPAYMENT allocation exists (its restore is
+   * ledger-internal, no cash moved); pure-cash PAID stays sealed —
+   * refunding cash is the payment-reversal flow.
+   */
+  private async assertCorrectableLocked(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    billId: string,
+    status: BillStatus,
+    reject: (status: string, reason?: string) => ConflictException,
+  ): Promise<void> {
+    if (CORRECTABLE_STATUSES.has(status)) return;
+    if (
+      status !== 'PAID' ||
+      !(await this.prepay.hasPrepaymentAllocsTx(tx, ctx, billId))
+    ) {
+      throw reject(status);
+    }
   }
 
   /**

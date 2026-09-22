@@ -28,6 +28,7 @@ import type {
   AccountStatus,
   Customer,
   HouseholdProfile,
+  PrepaymentBalance,
   WaterAccount,
   WaterAccountDetail,
 } from '../../api/types';
@@ -35,6 +36,7 @@ import { useAuth } from '../../auth/AuthContext';
 import {
   ACCOUNT_STATUS_LABELS,
   cleanBody,
+  fmtCent,
   fmtDate,
   fmtPeriod,
   fmtTime,
@@ -130,6 +132,8 @@ export default function WaterAccounts() {
   const [modal, setModal] = useState<ModalState>(null);
   const [idemKey, setIdemKey] = useState('');
   const [saving, setSaving] = useState(false);
+  // E6：过户前预取原结算户的预存余额，用于“余额不迁移”警告。
+  const [transferBalance, setTransferBalance] = useState<string | null>(null);
   const [createForm] = Form.useForm<CreateFormValues>();
   const [editForm] = Form.useForm<EditFormValues>();
   const [transferForm] = Form.useForm<TransferFormValues>();
@@ -207,6 +211,15 @@ export default function WaterAccounts() {
   const openModal = (m: NonNullable<ModalState>) => {
     setIdemKey(newIdemKey()); // 每次打开表单生成一次幂等键
     setModal(m);
+    if (m.kind === 'transfer') {
+      setTransferBalance(null);
+      api
+        .get<PrepaymentBalance>(
+          `/prepayments/balance?settleAccountId=${m.account.settleAccountId}`,
+        )
+        .then((res) => setTransferBalance(res.data.balance))
+        .catch(() => setTransferBalance('0')); // 无预存读权限时不阻塞过户
+    }
   };
 
   const loadHousehold = useCallback(async (accountId: string) => {
@@ -718,6 +731,14 @@ export default function WaterAccounts() {
           style={{ marginBottom: 16 }}
           message="至少选择一项过户目标：客户或结算户。未选的一方保持原值不变。"
         />
+        {transferBalance !== null && Number(transferBalance) > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={`原结算户预存余额 ${fmtCent(transferBalance)} 不会随改挂迁移 —— 余额归属结算户而非水表户；如需跨结算户转移请先办理预存退款。`}
+          />
+        )}
         <Form form={transferForm} layout="vertical">
           <Form.Item name="customerId" label="过户至客户">
             <CustomerSelect placeholder="搜索目标客户名称" />

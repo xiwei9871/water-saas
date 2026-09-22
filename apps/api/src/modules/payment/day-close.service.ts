@@ -16,6 +16,7 @@ export const DAY_CLOSE_SELECT = {
   totalCount: true,
   totalAmount: true,
   byChannel: true,
+  prepaymentBreakdown: true,
   status: true,
   closedAt: true,
   createdAt: true,
@@ -139,7 +140,18 @@ export class DayCloseService {
         orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
         select: PAYMENT_MEMBER_SELECT,
       });
-      return { ...close, payments: members.map(memberWire) };
+      // E6 (domain §16): SYSTEM APPLY is a company-wide NON-CASH
+      // informational metric — it belongs to no cashier's drawer and is
+      // never part of totalAmount or the signed prepaymentBreakdown.
+      const applyRows = await tx.$queryRaw<{ s: bigint | null }[]>`
+        SELECT SUM(-amount)::bigint AS s FROM prepayment_ledger_entry
+        WHERE tenant_id = ${ctx.tenantId}::uuid
+          AND type = 'APPLY' AND created_at::date = ${close.closeDate}::date`;
+      return {
+        ...close,
+        systemApplyAmount: (applyRows[0]?.s ?? 0n).toString(),
+        payments: members.map(memberWire),
+      };
     });
   }
 
@@ -202,6 +214,7 @@ export class DayCloseService {
     }
 
     const ids = pending.map((p) => p.id);
+    const idsText = ids.map((i) => i);
     // Buckets are derived from the PayChannel enum itself — a future
     // channel can never crash on an undefined bucket or silently
     // aggregate into a hardcoded set.
@@ -225,6 +238,55 @@ export class DayCloseService {
       ]),
     ) as unknown as Prisma.InputJsonValue;
 
+    // E6 (domain §16): the prepayment split of THIS close's payments —
+    // a stored snapshot computed once, never recomputed. Whole-payment
+    // classification: a reversal payment lands entirely in
+    // reversalAmount, a REFUND-backed payment entirely in refundAmount;
+    // an ordinary positive payment splits into debtCollection (Σ its
+    // PAYMENT-source allocs) + topUp (Σ its TOP_UP ledger legs). The
+    // four parts always sum to totalAmount — cash conservation.
+    const debtSums = await tx.$queryRaw<{ payment_id: string; s: bigint }[]>`
+      SELECT payment_id::text AS payment_id, SUM(amount)::bigint AS s
+      FROM payment_alloc
+      WHERE tenant_id = ${ctx.tenantId}::uuid
+        AND payment_id = ANY(${idsText}::uuid[]) AND source = 'PAYMENT'
+      GROUP BY payment_id`;
+    const topUpSums = await tx.$queryRaw<{ payment_id: string; s: bigint }[]>`
+      SELECT payment_id::text AS payment_id, SUM(amount)::bigint AS s
+      FROM prepayment_ledger_entry
+      WHERE tenant_id = ${ctx.tenantId}::uuid
+        AND payment_id = ANY(${idsText}::uuid[]) AND type = 'TOP_UP'
+      GROUP BY payment_id`;
+    const refundSums = await tx.$queryRaw<{ payment_id: string; s: bigint }[]>`
+      SELECT payment_id::text AS payment_id, SUM(amount)::bigint AS s
+      FROM prepayment_ledger_entry
+      WHERE tenant_id = ${ctx.tenantId}::uuid
+        AND payment_id = ANY(${idsText}::uuid[]) AND type = 'REFUND'
+      GROUP BY payment_id`;
+    const debtOf = new Map(debtSums.map((r) => [r.payment_id, r.s]));
+    const topUpOf = new Map(topUpSums.map((r) => [r.payment_id, r.s]));
+    const refundOf = new Map(refundSums.map((r) => [r.payment_id, r.s]));
+    let debtCollection = 0n;
+    let topUp = 0n;
+    let refundAmount = 0n;
+    let reversalAmount = 0n;
+    for (const p of pending) {
+      if (p.reversal_of_id !== null) {
+        reversalAmount += p.amount;
+      } else if (refundOf.has(p.id)) {
+        refundAmount += p.amount;
+      } else {
+        debtCollection += debtOf.get(p.id) ?? 0n;
+        topUp += topUpOf.get(p.id) ?? 0n;
+      }
+    }
+    const prepaymentBreakdown = {
+      debtCollection: debtCollection.toString(),
+      topUp: topUp.toString(),
+      refundAmount: refundAmount.toString(),
+      reversalAmount: reversalAmount.toString(),
+    } as unknown as Prisma.InputJsonValue;
+
     // The close row lands FIRST — its id is what the flip stamps onto
     // every swept payment, making membership a stored fact.
     const close = await tx.cashierDayClose.create({
@@ -236,6 +298,7 @@ export class DayCloseService {
         totalCount: pending.length,
         totalAmount,
         byChannel: byChannelJson,
+        prepaymentBreakdown,
         status: 'POSTED',
         createdBy: ctx.staffId,
         updatedBy: ctx.staffId,

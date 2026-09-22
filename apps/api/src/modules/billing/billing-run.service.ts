@@ -10,6 +10,7 @@ import type { Request } from 'express';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import { BILL_SELECT, type BillRow } from './bill.service.js';
 import {
   billDueDays,
@@ -151,7 +152,10 @@ interface AccountFacts {
  */
 @Injectable()
 export class BillingRunService {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly prepay: PrepaymentService,
+  ) {}
 
   list(
     ctx: TenantCtx,
@@ -630,7 +634,13 @@ export class BillingRunService {
   private async postOneBill(tx: Prisma.TransactionClient, ctx: TenantCtx, billId: string) {
     const bill = await tx.bill.findFirst({
       where: { tenantId: ctx.tenantId, id: billId },
-      select: { id: true, status: true, tariffPlanId: true, waterAccountId: true },
+      select: {
+        id: true,
+        status: true,
+        tariffPlanId: true,
+        waterAccountId: true,
+        settleAccountId: true,
+      },
     });
     if (!bill) throw new RecordedFailure('BILL_NOT_FOUND');
     await lockAccountForUpdate(tx, ctx, bill.waterAccountId);
@@ -645,6 +655,10 @@ export class BillingRunService {
         'cannot post a bill onto a CLOSED account',
       );
     }
+    // E6 lock order (domain §14): water_account → settle_account →
+    // tariff_plan → bill — the settle lock sits here so the APPLY
+    // below never introduces a settle → water wait edge.
+    await this.prepay.lockSettleAccountForUpdate(tx, ctx, bill.settleAccountId);
     if (bill.tariffPlanId) await lockPlanForUpdate(tx, ctx, bill.tariffPlanId);
     const flip = await tx.bill.updateMany({
       where: { tenantId: ctx.tenantId, id: billId, status: 'DRAFT' },
@@ -655,12 +669,25 @@ export class BillingRunService {
         where: { tenantId: ctx.tenantId, id: billId },
         select: { status: true },
       });
-      if (cur?.status === 'POSTED') return;
+      // E6 lost-race: the winner may have already auto-APPLIED in the
+      // same tx, leaving the bill PARTIAL_PAID or PAID — every
+      // posted-side status means posting succeeded elsewhere.
+      if (
+        cur?.status === 'POSTED' ||
+        cur?.status === 'PARTIAL_PAID' ||
+        cur?.status === 'PAID'
+      ) {
+        return;
+      }
       throw new RecordedFailure(
         'BILL_POST_GUARD',
         `bill is ${cur?.status ?? 'gone'}, expected DRAFT`,
       );
     }
+    // E6 (domain §9): a new payable POSTED debt consumes prepayment in
+    // the same tx — available balance applies FIFO across the settle
+    // account's whole debt queue, not only this bill.
+    await this.prepay.applyForPostedDebtTx(tx, ctx, bill.settleAccountId);
   }
 
   private toFailure(

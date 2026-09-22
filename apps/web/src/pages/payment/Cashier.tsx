@@ -10,9 +10,11 @@ import {
   Button,
   Card,
   Descriptions,
+  Drawer,
   Form,
   Input,
   InputNumber,
+  Modal,
   Select,
   Space,
   Statistic,
@@ -28,13 +30,17 @@ import type {
   OutstandingItem,
   PayChannel,
   PaymentDetail,
+  PrepaymentEntriesPage,
+  PrepaymentEntry,
   Receipt,
+  RefundResult,
+  TopUpResult,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { fmtCent, fmtPeriod, newIdemKey } from '../common';
 import { CustomerSelect, WaterAccountSelect } from '../pickers';
 import { BILL_KIND_COLORS, BILL_KIND_LABELS } from '../billing/common';
-import { PAY_CHANNEL_LABELS } from './common';
+import { PAY_CHANNEL_LABELS, PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from './common';
 
 const UUID_RE =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -56,6 +62,7 @@ export default function Cashier() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('payment:write');
+  const canPrepayReverse = hasPerm('prepayment:reverse');
   const canCustomerRead = hasPerm('customer:read');
 
   const [customerId, setCustomerId] = useState<string | undefined>(undefined);
@@ -74,6 +81,25 @@ export default function Cashier() {
   const [paying, setPaying] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [lastPayment, setLastPayment] = useState<PaymentDetail | null>(null);
+
+  // E6 预存：充值 / 退款 / 流水。
+  const [topUpOpen, setTopUpOpen] = useState(false);
+  const [topUpAmount, setTopUpAmount] = useState<number | null>(null);
+  const [topUpChannel, setTopUpChannel] = useState<PayChannel>('CASH');
+  const [topUpKey, setTopUpKey] = useState('');
+  const [topUpBusy, setTopUpBusy] = useState(false);
+
+  const [refundOpen, setRefundOpen] = useState(false);
+  const [refundAmount, setRefundAmount] = useState<number | null>(null);
+  const [refundChannel, setRefundChannel] = useState<PayChannel>('CASH');
+  const [refundReason, setRefundReason] = useState('');
+  const [refundKey, setRefundKey] = useState('');
+  const [refundBusy, setRefundBusy] = useState(false);
+
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  const [ledger, setLedger] = useState<PrepaymentEntry[]>([]);
+  const [ledgerTotal, setLedgerTotal] = useState(0);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
 
   const fetchSeq = useRef(0);
 
@@ -224,6 +250,103 @@ export default function Cashier() {
     }
   };
 
+  const openTopUp = () => {
+    setTopUpAmount(null);
+    setTopUpChannel('CASH');
+    setTopUpKey(newIdemKey());
+    setTopUpOpen(true);
+  };
+
+  const submitTopUp = async () => {
+    if (!outstanding) return;
+    const cent = yuanToCent(topUpAmount);
+    if (cent === null || cent <= 0) {
+      message.warning('请输入充值金额');
+      return;
+    }
+    setTopUpBusy(true);
+    try {
+      const res = await api.post<TopUpResult>(
+        '/prepayments/top-ups',
+        {
+          settleAccountId: outstanding.settleAccountId,
+          channel: topUpChannel,
+          amount: String(cent),
+        },
+        { headers: { 'Idempotency-Key': topUpKey } },
+      );
+      const cleared = res.data.billAllocs.reduce((s, a) => s + Number(a.amount), 0);
+      message.success(
+        `收款成功 ${fmtCent(res.data.payment.amount)}：清欠 ${fmtCent(cleared)}，预存 ${fmtCent(res.data.topUp)}`,
+      );
+      setTopUpOpen(false);
+      await loadOutstanding(outstanding.waterAccountId);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setTopUpBusy(false);
+    }
+  };
+
+  const openRefund = () => {
+    setRefundAmount(null);
+    setRefundChannel('CASH');
+    setRefundReason('');
+    setRefundKey(newIdemKey());
+    setRefundOpen(true);
+  };
+
+  const submitRefund = async () => {
+    if (!outstanding) return;
+    const cent = yuanToCent(refundAmount);
+    if (cent === null || cent <= 0) {
+      message.warning('请输入退款金额');
+      return;
+    }
+    if (!refundReason.trim()) {
+      message.warning('请填写退款原因');
+      return;
+    }
+    setRefundBusy(true);
+    try {
+      const res = await api.post<RefundResult>(
+        '/prepayments/refunds',
+        {
+          settleAccountId: outstanding.settleAccountId,
+          channel: refundChannel,
+          amount: String(cent),
+          reason: refundReason.trim(),
+        },
+        { headers: { 'Idempotency-Key': refundKey } },
+      );
+      message.success(`退款完成 ${fmtCent(res.data.payment.amount)}，余额 ${fmtCent(res.data.balance)}`);
+      setRefundOpen(false);
+      await loadOutstanding(outstanding.waterAccountId);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setRefundBusy(false);
+    }
+  };
+
+  const loadLedger = useCallback(
+    async (settleAccountId: string, page = 1) => {
+      setLedgerLoading(true);
+      try {
+        const res = await api.get<PrepaymentEntriesPage>(
+          `/prepayments/entries?settleAccountId=${settleAccountId}&take=50&skip=${(page - 1) * 50}`,
+        );
+        setLedger(res.data.items);
+        setLedgerTotal(res.data.total);
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setLedgerLoading(false);
+      }
+    },
+    [message],
+  );
+
   const print = async (receipt: Receipt | null | undefined) => {
     if (!receipt) return;
     setPrinting(true);
@@ -358,10 +481,37 @@ export default function Cashier() {
               }}
             />
             <Statistic
+              title="预存余额"
+              value={Number(outstanding.prepaymentBalance ?? 0) / 100}
+              precision={2}
+              prefix="¥"
+              valueStyle={{
+                color: Number(outstanding.prepaymentBalance ?? 0) > 0 ? '#1677ff' : undefined,
+              }}
+            />
+            <Statistic
               title="结算户"
               value={outstanding.settleAccountId.slice(0, 8) + '…'}
               valueStyle={{ fontSize: 16, fontFamily: 'monospace' }}
             />
+            <Space>
+              {canWrite && (
+                <Button onClick={openTopUp}>预存充值</Button>
+              )}
+              {canPrepayReverse && Number(outstanding.prepaymentBalance ?? 0) > 0 && (
+                <Button danger onClick={openRefund}>
+                  预存退款
+                </Button>
+              )}
+              <Button
+                onClick={() => {
+                  setLedgerOpen(true);
+                  void loadLedger(outstanding.settleAccountId);
+                }}
+              >
+                预存流水
+              </Button>
+            </Space>
           </Space>
           {Number(outstanding.reversedBillCredit) > 0 && (
             <Alert
@@ -489,6 +639,165 @@ export default function Cashier() {
           }
         />
       )}
+
+      <Modal
+        title="预存充值"
+        open={topUpOpen}
+        onCancel={() => setTopUpOpen(false)}
+        onOk={() => void submitTopUp()}
+        confirmLoading={topUpBusy}
+        okText="确认收款"
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="收款先清欠费（按到期先后），余额自动存入预存。一次收款 = 一笔资金 + 一张收据。"
+        />
+        <Form layout="vertical">
+          <Form.Item label="收款金额（元）" required>
+            <InputNumber
+              min={0}
+              precision={2}
+              style={{ width: 200 }}
+              value={topUpAmount}
+              onChange={(v) => setTopUpAmount(v)}
+              autoFocus
+            />
+          </Form.Item>
+          <Form.Item label="收款渠道" required>
+            <Select
+              style={{ width: 200 }}
+              value={topUpChannel}
+              onChange={setTopUpChannel}
+              options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+                value: c,
+                label: PAY_CHANNEL_LABELS[c],
+              }))}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="预存退款"
+        open={refundOpen}
+        onCancel={() => setRefundOpen(false)}
+        onOk={() => void submitRefund()}
+        confirmLoading={refundBusy}
+        okText="确认退款"
+        okButtonProps={{ danger: true }}
+        destroyOnHidden
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`当前预存余额 ${outstanding ? fmtCent(outstanding.prepaymentBalance ?? '0') : '—'}。退款按充值批次 FIFO 拆行，产生一笔负收款进入当日日结。`}
+        />
+        <Form layout="vertical">
+          <Form.Item label="退款金额（元）" required>
+            <InputNumber
+              min={0}
+              precision={2}
+              style={{ width: 200 }}
+              value={refundAmount}
+              onChange={(v) => setRefundAmount(v)}
+              autoFocus
+            />
+          </Form.Item>
+          <Form.Item label="退款渠道" required>
+            <Select
+              style={{ width: 200 }}
+              value={refundChannel}
+              onChange={setRefundChannel}
+              options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+                value: c,
+                label: PAY_CHANNEL_LABELS[c],
+              }))}
+            />
+          </Form.Item>
+          <Form.Item label="退款原因" required>
+            <Input
+              style={{ width: 320 }}
+              value={refundReason}
+              onChange={(e) => setRefundReason(e.target.value)}
+              maxLength={200}
+              placeholder="必填 —— 写入流水 reason"
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Drawer
+        title="预存流水（append-only）"
+        open={ledgerOpen}
+        onClose={() => setLedgerOpen(false)}
+        width={720}
+      >
+        <Table<PrepaymentEntry>
+          rowKey="id"
+          size="small"
+          loading={ledgerLoading}
+          dataSource={ledger}
+          pagination={{
+            total: ledgerTotal,
+            pageSize: 50,
+            showSizeChanger: false,
+            onChange: (p) =>
+              outstanding && void loadLedger(outstanding.settleAccountId, p),
+          }}
+          columns={[
+            {
+              title: '时间',
+              dataIndex: 'createdAt',
+              width: 170,
+              render: (v: string) => new Date(v).toLocaleString(),
+            },
+            {
+              title: '类型',
+              dataIndex: 'type',
+              width: 100,
+              render: (t: PrepaymentEntry['type']) => (
+                <Tag color={PREPAY_ENTRY_COLORS[t]}>{PREPAY_ENTRY_LABELS[t]}</Tag>
+              ),
+            },
+            {
+              title: '金额',
+              dataIndex: 'amount',
+              width: 120,
+              align: 'right',
+              render: fmtCent,
+            },
+            {
+              title: '操作人',
+              dataIndex: 'operatorId',
+              width: 90,
+              render: (v: string | null) => v ?? 'SYSTEM',
+            },
+            {
+              title: '批次/关联',
+              key: 'ref',
+              render: (_: unknown, e: PrepaymentEntry) => (
+                <Space size={4} direction="vertical">
+                  {e.originTopUpId && (
+                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                      批次 {e.originTopUpId.slice(0, 8)}…
+                    </span>
+                  )}
+                  {e.reversalOfEntryId && (
+                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                      冲正 {e.reversalOfEntryId.slice(0, 8)}…
+                    </span>
+                  )}
+                  {e.reason && <span style={{ fontSize: 12 }}>{e.reason}</span>}
+                </Space>
+              ),
+            },
+          ]}
+        />
+      </Drawer>
     </Card>
   );
 }

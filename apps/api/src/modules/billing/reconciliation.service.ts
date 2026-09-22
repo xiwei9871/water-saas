@@ -18,6 +18,7 @@ import type { Request } from 'express';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import { BILL_SELECT } from './bill.service.js';
 import {
   loadFeeItems,
@@ -142,7 +143,10 @@ const POSTED_STATUSES = ['POSTED', 'PARTIAL_PAID', 'PAID'] as const;
  */
 @Injectable()
 export class ReconciliationService {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly prepay: PrepaymentService,
+  ) {}
 
   list(
     ctx: TenantCtx,
@@ -602,6 +606,10 @@ export class ReconciliationService {
     // account row is already held (top of this tx, same order as
     // postOneBill: account → plan). The bill's tariffPlanId stays the
     // last span period's plan — the documented approximation.
+    // E6 lock order (domain §14): the water_account row is already held
+    // (top of this tx) — the settle_account fund lock must come BEFORE
+    // the plan locks so every path agrees on water → settle → plan.
+    await this.prepay.lockSettleAccountForUpdate(tx, ctx, account.settleAccountId);
     for (const planId of [...new Set(planIds)].sort()) {
       await lockPlanForUpdate(tx, ctx, planId);
     }
@@ -649,6 +657,12 @@ export class ReconciliationService {
         updatedBy: ctx.staffId,
       })),
     });
+    // E6 (domain §9): a POSITIVE adjustment is new payable POSTED debt —
+    // it consumes prepayment in this same tx; zero/negative corrections
+    // (credit) never trigger APPLY.
+    if (adjustmentAmountCent > 0n) {
+      await this.prepay.applyForPostedDebtTx(tx, ctx, account.settleAccountId);
+    }
     return { ...recon, adjustmentBill: bill };
   }
 

@@ -12,7 +12,10 @@ import {
 import type { Request } from 'express';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
-import { Permissions } from '../../common/permissions.decorator.js';
+import {
+  AnyPermissions,
+  Permissions,
+} from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
@@ -185,7 +188,12 @@ export class PaymentController {
    * + negated mirror allocs; the original's receipt is voided.
    */
   @Post(':id/reverse')
-  @Permissions('payment:write')
+  // E6 (domain §13): either permission passes the guard — the service
+  // decides the precise requirement from the payment's facts (a
+  // TOP_UP-containing reversal needs prepayment:reverse unless it's
+  // the cashier's own same-day unclosed slip; a cash-only reversal
+  // still needs payment:write).
+  @AnyPermissions('payment:write', 'prepayment:reverse')
   reverse(
     @Param('id') id: string,
     @Body() body: unknown,
