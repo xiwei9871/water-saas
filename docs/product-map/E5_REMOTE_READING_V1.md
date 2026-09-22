@@ -122,3 +122,4 @@
 - 远传实时告警推送、短信通知。
 - 双向通信（拉数以外的任何下行指令）。
 - GIS/安装位置维护 UI：`MeterInstallation` 的位置字段（经纬度/坐标系/来源/描述）只落数据层；位置录入、地图 pin 查看、坐标维护界面统一 defer 到 E7 Meter Lifecycle，E5 不新增任何 GIS/位置编辑界面。
+- Remote anomaly auto-classification（厂商质量码 / 负差 / 超阈值 → QC `MANUAL_REVIEW`）：V1 所有合法 REMOTE 统一进入 `qcStatus=PENDING`，`vendorQuality` 仅持久化不改 QC 状态。PENDING 同样不会成为 trusted reading，无账务安全风险。各厂商 `"1"/"异常"/"ERR"/"offline"` 语义（NORMAL / SUSPECT / INVALID）待真实 VendorX 文档到达后冻结——defer 到 Pilot / Vendor Adapter refinement。

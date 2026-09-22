@@ -38,3 +38,13 @@ in the 15-minute access JWT. A permission shrink or disable takes up to
 15 min to take effect (refresh path does re-check). Documented accepted
 risk in `auth.service.ts`; tightening = server-side session checks or
 shorter access TTL.
+
+## 4. Remote anomaly auto-classification not implemented (Pilot backlog)
+
+Frozen E5 spec calls for vendor-quality / negative-delta / threshold anomalies
+to auto-classify as QC `MANUAL_REVIEW`. V1 persists `vendorQuality` but leaves
+every valid remote reading at `qcStatus=PENDING`. Safe by default — PENDING is
+never a trusted reading — but vendor-specific code meanings
+(`"1" / "异常" / "ERR" / "offline"` → NORMAL / SUSPECT / INVALID) need real
+VendorX docs. Deferred to Pilot / Vendor Adapter refinement; see
+`docs/product-map/E5_REMOTE_READING_V1.md` Not in Scope.

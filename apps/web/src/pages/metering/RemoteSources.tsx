@@ -461,6 +461,12 @@ export default function RemoteSources() {
             <Upload.Dragger
               maxCount={1}
               beforeUpload={(f) => {
+                // Whole file travels inside a JSON body (xlsx→base64 inflates
+                // ~4/3); API allows 10MB JSON, keep UI guard at 5MB.
+                if (f.size > 5 * 1024 * 1024) {
+                  message.error('文件超过 5MB，请先拆分后再导入');
+                  return Upload.LIST_IGNORE;
+                }
                 setImportFile(f);
                 return false;
               }}

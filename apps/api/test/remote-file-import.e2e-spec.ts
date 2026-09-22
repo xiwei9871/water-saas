@@ -12,6 +12,7 @@
  *  7. re-import does NOT auto-replay UNBOUND rows (explicit replay only)
  */
 import { INestApplication } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test, TestingModule } from '@nestjs/testing';
 import bcrypt from 'bcrypt';
 import pg from 'pg';
@@ -85,6 +86,8 @@ beforeAll(async () => {
     imports: [AppModule],
   }).compile();
   app = moduleFixture.createNestApplication();
+  // Mirror main.ts: real vendor files exceed the ~100KB default body limit.
+  (app as NestExpressApplication).useBodyParser('json', { limit: '10mb' });
   await app.init();
 
   adminToken = (
@@ -274,4 +277,20 @@ describe('CSV import', () => {
     }).expect(201);
     expect(res.body.counts.CONVERTED).toBe(1);
   });
+
+  it('imports a realistic >100KB CSV (2000 rows → all UNBOUND)', async () => {
+    // Regression for the JSON body limit: county exports are thousands of
+    // rows; a toy UAT file would never trip the old ~100KB default.
+    const rows: string[][] = [HEADER];
+    for (let i = 0; i < 2000; i++) {
+      rows.push([`BULK-${RUN}-${i}`, `BULKDEV-${RUN}`, '2028-03-05 08:30:00', `${i}`, '正常', '202803']);
+    }
+    const big = csv(rows);
+    expect(Buffer.byteLength(big, 'utf-8')).toBeGreaterThan(100 * 1024);
+    const res = await importFile({ targetPeriod: '202803', format: 'csv', content: big, fileName: 'big.csv' })
+      .expect(201);
+    expect(res.body.totalRows).toBe(2000);
+    expect(res.body.parsed).toBe(2000);
+    expect(res.body.counts.UNBOUND).toBe(2000);
+  }, 120_000);
 });

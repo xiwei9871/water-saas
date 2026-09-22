@@ -1218,7 +1218,7 @@ model RemoteDeviceBinding {
 
   @@unique([tenantId, id])
   // Target of RawRemoteEvent's 4-column provenance FK (source+device agree).
-  @@unique([tenantId, remoteSourceId, remoteDeviceId, id])
+  @@unique([tenantId, remoteSourceId, remoteDeviceId, id], map: "remote_device_binding_tenant_source_device_id_key")
   @@index([tenantId, remoteDeviceId, effectiveFrom])
   @@index([tenantId, installationId])
   @@map("remote_device_binding")

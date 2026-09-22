@@ -54,3 +54,9 @@ ALTER TABLE "raw_remote_event" ADD CONSTRAINT
 ALTER TABLE "raw_remote_event" ADD CONSTRAINT
   "raw_remote_event_resolved_binding_requires_device"
   CHECK ("resolved_binding_id" IS NULL OR "resolved_remote_device_id" IS NOT NULL);
+
+-- Frozen rule: raw remote facts are append-only. The immutable UPDATE
+-- trigger above protects identity/payload columns, but ws_app still held
+-- DELETE+TRUNCATE via the blanket init grant. Revoke both — UPDATE stays
+-- granted because processing metadata legitimately evolves.
+REVOKE DELETE, TRUNCATE ON "raw_remote_event" FROM ws_app;

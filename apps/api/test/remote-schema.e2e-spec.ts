@@ -732,6 +732,29 @@ describe('append-only process log', () => {
   });
 });
 
+describe('raw_remote_event is non-deletable for ws_app', () => {
+  it('ws_app DELETE/TRUNCATE → 42501 (processing UPDATE stays allowed)', async () => {
+    // UPDATE of processing metadata must still work — the lifecycle needs it.
+    await app.query('BEGIN');
+    await app.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT_A]);
+    const upd = await app.query(
+      `UPDATE raw_remote_event SET current_issue_code='PROBE', updated_at=now()
+       WHERE id=$1 AND tenant_id=$2 RETURNING id`,
+      [eventId, TENANT_A],
+    );
+    expect(upd.rows[0].id).toBe(eventId);
+    await app.query('ROLLBACK');
+    // Privilege check precedes RLS, so autocommit DELETE still raises 42501
+    // without needing tenant context — and a rejected statement can't poison
+    // a shared transaction.
+    await expectPgError(
+      () => app.query(`DELETE FROM raw_remote_event WHERE id=$1`, [eventId]),
+      '42501',
+    );
+    await expectPgError(() => app.query(`TRUNCATE raw_remote_event`), '42501');
+  });
+});
+
 describe('RLS on new remote tables', () => {
   it('ws_app sees only its own tenant rows; cross-tenant insert blocked', async () => {
     await app.query('BEGIN');
