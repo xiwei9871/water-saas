@@ -842,3 +842,139 @@ export interface RecoveryRateReport {
   collected: string;
   rate: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// remote (E5 远传接入)
+// ---------------------------------------------------------------------------
+
+export type RemoteSourceType = 'FILE_IMPORT' | 'API_PULL' | 'WEBHOOK';
+export type RemoteStatus = 'ACTIVE' | 'DISABLED';
+
+/** GET /remote-sources row. `config` holds the vendor column mapping. */
+export interface RemoteSource {
+  id: string;
+  tenantId: string;
+  code: string;
+  name: string;
+  type: RemoteSourceType;
+  adapterKey: string;
+  timezone: string;
+  orgUnitId: string | null;
+  credentialRef: string | null;
+  config: Record<string, unknown> | null;
+  status: RemoteStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /remote-devices row — vendor-side device identity (≠ Meter). */
+export interface RemoteDevice {
+  id: string;
+  tenantId: string;
+  remoteSourceId: string;
+  vendorDeviceKey: string;
+  vendorMeterNo: string | null;
+  communicationId: string | null;
+  model: string | null;
+  status: RemoteStatus;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Effective-dated device → installation binding [from, to). */
+export interface RemoteDeviceBinding {
+  id: string;
+  tenantId: string;
+  remoteSourceId: string;
+  remoteDeviceId: string;
+  installationId: string;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  createdAt: string;
+  updatedAt: string;
+  installation?: MeterInstallation | null;
+}
+
+export interface RemoteDeviceDetail extends RemoteDevice {
+  bindings: RemoteDeviceBinding[];
+}
+
+export type RemoteEventStatus =
+  | 'RECEIVED'
+  | 'UNBOUND'
+  | 'WAITING_PLAN'
+  | 'FAILED'
+  | 'CONFLICT'
+  | 'CONVERTED'
+  | 'IGNORED';
+
+/** GET /remote-events row — immutable raw ingest fact + processing state. */
+export interface RawRemoteEvent {
+  id: string;
+  tenantId: string;
+  remoteSourceId: string;
+  externalEventKey: string;
+  canonicalPayloadHash: string;
+  vendorDeviceKey: string;
+  businessPeriod: string;
+  collectedAt: string;
+  readingValue: string;
+  vendorQuality: string | null;
+  processingStatus: RemoteEventStatus;
+  resolvedRemoteDeviceId: string | null;
+  resolvedBindingId: string | null;
+  currentIssueCode: string | null;
+  currentIssueAt: string | null;
+  receivedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RemoteEventProcessLog {
+  id: string;
+  remoteEventId: string;
+  action: string;
+  fromStatus: RemoteEventStatus | null;
+  toStatus: RemoteEventStatus | null;
+  code: string | null;
+  message: string | null;
+  actorType: 'SYSTEM' | 'USER';
+  actorStaffId: string | null;
+  detail: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface RawRemoteEventDetail extends RawRemoteEvent {
+  rawPayload: Record<string, unknown>;
+  canonicalPayload: Record<string, unknown>;
+  processLogs: RemoteEventProcessLog[];
+  reading: {
+    id: string;
+    qcStatus: string;
+    period: string;
+    readingValue: string;
+  } | null;
+}
+
+/** POST /remote-sources/:id/events outcome item. */
+export interface IngestOutcome {
+  index: number;
+  externalEventKey: string;
+  outcome: RemoteEventStatus | 'IDEMPOTENT_REPLAY' | 'EVENT_KEY_CONFLICT';
+  eventId?: string;
+  readingId?: string;
+  code?: string;
+}
+
+/** POST /remote-sources/:id/import report. */
+export interface RemoteImportReport {
+  fileSha256: string;
+  fileName: string | null;
+  targetPeriod: string;
+  totalRows: number;
+  parsed: number;
+  invalid: { row: number; code: string; error: string }[];
+  outcomes: IngestOutcome[];
+  counts: Record<string, number>;
+}

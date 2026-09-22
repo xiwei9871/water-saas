@@ -22,6 +22,9 @@ import WaterAccounts from './pages/customer/WaterAccounts';
 import MeterReadings from './pages/metering/MeterReadings';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
+import RemoteDevices from './pages/metering/RemoteDevices';
+import RemoteEvents from './pages/metering/RemoteEvents';
+import RemoteSources from './pages/metering/RemoteSources';
 import Cashier from './pages/payment/Cashier';
 import DayClose from './pages/payment/DayClose';
 import Payments from './pages/payment/Payments';
@@ -128,6 +131,24 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/metering/readings',
         label: '抄表记录',
         element: <MeterReadings />,
+      },
+      {
+        key: 'metering-remote-sources',
+        path: '/metering/remote-sources',
+        label: '远传数据源',
+        element: <RemoteSources />,
+      },
+      {
+        key: 'metering-remote-devices',
+        path: '/metering/remote-devices',
+        label: '远传设备',
+        element: <RemoteDevices />,
+      },
+      {
+        key: 'metering-remote-events',
+        path: '/metering/remote-events',
+        label: '远传事件',
+        element: <RemoteEvents />,
       },
     ],
   },
