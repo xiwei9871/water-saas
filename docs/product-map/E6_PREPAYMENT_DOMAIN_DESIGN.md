@@ -19,7 +19,7 @@ CashierDayClose / Bill POSTED` 五个对象分别已经承担了：
 | 欠费销账事实 | `PaymentAlloc` | 扩展为 PAYMENT / PREPAYMENT 双来源 |
 | 收据 | `Receipt → Payment` | 沿用，一次真实收款一张收据 |
 | 收费员日结 | `CashierDayClose` | 现金口径不变，预存用途做分项 snapshot |
-| 账单过账入口 | `BillingRunService.postOneBill` | POSTED 事务内接自动 APPLY |
+| 正向 POSTED 债务入口 | `postOneBill` / `replaceTx` / `ReconciliationService.createTx` 正 ADJUSTMENT | 同事务接自动 APPLY（§9） |
 | 预存余额 | 无 | **唯一新增对象** `PrepaymentLedgerEntry`（append-only，余额 = Σ） |
 
 E6 完成后财务模块形成三条彼此独立、可互相勾稽的事实轴：
@@ -73,13 +73,16 @@ billKind)` 挡二次红冲）。**PAID 与 DRAFT 不可红冲**。REVERSED 账�
 POSTED 视为已成功幂等返回）。锁序固定 `water_account → tariff_plan →
 bill`。
 
-但 `BillService.replaceTx` 也直接 `create` 一条 `status=POSTED` 的
-REPLACEMENT bill——POSTED 债务的产出不只有 run 入口。因此 E6 自动
-APPLY 的触发点冻结为**领域事件**"新的正向可支付债务进入 POSTED"，
-而不是某个 service 方法名（§9）。实现时必须再全库搜索一遍
-`status: 'POSTED'`/`bill.create` 路径（含未来 ADJUSTMENT/correction
-入口），确保无一漏接；`billKind='REVERSAL'` 是负向纠正单，恒不触发
-APPLY。
+但 `BillService.replaceTx` 直接 `create` 一条 `status=POSTED` 的
+REPLACEMENT bill，`ReconciliationService.createTx` 也会直接建
+`billKind=ADJUSTMENT, status=POSTED, sourceType=RECONCILIATION` 且金额
+可正可负——POSTED 债务的产出不只有 run 入口，且正 ADJUSTMENT 是
+**当前 main 已存在的生产路径**，不是未来扩展。因此 E6 自动 APPLY 的
+触发点冻结为**领域事件**"新的正向可支付债务进入 POSTED"，而不是某个
+service 方法名（§9）。实现时必须再全库搜索一遍
+`status: 'POSTED'`/`bill.create` 路径（含未来 correction 入口），
+确保无一漏接；`billKind='REVERSAL'`（负向纠正单）与非正金额
+ADJUSTMENT 恒不触发 APPLY。
 
 ### E. CashierDayClose 是签字现金事实
 
@@ -241,9 +244,19 @@ prepayment_entry_id   uuid NULL              -- → prepayment_ledger_entry
 
 CHECK (source='PAYMENT'    ⟹ payment_id NOT NULL AND prepayment_entry_id IS NULL)
 CHECK (source='PREPAYMENT' ⟹ payment_id IS NULL AND prepayment_entry_id NOT NULL)
-FK (tenant_id, prepayment_entry_id) → prepayment_ledger_entry(tenant_id, id)
+FK (tenant_id, prepayment_entry_id, bill_id)
+   → prepayment_ledger_entry(tenant_id, id, bill_id)   -- 同一条 Bill，见下
 UNIQUE (tenant_id, prepayment_entry_id)   -- 一条 settlement entry 至多一条 alloc
 ```
+
+**billId 一致性由 DB 保证（冻结）**：`prepayment_ledger_entry` 增
+`UNIQUE(tenant_id, id, bill_id)`，`payment_alloc` 用
+`(tenant_id, prepayment_entry_id, bill_id)` 复合 FK 引用它——于是
+`alloc.billId ≡ entry.billId` 在数据库层成立，服务写错目标账单的 bug
+会直接 23503 而非静默错账（MATCH SIMPLE 下两列均非 NULL 才校验，
+PAYMENT 行 entry 为 NULL 不受影响）。ledger 自身的
+`(tenant, settleAccount, bill)` 复合 FK 又保证该账单属于同一结算户，
+资金链闭合。
 
 - **`prepayment_entry_id` 指向产生该 Allocation 的那条 ledger
   entry**（冻结，不是指向 lot 的 TOP_UP）：
@@ -346,6 +359,7 @@ applyAvailablePrepaymentForPostedDebtTx(tx, ctx, settleAccountId)
 |---|---|
 | `BillingRunService.postOneBill` | DRAFT→POSTED 翻转后同事务调用 |
 | `BillService.replaceTx` | REPLACEMENT bill 建为 POSTED 后同事务调用 |
+| `ReconciliationService.createTx`（正 ADJUSTMENT） | `totalAmount > 0` 的 ADJUSTMENT bill 建为 POSTED 后同事务调用；`totalAmount <= 0` 不触发 |
 | 未来任何"正向可支付债务进入 POSTED"的路径 | 必须调用；`billKind='REVERSAL'`（负向纠正单）恒不触发 |
 
 旧欠费 A 50 + B 30、余额 60、新单 C POSTED 100：按冻结序 A 50 → B 10 →
@@ -413,9 +427,21 @@ reason 必填，key=refund:{paymentId}:{topUpId}）
 | REFUND | `refund:{refundPaymentId}:{topUpId}` |
 
 `UNIQUE(tenant_id, idempotency_key)` 让 worker retry / API retry /
-BillingRun retry 撞库即幂等返回（插入撞唯一 → 读已有 entry 返回）。
-HTTP Idempotency-Key 仍在外层（请求级响应重放）；ledger 键是事实级
-兜底。
+BillingRun retry 撞库即幂等。HTTP Idempotency-Key 仍在外层（请求级
+响应重放）；ledger 键是事实级兜底。
+
+**幂等写入实现合同（冻结，E5 踩过的坑）**：禁止"catch 唯一冲突后在同
+一 PostgreSQL 事务内继续查询"——unique violation 会 abort 整个 tx，
+后续 SELECT 也失败。一律用：
+
+```
+INSERT ... ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+RETURNING ...
+  -- 无 RETURNING 行 → SELECT existing（此时无 aborted 态）
+```
+
+或在持有 `settle_account FOR UPDATE` 锁时先 probe 再插（锁内串行，
+probe 可靠）。
 
 ## 13. 权限冻结
 
@@ -424,13 +450,33 @@ HTTP Idempotency-Key 仍在外层（请求级响应重放）；ledger 键是事�
 | TOP_UP（含先清欠） | `payment:write`（既有） |
 | 余额/流水查询 | `payment:read`（既有） |
 | APPLY（系统自动） | SYSTEM，事务内不走用户权限 |
-| 含 TOP_UP 的 Payment 冲正 | 本人 + 当日 + 未 DAY_CLOSED → `payment:write`；否则须 `prepayment:reverse`（新增，唯一新权限码） |
+| 含 TOP_UP 的 Payment 冲正 | 同时满足下方三个"当日错收"条件 → `payment:write`；否则须 `prepayment:reverse`（新增，唯一新权限码） |
 | REFUND | `prepayment:reverse` 恒定 |
 | 删除/修改流水 | 永远无权限（DB REVOKE） |
 
-"当日"沿用 `CashierDayClose` 的 operating-date 语义
-（`received_at::date <= closeDate` 且 `day_close_id IS NULL` 视为未日结）
-——不另造时间口径。
+**"当日错收"冻结为可编码的三元条件**（缺一不可）：
+
+```
+original.cashierId   = ctx.staffId
+original.dayCloseId IS NULL
+original.receivedAt::date = CURRENT_DATE   -- DB 时钟，与 DayClose 同口径
+```
+
+`dayCloseId IS NULL` 单独**不等于**"当日"——昨天漏日结的充值今天仍未
+日结，但已不是当日错收。三条件全过 → `payment:write` 可冲正；任一不
+满足且 Payment 名下含 TOP_UP → 必须 `prepayment:reverse`。
+
+**实现合同**：`/payments/:id/reverse` 的 Guard 不能用单一
+`@Permissions('payment:write')`（会把只持 `prepayment:reverse` 的主管
+拦在 service 外），改为
+
+```
+@AnyPermissions('payment:write', 'prepayment:reverse')
+```
+
+service 内再按上表二次判定：普通现金 Payment 冲正仍要求
+`payment:write`（`prepayment:reverse` 不顺带授予普通冲正权）；含
+TOP_UP 的 Payment 按三元条件分流两码。
 
 ## 14. 锁顺序冻结（真实资金，先定后写）
 
@@ -585,8 +631,12 @@ REPLACEMENT POSTED 后立即走 §9 自动 APPLY——恢复出来的余额可�
    `origin_top_up_id`；REVERSAL 必带 `reversal_of_entry_id+reason`）。
 4. `UNIQUE(tenant_id, idempotency_key)`。
 5. `receipt` 增 `UNIQUE(tenant_id, payment_id)`。
-6. `payment_alloc` source CHECK（§7 两条）+ `prepayment_entry_id` FK +
-   `UNIQUE(tenant_id, prepayment_entry_id)`（1 settlement entry : 1 alloc）。
+6. `payment_alloc` source CHECK（§7 两条）+ `UNIQUE(tenant_id,
+   prepayment_entry_id)`（1 settlement entry : 1 alloc）+
+   复合 FK `(tenant_id, prepayment_entry_id, bill_id)` →
+   `ledger(tenant_id, id, bill_id)`（配套 ledger
+   `UNIQUE(tenant_id, id, bill_id)`）——DB 层强制
+   `alloc.billId ≡ entry.billId`。
 7. Ledger 引用全部 `(tenant_id, settle_account_id, target)` 复合 FK；
    配套 `payment`/`bill` 增 `UNIQUE(tenant_id, settle_account_id, id)`、
    ledger 自身 `UNIQUE(tenant_id, settle_account_id, id)`——同租户且
@@ -628,6 +678,12 @@ REPLACEMENT POSTED 后立即走 §9 自动 APPLY——恢复出来的余额可�
   无 deadlock。
 - REPLACEMENT bill 触发 APPLY：`replaceTx` 产出的正向 POSTED 债务
   立即参与抵扣；REVERSAL-kind bill 不触发。
+- Reconciliation 正 ADJUSTMENT：`totalAmount > 0` → POSTED 同事务
+  APPLY；`totalAmount <= 0` → 不触发（当前 main 已有路径，非扩展）。
+- "当日错收"三条件：本人+未日结+receivedAt=今日 → payment:write 过；
+  昨日未日结的 TOP_UP 单冲正（dayCloseId 仍 NULL）→ 须
+  prepayment:reverse；只有 prepayment:reverse 的主管过 Guard 后普通
+  现金冲正仍 403。
 - 排序 comparator：dueDate NULL 的 202401 老账（key=月末）排在前，
   有 dueDate 的新账按 dueDate；两实现（TOP_UP 清欠 / 自动 APPLY）
   同序。
@@ -640,7 +696,9 @@ REPLACEMENT POSTED 后立即走 §9 自动 APPLY——恢复出来的余额可�
 **DB 级**（ws_app 直连，沿用 remote-schema spec 模式）：ledger
 UPDATE/DELETE/TRUNCATE → 42501；payment_alloc UPDATE/DELETE →
 42501；type CHECK 拒绝矩阵；幂等键唯一；receipt (tenant,payment)
-唯一。
+唯一；PREPAYMENT alloc 指向 billId 不一致的 ledger entry →
+23503（复合 FK）；幂等写入走 `ON CONFLICT DO NOTHING RETURNING`
+回归用例（同事务重放不 abort）。
 
 ## 23. Not in Scope（V1 冻结）
 
