@@ -11,6 +11,7 @@ import { SequenceService } from '../../common/sequence.service.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { lockAccountForUpdate } from '../billing/pricing.js';
+import { PrepaymentService } from '../prepayment/prepayment.service.js';
 
 export const PAYMENT_SELECT = {
   id: true,
@@ -32,7 +33,9 @@ export const PAYMENT_SELECT = {
 export const PAYMENT_ALLOC_SELECT = {
   id: true,
   tenantId: true,
+  source: true,
   paymentId: true,
+  prepaymentEntryId: true,
   billId: true,
   amount: true,
   createdAt: true,
@@ -151,6 +154,7 @@ export class PaymentService {
   constructor(
     private readonly prisma: TenantPrismaService,
     private readonly seq: SequenceService,
+    private readonly prepay: PrepaymentService,
   ) {}
 
   list(
@@ -435,12 +439,20 @@ export class PaymentService {
     const items = lines.filter((i) => i.outstanding > 0n);
     const totalOutstanding =
       lines.reduce((s, i) => s + i.outstanding, 0n) - credit;
+    // E6: the settle account's prepayment balance — the counter needs it
+    // beside the debt view (it auto-consumes on the next posted debt).
+    const prepaymentBalance = await this.prepay.balanceTx(
+      tx,
+      ctx,
+      account.settleAccountId,
+    );
     return {
       waterAccountId: account.id,
       settleAccountId: account.settleAccountId,
       items,
       reversedBillCredit: credit,
       totalOutstanding,
+      prepaymentBalance,
     };
   }
 
@@ -506,6 +518,48 @@ export class PaymentService {
     }
     await this.assertSettleScope(tx, ctx, original.settleAccountId);
 
+    // E6 (domain §10): a REFUND payment is itself a money-out fact —
+    // "undoing a refund" is a fresh top-up, never a reversal.
+    const refundLegs = await this.prepay.ledgerOfPaymentTx(tx, ctx, id, ['REFUND']);
+    if (refundLegs.length) {
+      throw new BadRequestException({
+        code: 'PAYMENT_NOT_REVERSABLE',
+        paymentId: id,
+      });
+    }
+    const topUpLegs = await this.prepay.ledgerOfPaymentTx(tx, ctx, id, ['TOP_UP']);
+
+    // E6 (domain §13): the route guard admits either permission; the
+    // precise requirement is decided on this payment's facts —
+    // 本人当日未日结 → payment:write; otherwise a TOP_UP-containing
+    // reversal requires prepayment:reverse. That perm never grants the
+    // ordinary cash-reversal right: a cash-only payment still demands
+    // payment:write.
+    const perms = (req.user as { perms?: string[] } | undefined)?.perms ?? [];
+    const hasPerm = (c: string) => perms.includes('*') || perms.includes(c);
+    if (topUpLegs.length) {
+      const sameDayRows = await tx.$queryRaw<{ same_day: boolean }[]>`
+        SELECT (received_at::date = CURRENT_DATE) AS same_day
+        FROM payment
+        WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid`;
+      const sameDaySelf =
+        original.cashierId === ctx.staffId &&
+        original.dayCloseId === null &&
+        (sameDayRows[0]?.same_day ?? false);
+      const required = sameDaySelf ? 'payment:write' : 'prepayment:reverse';
+      if (!hasPerm(required)) {
+        throw new ForbiddenException({
+          code: 'PERMISSION_DENIED',
+          required: [required],
+        });
+      }
+    } else if (!hasPerm('payment:write')) {
+      throw new ForbiddenException({
+        code: 'PERMISSION_DENIED',
+        required: ['payment:write'],
+      });
+    }
+
     const origAllocs = await tx.paymentAlloc.findMany({
       where: { tenantId: ctx.tenantId, paymentId: id },
       select: { billId: true, amount: true },
@@ -545,6 +599,20 @@ export class PaymentService {
         throw new ConflictException({
           code: 'PAYMENT_ACCOUNT_CLOSED',
           waterAccountId: closed.id,
+        });
+      }
+    }
+    // E6 lock order (domain §14): payment → water_accounts(sorted) →
+    // settle_account → bills(sorted). The settle row is the prepayment
+    // fund lock — the lot check below MUST run under it so a concurrent
+    // APPLY can't consume a lot after we verified it unspent.
+    await this.prepay.lockSettleAccountForUpdate(tx, ctx, original.settleAccountId);
+    for (const t of topUpLegs) {
+      const remaining = await this.prepay.lotRemainingTx(tx, ctx, t.id);
+      if (remaining < BigInt(t.amount)) {
+        throw new ConflictException({
+          code: 'PREPAYMENT_ALREADY_APPLIED',
+          topUpEntryId: t.id,
         });
       }
     }
@@ -588,6 +656,15 @@ export class PaymentService {
         })),
       });
     }
+    // E6: the TOP_UP leg reverses through the ledger — an append-only
+    // REVERSAL(-topUp.amount) chained via reversal_of_entry_id; the
+    // TOP_UP row itself is never touched.
+    await this.prepay.reverseTopUpsForPaymentTx(
+      tx,
+      ctx,
+      { id: original.id, settleAccountId: original.settleAccountId },
+      reversal.id,
+    );
     // The original's receipt is void — a re-print must fail.
     await tx.receipt.updateMany({
       where: { tenantId: ctx.tenantId, paymentId: id, voidFlag: false },
@@ -665,7 +742,16 @@ export class PaymentService {
       where: { tenantId: ctx.tenantId, paymentId: payment.id },
       select: RECEIPT_SELECT,
     });
-    return { ...payment, allocs, receipt };
+    // E6: the payment's ledger legs (TOP_UP on a top-up payment, REFUND
+    // on a money-out, REVERSAL on a payment reversal) — the receipt
+    // explanation needs debtCollection + topUp attribution.
+    const prepaymentEntries = await this.prepay.ledgerOfPaymentTx(
+      tx,
+      ctx,
+      payment.id,
+      ['TOP_UP', 'REFUND', 'REVERSAL'],
+    );
+    return { ...payment, allocs, receipt, prepaymentEntries };
   }
 
   /** Σ payment_alloc.amount per bill (reversal allocs net negative). */

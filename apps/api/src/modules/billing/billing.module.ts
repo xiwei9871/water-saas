@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { PrepaymentModule } from '../prepayment/prepayment.module.js';
 import { BillController } from './bill.controller.js';
 import { BillService } from './bill.service.js';
 import { BillingFinancePort } from './billing-finance.port.js';
@@ -26,6 +27,7 @@ import { TariffPlanService } from './tariff-plan.service.js';
  * CommonModule.
  */
 @Module({
+  imports: [PrepaymentModule],
   controllers: [
     FeeItemController,
     TariffPlanController,

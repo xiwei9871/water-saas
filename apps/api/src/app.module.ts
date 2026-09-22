@@ -14,6 +14,7 @@ import { IamModule } from './modules/iam/iam.module.js';
 import { IntegrationModule } from './modules/integration/integration.module.js';
 import { MeteringModule } from './modules/metering/metering.module.js';
 import { PaymentModule } from './modules/payment/payment.module.js';
+import { PrepaymentModule } from './modules/prepayment/prepayment.module.js';
 import { RemoteModule } from './modules/remote/remote.module.js';
 import { ReportModule } from './modules/report/report.module.js';
 
@@ -24,6 +25,7 @@ import { ReportModule } from './modules/report/report.module.js';
     CustomerModule,
     MeteringModule,
     RemoteModule,
+    PrepaymentModule,
     BillingModule,
     PaymentModule,
     ReportModule,

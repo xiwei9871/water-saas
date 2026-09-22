@@ -11,11 +11,13 @@ import type { Request } from 'express';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import {
   computeBill,
   feeItemIdMap,
   insertBillItems,
   loadFeeItems,
+  lockAccountForUpdate,
   lockPlanForUpdate,
   ytdBeforeQty,
 } from './pricing.js';
@@ -98,7 +100,10 @@ const CORRECTABLE_STATUSES = new Set(['POSTED', 'PARTIAL_PAID']);
  */
 @Injectable()
 export class BillService {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly prepay: PrepaymentService,
+  ) {}
 
   list(
     ctx: TenantCtx,
@@ -174,6 +179,10 @@ export class BillService {
       });
     }
 
+    // E6 lock order (domain §14): water_account → settle_account →
+    // tariff_plan → bill — the settle row is the prepayment-fund lock.
+    await lockAccountForUpdate(tx, ctx, original.waterAccountId);
+    await this.prepay.lockSettleAccountForUpdate(tx, ctx, original.settleAccountId);
     if (original.tariffPlanId) {
       await lockPlanForUpdate(tx, ctx, original.tariffPlanId);
     }
@@ -181,7 +190,9 @@ export class BillService {
       where: {
         tenantId: ctx.tenantId,
         id,
-        status: { in: [...CORRECTABLE_STATUSES] as BillStatus[] },
+        // PAID is admitted by loadCorrectable only when a PREPAYMENT
+        // leg exists — the guard just fences the flip race.
+        status: { in: [...CORRECTABLE_STATUSES, 'PAID'] as BillStatus[] },
       },
       data: { status: 'REVERSED', updatedBy: ctx.staffId },
     });
@@ -192,6 +203,16 @@ export class BillService {
       });
       throw notReversable(cur?.status ?? 'gone', 'lost guarded transition race');
     }
+
+    // E6 (domain §10/§20): restore every PREPAYMENT APPLY via append-only
+    // REVERSAL(+restore) + mirror allocation(-restore); the cash leg
+    // keeps its own reversedBillCredit → payment-reversal path.
+    await this.prepay.reverseAppliedForBillTx(
+      tx,
+      ctx,
+      id,
+      'bill reversal',
+    );
 
     const items = await tx.billItem.findMany({
       where: { tenantId: ctx.tenantId, billId: id },
@@ -318,12 +339,15 @@ export class BillService {
       throw err;
     }
 
+    // Same frozen lock order as reverseTx: water → settle → plan → bill.
+    await lockAccountForUpdate(tx, ctx, original.waterAccountId);
+    await this.prepay.lockSettleAccountForUpdate(tx, ctx, original.settleAccountId);
     await lockPlanForUpdate(tx, ctx, original.tariffPlanId);
     const flip = await tx.bill.updateMany({
       where: {
         tenantId: ctx.tenantId,
         id,
-        status: { in: [...CORRECTABLE_STATUSES] as BillStatus[] },
+        status: { in: [...CORRECTABLE_STATUSES, 'PAID'] as BillStatus[] },
       },
       data: { status: 'REVERSED', updatedBy: ctx.staffId },
     });
@@ -334,6 +358,15 @@ export class BillService {
       });
       throw notReplaceable(cur?.status ?? 'gone', 'lost guarded transition race');
     }
+
+    // Restore the original's PREPAYMENT APPLY before the REPLACEMENT
+    // re-applies the freed balance below.
+    await this.prepay.reverseAppliedForBillTx(
+      tx,
+      ctx,
+      id,
+      'bill replacement',
+    );
 
     let replacement;
     try {
@@ -373,6 +406,11 @@ export class BillService {
       result.items.map((i) => i.feeItemCode),
     );
     await insertBillItems(tx, ctx, replacement.id, result.items, idMap);
+    // E6 (domain §9): the REPLACEMENT is a new payable POSTED debt —
+    // it consumes prepayment in this same tx.
+    if (replacement.totalAmount > 0n) {
+      await this.prepay.applyForPostedDebtTx(tx, ctx, original.settleAccountId);
+    }
     return this.withItems(tx, ctx, replacement);
   }
 
@@ -390,7 +428,22 @@ export class BillService {
       select: BILL_ITEM_SELECT,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
-    return { ...bill, items };
+    // E6: allocations on the bill with their source attribution — a
+    // PREPAYMENT alloc links the funding ledger entry (APPLY on apply,
+    // REVERSAL-of-APPLY on restore), so the UI can trace balance ⇄ debt.
+    const allocs = await tx.paymentAlloc.findMany({
+      where: { tenantId: ctx.tenantId, billId: bill.id },
+      select: {
+        id: true,
+        source: true,
+        paymentId: true,
+        prepaymentEntryId: true,
+        amount: true,
+        createdAt: true,
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    return { ...bill, items, allocs };
   }
 
   /**
@@ -413,7 +466,16 @@ export class BillService {
       throw reject(bill.status, 'REVERSAL bills cannot be corrected');
     }
     if (!CORRECTABLE_STATUSES.has(bill.status)) {
-      throw reject(bill.status);
+      // E6 (domain §20): a PAID bill is correctable only when a
+      // PREPAYMENT allocation exists — its restore is ledger-internal
+      // (no cash moved), while a pure-cash PAID bill stays sealed
+      // because refunding cash is the payment-reversal flow.
+      if (
+        bill.status !== 'PAID' ||
+        !(await this.prepay.hasPrepaymentAllocsTx(tx, ctx, id))
+      ) {
+        throw reject(bill.status);
+      }
     }
     return bill;
   }
