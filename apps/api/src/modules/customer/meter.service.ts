@@ -6,7 +6,7 @@ import {
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
-import type { TenantCtx } from '../../common/tenant-context.js';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
 
@@ -99,8 +99,8 @@ export class MeterService {
   }
 
   async getById(ctx: TenantCtx, id: string) {
-    const row = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.meter.findFirst({
+    const row = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const r = await tx.meter.findFirst({
         where: { tenantId: ctx.tenantId, id },
         select: {
           ...METER_SELECT,
@@ -119,8 +119,51 @@ export class MeterService {
             orderBy: { installedAt: 'desc' },
           },
         },
-      }),
-    );
+      });
+      if (!r || ctx.scope === 'ALL') return r;
+      // E7 scope fix: the meter registry is a tenant-level asset pool, but
+      // its embedded installation history is customer data — drop rows
+      // whose account has a covering book outside the caller's subtree so
+      // meter detail can't bypass installation scope.
+      const accountIds = [...new Set(r.installations.map((i) => i.waterAccountId))];
+      if (!accountIds.length) return r;
+      const items = await tx.readingPlanItem.findMany({
+        where: { tenantId: ctx.tenantId, waterAccountId: { in: accountIds } },
+        select: { waterAccountId: true, planId: true },
+      });
+      const plans = await tx.readingPlan.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          id: { in: [...new Set(items.map((i) => i.planId))] },
+        },
+        select: { id: true, bookId: true },
+      });
+      const books = await tx.readingBook.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          id: { in: [...new Set(plans.map((p) => p.bookId))] },
+        },
+        select: { id: true, orgUnitId: true },
+      });
+      const bookOrg = new Map(books.map((b) => [b.id, b.orgUnitId]));
+      const planOrg = new Map(
+        plans.map((p) => [p.id, bookOrg.get(p.bookId) ?? null]),
+      );
+      const outOfScope = new Set(
+        items
+          .filter((i) => {
+            const org = planOrg.get(i.planId);
+            return org != null && !orgInScope(ctx, org);
+          })
+          .map((i) => i.waterAccountId),
+      );
+      return {
+        ...r,
+        installations: r.installations.filter(
+          (i) => !outOfScope.has(i.waterAccountId),
+        ),
+      };
+    });
     if (!row) throw new NotFoundException({ code: 'METER_NOT_FOUND' });
     return row;
   }

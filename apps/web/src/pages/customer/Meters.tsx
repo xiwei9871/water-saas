@@ -2,6 +2,7 @@ import {
   EditOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
 import {
@@ -10,6 +11,8 @@ import {
   Button,
   Card,
   DatePicker,
+  Descriptions,
+  Drawer,
   Form,
   Input,
   Modal,
@@ -26,8 +29,10 @@ import type {
   InstallReason,
   InstallationStatus,
   Meter,
+  MeterDetail,
   MeterInstallation,
   MeterStatus,
+  ReplaceResult,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -85,8 +90,20 @@ interface RemoveFormValues {
   removedAt?: dayjs.Dayjs;
 }
 
+interface ReplaceFormValues {
+  newMeterId: string;
+  oldFinalReading: string;
+  newInitialReading: string;
+  replacedAt?: dayjs.Dayjs;
+  reason?: 'REPLACE' | 'FAULT' | 'PERIODIC_CHECK';
+}
+
 const REASON_OPTIONS = (
   ['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
+).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }));
+
+const REPLACE_REASON_OPTIONS = (
+  ['REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
 ).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }));
 
 /** 水表档案：设备台账（含受限状态流转）+ 装拆记录（装表/拆表）。 */
@@ -121,9 +138,16 @@ export default function Meters() {
 
   const [installOpen, setInstallOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<MeterInstallation | null>(null);
+  const [replaceTarget, setReplaceTarget] = useState<MeterInstallation | null>(null);
   const [installForm] = Form.useForm<InstallFormValues>();
   const [removeForm] = Form.useForm<RemoveFormValues>();
+  const [replaceForm] = Form.useForm<ReplaceFormValues>();
   const installCustomerId = Form.useWatch('customerId', installForm);
+
+  // ---- 水表详情抽屉（台账对象中心视图：档案 + 安装史） ----
+  const [detailMeterId, setDetailMeterId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<MeterDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -306,6 +330,59 @@ export default function Meters() {
     }
   };
 
+  /**
+   * 换表 — 单事务原子操作：旧表止码与新表始码是两块不同物理表盘，
+   * 两个读数完全独立（服务端不会默认/强制相等）。
+   */
+  const submitReplace = async () => {
+    let values: ReplaceFormValues;
+    try {
+      values = await replaceForm.validateFields();
+    } catch {
+      return;
+    }
+    if (!replaceTarget) return;
+    setSaving(true);
+    try {
+      await api.post<ReplaceResult>(
+        `/meter-installations/${replaceTarget.id}/replace`,
+        cleanBody({
+          newMeterId: values.newMeterId,
+          oldFinalReading: values.oldFinalReading,
+          newInitialReading: values.newInitialReading,
+          replacedAt: values.replacedAt?.format('YYYY-MM-DD'),
+          reason: values.reason,
+        }),
+        { headers: { 'Idempotency-Key': idemKey } },
+      );
+      message.success('换表完成');
+      setReplaceTarget(null);
+      await Promise.all([load(page, pageSize), loadInstallations(instPage, instPageSize)]);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openDetail = useCallback(
+    async (meterId: string) => {
+      setDetailMeterId(meterId);
+      setDetail(null);
+      setDetailLoading(true);
+      try {
+        const res = await api.get<MeterDetail>(`/meters/${meterId}`);
+        setDetail(res.data);
+      } catch (err) {
+        message.error(apiErrorText(err));
+        setDetailMeterId(null);
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [message],
+  );
+
   const meterColumns: ColumnsType<Meter> = [
     { title: '表号', dataIndex: 'meterNo', key: 'meterNo', width: 150 },
     {
@@ -376,6 +453,9 @@ export default function Meters() {
           >
             装拆记录
           </Button>
+          <Button size="small" onClick={() => void openDetail(record.id)}>
+            详情
+          </Button>
         </Space>
       ),
     },
@@ -440,20 +520,34 @@ export default function Meters() {
           {
             title: '操作',
             key: 'actions',
-            width: 90,
+            width: 150,
             render: (_: unknown, record: MeterInstallation) =>
               record.status === 'ACTIVE' ? (
-                <Button
-                  size="small"
-                  danger
-                  onClick={() => {
-                    removeForm.resetFields();
-                    setIdemKey(newIdemKey());
-                    setRemoveTarget(record);
-                  }}
-                >
-                  拆除
-                </Button>
+                <Space size={4}>
+                  <Button
+                    size="small"
+                    icon={<SwapOutlined />}
+                    onClick={() => {
+                      replaceForm.resetFields();
+                      replaceForm.setFieldValue('reason', 'REPLACE');
+                      setIdemKey(newIdemKey());
+                      setReplaceTarget(record);
+                    }}
+                  >
+                    更换
+                  </Button>
+                  <Button
+                    size="small"
+                    danger
+                    onClick={() => {
+                      removeForm.resetFields();
+                      setIdemKey(newIdemKey());
+                      setRemoveTarget(record);
+                    }}
+                  >
+                    拆除
+                  </Button>
+                </Space>
               ) : null,
           } satisfies ColumnsType<MeterInstallation>[number],
         ]
@@ -756,6 +850,150 @@ export default function Meters() {
           </Form.Item>
         </Form>
       </Modal>
+
+      {/* 换表 — 原子操作：旧表止码 + 新表始码各自独立填写 */}
+      <Modal
+        open={replaceTarget !== null}
+        title={
+          replaceTarget
+            ? `换表 — ${replaceTarget.meter.meterNo}（水表户 ${replaceTarget.waterAccount.accountNo}）`
+            : ''
+        }
+        okText="确认换表"
+        cancelText="取消"
+        confirmLoading={saving}
+        onOk={() => void submitReplace()}
+        onCancel={() => setReplaceTarget(null)}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="换表为单事务操作：旧表按止码拆除、新表按始码挂装，两块物理表盘读数互相独立。"
+          description={
+            replaceTarget
+              ? `旧表装表始码 ${replaceTarget.initialReading}；远传设备绑定不会自动迁移，新表需重新绑定。`
+              : undefined
+          }
+        />
+        <Form form={replaceForm} layout="vertical">
+          <Form.Item
+            name="newMeterId"
+            label="新表（仅可用表）"
+            rules={[{ required: true, message: '请选择新表' }]}
+          >
+            <MeterSelect status="AVAILABLE" />
+          </Form.Item>
+          <Form.Item
+            name="oldFinalReading"
+            label="旧表止码"
+            rules={[{ required: true, message: '请输入旧表止码' }, DECIMAL_RULE]}
+          >
+            <Input placeholder="旧表机械字轮读数" />
+          </Form.Item>
+          <Form.Item
+            name="newInitialReading"
+            label="新表始码"
+            rules={[{ required: true, message: '请输入新表始码' }, DECIMAL_RULE]}
+            extra="新表自身表盘读数，通常不等于旧表止码"
+          >
+            <Input placeholder="如 0" />
+          </Form.Item>
+          <Form.Item name="replacedAt" label="换表日期">
+            <DatePicker style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="reason" label="换表原因">
+            <Select allowClear options={REPLACE_REASON_OPTIONS} placeholder="默认换表" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 水表详情抽屉：档案字段 + 安装史（按调用者数据范围过滤） */}
+      <Drawer
+        open={detailMeterId !== null}
+        title={detail ? `水表详情 — ${detail.meterNo}` : '水表详情'}
+        width={720}
+        onClose={() => setDetailMeterId(null)}
+        loading={detailLoading}
+      >
+        {detail && (
+          <>
+            <Descriptions column={2} size="small" bordered>
+              <Descriptions.Item label="表号">{detail.meterNo}</Descriptions.Item>
+              <Descriptions.Item label="状态">
+                <MeterStatusTag status={detail.status} />
+              </Descriptions.Item>
+              <Descriptions.Item label="出厂编号">
+                {detail.serialNo ?? '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="条码">
+                {detail.barcode ?? '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="品牌/型号">
+                {[detail.brand, detail.model].filter(Boolean).join(' ') || '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="口径">
+                {detail.caliber ?? '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="最大读数">
+                {detail.maxDial ?? '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="前任表">
+                {detail.parentMeterId ?? '—'}
+              </Descriptions.Item>
+            </Descriptions>
+            <Card
+              size="small"
+              title="安装历史"
+              style={{ marginTop: 16 }}
+            >
+              <Table
+                rowKey="id"
+                size="small"
+                dataSource={detail.installations}
+                pagination={false}
+                columns={[
+                  {
+                    title: '水表户',
+                    key: 'acct',
+                    render: (_: unknown, r: MeterDetail['installations'][number]) =>
+                      r.waterAccount.accountNo,
+                  },
+                  {
+                    title: '装表时间',
+                    dataIndex: 'installedAt',
+                    render: (v: string) => fmtDate(v),
+                  },
+                  {
+                    title: '拆表时间',
+                    dataIndex: 'removedAt',
+                    render: (v: string | null) => fmtDate(v),
+                  },
+                  { title: '始码', dataIndex: 'initialReading' },
+                  {
+                    title: '止码',
+                    dataIndex: 'finalReading',
+                    render: (v: string | null) => v ?? '—',
+                  },
+                  {
+                    title: '原因',
+                    dataIndex: 'reason',
+                    render: (r: InstallReason) => INSTALL_REASON_LABELS[r],
+                  },
+                  {
+                    title: '状态',
+                    dataIndex: 'status',
+                    render: (s: InstallationStatus) => (
+                      <InstallationStatusTag status={s} />
+                    ),
+                  },
+                ]}
+              />
+            </Card>
+          </>
+        )}
+      </Drawer>
     </>
   );
 }

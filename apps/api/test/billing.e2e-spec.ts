@@ -676,6 +676,18 @@ describe('getOutstanding → close-account', () => {
     });
 
     await owner.query(`UPDATE bill SET status = 'PAID' WHERE id = $1`, [bill['A1-06']]);
+    // E7 close guard: ACTIVE installations block close — detach them first.
+    await owner.query(
+      `UPDATE meter m SET status='AVAILABLE' FROM meter_installation mi
+       WHERE mi.tenant_id=$1 AND mi.water_account_id=$2 AND mi.meter_id=m.id`,
+      [T10A, acct['A1']],
+    );
+    await owner.query(
+      `UPDATE meter_installation SET status='REMOVED', final_reading=initial_reading,
+             removed_at=now()
+       WHERE tenant_id=$1 AND water_account_id=$2 AND status='ACTIVE'`,
+      [T10A, acct['A1']],
+    );
     const ok = await post(`/water-accounts/${acct['A1']}/close`, {}).expect(201);
     expect(ok.body.status).toBe('CLOSED');
   });
@@ -779,6 +791,18 @@ describe('review fixes: org scope, close-vs-post, input bounds', () => {
     expect(blocked.body).toMatchObject({ code: 'ACCOUNT_OUTSTANDING_BALANCE' });
 
     await post(`/billing-runs/${r1.body.id}/discard`, {}).expect(201);
+    // E7 close guard: detach the onboarded ACTIVE installation first.
+    await owner.query(
+      `UPDATE meter m SET status='AVAILABLE' FROM meter_installation mi
+       WHERE mi.tenant_id=$1 AND mi.water_account_id=$2 AND mi.meter_id=m.id`,
+      [T10A, acct['A4']],
+    );
+    await owner.query(
+      `UPDATE meter_installation SET status='REMOVED', final_reading=initial_reading,
+             removed_at=now()
+       WHERE tenant_id=$1 AND water_account_id=$2 AND status='ACTIVE'`,
+      [T10A, acct['A4']],
+    );
     const closed = await post(`/water-accounts/${acct['A4']}/close`, {}).expect(201);
     expect(closed.body.status).toBe('CLOSED');
 

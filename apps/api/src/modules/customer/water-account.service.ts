@@ -642,6 +642,18 @@ export class WaterAccountService {
     body: EventBody,
     req: Request,
   ) {
+    // E7 C1: lock the account row FOR UPDATE *before* reading state —
+    // install/replace take the same lock and re-check inside it, so close
+    // and a concurrent meter-mount are mutually exclusive. All status
+    // judgments below run on the locked row, not a pre-lock snapshot
+    // (a racing transition must not leak into auditBefore/oldValue).
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM water_account
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
+      FOR UPDATE`;
+    if (!locked.length) {
+      throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    }
     const existing = await this.loadAccount(tx, ctx, id);
     const allowed: Record<string, AccountStatus[]> = {
       SUSPENDED: ['NORMAL'], // suspend: NORMAL → SUSPENDED
@@ -653,6 +665,17 @@ export class WaterAccountService {
     }
     req.auditBefore = existing;
 
+    if (to === 'CLOSED') {
+      const active = await tx.meterInstallation.count({
+        where: { tenantId: ctx.tenantId, waterAccountId: id, status: 'ACTIVE' },
+      });
+      if (active > 0) {
+        throw new ConflictException({
+          code: 'ACCOUNT_HAS_ACTIVE_INSTALLATION',
+          activeInstallations: active,
+        });
+      }
+    }
     // Guarded transition: the allowed-from predicate is part of the UPDATE so
     // a concurrent transition loses the race (count=0) instead of double-
     // writing events (e.g. two SUSPEND records).
