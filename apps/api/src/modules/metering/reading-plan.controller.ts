@@ -62,10 +62,12 @@ export class ReadingPlanController {
     @Query('bookId') bookId?: string,
     @Query('period') period?: string,
     @Query('status') status?: string,
+    @Query('waterAccountId') waterAccountId?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
     if (bookId !== undefined) assertUuid(bookId, 'bookId');
+    if (waterAccountId !== undefined) assertUuid(waterAccountId, 'waterAccountId');
     if (period !== undefined) assertPeriod(period);
     if (status !== undefined && !PLAN_STATUSES.has(status)) {
       throw new BadRequestException({ code: 'PLAN_STATUS_INVALID' });
@@ -75,6 +77,7 @@ export class ReadingPlanController {
       bookId,
       period,
       status: status as 'OPEN' | 'IN_PROGRESS' | 'DONE' | 'CLOSED' | undefined,
+      waterAccountId,
     });
   }
 
@@ -91,6 +94,7 @@ export class ReadingPlanController {
   items(
     @Param('id') id: string,
     @Query('status') status?: string,
+    @Query('waterAccountId') waterAccountId?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {

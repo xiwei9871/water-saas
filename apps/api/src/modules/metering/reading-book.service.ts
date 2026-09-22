@@ -16,6 +16,7 @@ import {
   type MeterChannel,
 } from '../../common/reading-cadence.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import { assertAccountScopeTx } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
 
@@ -93,22 +94,50 @@ export class ReadingBookService {
 
   list(
     ctx: TenantCtx,
-    q: { take: number; skip: number; name?: string; bookNo?: string; orgUnitId?: string },
+    q: {
+      take: number;
+      skip: number;
+      name?: string;
+      bookNo?: string;
+      orgUnitId?: string;
+      waterAccountId?: string;
+    },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.readingBook.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8: a scoped caller sees only books anchored to their org subtree —
+      // the book IS the org anchor. Explicit waterAccountId (360 books
+      // card) asserts account scope first, then matches membership.
+      if (q.waterAccountId) {
+        await assertAccountScopeTx(tx, ctx, q.waterAccountId);
+      }
+      if (q.orgUnitId && ctx.scope !== 'ALL' && !orgInScope(ctx, q.orgUnitId)) {
+        throw outOfScope();
+      }
+      // book_meter has no ORM relation (composite-FK managed manually) —
+      // resolve membership bookIds in a second query.
+      const memberBookIds = q.waterAccountId
+        ? (
+            await tx.bookMeter.findMany({
+              where: { tenantId: ctx.tenantId, waterAccountId: q.waterAccountId },
+              select: { bookId: true },
+            })
+          ).map((m) => m.bookId)
+        : undefined;
+      return tx.readingBook.findMany({
         where: {
           tenantId: ctx.tenantId,
           bookNo: q.bookNo,
-          orgUnitId: q.orgUnitId,
+          orgUnitId:
+            ctx.scope === 'ALL' ? q.orgUnitId : { in: ctx.orgScope },
           name: q.name ? { contains: q.name } : undefined,
+          ...(memberBookIds ? { id: { in: memberBookIds } } : {}),
         },
         select: READING_BOOK_SELECT,
         orderBy: { bookNo: 'asc' },
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+    });
   }
 
   /** Members of a book ordered by seq_no, hydrated with the account summary. */
@@ -140,6 +169,9 @@ export class ReadingBookService {
         select: READING_BOOK_SELECT,
       });
       if (!book) throw new NotFoundException({ code: 'BOOK_NOT_FOUND' });
+      // E8: book detail is org-anchored — out-of-scope org → 403. The
+      // member list is customer data but the book itself already gates.
+      if (!orgInScope(ctx, book.orgUnitId)) throw outOfScope();
       const members = await this.membersOf(tx, ctx, id);
       return { ...book, members };
     });

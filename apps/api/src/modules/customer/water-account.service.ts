@@ -11,6 +11,12 @@ import { isValidPeriod } from '../../common/reading-cadence.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import {
+  assertAccountScopeTx,
+  assertCustomerReadScopeTx,
+  assertSettleScopeTx,
+  outOfScopeAccountIds,
+} from '../../common/account-scope.js';
+import {
   assertUsageCategory,
   USAGE_CATEGORIES,
 } from '../../common/usage-categories.js';
@@ -113,6 +119,7 @@ export interface OnboardBody {
 
 /** Stable system-customer key for monitoring accounts (漏损分析计量点). */
 const MONITORING_SYSTEM_KEY = 'MONITORING_INTERNAL';
+const MONITORING_SETTLE_NO = 'SYS-MONITORING';
 
 /** 'YYYYMM' → period of a Date (UTC, matching settlement period semantics). */
 const periodOf = (d: Date) =>
@@ -149,21 +156,27 @@ export class WaterAccountService {
       accountNo?: string;
     },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.waterAccount.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8 read-scope: coverage exclusion applies to every filter shape —
+      // an explicit customerId/settleAccountId/accountNo lookup must not
+      // resurrect an out-of-scope account.
+      const hidden =
+        ctx.scope === 'ALL' ? [] : await outOfScopeAccountIds(tx, ctx);
+      return tx.waterAccount.findMany({
         where: {
           tenantId: ctx.tenantId,
           customerId: q.customerId,
           settleAccountId: q.settleAccountId,
           status: q.status,
           accountNo: q.accountNo,
+          ...(hidden.length ? { id: { notIn: hidden } } : {}),
         },
         select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
         orderBy: { accountNo: 'asc' },
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+    });
   }
 
   usageCategories(_ctx: TenantCtx) {
@@ -183,6 +196,7 @@ export class WaterAccountService {
         },
       });
       if (!account) return null;
+      await assertAccountScopeTx(tx, ctx, id);
       // 当前人数 = 生效账期 ≤ 当前账期的最新申报 —— 未来生效的申报只在
       // 历史列表可见，不冒充当前值。display-only；计费走结算快照。
       const now = new Date();
@@ -200,6 +214,78 @@ export class WaterAccountService {
     });
     if (!row) throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     return row;
+  }
+
+  /**
+   * GET /water-accounts/:id/360 — E8 D1 frozen: the core summary returns
+   * ONLY customer:read-domain data. Cross-domain cards (readings, books,
+   * settlement, bills, outstanding, prepayment, payment activity) are
+   * fetched by the UI through each domain's own endpoint + permission —
+   * this endpoint must never become an RBAC bypass.
+   */
+  async summary360(ctx: TenantCtx, id: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const account = await tx.waterAccount.findFirst({
+        where: { tenantId: ctx.tenantId, id },
+        select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
+      });
+      if (!account) {
+        throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+      }
+      await assertAccountScopeTx(tx, ctx, id);
+      const now = new Date();
+      const currentPeriod = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const profile = await tx.waterAccountHouseholdProfile.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: id,
+          effectiveFromPeriod: { lte: currentPeriod },
+        },
+        orderBy: { effectiveFromPeriod: 'desc' },
+        select: { householdSize: true },
+      });
+      // Current meter resolution = E7 frozen rule (shared with the
+      // meter-reading resolver): ACTIVE ORDER BY installed_at DESC, id.
+      const actives = await tx.meterInstallation.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: id,
+          status: 'ACTIVE',
+        },
+        select: INSTALLATION_TIMELINE.meterInstallations.select,
+        orderBy: [{ installedAt: 'desc' }, { id: 'desc' }],
+      });
+      // Lifecycle-derived warnings only — financial/metering warnings are
+      // derived by the UI from each domain's own (permission-gated) data.
+      const warnings: string[] = [];
+      if (actives.length === 0 && account.status !== 'CLOSED') {
+        warnings.push('NO_ACTIVE_METER');
+      }
+      if (actives.length > 1) warnings.push('MULTI_ACTIVE_METER');
+      return {
+        account: { ...account, householdSize: profile?.householdSize ?? null },
+        currentInstallation: actives[0] ?? null,
+        activeInstallationCount: actives.length,
+        warnings,
+      };
+    });
+  }
+
+  /**
+   * GET /water-accounts/:id/events — account lifecycle timeline
+   * (TRANSFER/SUSPEND/RESUME/CLOSE, append-only). Paginated; scope via
+   * loadAccount like every other account path.
+   */
+  listEvents(ctx: TenantCtx, id: string, q: { take: number; skip: number }) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      await this.loadAccount(tx, ctx, id);
+      return tx.accountEvent.findMany({
+        where: { tenantId: ctx.tenantId, waterAccountId: id },
+        orderBy: [{ effectiveDate: 'desc' }, { createdAt: 'desc' }],
+        take: q.take,
+        skip: q.skip,
+      });
+    });
   }
 
   private async writeEvent(
@@ -228,6 +314,9 @@ export class WaterAccountService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!account) throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    // E8: every account write/read path funnels through this loader —
+    // out-of-scope callers get 403 before any mutation or read.
+    await assertAccountScopeTx(tx, ctx, id);
     return account;
   }
 
@@ -247,6 +336,20 @@ export class WaterAccountService {
       where: { tenantId: ctx.tenantId, id: body.settleAccountId },
     });
     if (!settle) throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+    this.assertSystemPrincipalPair(
+      body.usageCategory === 'MONITORING',
+      customer.systemKey === MONITORING_SYSTEM_KEY,
+      settle.settleNo === MONITORING_SETTLE_NO,
+    );
+    if (body.usageCategory !== 'MONITORING') {
+      // E8 P1: binding an EXISTING customer/settle is a target-reference —
+      // the caller must be able to read that customer (D2 rule) and the
+      // settle must satisfy the strict E6 scope. The system pair skips
+      // this intentionally: it is internal plumbing for MONITORING
+      // accounts, never operator data, and must not depend on org scope.
+      await assertCustomerReadScopeTx(tx, ctx, body.customerId);
+      await assertSettleScopeTx(tx, ctx, body.settleAccountId);
+    }
     const accountNo =
       body.accountNo?.trim() ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'account_no', 'A', ctx.staffId));
@@ -269,6 +372,27 @@ export class WaterAccountService {
         select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
       }),
     );
+  }
+
+  /**
+   * E8 RC2: the monitoring system principal is a CLOSED pair —
+   * customer.systemKey=MONITORING_INTERNAL + settle.settleNo=SYS-MONITORING
+   * may only appear TOGETHER and only on MONITORING accounts. A normal
+   * account bound to either half (or a MONITORING account without the
+   * complete pair) is an invalid business binding → 400, not 403: this is
+   * not an org-scope judgement.
+   */
+  private assertSystemPrincipalPair(
+    isMonitoringAccount: boolean,
+    isSystemCustomer: boolean,
+    isSystemSettle: boolean,
+  ) {
+    const invalid = isMonitoringAccount
+      ? !(isSystemCustomer && isSystemSettle)
+      : isSystemCustomer || isSystemSettle;
+    if (invalid) {
+      throw new BadRequestException({ code: 'SYSTEM_PRINCIPAL_NOT_ALLOWED' });
+    }
   }
 
   /**
@@ -306,13 +430,13 @@ export class WaterAccountService {
       }
     }
     let settle = await tx.settleAccount.findFirst({
-      where: { tenantId: ctx.tenantId, settleNo: 'SYS-MONITORING' },
+      where: { tenantId: ctx.tenantId, settleNo: MONITORING_SETTLE_NO },
       select: SETTLE_ACCOUNT_SELECT,
     });
     if (!settle) {
       try {
         settle = await this.settles.createTx(tx, ctx, {
-          settleNo: 'SYS-MONITORING',
+          settleNo: MONITORING_SETTLE_NO,
           name: '本公司·监控表',
         });
       } catch (e) {
@@ -322,7 +446,7 @@ export class WaterAccountService {
           throw e;
         }
         settle = await tx.settleAccount.findFirstOrThrow({
-          where: { tenantId: ctx.tenantId, settleNo: 'SYS-MONITORING' },
+          where: { tenantId: ctx.tenantId, settleNo: MONITORING_SETTLE_NO },
           select: SETTLE_ACCOUNT_SELECT,
         });
       }
@@ -414,6 +538,7 @@ export class WaterAccountService {
     if (!existing) {
       throw new NotFoundException({ code: 'HOUSEHOLD_PROFILE_NOT_FOUND' });
     }
+    await assertAccountScopeTx(tx, ctx, waterAccountId);
     if (
       body.householdSize === undefined ||
       !Number.isInteger(body.householdSize) ||
@@ -557,6 +682,24 @@ export class WaterAccountService {
     if (existing.status === 'CLOSED') throw invalidTransition('CLOSED', 'PATCH');
     if (body.usageCategory !== undefined) {
       assertUsageCategory(body.usageCategory);
+      // E8 RC3: category change must not break the closed system-principal
+      // pair — the account keeps its customer/settle, so the POST-PATCH
+      // category is checked against the CURRENT pair.
+      const [customer, settle] = await Promise.all([
+        tx.customer.findFirst({
+          where: { tenantId: ctx.tenantId, id: existing.customerId },
+          select: { systemKey: true },
+        }),
+        tx.settleAccount.findFirst({
+          where: { tenantId: ctx.tenantId, id: existing.settleAccountId },
+          select: { settleNo: true },
+        }),
+      ]);
+      this.assertSystemPrincipalPair(
+        body.usageCategory === 'MONITORING',
+        customer?.systemKey === MONITORING_SYSTEM_KEY,
+        settle?.settleNo === MONITORING_SETTLE_NO,
+      );
     }
     req.auditBefore = existing;
     return tx.waterAccount.update({
@@ -587,17 +730,52 @@ export class WaterAccountService {
   ) {
     const existing = await this.loadAccount(tx, ctx, id);
     if (existing.status === 'CLOSED') throw invalidTransition('CLOSED', 'TRANSFER');
+    // Resolve the POST-TRANSFER principal flags — the pair rule applies
+    // to the resulting (customer, settle) combination, not only to the
+    // fields being changed.
+    let targetSystemCustomer: boolean;
     if (body.customerId !== undefined) {
       const c = await tx.customer.findFirst({
         where: { tenantId: ctx.tenantId, id: body.customerId },
       });
       if (!c) throw new BadRequestException({ code: 'CUSTOMER_NOT_FOUND' });
+      targetSystemCustomer = c.systemKey === MONITORING_SYSTEM_KEY;
+    } else {
+      const c = await tx.customer.findFirst({
+        where: { tenantId: ctx.tenantId, id: existing.customerId },
+        select: { systemKey: true },
+      });
+      targetSystemCustomer = c?.systemKey === MONITORING_SYSTEM_KEY;
     }
+    let targetSystemSettle: boolean;
     if (body.settleAccountId !== undefined) {
       const s = await tx.settleAccount.findFirst({
         where: { tenantId: ctx.tenantId, id: body.settleAccountId },
       });
       if (!s) throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+      targetSystemSettle = s.settleNo === MONITORING_SETTLE_NO;
+    } else {
+      const s = await tx.settleAccount.findFirst({
+        where: { tenantId: ctx.tenantId, id: existing.settleAccountId },
+        select: { settleNo: true },
+      });
+      targetSystemSettle = s?.settleNo === MONITORING_SETTLE_NO;
+    }
+    this.assertSystemPrincipalPair(
+      existing.usageCategory === 'MONITORING',
+      targetSystemCustomer,
+      targetSystemSettle,
+    );
+    if (existing.usageCategory !== 'MONITORING') {
+      // E8 P1: target reference scope — source-account scope (loadAccount
+      // above) does NOT license pointing the account at a customer/settle
+      // the caller can't read.
+      if (body.customerId !== undefined) {
+        await assertCustomerReadScopeTx(tx, ctx, body.customerId);
+      }
+      if (body.settleAccountId !== undefined) {
+        await assertSettleScopeTx(tx, ctx, body.settleAccountId);
+      }
     }
     req.auditBefore = existing;
 

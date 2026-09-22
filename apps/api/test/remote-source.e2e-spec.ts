@@ -263,7 +263,9 @@ describe('remote-source create validation', () => {
 describe('remote-source permissions', () => {
   it('metering:read lists + gets; list does not leak across tenants', async () => {
     const list = await request(app.getHttpServer())
-      .get('/remote-sources')
+      // ?q= keeps the assertion deterministic — the test DB accumulates
+      // sources across runs and the default page no longer holds all rows.
+      .get(`/remote-sources?q=SRC-${RUN}`)
       .set(auth(viewerToken))
       .expect(200);
     expect(list.body.some((s: { id: string }) => s.id === sourceId)).toBe(true);

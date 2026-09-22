@@ -9,6 +9,7 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { isBookDue, type BookCadence } from '../../common/reading-cadence.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import { assertAccountScopeTx } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
 export const READING_PLAN_SELECT = {
@@ -69,31 +70,79 @@ export class ReadingPlanService {
 
   list(
     ctx: TenantCtx,
-    q: { take: number; skip: number; bookId?: string; period?: string; status?: PlanStatus },
+    q: {
+      take: number;
+      skip: number;
+      bookId?: string;
+      period?: string;
+      status?: PlanStatus;
+      waterAccountId?: string;
+    },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.readingPlan.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8: scoped callers see only plans whose book's org is in their
+      // subtree. Explicit waterAccountId (360 currentPlanItems) asserts
+      // account scope, then matches plans containing that account's item —
+      // the item comes back embedded as `myItem`.
+      if (q.waterAccountId) {
+        await assertAccountScopeTx(tx, ctx, q.waterAccountId);
+      }
+      // reading_plan→reading_book has no ORM relation either — scope via
+      // an explicit in-scope bookId list.
+      const scopedBookIds =
+        ctx.scope === 'ALL'
+          ? undefined
+          : (
+              await tx.readingBook.findMany({
+                where: { tenantId: ctx.tenantId, orgUnitId: { in: ctx.orgScope } },
+                select: { id: true },
+              })
+            ).map((b) => b.id);
+      const rows = await tx.readingPlan.findMany({
         where: {
           tenantId: ctx.tenantId,
-          bookId: q.bookId,
+          bookId: q.bookId ?? (scopedBookIds ? { in: scopedBookIds } : undefined),
           period: q.period,
           status: q.status,
+          ...(q.waterAccountId
+            ? { items: { some: { waterAccountId: q.waterAccountId } } }
+            : {}),
         },
-        select: READING_PLAN_SELECT,
+        select: {
+          ...READING_PLAN_SELECT,
+          ...(q.waterAccountId
+            ? {
+                items: {
+                  where: { waterAccountId: q.waterAccountId },
+                  select: PLAN_ITEM_SELECT,
+                },
+              }
+            : {}),
+        },
         orderBy: [{ period: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+      return rows.map((r) => {
+        const { items, ...plan } = r as typeof r & { items?: unknown[] };
+        return { ...plan, ...(items ? { myItem: items[0] ?? null } : {}) };
+      });
+    });
   }
 
   async getById(ctx: TenantCtx, id: string) {
-    const row = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.readingPlan.findFirst({
+    const row = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const plan = await tx.readingPlan.findFirst({
         where: { tenantId: ctx.tenantId, id },
-        select: { ...READING_PLAN_SELECT, items: { select: PLAN_ITEM_SELECT, orderBy: { seqNo: 'asc' } } },
-      }),
-    );
+        select: {
+          ...READING_PLAN_SELECT,
+          items: { select: PLAN_ITEM_SELECT, orderBy: { seqNo: 'asc' } },
+        },
+      });
+      if (!plan) return null;
+      await this.assertPlanBookInScope(tx, ctx, plan.bookId);
+      return plan;
+    });
     if (!row) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
     return row;
   }
@@ -107,9 +156,10 @@ export class ReadingPlanService {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const plan = await tx.readingPlan.findFirst({
         where: { tenantId: ctx.tenantId, id: planId },
-        select: { id: true },
+        select: { id: true, bookId: true },
       });
       if (!plan) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
+      await this.assertPlanBookInScope(tx, ctx, plan.bookId);
       return tx.readingPlanItem.findMany({
         where: { tenantId: ctx.tenantId, planId, status: q.status },
         select: PLAN_ITEM_SELECT,
@@ -129,9 +179,10 @@ export class ReadingPlanService {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const plan = await tx.readingPlan.findFirst({
         where: { tenantId: ctx.tenantId, id: planId },
-        select: { id: true, status: true },
+        select: { id: true, status: true, bookId: true },
       });
       if (!plan) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
+      await this.assertPlanBookInScope(tx, ctx, plan.bookId);
       const rows = await tx.readingPlanItem.groupBy({
         by: ['status'],
         where: { tenantId: ctx.tenantId, planId },

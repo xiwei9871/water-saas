@@ -8,6 +8,10 @@ import {
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import {
+  assertAccountScopeTx,
+  outOfScopeAccountIds,
+} from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
 export const METER_READING_SELECT = {
@@ -187,6 +191,7 @@ export class MeterReadingService {
       skip: number;
       planItemId?: string;
       installationId?: string;
+      waterAccountId?: string;
       period?: string;
       resultType?: ReadResultType;
       qcStatus?: QcStatus;
@@ -194,17 +199,36 @@ export class MeterReadingService {
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8 D5: explicit waterAccountId → assert + strict equality via the
+      // installation join; unfiltered scoped lists must exclude readings
+      // on out-of-scope accounts (every reading anchors via installation).
+      if (q.waterAccountId) {
+        await assertAccountScopeTx(tx, ctx, q.waterAccountId);
+      }
+      const hidden =
+        !q.waterAccountId && ctx.scope !== 'ALL'
+          ? await outOfScopeAccountIds(tx, ctx)
+          : [];
+      const accountFilter = q.waterAccountId
+        ? { waterAccountId: q.waterAccountId }
+        : hidden.length
+          ? { waterAccountId: { notIn: hidden } }
+          : {};
       const rows = await tx.meterReading.findMany({
         where: {
           tenantId: ctx.tenantId,
           planItemId: q.planItemId,
           installationId: q.installationId,
+          installation: Object.keys(accountFilter).length
+            ? accountFilter
+            : undefined,
           period: q.period,
           resultType: q.resultType,
           qcStatus: q.qcStatus,
           ...(q.q
             ? {
                 installation: {
+                  ...accountFilter,
                   waterAccount: {
                     tenantId: ctx.tenantId,
                     OR: [
@@ -240,9 +264,26 @@ export class MeterReadingService {
     const row = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const found = await tx.meterReading.findFirst({
         where: { tenantId: ctx.tenantId, id },
-        select: READING_DISPLAY_SELECT,
+        select: {
+          ...READING_DISPLAY_SELECT,
+          installation: {
+            select: {
+              waterAccountId: true,
+              waterAccount: {
+                select: {
+                  accountNo: true,
+                  addr: true,
+                  customer: { select: { name: true } },
+                },
+              },
+              meter: { select: { meterNo: true } },
+            },
+          },
+        },
       });
       if (!found) throw new NotFoundException({ code: 'READING_NOT_FOUND' });
+      // E8: reading detail is customer data via its installation anchor.
+      await assertAccountScopeTx(tx, ctx, found.installation.waterAccountId);
       return (await this.attachSupersededBy(tx, ctx, await this.displayRows(tx, ctx, [found])))[0];
     });
     return row;

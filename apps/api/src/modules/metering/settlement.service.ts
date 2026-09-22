@@ -9,6 +9,10 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { estimateAvg3 } from '@ws/billing-core';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import {
+  assertAccountScopeTx as assertAccountCoverageTx,
+  outOfScopeAccountIds,
+} from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
 export const SETTLEMENT_SELECT = {
@@ -155,10 +159,22 @@ export class SettlementService {
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8 read-scope: explicit waterAccountId → assert + strict equality;
+      // unfiltered scoped lists exclude out-of-scope accounts.
+      if (q.waterAccountId) {
+        await assertAccountCoverageTx(tx, ctx, q.waterAccountId);
+      }
+      const hidden =
+        !q.waterAccountId && ctx.scope !== 'ALL'
+          ? await outOfScopeAccountIds(tx, ctx)
+          : [];
       const rows = await tx.consumptionSettlement.findMany({
         where: {
           tenantId: ctx.tenantId,
           waterAccountId: q.waterAccountId,
+          ...(hidden.length
+            ? { waterAccountId: { notIn: hidden } }
+            : {}),
           period: q.period,
           status: q.status,
           isEstimated: q.isEstimated,
@@ -179,6 +195,7 @@ export class SettlementService {
         select: SETTLEMENT_SELECT,
       });
       if (!row) throw new NotFoundException({ code: 'SETTLEMENT_NOT_FOUND' });
+      await assertAccountCoverageTx(tx, ctx, row.waterAccountId);
       return (await this.attachDetails(tx, ctx, [row]))[0];
     });
   }
@@ -197,6 +214,7 @@ export class SettlementService {
     if (!account) {
       throw new BadRequestException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     }
+    await assertAccountCoverageTx(tx, ctx, body.waterAccountId);
     const history = await this.historyUsages(tx, ctx, body.waterAccountId, body.period);
     const suggested = estimateAvg3(history);
     return {

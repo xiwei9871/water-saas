@@ -10,6 +10,11 @@ import { DomainError } from '@ws/billing-core';
 import type { Request } from 'express';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import {
+  assertAccountScopeTx,
+  assertSettleScopeTx,
+  outOfScopeAccountIds,
+} from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import {
@@ -117,13 +122,26 @@ export class BillService {
       billingRunId?: string;
     },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.bill.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8 read-scope: explicit anchors assert first (strict equality),
+      // unfiltered scoped lists exclude bills on out-of-scope accounts.
+      if (q.waterAccountId) {
+        await assertAccountScopeTx(tx, ctx, q.waterAccountId);
+      }
+      if (q.settleAccountId) {
+        await assertSettleScopeTx(tx, ctx, q.settleAccountId);
+      }
+      const hidden =
+        !q.waterAccountId && ctx.scope !== 'ALL'
+          ? await outOfScopeAccountIds(tx, ctx)
+          : [];
+      return tx.bill.findMany({
         where: {
           tenantId: ctx.tenantId,
           period: q.period,
           status: q.status,
           waterAccountId: q.waterAccountId,
+          ...(hidden.length ? { waterAccountId: { notIn: hidden } } : {}),
           settleAccountId: q.settleAccountId,
           billingRunId: q.billingRunId,
         },
@@ -131,8 +149,8 @@ export class BillService {
         orderBy: [{ period: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+    });
   }
 
   async getById(ctx: TenantCtx, id: string) {
@@ -142,6 +160,7 @@ export class BillService {
         select: BILL_SELECT,
       });
       if (!bill) throw new NotFoundException({ code: 'BILL_NOT_FOUND' });
+      await assertAccountScopeTx(tx, ctx, bill.waterAccountId);
       return this.withItems(tx, ctx, bill);
     });
   }

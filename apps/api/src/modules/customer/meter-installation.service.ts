@@ -1,13 +1,16 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
-import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import type { TenantCtx } from '../../common/tenant-context.js';
+import {
+  assertAccountScopeTx,
+  outOfScopeAccountIds,
+} from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
 export const INSTALLATION_SELECT = {
@@ -81,11 +84,11 @@ export class MeterInstallationService {
       // single-account read (403 when out of scope, strict equality
       // otherwise); only the unfiltered list applies the notIn exclusion.
       if (q.waterAccountId) {
-        await this.assertAccountScopeTx(tx, ctx, q.waterAccountId);
+        await assertAccountScopeTx(tx, ctx, q.waterAccountId);
       }
       const scopedIds =
         !q.waterAccountId && ctx.scope !== 'ALL'
-          ? await this.outOfScopeAccountIds(tx, ctx)
+          ? await outOfScopeAccountIds(tx, ctx)
           : null;
       return tx.meterInstallation.findMany({
         where: {
@@ -112,7 +115,7 @@ export class MeterInstallationService {
         where: { tenantId: ctx.tenantId, id },
         select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
       });
-      if (r) await this.assertAccountScopeTx(tx, ctx, r.waterAccountId);
+      if (r) await assertAccountScopeTx(tx, ctx, r.waterAccountId);
       return r;
     });
     if (!row) throw new NotFoundException({ code: 'INSTALLATION_NOT_FOUND' });
@@ -129,7 +132,7 @@ export class MeterInstallationService {
    * commit.
    */
   async installTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: InstallBody) {
-    await this.assertAccountScopeTx(tx, ctx, body.waterAccountId);
+    await assertAccountScopeTx(tx, ctx, body.waterAccountId);
     const account = await this.lockAccountForUpdateTx(tx, ctx, body.waterAccountId);
     if (account.status === 'CLOSED') {
       throw new ConflictException({ code: 'ACCOUNT_CLOSED' });
@@ -193,7 +196,7 @@ export class MeterInstallationService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'INSTALLATION_NOT_FOUND' });
-    await this.assertAccountScopeTx(tx, ctx, existing.waterAccountId);
+    await assertAccountScopeTx(tx, ctx, existing.waterAccountId);
     // Uniform lock direction (E7 §10): water_account → installation →
     // meter → binding. The account lock serializes against close/install.
     await this.lockAccountForUpdateTx(tx, ctx, existing.waterAccountId);
@@ -246,7 +249,7 @@ export class MeterInstallationService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'INSTALLATION_NOT_FOUND' });
-    await this.assertAccountScopeTx(tx, ctx, existing.waterAccountId);
+    await assertAccountScopeTx(tx, ctx, existing.waterAccountId);
     if (existing.meterId === body.newMeterId) {
       throw new BadRequestException({ code: 'SAME_METER_REPLACE' });
     }
@@ -487,56 +490,4 @@ export class MeterInstallationService {
     });
   }
 
-  /**
-   * Account coverage rule (same as prepayment assertSettleScope /
-   * billing assertAccountScope): EVERY covering reading book's org must
-   * sit inside the caller's orgScope; an account with no plan coverage
-   * is off-book and returns permissively.
-   */
-  private async assertAccountScopeTx(
-    tx: Prisma.TransactionClient,
-    ctx: TenantCtx,
-    waterAccountId: string,
-  ): Promise<void> {
-    if (ctx.scope === 'ALL') return;
-    const items = await tx.readingPlanItem.findMany({
-      where: { tenantId: ctx.tenantId, waterAccountId },
-      select: { planId: true },
-    });
-    if (items.length === 0) return;
-    const plans = await tx.readingPlan.findMany({
-      where: { tenantId: ctx.tenantId, id: { in: items.map((i) => i.planId) } },
-      select: { bookId: true },
-    });
-    const books = await tx.readingBook.findMany({
-      where: { tenantId: ctx.tenantId, id: { in: plans.map((p) => p.bookId) } },
-      select: { orgUnitId: true },
-    });
-    for (const b of books) {
-      if (!orgInScope(ctx, b.orgUnitId)) {
-        throw new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
-      }
-    }
-  }
-
-  /**
-   * Accounts that are out of scope for the caller (any covering book
-   * outside orgScope). Used by list filters — the mirror image of
-   * assertAccountScopeTx's permissive off-book rule.
-   */
-  private async outOfScopeAccountIds(
-    tx: Prisma.TransactionClient,
-    ctx: TenantCtx,
-  ): Promise<string[]> {
-    const rows = await tx.$queryRaw<{ water_account_id: string }[]>`
-      SELECT DISTINCT rpi.water_account_id
-      FROM reading_plan_item rpi
-      JOIN reading_plan rp
-        ON rp.tenant_id = rpi.tenant_id AND rp.id = rpi.plan_id
-      JOIN reading_book rb
-        ON rb.tenant_id = rpi.tenant_id AND rb.id = rp.book_id
-      WHERE rpi.tenant_id = ${ctx.tenantId}::uuid
-        AND rb.org_unit_id <> ALL(${ctx.orgScope}::uuid[])`;
-    return rows.map((r) => r.water_account_id);
-  }
 }

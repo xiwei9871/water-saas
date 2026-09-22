@@ -172,6 +172,7 @@ export class MeterReadingController {
   list(
     @Query('planItemId') planItemId?: string,
     @Query('installationId') installationId?: string,
+    @Query('waterAccountId') waterAccountId?: string,
     @Query('period') period?: string,
     @Query('resultType') resultType?: string,
     @Query('qcStatus') qcStatus?: string,
@@ -181,6 +182,7 @@ export class MeterReadingController {
   ) {
     if (planItemId !== undefined) assertUuid(planItemId, 'planItemId');
     if (installationId !== undefined) assertUuid(installationId, 'installationId');
+    if (waterAccountId !== undefined) assertUuid(waterAccountId, 'waterAccountId');
     if (period !== undefined) assertPeriod(period);
     if (resultType !== undefined && !RESULT_TYPES.has(resultType)) {
       throw new BadRequestException({ code: 'RESULT_TYPE_INVALID' });
@@ -193,6 +195,7 @@ export class MeterReadingController {
       q: q?.trim().slice(0, 200),
       planItemId,
       installationId,
+      waterAccountId,
       period,
       resultType: resultType as 'ACTUAL' | 'REMOTE' | 'NO_READ' | undefined,
       qcStatus: qcStatus as 'PENDING' | 'PASSED' | 'REJECTED' | 'MANUAL_REVIEW' | undefined,

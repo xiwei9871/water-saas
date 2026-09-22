@@ -63,31 +63,30 @@
 
 **Option A — 单端点 `GET /water-accounts/:id/360` 全量**：scope 一次、无 waterfall；但 endpoint 过胖、跨 4 个权限域、数据量失控。
 **Option B — 前端聚合现有资源 API**：边界干净；但首屏 8+ 请求、scope 规则各端点须逐一正确、快照时间不一致。
-**Option A′（推荐）— summary 端点 + Tab 懒加载**：
+**Option A′ revised（已冻结）— customer 域 summary 端点 + 权限域卡片 + Tab 懒加载**：
 
 ```
-GET /water-accounts/:id/360   → 单事务返回概览截面（§5 结构）
-GET /<domain>?waterAccountId=…&take&skip → 各 Tab 历史，复用现有端点
+GET /water-accounts/:id/360   → 单事务返回 customer:read 域概览（§5 结构）
+GET /<domain>?waterAccountId=…&take&skip → 各域卡片/Tab，复用现有端点 + 各域自身权限
 ```
 
-理由：首屏一次 RT 拿到"这户现在怎样"（scope 判一次、一事务内一致）；历史无限增长的表走既有分页端点，不复制查询逻辑。权限上 ctx 只有 scope 没有 perm 集合——分域门禁在 endpoint 层（**D6**，见 §9）。
+理由：首屏一次 RT 拿 customer 域"这户是谁/什么状态"；跨域数据不借聚合绕过 RBAC（D6）；历史无限增长的表走既有分页端点。
 
-## 5. Summary 响应结构（单 `runAsTenant` 事务）
+## 5. Summary 响应结构（单 `runAsTenant` 事务）— 按 D1 冻结修订
+
+`GET /water-accounts/:id/360` 只含 `customer:read` 域（D1）：
 
 ```jsonc
 {
-  "account": { /* WATER_ACCOUNT_SELECT + customer + settleAccount + householdSize */ },
-  "book":    { "bookId","bookNo","name","orgUnitId","readerId","cadence" } | null,
-  "currentPlanItem": { "planId","period","status","seqNo","plannedInstallationId" } | null,
-  "currentInstallation": { /* INSTALLATION_SELECT 当前 ACTIVE（installed_at DESC）*/ } | null,
+  "account": { /* WATER_ACCOUNT_SELECT + customer + settleAccount identity + householdSize */ },
+  "currentInstallation": { /* INSTALLATION_SELECT 当前 ACTIVE（installed_at DESC, id）*/ } | null,
   "activeInstallationCount": 1,
-  "latestReading": { /* 当前 installation 的最近有效读数 */ } | null,
-  "latestSettlement": { "id","period","totalUsageQty","isEstimated","status" } | null,
-  "outstanding": { /* outstandingTx 原样：items/total/reversedBillCredit */ },
-  "prepaymentBalance": "0",
-  "warnings": ["NO_BOOK","ESTIMATED", ...]
+  "warnings": ["NO_ACTIVE_METER","MULTI_ACTIVE_METER"]  // 仅户/表生命周期派生
 }
 ```
+
+以下卡片由前端按权限域并行调原接口（无权限 → 隐藏/「无权限」）：
+`latestReading`（metering:read，`/meter-readings?waterAccountId=` 取当前 installation 行）、`books[]`+`currentPlanItems[]`（metering:read，`/reading-books?waterAccountId=` + `/reading-plans?waterAccountId=`）、`latestSettlement`（metering:read）、`outstanding`+`prepaymentBalance`（payment:read）、账单/支付/预存/事件各 Tab 原端点。
 
 **一致性冻结**：
 - `currentInstallation` 解析 = E7 规则（ACTIVE `installed_at DESC`，并列按 id）；`activeInstallationCount` 同事务计数 → `MULTI_ACTIVE_METER` badge 与展示数据天然一致。
@@ -100,10 +99,12 @@ GET /<domain>?waterAccountId=…&take&skip → 各 Tab 历史，复用现有端�
 
 | 端点 | 说明 |
 |---|---|
-| `GET /water-accounts/:id/360` | §5；`customer:read`（D6）；`assertAccountScopeTx` |
+| `GET /water-accounts/:id/360` | §5 customer 域 summary；`customer:read`；`assertAccountScopeTx` |
 | `GET /water-accounts/:id/events` | account_event 分页只读；`customer:read`；scope 同上 |
-| `GET /meter-readings?waterAccountId=` | 新增过滤（join installation），配合读 scope |
-| `GET /payments?waterAccountId=` | 新增过滤：行 = 本户账单上的 `payment_alloc`（`source=PAYMENT`），返回 `{...payment, allocatedAmount}`；**D4 备选**：`source=PREPAYMENT` 的 APPLY alloc 并入同一 Tab 用 `source` badge 区分——推荐并入，否则预存抵扣的"已付"在支付 Tab 不可见 |
+| `GET /water-accounts/:id/payment-activity` | **D4 discriminated union**：行 = 本户账单上的 `payment_alloc`；`source=PAYMENT` → `{source,allocatedAmount,bill,payment}`，`source=PREPAYMENT` → `{source,allocatedAmount,bill,prepaymentEntry}`；`payment:read`；分页 |
+| `GET /meter-readings?waterAccountId=` | 新增过滤（join installation）；显式 → assert + 严格相等；无参 scoped → 排除出界读数 |
+| `GET /reading-books?waterAccountId=` | 新增过滤（book_meter join）→ `books[]`；metering:read；scope：assert 户 + book.orgUnitId |
+| `GET /reading-plans?waterAccountId=` | 新增过滤（plan_item join）→ 含本户 item 的 plans（内嵌 `myItem`）；metering:read |
 | 读 scope 补齐 | §3 矩阵中全部 ❌ 行 |
 | 复用不改 | bills/settlements `?waterAccountId`、prepay balance/entries、installation/meter 全部 E7 端点、outstanding |
 
@@ -120,14 +121,16 @@ GET /<domain>?waterAccountId=…&take&skip → 各 Tab 历史，复用现有端�
 - Tab 端点沿用各域既有错误码；scope 失败一律 `403 ORG_OUT_OF_SCOPE`。
 - Summary 内部子查询（无读数/无结算/无册）返回 `null`，不是错误。
 
-## 9. 待拍板决策（Gate 评审项）
+## 9. Gate 决策（已冻结，2026-09-22）
 
-- **D1 聚合形态**：推荐 A′（summary + lazy tabs）。否决项：纯 B 的 8+ waterfall 与快照漂移；纯 A 的过胖与跨权限域。
-- **D2 customer/settle 读 scope**：settle-account 复用 E6 严格规则（任一覆盖册出界→整户 403/隐藏）。customer 推荐「**至少一个可见户即可见**，detail 内嵌 water-accounts 只回可见户」——customer 是身份对象不是覆盖对象，双营业所客户不该互相隐身；备选 = 与 settle 同规则（任一出界→整隐，更简单但过度隐藏）。列表按可见性过滤。
-- **D3 一户多册**：summary `book` 取法——推荐 `book_meter` 中当前期有 plan 的册优先，否则最近创建；UI 多册时并列展示（如实，不合并）。
-- **D4 支付 Tab 源**：推荐并入 `source=PREPAYMENT` alloc（badge 区分 柜台/预存抵扣），否则 E6 自动抵扣的已付金额在户视角缺失。
-- **D5 读数过滤**：推荐 `GET /meter-readings?waterAccountId=`（join installation）而非新增专用端点。
-- **D6 360 权限**：推荐 V1 单门 `customer:read`（ctx 无 perm 集合，分域隐藏需新 plumbing；试点期柜台/客服角色本就宽）。若评审要求分域：改为 header 金融卡走 `outstanding`/`prepayments/balance` 原端点（payment:read 自动 403 → UI「无权限」），summary 只回 customer/metering 域——**此为备选方案，推荐仍单门**。
+- **D1 聚合形态 — A′ revised**：`GET /water-accounts/:id/360` 只聚合 `customer:read` 域数据（account/customer/settleAccount identity、householdSize、currentInstallation、activeInstallationCount、户/表生命周期 warnings）。**禁止**经该端点返回 latestReading / book·plan / latestSettlement / bill / outstanding / prepayment / payment——各域卡片由前端并行调各权限域读接口，不得借聚合绕过 RBAC。
+- **D2 customer scope**：读——无关联户可见；≥1 关联户可见则 identity 可见且内嵌 waterAccounts 只回可见户；全部不可见 → list 隐藏、detail 403。写（PATCH）——无关联户允许；全部关联户在 scope 允许；任一出界 → 403。settle-account 沿用 E6 strict，不改。
+- **D3 一户多册**：禁人为选主册。summary（UI 层，metering 域数据经其自身权限域接口取）返回 `books[]`/`currentPlanItems[]` 如实并列；0 册 `NO_BOOK`、>1 册 `MULTI_BOOK`。
+- **D4 支付活动**：Payment Tab = 本户账单偿付记录，纳入 `PAYMENT` 与 `PREPAYMENT` 两源 alloc，**discriminated union**（PAYMENT→payment 对象；PREPAYMENT→prepaymentEntry，禁止伪造 paymentNo/channel/cashier）；UI badge 区分柜台/预存抵扣。
+- **D5 读数过滤**：`GET /meter-readings?waterAccountId=`（join installation）；显式 → assert + 严格相等；无参 scoped list 必须排除出界读数。
+- **D6 RBAC**：否决 360 单门跨域。保持 `customer/metering/billing/payment` 各域 read 权限；UI 按权限域独立加载，无权限 → 隐藏或「无权限」。V1 不做字段级 perm plumbing。
+- **Scope 收口**：water-accounts/customer/settle/outstanding/payment/bill/settlement/meter-reading/reading-book/reading-plan/estimate 全部 list+detail+nested+explicit filter 补齐；每资源测试须含：无参 scoped list、own-scope explicit filter、out-of-scope explicit filter、detail by id、nested relation bypass。
+- **一致性**：currentInstallation = E7（ACTIVE `installed_at DESC, id`）；无有效读数不回退旧表；latestReading = 当前 installation 上最新 PASSED ACTUAL|REMOTE，无 → null。
 
 ## 10. 测试矩阵（Implementation Gate 用）
 

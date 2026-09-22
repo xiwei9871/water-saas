@@ -1,9 +1,14 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Controller, Get, Param, Query } from '@nestjs/common';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 import { PaymentService } from './payment.service.js';
+
+const pageArgs = (take?: string, skip?: string) => ({
+  take: Math.min(Math.max(parseInt(take ?? '50', 10) || 50, 1), 200),
+  skip: Math.max(parseInt(skip ?? '0', 10) || 0, 0),
+});
 
 /**
  * GET /water-accounts/:id/outstanding — the cashier's open-debt probe
@@ -26,6 +31,25 @@ export class AccountOutstandingController {
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       this.svc.outstandingTx(tx, ctx, assertUuid(id, 'id')),
+    );
+  }
+
+  /**
+   * GET /water-accounts/:id/payment-activity — 本户账单偿付记录 (E8 D4):
+   * payment_alloc rows on this account's bills, discriminated union on
+   * `source` (PAYMENT counter payments + PREPAYMENT auto-apply).
+   */
+  @Get(':id/payment-activity')
+  @Permissions('payment:read')
+  paymentActivity(
+    @Param('id') id: string,
+    @Query('take') take?: string,
+    @Query('skip') skip?: string,
+  ) {
+    const ctx = currentTenant();
+    const args = pageArgs(take, skip);
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.paymentActivityTx(tx, ctx, assertUuid(id, 'id'), args),
     );
   }
 }

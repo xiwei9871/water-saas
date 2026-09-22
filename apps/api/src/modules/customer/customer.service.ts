@@ -3,6 +3,12 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
+import {
+  assertCustomerReadScopeTx,
+  assertCustomerWriteScopeTx,
+  hiddenCustomerIds,
+  outOfScopeAccountIds,
+} from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
 
@@ -59,24 +65,29 @@ export class CustomerService {
   ) {}
 
   list(ctx: TenantCtx, q: ListQuery) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.customer.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8 D2: hide customers whose EVERY linked account is out of scope;
+      // customers with any visible account (or none) stay listed.
+      const hidden =
+        ctx.scope === 'ALL' ? [] : await hiddenCustomerIds(tx, ctx);
+      return tx.customer.findMany({
         where: {
           tenantId: ctx.tenantId,
           name: q.name ? { contains: q.name } : undefined,
           customerNo: q.customerNo,
+          ...(hidden.length ? { id: { notIn: hidden } } : {}),
         },
         select: CUSTOMER_SELECT,
         orderBy: { customerNo: 'asc' },
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+    });
   }
 
   async getById(ctx: TenantCtx, id: string) {
-    const row = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.customer.findFirst({
+    const row = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const found = await tx.customer.findFirst({
         where: { tenantId: ctx.tenantId, id },
         select: {
           ...CUSTOMER_SELECT,
@@ -84,8 +95,19 @@ export class CustomerService {
             select: { id: true, accountNo: true, status: true, usageCategory: true },
           },
         },
-      }),
-    );
+      });
+      if (!found) return null;
+      // E8 D2: identity visible iff any linked account is in scope; the
+      // embedded list itself is filtered — detail can't bypass scope.
+      await assertCustomerReadScopeTx(tx, ctx, id);
+      if (ctx.scope !== 'ALL') {
+        const hidden = new Set(await outOfScopeAccountIds(tx, ctx));
+        found.waterAccounts = found.waterAccounts.filter(
+          (a) => !hidden.has(a.id),
+        );
+      }
+      return found;
+    });
     if (!row) throw new NotFoundException({ code: 'CUSTOMER_NOT_FOUND' });
     return row;
   }
@@ -125,6 +147,9 @@ export class CustomerService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'CUSTOMER_NOT_FOUND' });
+    // E8 D2 write rule: ANY linked account out of scope forbids editing
+    // the shared customer master data.
+    await assertCustomerWriteScopeTx(tx, ctx, id);
     req.auditBefore = existing;
     return tx.customer.update({
       where: { tenantId_id: { tenantId: ctx.tenantId, id } },

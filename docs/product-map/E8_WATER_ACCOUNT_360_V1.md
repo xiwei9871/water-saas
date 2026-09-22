@@ -25,13 +25,11 @@ WaterAccount = 水务运营的对象中心。从一个户出发，柜面/抄表�
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-### A. 概览（summary，非 Tab，随页首渲染）
+### A. 概览（首屏；按 D1/D6 冻结——跨域卡片分权限域并行加载）
 
-- accountNo / customer / settleAccount / 地址 / usageCategory / status / billable / openedAt / closedAt / householdSize
-- 当前册归属（bookNo + orgUnit 名）与当前期 plan item 状态
-- 当前表（meterNo + installedAt）、最近有效读数（值 + readDate + resultType + qcStatus，标注属于哪条 installation）
-- outstanding 合计 + 最近账单行、prepay balance
-- warning badges（§6）
+- **core（`GET /:id/360`，customer:read）**：accountNo / customer / settleAccount / 地址 / usageCategory / status / billable / openedAt / closedAt / householdSize / 当前表 / activeInstallationCount / 户表 warnings
+- **域卡片（各域权限独立拉取，无权限隐藏或「无权限」）**：册归属 books[] + 当前期 plan items（metering:read）、最近有效读数（metering:read）、outstanding + prepay balance（payment:read）、最近 settlement（metering:read）、最近账单（billing:read）
+- warning badges（§6）：户表派生的在 core 返回；册/读数/欠费类由各域数据在前端派生
 
 ### B. 水表 Tab（复用 E7，禁止重写）
 

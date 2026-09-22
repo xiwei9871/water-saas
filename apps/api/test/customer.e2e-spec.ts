@@ -647,7 +647,7 @@ describe('v0.2: monitoring meter onboard （监控表）', () => {
     }
   });
 
-  it('billable derives from category — PATCH to MONITORING flips it, and back', async () => {
+  it('billable derives from category — PATCH to MONITORING on an ordinary pair is refused', async () => {
     const res = await request(app.getHttpServer())
       .post('/water-accounts/onboard')
       .set(auth(adminToken))
@@ -661,13 +661,17 @@ describe('v0.2: monitoring meter onboard （监控表）', () => {
     const id = res.body.waterAccount.id;
     expect(res.body.waterAccount.billable).toBe(true);
 
+    // E8 RC3: MONITORING ⇔ closed system pair — an ordinary customer/settle
+    // can't be flipped into MONITORING (would orphan the category from its
+    // internal principal).
     const toMon = await request(app.getHttpServer())
       .patch(`/water-accounts/${id}`)
       .set(auth(adminToken))
       .send({ usageCategory: 'MONITORING' })
-      .expect(200);
-    expect(toMon.body.billable).toBe(false);
+      .expect(400);
+    expect(toMon.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
 
+    // ordinary → ordinary still derives billable normally
     const back = await request(app.getHttpServer())
       .patch(`/water-accounts/${id}`)
       .set(auth(adminToken))
