@@ -14,6 +14,7 @@ import { IamModule } from './modules/iam/iam.module.js';
 import { IntegrationModule } from './modules/integration/integration.module.js';
 import { MeteringModule } from './modules/metering/metering.module.js';
 import { PaymentModule } from './modules/payment/payment.module.js';
+import { RemoteModule } from './modules/remote/remote.module.js';
 import { ReportModule } from './modules/report/report.module.js';
 
 @Module({
@@ -22,6 +23,7 @@ import { ReportModule } from './modules/report/report.module.js';
     IamModule,
     CustomerModule,
     MeteringModule,
+    RemoteModule,
     BillingModule,
     PaymentModule,
     ReportModule,
