@@ -292,3 +292,94 @@ describe('remote-device-binding', () => {
     expect(open.effectiveTo).toBe(removedAt);
   });
 });
+
+describe('binding lifecycle guards (release fix)', () => {
+  it('REMOVED installation: reopening a binding (effectiveTo=null) → 422', async () => {
+    const detail = await request(app.getHttpServer())
+      .get(`/remote-devices/${deviceId}`)
+      .set(auth(adminToken))
+      .expect(200);
+    const closed = detail.body.bindings.find(
+      (b: { installationId: string }) => b.installationId === inst2Id,
+    );
+    await request(app.getHttpServer())
+      .patch(`/remote-device-bindings/${closed.id}`)
+      .set(auth(adminToken))
+      .send({ effectiveTo: null })
+      .expect(422)
+      .expect((r) => expect(r.body.code).toBe('BINDING_OUTSIDE_INSTALLATION'));
+    // A REMOVED installation also refuses brand-new open bindings.
+    await request(app.getHttpServer())
+      .post(`/remote-devices/${device2Id}/bindings`)
+      .set(auth(adminToken))
+      .send({ installationId: inst2Id, effectiveFrom: plusDays(instInstalledAt, 5) })
+      .expect(422)
+      .expect((r) => expect(r.body.code).toBe('BINDING_OUTSIDE_INSTALLATION'));
+  });
+
+  it('removedAt < installedAt → business error, not a DB 500', async () => {
+    const inst3 = await onboard('C');
+    await request(app.getHttpServer())
+      .post(`/meter-installations/${inst3.installation.id}/remove`)
+      .set(auth(adminToken))
+      .send({
+        finalReading: 0,
+        removedAt: plusDays(inst3.installation.installedAt, -1),
+      })
+      .expect(400)
+      .expect((r) => expect(r.body.code).toBe('REMOVE_BEFORE_INSTALL'));
+  });
+
+  it('removal that would orphan a resolved event → 409 BINDING_CLOSE_ORPHANS_EVENT', async () => {
+    const inst4 = await onboard('D');
+    const bind = await request(app.getHttpServer())
+      .post(`/remote-devices/${device2Id}/bindings`)
+      .set(auth(adminToken))
+      .send({
+        installationId: inst4.installation.id,
+        effectiveFrom: inst4.installation.installedAt,
+      })
+      .expect(201);
+    // A raw event already resolved through this binding, collected AFTER
+    // the removal date we are about to request — closing the binding at
+    // removedAt would strand it outside its own provenance window.
+    const collectedAt = plusDays(inst4.installation.installedAt, 30);
+    await owner.query(
+      `INSERT INTO raw_remote_event (
+         id, tenant_id, remote_source_id, external_event_key,
+         canonical_payload_hash, vendor_device_key, business_period,
+         collected_at, reading_value, raw_payload, canonical_payload,
+         resolved_remote_device_id, resolved_binding_id,
+         processing_status, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 'h', 'x', '202610', $4, 1,
+               '{}'::jsonb, '{}'::jsonb, $5, $6, 'CONVERTED', now(), now())`,
+      [
+        TENANT,
+        sourceId,
+        `orphan-${RUN}`,
+        collectedAt,
+        device2Id,
+        bind.body.id,
+      ],
+    );
+    await request(app.getHttpServer())
+      .post(`/meter-installations/${inst4.installation.id}/remove`)
+      .set(auth(adminToken))
+      .send({
+        finalReading: 0,
+        removedAt: plusDays(inst4.installation.installedAt, 20),
+      })
+      .expect(409)
+      .expect((r) => expect(r.body.code).toBe('BINDING_CLOSE_ORPHANS_EVENT'));
+    // A removal dated past the event's collectedAt keeps the event inside
+    // the (closed) window → allowed.
+    await request(app.getHttpServer())
+      .post(`/meter-installations/${inst4.installation.id}/remove`)
+      .set(auth(adminToken))
+      .send({
+        finalReading: 0,
+        removedAt: plusDays(inst4.installation.installedAt, 40),
+      })
+      .expect(201);
+  });
+});

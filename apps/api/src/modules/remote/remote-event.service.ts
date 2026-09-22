@@ -3,12 +3,13 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
-import type { CanonicalRemoteEvent } from './canonical.js';
+import { isBusinessPeriod, type CanonicalRemoteEvent } from './canonical.js';
 import {
   PROCESS_LOG_SELECT,
   REMOTE_EVENT_SELECT,
@@ -64,6 +65,13 @@ export class RemoteEventService {
     private readonly processor: RemoteEventProcessorService,
   ) {}
 
+  /** Read-scope filter through the event's source (see RemoteSourceService). */
+  private scopeWhere(ctx: TenantCtx): Prisma.RawRemoteEventWhereInput {
+    return ctx.scope === 'ALL'
+      ? {}
+      : { remoteSource: { orgUnitId: { in: ctx.orgScope } } };
+  }
+
   list(ctx: TenantCtx, q: EventListQuery) {
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       tx.rawRemoteEvent.findMany({
@@ -75,6 +83,7 @@ export class RemoteEventService {
           vendorDeviceKey: q.vendorDeviceKey
             ? { contains: q.vendorDeviceKey }
             : undefined,
+          ...this.scopeWhere(ctx),
         },
         select: REMOTE_EVENT_SELECT,
         orderBy: [{ receivedAt: 'desc' }, { id: 'asc' }],
@@ -84,11 +93,21 @@ export class RemoteEventService {
     );
   }
 
-  /** Event detail: payloads + resolution + process log + linked reading. */
-  getById(ctx: TenantCtx, id: string) {
+  /**
+   * Event detail: resolution + process log + linked reading for any
+   * metering:read caller inside the source's scope. rawPayload /
+   * canonicalPayload (vendor bodies — potentially PII-bearing) only come
+   * back to metering:remote:manage.
+   */
+  getById(ctx: TenantCtx, id: string, canManage: boolean) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const event = await tx.rawRemoteEvent.findFirst({
-        where: { tenantId: ctx.tenantId, id },
+        where: { tenantId: ctx.tenantId, id, ...this.scopeWhere(ctx) },
+        select: {
+          ...REMOTE_EVENT_SELECT,
+          rawPayload: canManage,
+          canonicalPayload: canManage,
+        },
       });
       if (!event) throw new NotFoundException({ code: 'REMOTE_EVENT_NOT_FOUND' });
       const logs = await tx.remoteEventProcessLog.findMany({
@@ -131,6 +150,15 @@ export class RemoteEventService {
     sourceId: string,
     event: CanonicalRemoteEvent,
   ): Promise<IngestOutcome> {
+    // Canonical-contract belt: adapters are expected to enforce this, but
+    // the ingest boundary re-checks the two invariants facts depend on.
+    if (!isBusinessPeriod(event.businessPeriod)) {
+      throw new BadRequestException({ code: 'INVALID_BUSINESS_PERIOD' });
+    }
+    if (!/^-?\d+(\.\d+)?$/.test(event.readingValue.trim()) ||
+        new Prisma.Decimal(event.readingValue).isNegative()) {
+      throw new UnprocessableEntityException({ code: 'INVALID_READING_VALUE' });
+    }
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const source = await this.assertSourceWritable(tx, ctx, sourceId);
       if (source.status !== 'ACTIVE') {
@@ -217,7 +245,10 @@ export class RemoteEventService {
           code: 'EVENT_KEY_CONFLICT',
           message: 'same externalEventKey with a different canonical payload — original preserved',
           actor,
-          detail: { incomingPayloadHash: event.payloadHash },
+          detail: {
+            incomingPayloadHash: event.payloadHash,
+            incomingCanonicalPayload: event.canonicalPayload,
+          },
         });
         return {
           index: 0,

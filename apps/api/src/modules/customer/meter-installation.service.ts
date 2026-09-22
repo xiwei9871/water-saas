@@ -185,6 +185,14 @@ export class MeterInstallationService {
     // YYYYMM of the UTC month containing removedAt. Historical back-fills
     // need a dedicated correction workflow — out of MVP scope.
     const removedAt = body.removedAt ?? new Date();
+    // removedAt is the end of the installation's life — a removal dated
+    // before the install is a data error, not a DB exception.
+    if (removedAt < existing.installedAt) {
+      throw new BadRequestException({
+        code: 'REMOVE_BEFORE_INSTALL',
+        installedAt: existing.installedAt,
+      });
+    }
     const period = `${removedAt.getUTCFullYear()}${String(removedAt.getUTCMonth() + 1).padStart(2, '0')}`;
     const [finalized, posted] = await Promise.all([
       tx.consumptionSettlement.findFirst({
@@ -235,14 +243,38 @@ export class MeterInstallationService {
     // E5 T3: removing an installation closes its remote-device bindings in
     // the same transaction — a binding must never outlive its installation.
     // Rows ending before removedAt are already within the lifetime and stay.
-    await tx.remoteDeviceBinding.updateMany({
+    const closable = await tx.remoteDeviceBinding.findMany({
       where: {
         tenantId: ctx.tenantId,
         installationId: id,
         OR: [{ effectiveTo: null }, { effectiveTo: { gt: removedAt } }],
       },
-      data: { effectiveTo: removedAt, updatedBy: ctx.staffId },
+      select: { id: true },
     });
+    if (closable.length > 0) {
+      // Same invariant as PATCH close (BINDING_CLOSE_ORPHANS_EVENT): a
+      // resolved event collected after removedAt must not be stranded
+      // outside its own binding's window — refuse the removal instead of
+      // silently orphaning the provenance chain.
+      const orphan = await tx.rawRemoteEvent.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          resolvedBindingId: { in: closable.map((b) => b.id) },
+          collectedAt: { gte: removedAt },
+        },
+        select: { id: true },
+      });
+      if (orphan) {
+        throw new ConflictException({
+          code: 'BINDING_CLOSE_ORPHANS_EVENT',
+          eventId: orphan.id,
+        });
+      }
+      await tx.remoteDeviceBinding.updateMany({
+        where: { tenantId: ctx.tenantId, id: { in: closable.map((b) => b.id) } },
+        data: { effectiveTo: removedAt, updatedBy: ctx.staffId },
+      });
+    }
     return tx.meterInstallation.findUniqueOrThrow({
       where: { tenantId_id: { tenantId: ctx.tenantId, id } },
       select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },

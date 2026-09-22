@@ -73,7 +73,7 @@ beforeAll(async () => {
     );
     await owner.query(`DELETE FROM remote_device WHERE tenant_id=$1`, [t]);
     await owner.query(
-      `DELETE FROM remote_source WHERE tenant_id=$1 AND code='e5-src'`,
+      `DELETE FROM remote_source WHERE tenant_id=$1 AND code IN ('e5-src','e5-src2')`,
       [t],
     );
   }
@@ -376,6 +376,215 @@ describe('raw_remote_event invariants', () => {
       [eventId],
     );
     expect(ok.rows[0].processing_status).toBe('UNBOUND');
+  });
+
+  it('immutable WHITELIST: every non-processing column is rejected (incl. vendor_quality/created_by)', async () => {
+    // The trigger diffs the whole row minus the seven allowed columns, so
+    // every column not on the list — including any future one — is
+    // immutable by default. Spot-check a representative set across types.
+    const rejects: [string, string][] = [
+      ['vendor_quality', `'tampered'`],
+      ['created_by', `'ffffffff-1111-4111-8111-111111111111'`],
+      ['raw_payload', `'{"tampered":true}'::jsonb`],
+      ['canonical_payload', `'{"tampered":true}'::jsonb`],
+      ['external_event_key', `'evt-tampered'`],
+      ['canonical_payload_hash', `'hash-tampered'`],
+      ['vendor_device_key', `'D999'`],
+      ['business_period', `'202610'`],
+      ['collected_at', `'2026-09-25T00:00:00Z'`],
+      ['reading_value', `999`],
+      ['received_at', `now()`],
+      ['remote_source_id', `'ffffffff-1111-4111-8111-111111111111'`],
+      ['tenant_id', `'${TENANT_B}'`],
+      ['created_at', `now()`],
+      ['id', `gen_random_uuid()`],
+    ];
+    for (const [col, lit] of rejects) {
+      await expectPgError(
+        () =>
+          owner.query(
+            `UPDATE raw_remote_event SET ${col} = ${lit} WHERE id = $1`,
+            [eventId],
+          ),
+        'P0001',
+      );
+    }
+  });
+
+  it('immutable WHITELIST: processing/provenance/audit columns all allowed', async () => {
+    const r = await owner.query(
+      `UPDATE raw_remote_event SET
+         processing_status = 'CONVERTED',
+         current_issue_code = NULL,
+         current_issue_at = now(),
+         updated_at = now(),
+         updated_by = 'ffffffff-1111-4111-8111-111111111111'
+       WHERE id = $1 RETURNING processing_status, updated_by`,
+      [eventId],
+    );
+    expect(r.rows[0].processing_status).toBe('CONVERTED');
+  });
+});
+
+describe('resolved_* provenance composite FK (release fix)', () => {
+  let source2Id = '';
+  let deviceXId = ''; // device on source2
+  let deviceBId = ''; // device on TENANT_B's source
+  let bindingDev2Id = ''; // src1 binding on device2 (device/binding mismatch target)
+  let bindingXId = ''; // src2 binding on deviceX
+  let bindingDev1Id = ''; // src1 binding on device1 (the consistent target)
+
+  it('fixture: second source + devices + bindings + a third installation', async () => {
+    const s2 = await owner.query(
+      `INSERT INTO remote_source (id, tenant_id, code, name, type, adapter_key, timezone, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, 'e5-src2', 'E5 Source 2', 'FILE_IMPORT', 'FILE_GENERIC_V1', 'UTC', now(), now())
+       ON CONFLICT DO NOTHING RETURNING id`,
+      [TENANT_A],
+    );
+    source2Id =
+      s2.rows[0]?.id ??
+      (
+        await owner.query(
+          `SELECT id FROM remote_source WHERE tenant_id=$1 AND code='e5-src2'`,
+          [TENANT_A],
+        )
+      ).rows[0].id;
+    const dx = await owner.query(
+      `INSERT INTO remote_device (id, tenant_id, remote_source_id, vendor_device_key, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, 'X001', now(), now()) RETURNING id`,
+      [TENANT_A, source2Id],
+    );
+    deviceXId = dx.rows[0].id;
+    const bSrc = await owner.query(
+      `SELECT id FROM remote_source WHERE tenant_id=$1 AND code='e5-src'`,
+      [TENANT_B],
+    );
+    const db = await owner.query(
+      `INSERT INTO remote_device (id, tenant_id, remote_source_id, vendor_device_key, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, 'B001', now(), now()) RETURNING id`,
+      [TENANT_B, bSrc.rows[0].id],
+    );
+    deviceBId = db.rows[0].id;
+
+    // inst3: a third installation so device2's binding does not trip the
+    // (tenant, source, installation) exclusion against device1's ranges.
+    const m3 = await owner.query(
+      `INSERT INTO meter (id, tenant_id, meter_no, status, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, 'e5-meter-3', 'INSTALLED', now(), now())
+       ON CONFLICT DO NOTHING RETURNING id`,
+      [TENANT_A],
+    );
+    const meter3Id =
+      m3.rows[0]?.id ??
+      (
+        await owner.query(
+          `SELECT id FROM meter WHERE tenant_id=$1 AND meter_no='e5-meter-3'`,
+          [TENANT_A],
+        )
+      ).rows[0].id;
+    const i3 = await owner.query(
+      `INSERT INTO meter_installation (id, tenant_id, water_account_id, meter_id, installed_at, initial_reading, reason, status, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, 'eeeeeeee-1111-4111-8111-111111111111', $2, '2026-07-01T00:00:00Z', 0, 'NEW', 'ACTIVE', now(), now())
+       RETURNING id`,
+      [TENANT_A, meter3Id],
+    );
+    const inst3Id = i3.rows[0].id;
+    const bd2 = await owner.query(
+      `INSERT INTO remote_device_binding (id, tenant_id, remote_source_id, remote_device_id, installation_id, effective_from, effective_to, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, '2026-07-01T00:00:00Z', NULL, now(), now()) RETURNING id`,
+      [TENANT_A, sourceId, device2Id, inst3Id],
+    );
+    bindingDev2Id = bd2.rows[0].id;
+    // src2's binding may reuse installationId — exclusion is per-source.
+    const bx = await owner.query(
+      `INSERT INTO remote_device_binding (id, tenant_id, remote_source_id, remote_device_id, installation_id, effective_from, effective_to, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, '2026-07-01T00:00:00Z', NULL, now(), now()) RETURNING id`,
+      [TENANT_A, source2Id, deviceXId, installationId],
+    );
+    bindingXId = bx.rows[0].id;
+    bindingDev1Id = (
+      await owner.query(
+        `SELECT id FROM remote_device_binding WHERE tenant_id=$1 AND remote_device_id=$2 LIMIT 1`,
+        [TENANT_A, deviceId],
+      )
+    ).rows[0].id;
+  });
+
+  it('rejects a resolved device belonging to another source', async () => {
+    await expectPgError(
+      () =>
+        owner.query(
+          `UPDATE raw_remote_event SET resolved_remote_device_id = $2 WHERE id = $1`,
+          [eventId, deviceXId],
+        ),
+      '23503',
+    );
+  });
+
+  it('rejects a resolved binding belonging to another source', async () => {
+    // resolved device on src1 (deviceX is src2's device, but the binding
+    // column alone is what we're probing): the composite FK requires the
+    // binding's (tenant, source, device, id) to match the event's tuple.
+    await expectPgError(
+      () =>
+        owner.query(
+          `UPDATE raw_remote_event
+             SET resolved_remote_device_id = $2, resolved_binding_id = $3
+           WHERE id = $1`,
+          [eventId, deviceXId, bindingXId],
+        ),
+      '23503',
+    );
+  });
+
+  it('rejects a resolved binding without a resolved device (CHECK)', async () => {
+    // MATCH SIMPLE would let binding-only provenance slip past the FK —
+    // a resolved binding always implies a resolved device.
+    await expectPgError(
+      () =>
+        owner.query(
+          `UPDATE raw_remote_event
+             SET resolved_remote_device_id = NULL, resolved_binding_id = $2
+           WHERE id = $1`,
+          [eventId, bindingDev1Id],
+        ),
+      '23514',
+    );
+  });
+
+  it('rejects a binding that is not on the resolved device (same source)', async () => {
+    await expectPgError(
+      () =>
+        owner.query(
+          `UPDATE raw_remote_event
+             SET resolved_remote_device_id = $2, resolved_binding_id = $3
+           WHERE id = $1`,
+          [eventId, deviceId, bindingDev2Id],
+        ),
+      '23503',
+    );
+  });
+
+  it('rejects a resolved device belonging to another tenant', async () => {
+    await expectPgError(
+      () =>
+        owner.query(
+          `UPDATE raw_remote_event SET resolved_remote_device_id = $2 WHERE id = $1`,
+          [eventId, deviceBId],
+        ),
+      '23503',
+    );
+  });
+
+  it('accepts a consistent device + binding pair on the event source', async () => {
+    const r = await owner.query(
+      `UPDATE raw_remote_event
+         SET resolved_remote_device_id = $2, resolved_binding_id = $3
+       WHERE id = $1 RETURNING resolved_remote_device_id, resolved_binding_id`,
+      [eventId, deviceId, bindingDev1Id],
+    );
+    expect(r.rows[0].resolved_remote_device_id).toBe(deviceId);
+    expect(r.rows[0].resolved_binding_id).toBe(bindingDev1Id);
   });
 });
 

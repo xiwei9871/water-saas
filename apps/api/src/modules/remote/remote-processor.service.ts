@@ -1,9 +1,11 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { localDateOf } from './timezone.js';
 
@@ -298,12 +300,24 @@ export class RemoteEventProcessorService {
       select: { id: true, period: true, status: true },
     });
 
+    // Serialize against a concurrent manual entry BEFORE judging state:
+    // lock the plan item, then re-read status/completedReadingId under the
+    // lock — the conflict matrix must never run on a pre-lock snapshot.
+    await tx.$queryRaw`
+      SELECT id FROM reading_plan_item
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${item.id}::uuid
+      FOR UPDATE`;
+    const fresh = await tx.readingPlanItem.findFirstOrThrow({
+      where: { tenantId: ctx.tenantId, id: item.id },
+      select: { id: true, planId: true, status: true, completedReadingId: true },
+    });
+
     // Conflict matrix (design §30): the item's completed reading decides
     // whether this remote fact is a fresh write, a correction after a
     // rejected QC verdict, or a human review case.
-    if (item.status === 'READ' && item.completedReadingId) {
+    if (fresh.status === 'READ' && fresh.completedReadingId) {
       const completed = await tx.meterReading.findFirst({
-        where: { tenantId: ctx.tenantId, id: item.completedReadingId },
+        where: { tenantId: ctx.tenantId, id: fresh.completedReadingId },
         select: { id: true, qcStatus: true, resultType: true, installationId: true, meterId: true },
       });
       if (completed && completed.qcStatus !== 'REJECTED') {
@@ -340,7 +354,7 @@ export class RemoteEventProcessorService {
     const late = plan.status === 'DONE' || plan.status === 'CLOSED';
     const reading = await this.writeReadingTx(tx, ctx, {
       event,
-      item,
+      item: fresh,
       plan,
       installation,
       readDate,
@@ -375,11 +389,8 @@ export class RemoteEventProcessorService {
     },
   ) {
     const { event, item, plan, installation, readDate, late } = args;
-    // Serialize remote vs manual entry on the same plan item.
-    await tx.$queryRaw`
-      SELECT id FROM reading_plan_item
-      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${item.id}::uuid
-      FOR UPDATE`;
+    // The caller holds the plan-item FOR UPDATE lock (see processEventTx)
+    // — the guarded status flip below is the atomic backstop either way.
     const reading = await tx.meterReading.create({
       data: {
         tenantId: ctx.tenantId,
@@ -504,13 +515,32 @@ export class RemoteEventProcessorService {
   // -------------------------------------------------------------------------
 
   /**
+   * Operator actions (replay / resolve-conflict) are writes — they must
+   * respect the event source's org scope, same as reads do. The pipeline's
+   * own SYSTEM-driven transitions never reach this guard (no caller org).
+   */
+  private async assertEventInScope(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    event: { remoteSourceId: string },
+  ) {
+    const source = await tx.remoteSource.findFirstOrThrow({
+      where: { tenantId: ctx.tenantId, id: event.remoteSourceId },
+      select: { orgUnitId: true },
+    });
+    if (!orgInScope(ctx, source.orgUnitId)) {
+      throw new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
+    }
+  }
+
+  /**
    * POST /remote-events/:id/replay — explicit operator replay from
    * UNBOUND/FAILED/WAITING_PLAN only. The replay itself is logged, then the
    * event re-runs the full pipeline under the same row lock.
    */
   async replayTx(
     tx: Prisma.TransactionClient,
-    ctx: { tenantId: string; staffId: string },
+    ctx: TenantCtx,
     eventId: string,
   ) {
     const locked = await tx.$queryRaw<{ id: string }[]>`
@@ -521,6 +551,7 @@ export class RemoteEventProcessorService {
     const event = await tx.rawRemoteEvent.findFirstOrThrow({
       where: { tenantId: ctx.tenantId, id: eventId },
     });
+    await this.assertEventInScope(tx, ctx, event);
     if (!REPLAYABLE.includes(event.processingStatus as EventStatus)) {
       throw new ConflictException({
         code: 'REMOTE_EVENT_NOT_REPLAYABLE',
@@ -548,7 +579,7 @@ export class RemoteEventProcessorService {
    */
   async resolveConflictTx(
     tx: Prisma.TransactionClient,
-    ctx: { tenantId: string; staffId: string },
+    ctx: TenantCtx,
     eventId: string,
     decision: 'USE_REMOTE' | 'KEEP_ACTUAL',
     note?: string,
@@ -561,6 +592,7 @@ export class RemoteEventProcessorService {
     const event = await tx.rawRemoteEvent.findFirstOrThrow({
       where: { tenantId: ctx.tenantId, id: eventId },
     });
+    await this.assertEventInScope(tx, ctx, event);
     if (event.processingStatus !== 'CONFLICT') {
       throw new ConflictException({
         code: 'REMOTE_EVENT_NOT_IN_CONFLICT',
@@ -609,9 +641,15 @@ export class RemoteEventProcessorService {
       SELECT id FROM reading_plan_item
       WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${item.id}::uuid
       FOR UPDATE`;
-    const original = item.completedReadingId
+    // Re-read under the lock — a manual write committed between the
+    // unlocked candidate scan and this lock must not be missed.
+    const fresh = await tx.readingPlanItem.findFirstOrThrow({
+      where: { tenantId: ctx.tenantId, id: item.id },
+      select: { completedReadingId: true },
+    });
+    const original = fresh.completedReadingId
       ? await tx.meterReading.findFirst({
-          where: { tenantId: ctx.tenantId, id: item.completedReadingId },
+          where: { tenantId: ctx.tenantId, id: fresh.completedReadingId },
           select: { id: true, installationId: true, meterId: true },
         })
       : null;

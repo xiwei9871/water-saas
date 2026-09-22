@@ -44,7 +44,8 @@ export const sha256Hex = (s: string): string =>
 /**
  * Validate + normalize a decimal reading value. Vendor exports carry
  * strings/numbers; canonical form is a plain decimal string (no exponent,
- * trimmed). Throws on non-numeric input — the caller marks the row invalid.
+ * trimmed). Remote dial values are never negative in V1 — a negative
+ * reading is a vendor-data error, not a rollback.
  */
 export const canonicalDecimal = (v: unknown): string | null => {
   if (v === null || v === undefined || v === '') return null;
@@ -52,13 +53,16 @@ export const canonicalDecimal = (v: unknown): string | null => {
   const s = String(v).trim();
   if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
   try {
-    return new Prisma.Decimal(s).toString();
+    const d = new Prisma.Decimal(s);
+    return d.isNegative() ? null : d.toString();
   } catch {
     return null;
   }
 };
 
-const PERIOD_RE = /^\d{6}$/;
+// Real YYYYMM — month must be 01..12 (a period like 202613 is a data bug,
+// not a billing month).
+const PERIOD_RE = /^\d{4}(0[1-9]|1[0-2])$/;
 export const isBusinessPeriod = (v: unknown): v is string =>
   typeof v === 'string' && PERIOD_RE.test(v);
 

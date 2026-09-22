@@ -6,8 +6,11 @@ import {
   Param,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { Permissions } from '../../common/permissions.decorator.js';
+import { canRemoteManage } from './remote-source.controller.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
@@ -60,11 +63,12 @@ export class RemoteEventController {
     });
   }
 
-  /** GET /remote-events/:id — event + payload + process log + linked reading. */
+  /** GET /remote-events/:id — event + process log + linked reading; raw
+   * payloads require metering:remote:manage (source scope applies to both). */
   @Get(':id')
   @Permissions('metering:read')
-  get(@Param('id') id: string) {
-    return this.svc.getById(currentTenant(), assertUuid(id, 'id'));
+  get(@Param('id') id: string, @Req() req: Request) {
+    return this.svc.getById(currentTenant(), assertUuid(id, 'id'), canRemoteManage(req));
   }
 
   /**

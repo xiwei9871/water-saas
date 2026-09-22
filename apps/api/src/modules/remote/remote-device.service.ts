@@ -126,6 +126,13 @@ export class RemoteDeviceService {
   // devices
   // -------------------------------------------------------------------------
 
+  /** Read-scope filter through the device's source (see RemoteSourceService). */
+  private scopeWhere(ctx: TenantCtx): Prisma.RemoteDeviceWhereInput {
+    return ctx.scope === 'ALL'
+      ? {}
+      : { remoteSource: { orgUnitId: { in: ctx.orgScope } } };
+  }
+
   listDevices(
     ctx: TenantCtx,
     q: {
@@ -149,6 +156,7 @@ export class RemoteDeviceService {
                 { communicationId: { contains: q.q } },
               ]
             : undefined,
+          ...this.scopeWhere(ctx),
         },
         select: REMOTE_DEVICE_SELECT,
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
@@ -162,7 +170,7 @@ export class RemoteDeviceService {
   getDevice(ctx: TenantCtx, id: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const device = await tx.remoteDevice.findFirst({
-        where: { tenantId: ctx.tenantId, id },
+        where: { tenantId: ctx.tenantId, id, ...this.scopeWhere(ctx) },
         select: REMOTE_DEVICE_SELECT,
       });
       if (!device) throw new NotFoundException({ code: 'REMOTE_DEVICE_NOT_FOUND' });
@@ -299,6 +307,9 @@ export class RemoteDeviceService {
           tenantId: ctx.tenantId,
           remoteDeviceId: q.remoteDeviceId,
           installationId: q.installationId,
+          ...(ctx.scope === 'ALL'
+            ? {}
+            : { remoteSource: { orgUnitId: { in: ctx.orgScope } } }),
         },
         select: REMOTE_BINDING_SELECT,
         orderBy: [{ effectiveFrom: 'asc' }, { id: 'asc' }],
@@ -412,7 +423,20 @@ export class RemoteDeviceService {
     if (effectiveTo !== null && effectiveTo <= binding.effectiveFrom) {
       throw new UnprocessableEntityException({ code: 'INVALID_BINDING_RANGE' });
     }
-    if (effectiveTo !== null) {
+    const installation = await tx.meterInstallation.findFirst({
+      where: { tenantId: ctx.tenantId, id: binding.installationId },
+      select: { removedAt: true },
+    });
+    // Re-opening (effectiveTo=null) is only legal while the installation is
+    // still alive — a removed installation can never accept new readings.
+    if (effectiveTo === null) {
+      if (installation?.removedAt) {
+        throw new UnprocessableEntityException({
+          code: 'BINDING_OUTSIDE_INSTALLATION',
+          removedAt: installation.removedAt,
+        });
+      }
+    } else {
       const orphan = await tx.rawRemoteEvent.findFirst({
         where: {
           tenantId: ctx.tenantId,
@@ -424,10 +448,6 @@ export class RemoteDeviceService {
       if (orphan) {
         throw new ConflictException({ code: 'BINDING_CLOSE_ORPHANS_EVENT', eventId: orphan.id });
       }
-      const installation = await tx.meterInstallation.findFirst({
-        where: { tenantId: ctx.tenantId, id: binding.installationId },
-        select: { removedAt: true },
-      });
       if (installation?.removedAt && effectiveTo > installation.removedAt) {
         throw new UnprocessableEntityException({
           code: 'BINDING_OUTSIDE_INSTALLATION',

@@ -121,3 +121,4 @@
 - 第一个真实 VendorXAdapter 的厂商接口细节（等 Pilot 水司提供接口文档后另行冻结）。
 - 远传实时告警推送、短信通知。
 - 双向通信（拉数以外的任何下行指令）。
+- GIS/安装位置维护 UI：`MeterInstallation` 的位置字段（经纬度/坐标系/来源/描述）只落数据层；位置录入、地图 pin 查看、坐标维护界面统一 defer 到 E7 Meter Lifecycle，E5 不新增任何 GIS/位置编辑界面。

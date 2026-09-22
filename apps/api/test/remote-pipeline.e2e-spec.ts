@@ -631,3 +631,329 @@ describe('T11: REMOTE reading → QC → reconciliation trusted chain', () => {
     expect(recon.body.status).toBe('ABSORBED');
   });
 });
+
+describe('release fixes — canonical validation', () => {
+  it('negative readingValue → 422 INVALID_READING_VALUE', async () => {
+    const res = await ingest({
+      vendorDeviceKey: DEVKEY,
+      businessPeriod: '202610',
+      collectedAt: '2026-10-07T00:00:00Z',
+      readingValue: '-5',
+    }).expect(422);
+    expect(res.body.code).toBe('INVALID_READING_VALUE');
+  });
+
+  it('businessPeriod must be a real YYYYMM — month 01..12', async () => {
+    const res = await ingest({
+      vendorDeviceKey: DEVKEY,
+      businessPeriod: '202613',
+      collectedAt: '2026-10-07T00:00:00Z',
+      readingValue: '5',
+    }).expect(400);
+    expect(res.body.code).toBe('EVENT_FIELDS_REQUIRED');
+    await ingest({
+      vendorDeviceKey: DEVKEY,
+      businessPeriod: '202600',
+      collectedAt: '2026-10-07T00:00:00Z',
+      readingValue: '5',
+    }).expect(400);
+  });
+
+  it('naive collectedAt resolves through the SOURCE timezone, never the server tz', async () => {
+    // Source is Asia/Shanghai (UTC+8): '2026-10-06 08:30:00' local =
+    // 2026-10-06T00:30:00Z absolute — independent of the machine's zone.
+    const res = await ingest({
+      vendorDeviceKey: `GHOST-TZ-${RUN}`,
+      businessPeriod: '202610',
+      collectedAt: '2026-10-06 08:30:00',
+      readingValue: '5',
+    }).expect(201);
+    const detail = await request(app.getHttpServer())
+      .get(`/remote-events/${res.body[0].eventId}`)
+      .set(auth(adminToken))
+      .expect(200);
+    expect(detail.body.collectedAt).toBe('2026-10-06T00:30:00.000Z');
+    // An explicit offset is honored verbatim.
+    const res2 = await ingest({
+      vendorDeviceKey: `GHOST-TZ-${RUN}`,
+      businessPeriod: '202610',
+      collectedAt: '2026-10-06T08:30:00+05:30',
+      readingValue: '5',
+    }).expect(201);
+    const detail2 = await request(app.getHttpServer())
+      .get(`/remote-events/${res2.body[0].eventId}`)
+      .set(auth(adminToken))
+      .expect(200);
+    expect(detail2.body.collectedAt).toBe('2026-10-06T03:00:00.000Z');
+  });
+
+  it('EVENT_KEY_CONFLICT process log preserves the incoming canonical payload', async () => {
+    const res = await ingest({
+      externalEventKey: `E1-${RUN}`,
+      vendorDeviceKey: DEVKEY,
+      businessPeriod: '202610',
+      collectedAt: '2026-10-05T00:30:00Z',
+      readingValue: '777.7',
+    }).expect(201);
+    expect(res.body[0].outcome).toBe('EVENT_KEY_CONFLICT');
+    const detail = await request(app.getHttpServer())
+      .get(`/remote-events/${res.body[0].eventId}`)
+      .set(auth(adminToken))
+      .expect(200);
+    const conflicts = detail.body.processLogs.filter(
+      (l: { action: string }) => l.action === 'EVENT_KEY_CONFLICT',
+    );
+    const last = conflicts[conflicts.length - 1];
+    expect(last.detail.incomingCanonicalPayload.readingValue).toBe('777.7');
+    expect(last.detail.incomingPayloadHash).toBeTruthy();
+    // The stored event itself is still the original fact.
+    expect(Number(detail.body.readingValue)).toBe(123.5);
+  });
+});
+
+describe('release fixes — manual vs remote concurrency', () => {
+  it('manual ACTUAL ∥ remote ingest: one current reading, event kept, no 500', async () => {
+    const d = await onboard('D');
+    acct.D = d.waterAccount.id;
+    inst.D = d.installation.id;
+    instAt.D = d.installation.installedAt;
+    const dev = await request(app.getHttpServer())
+      .post('/remote-devices')
+      .set(auth(adminToken))
+      .send({ remoteSourceId: sourceId, vendorDeviceKey: `DEVD-${RUN}` })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/remote-devices/${dev.body.id}/bindings`)
+      .set(auth(adminToken))
+      .send({ installationId: inst.D, effectiveFrom: instAt.D })
+      .expect(201);
+    const plan = await mkPlan('202801', [acct.D], 'race');
+    const itemD = itemFor(plan.items, acct.D);
+
+    // Fire both writes at once — whichever loses the plan-item lock must
+    // see the winner's committed state, not a pre-lock snapshot.
+    const [manual, remote] = await Promise.all([
+      request(app.getHttpServer())
+        .post('/meter-readings')
+        .set(auth(adminToken))
+        .send({ planItemId: itemD, resultType: 'ACTUAL', readingValue: 500 }),
+      ingest({
+        vendorDeviceKey: `DEVD-${RUN}`,
+        businessPeriod: '202801',
+        collectedAt: '2028-01-05T00:30:00Z',
+        readingValue: '500',
+      }),
+    ]);
+    expect(manual.status).toBeLessThan(500);
+    expect(remote.status).toBe(201);
+
+    const eventId = remote.body[0].eventId as string;
+    expect(eventId).toBeTruthy();
+    const detail = await request(app.getHttpServer())
+      .get(`/remote-events/${eventId}`)
+      .set(auth(adminToken))
+      .expect(200);
+    // The event is always preserved; the loser lands CONFLICT for human
+    // adjudication (or — if manual never committed — a clean CONVERTED).
+    expect(['CONFLICT', 'CONVERTED']).toContain(detail.body.processingStatus);
+
+    // Exactly one current completed reading on the item.
+    const item = (
+      await owner.query(
+        `SELECT status, completed_reading_id FROM reading_plan_item
+         WHERE tenant_id=$1 AND id=$2`,
+        [TENANT, itemD],
+      )
+    ).rows[0];
+    expect(item.status).toBe('READ');
+    expect(item.completed_reading_id).toBeTruthy();
+    if (detail.body.processingStatus === 'CONFLICT') {
+      // Manual won → its reading is the current fact; the remote fact
+      // awaits adjudication instead of silently overwriting.
+      expect(item.completed_reading_id).toBe(manual.body.id);
+    }
+    // No orphan: every reading on the item is reachable through
+    // completed_reading_id or the supersede chain.
+    const { rows } = await owner.query(
+      `SELECT COUNT(*)::int c FROM meter_reading
+       WHERE tenant_id=$1 AND plan_item_id=$2`,
+      [TENANT, itemD],
+    );
+    expect(rows[0].c).toBe(detail.body.processingStatus === 'CONVERTED' ? 1 : 1);
+  });
+});
+
+describe('release fixes — FINAL estimate + POSTED bill + late REMOTE → adjustment', () => {
+  it('frozen settlement/bill untouched; reconciliation posts an ADJUSTMENT bill', async () => {
+    // Tariff fixtures (pricing engine needs an ACTIVE plan + fee items).
+    const waterItem = (
+      await request(app.getHttpServer())
+        .post('/fee-items')
+        .set(auth(adminToken))
+        .send({ code: `WATER-${RUN}`, name: '水费', calcType: 'PER_QTY' })
+        .expect(201)
+    ).body.id;
+    const fixedItem = (
+      await request(app.getHttpServer())
+        .post('/fee-items')
+        .set(auth(adminToken))
+        .send({ code: `FIXED-${RUN}`, name: '定额费', calcType: 'FIXED' })
+        .expect(201)
+    ).body.id;
+    // Idempotent across reruns: a leftover ACTIVE RES_METERED plan from a
+    // previous run would 409 the activation below.
+    await owner.query(
+      `UPDATE tariff_plan SET status='RETIRED'
+       WHERE tenant_id=$1 AND usage_category='RES_METERED' AND status='ACTIVE'`,
+      [TENANT],
+    );
+    const plan = await request(app.getHttpServer())
+      .post('/tariff-plans')
+      .set(auth(adminToken))
+      .send({
+        code: `RES-${RUN}`,
+        name: '居民水价',
+        usageCategory: 'RES_METERED',
+        effectiveFrom: '2026-01-01',
+        tiers: [
+          { feeItemId: waterItem, tierNo: 1, fromQty: 0, toQty: 180, unitPrice: '3.0' },
+          { feeItemId: waterItem, tierNo: 2, fromQty: 180, toQty: null, unitPrice: '4.5' },
+          { feeItemId: fixedItem, tierNo: 1, fromQty: 0, toQty: null, unitPrice: '10' },
+        ],
+      })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/tariff-plans/${plan.body.id}/activate`)
+      .set(auth(adminToken))
+      .send({})
+      .expect(201);
+
+    const e = await onboard('E');
+    acct.E = e.waterAccount.id;
+    inst.E = e.installation.id;
+    instAt.E = e.installation.installedAt;
+    const dev = await request(app.getHttpServer())
+      .post('/remote-devices')
+      .set(auth(adminToken))
+      .send({ remoteSourceId: sourceId, vendorDeviceKey: `DEVE-${RUN}` })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/remote-devices/${dev.body.id}/bindings`)
+      .set(auth(adminToken))
+      .send({ installationId: inst.E, effectiveFrom: instAt.E })
+      .expect(201);
+
+    // Anchor: manual ACTUAL 202706 = 1000, QC PASSED.
+    const p1 = await mkPlan('202706', [acct.E], 'f1');
+    const anchorId = (
+      await request(app.getHttpServer())
+        .post('/meter-readings')
+        .set(auth(adminToken))
+        .send({
+          planItemId: itemFor(p1.items, acct.E),
+          resultType: 'ACTUAL',
+          readingValue: 1000,
+        })
+        .expect(201)
+    ).body.id;
+    await request(app.getHttpServer())
+      .post(`/meter-readings/${anchorId}/qc`)
+      .set(auth(adminToken))
+      .send({ action: 'pass' })
+      .expect(201);
+
+    // 202707: estimated FINAL settlement (30) → billed → POSTED.
+    const settlementId = (
+      await owner.query(
+        `INSERT INTO consumption_settlement
+           (id, tenant_id, water_account_id, period, total_usage_qty, is_estimated,
+            estimate_method, estimate_reason, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, '202707', 30, true, 'MANUAL',
+                 'e5p-estimate', 'FINAL', now(), now())
+         RETURNING id::text AS id`,
+        [TENANT, acct.E],
+      )
+    ).rows[0].id as string;
+    const run = await request(app.getHttpServer())
+      .post('/billing-runs')
+      .set(auth(adminToken))
+      .send({ period: '202707' })
+      .expect(201);
+    const posted = await request(app.getHttpServer())
+      .post(`/billing-runs/${run.body.id}/post`)
+      .set(auth(adminToken))
+      .send({})
+      .expect(201);
+    expect(posted.body.status).toBe('POSTED');
+    const billsBefore = (
+      await request(app.getHttpServer())
+        .get(`/bills?waterAccountId=${acct.E}`)
+        .set(auth(adminToken))
+        .expect(200)
+    ).body as { id: string; period: string; status: string; billKind: string; totalAmount: string }[];
+    const postedBill = billsBefore.find((b) => b.period === '202707');
+    expect(postedBill?.status).toBe('POSTED');
+
+    // Late remote fact for 202707 arrives → converts → QC PASS.
+    await mkPlan('202707', [acct.E], 'f2');
+    const res = await ingest({
+      vendorDeviceKey: `DEVE-${RUN}`,
+      businessPeriod: '202707',
+      collectedAt: '2027-07-05T00:30:00Z',
+      readingValue: '1035',
+    }).expect(201);
+    expect(res.body[0].outcome).toBe('CONVERTED');
+    const remoteReadingId = res.body[0].readingId as string;
+    await request(app.getHttpServer())
+      .post(`/meter-readings/${remoteReadingId}/qc`)
+      .set(auth(adminToken))
+      .send({ action: 'pass' })
+      .expect(201);
+
+    // Reconciliation: actual usage 35 vs settled/billed 30 → +5 m³
+    // remainder over a FINAL+billed span → APPLIED + ADJUSTMENT bill.
+    const recon = await request(app.getHttpServer())
+      .post('/reconciliations')
+      .set(auth(adminToken))
+      .send({ waterAccountId: acct.E })
+      .expect(201);
+    expect(recon.body.status).toBe('APPLIED');
+    expect(recon.body.anchorReadingId).toBe(anchorId);
+    expect(recon.body.actualReadingId).toBe(remoteReadingId);
+    expect(recon.body.actualTotalUsage).toBe('35');
+    expect(recon.body.previouslySettledUsage).toBe('30');
+    expect(recon.body.remainderUsage).toBe('5');
+    expect(recon.body.adjustmentBill).toBeTruthy();
+
+    // History is append-only: the FINAL settlement and the POSTED bill
+    // are byte-identical to before — the correction lives on the new
+    // ADJUSTMENT bill only.
+    const stl = (
+      await owner.query(
+        `SELECT status, total_usage_qty::text u FROM consumption_settlement
+         WHERE tenant_id=$1 AND id=$2`,
+        [TENANT, settlementId],
+      )
+    ).rows[0];
+    expect(stl.status).toBe('FINAL');
+    expect(stl.u).toBe('30.0000');
+    const bill = (
+      await owner.query(
+        `SELECT status, bill_kind, total_amount::text a FROM bill
+         WHERE tenant_id=$1 AND id=$2`,
+        [TENANT, postedBill!.id],
+      )
+    ).rows[0];
+    expect(bill.status).toBe('POSTED');
+    expect(bill.bill_kind).toBe('NORMAL');
+    expect(bill.a).toBe(postedBill!.totalAmount);
+    const adj = (
+      await owner.query(
+        `SELECT status, bill_kind, source_type FROM bill WHERE tenant_id=$1 AND id=$2`,
+        [TENANT, recon.body.adjustmentBill.id],
+      )
+    ).rows[0];
+    expect(adj.bill_kind).toBe('ADJUSTMENT');
+    expect(adj.status).toBe('POSTED');
+  });
+});

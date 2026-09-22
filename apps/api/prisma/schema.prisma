@@ -1217,6 +1217,8 @@ model RemoteDeviceBinding {
   resolvedEvents RawRemoteEvent[] @relation("resolvedBinding")
 
   @@unique([tenantId, id])
+  // Target of RawRemoteEvent's 4-column provenance FK (source+device agree).
+  @@unique([tenantId, remoteSourceId, remoteDeviceId, id])
   @@index([tenantId, remoteDeviceId, effectiveFrom])
   @@index([tenantId, installationId])
   @@map("remote_device_binding")
@@ -1258,8 +1260,10 @@ model RawRemoteEvent {
   updatedBy             String?           @map("updated_by") @db.Uuid
 
   remoteSource RemoteSource             @relation(fields: [tenantId, remoteSourceId], references: [tenantId, id], onDelete: Restrict)
-  resolvedRemoteDevice RemoteDevice?    @relation("resolvedDevice", fields: [tenantId, resolvedRemoteDeviceId], references: [tenantId, id], onDelete: Restrict)
-  resolvedBinding RemoteDeviceBinding?  @relation("resolvedBinding", fields: [tenantId, resolvedBindingId], references: [tenantId, id], onDelete: Restrict)
+  // Provenance must agree on the event's own remote_source; the resolved
+  // binding must additionally belong to the resolved device.
+  resolvedRemoteDevice RemoteDevice?    @relation("resolvedDevice", fields: [tenantId, remoteSourceId, resolvedRemoteDeviceId], references: [tenantId, remoteSourceId, id], onDelete: Restrict, map: "raw_remote_event_resolved_device_fkey")
+  resolvedBinding RemoteDeviceBinding?  @relation("resolvedBinding", fields: [tenantId, remoteSourceId, resolvedRemoteDeviceId, resolvedBindingId], references: [tenantId, remoteSourceId, remoteDeviceId, id], onDelete: Restrict, map: "raw_remote_event_resolved_binding_fkey")
   processLogs  RemoteEventProcessLog[]
   reading      MeterReading?
 

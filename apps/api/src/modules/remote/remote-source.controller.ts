@@ -31,6 +31,7 @@ import {
   parseVendorFile,
 } from './file-import-adapter.js';
 import { sha256Hex } from './canonical.js';
+import { naiveLocalToUtc } from './timezone.js';
 import {
   RemoteSourceService,
   type RemoteSourceBody,
@@ -42,6 +43,12 @@ const pageArgs = (take?: string, skip?: string) => ({
   take: Math.min(Math.max(parseInt(take ?? '50', 10) || 50, 1), 200),
   skip: Math.max(parseInt(skip ?? '0', 10) || 0, 0),
 });
+
+/** Full remote detail (credentialRef, raw payloads) requires remote:manage. */
+export const canRemoteManage = (req: Request): boolean => {
+  const perms = req.user?.perms ?? [];
+  return perms.includes('*') || perms.includes('metering:remote:manage');
+};
 
 /**
  * /remote-sources — vendor platform configuration (E5 T2). Reads need
@@ -61,25 +68,30 @@ export class RemoteSourceController {
   @Get()
   @Permissions('metering:read')
   list(
+    @Req() req: Request,
     @Query('q') q?: string,
     @Query('type') type?: string,
     @Query('status') status?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
-    return this.svc.list(currentTenant(), {
-      ...pageArgs(take, skip),
-      q,
-      type,
-      status,
-    });
+    return this.svc.list(
+      currentTenant(),
+      {
+        ...pageArgs(take, skip),
+        q,
+        type,
+        status,
+      },
+      canRemoteManage(req),
+    );
   }
 
   /** GET /remote-sources/:id */
   @Get(':id')
   @Permissions('metering:read')
-  get(@Param('id') id: string) {
-    return this.svc.getById(currentTenant(), assertUuid(id, 'id'));
+  get(@Param('id') id: string, @Req() req: Request) {
+    return this.svc.getById(currentTenant(), assertUuid(id, 'id'), canRemoteManage(req));
   }
 
   /**
@@ -142,14 +154,22 @@ export class RemoteSourceController {
    */
   @Post(':id/events')
   @Permissions('metering:remote:manage')
-  ingest(@Param('id') id: string, @Body() body: { events?: IngestEventBody[] } & IngestEventBody) {
+  async ingest(@Param('id') id: string, @Body() body: { events?: IngestEventBody[] } & IngestEventBody) {
     const sourceId = assertUuid(id, 'id');
     const rows = Array.isArray(body?.events) ? body.events : [body];
     if (rows.length === 0) {
       throw new BadRequestException({ code: 'EVENTS_REQUIRED' });
     }
-    const canonical = rows.map((row) => toCanonical(row));
     const ctx = currentTenant();
+    const source = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const s = await tx.remoteSource.findFirst({
+        where: { tenantId: ctx.tenantId, id: sourceId },
+        select: { timezone: true },
+      });
+      if (!s) throw new BadRequestException({ code: 'REMOTE_SOURCE_NOT_FOUND' });
+      return s;
+    });
+    const canonical = rows.map((row) => toCanonical(row, source.timezone));
     return this.events.ingestBatch(ctx, sourceId, canonical);
   }
 
@@ -231,14 +251,21 @@ interface IngestEventBody {
   rawPayload?: Record<string, unknown>;
 }
 
-const toCanonical = (row: IngestEventBody): CanonicalRemoteEvent => {
+const toCanonical = (row: IngestEventBody, sourceTimezone: string): CanonicalRemoteEvent => {
   if (!row?.vendorDeviceKey?.trim()) {
     throw new BadRequestException({ code: 'EVENT_FIELDS_REQUIRED', field: 'vendorDeviceKey' });
   }
   if (!isBusinessPeriod(row.businessPeriod)) {
     throw new BadRequestException({ code: 'EVENT_FIELDS_REQUIRED', field: 'businessPeriod' });
   }
-  const collectedAt = row.collectedAt ? new Date(row.collectedAt) : null;
+  // Absolute instants (offset or Z) parse directly; naive vendor timestamps
+  // resolve through the SOURCE timezone — never the server's local zone.
+  const rawTs = row.collectedAt?.trim();
+  const collectedAt = rawTs
+    ? /[zZ]|[+-]\d{2}:?\d{2}$/.test(rawTs)
+      ? new Date(rawTs)
+      : naiveLocalToUtc(rawTs, sourceTimezone)
+    : null;
   if (!collectedAt || Number.isNaN(collectedAt.getTime())) {
     throw new BadRequestException({ code: 'EVENT_FIELDS_REQUIRED', field: 'collectedAt' });
   }

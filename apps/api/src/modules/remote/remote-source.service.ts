@@ -27,6 +27,13 @@ export const REMOTE_SOURCE_SELECT = {
   updatedAt: true,
 } satisfies Prisma.RemoteSourceSelect;
 
+/** Read projection for callers WITHOUT metering:remote:manage — the vault
+ * reference itself is configuration the operator role doesn't need. */
+export const REMOTE_SOURCE_PUBLIC_SELECT = {
+  ...REMOTE_SOURCE_SELECT,
+  credentialRef: false,
+} satisfies Prisma.RemoteSourceSelect;
+
 export const REMOTE_SOURCE_TYPES = ['FILE_IMPORT', 'API_PULL', 'WEBHOOK'] as const;
 export type RemoteSourceType = (typeof REMOTE_SOURCE_TYPES)[number];
 
@@ -70,9 +77,19 @@ const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
 export class RemoteSourceService {
   constructor(private readonly prisma: TenantPrismaService) {}
 
+  /**
+   * Read-scope filter: ALL sees the whole tenant; ORG_SUBTREE/SELF only see
+   * sources pinned to an org inside ctx.orgScope. A tenant-wide (NULL org)
+   * source is therefore invisible to scoped callers.
+   */
+  private scopeWhere(ctx: TenantCtx): Prisma.RemoteSourceWhereInput {
+    return ctx.scope === 'ALL' ? {} : { orgUnitId: { in: ctx.orgScope } };
+  }
+
   list(
     ctx: TenantCtx,
     q: { take: number; skip: number; q?: string; type?: string; status?: string },
+    canManage: boolean,
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       tx.remoteSource.findMany({
@@ -81,8 +98,9 @@ export class RemoteSourceService {
           type: q.type as RemoteSourceType | undefined,
           status: q.status as 'ACTIVE' | 'DISABLED' | undefined,
           OR: q.q ? [{ code: { contains: q.q } }, { name: { contains: q.q } }] : undefined,
+          ...this.scopeWhere(ctx),
         },
-        select: REMOTE_SOURCE_SELECT,
+        select: canManage ? REMOTE_SOURCE_SELECT : REMOTE_SOURCE_PUBLIC_SELECT,
         orderBy: { code: 'asc' },
         take: q.take,
         skip: q.skip,
@@ -90,11 +108,13 @@ export class RemoteSourceService {
     );
   }
 
-  getById(ctx: TenantCtx, id: string) {
+  getById(ctx: TenantCtx, id: string, canManage: boolean) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // findFirst + scope filter: an out-of-scope source is indistinguishable
+      // from a missing one (same convention as tenant isolation).
       const source = await tx.remoteSource.findFirst({
-        where: { tenantId: ctx.tenantId, id },
-        select: REMOTE_SOURCE_SELECT,
+        where: { tenantId: ctx.tenantId, id, ...this.scopeWhere(ctx) },
+        select: canManage ? REMOTE_SOURCE_SELECT : REMOTE_SOURCE_PUBLIC_SELECT,
       });
       if (!source) throw new NotFoundException({ code: 'REMOTE_SOURCE_NOT_FOUND' });
       return source;
@@ -145,6 +165,20 @@ export class RemoteSourceService {
     return source;
   }
 
+  /**
+   * credentialRef must be a secret-store REFERENCE (vault://, env://,
+   * secret://) — a plaintext key stored here would leak through every read
+   * path and into audit_log before-images.
+   */
+  private validateCredentialRef(v: string | null | undefined) {
+    if (v === undefined || v === null) return;
+    const s = v.trim();
+    if (s === '') return;
+    if (!/^(vault|env|secret):\/\//.test(s)) {
+      throw new UnprocessableEntityException({ code: 'INVALID_CREDENTIAL_REF' });
+    }
+  }
+
   /** POST — code/name/type/adapterKey/timezone required; status starts ACTIVE. */
   async createTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: RemoteSourceBody) {
     if (!body.code?.trim() || !body.name?.trim() || !body.adapterKey?.trim()) {
@@ -157,6 +191,7 @@ export class RemoteSourceService {
       throw new BadRequestException({ code: 'REMOTE_SOURCE_FIELDS_REQUIRED' });
     }
     this.validateTimezone(body.timezone);
+    this.validateCredentialRef(body.credentialRef);
     await this.assertOrg(tx, ctx, body.orgUnitId ?? null);
     return conflictOnUnique(
       tx.remoteSource.create({
@@ -193,6 +228,7 @@ export class RemoteSourceService {
       throw new UnprocessableEntityException({ code: 'INVALID_SOURCE_STATUS' });
     }
     if (body.timezone !== undefined) this.validateTimezone(body.timezone);
+    this.validateCredentialRef(body.credentialRef);
     if (body.orgUnitId !== undefined) await this.assertOrg(tx, ctx, body.orgUnitId);
     req.auditBefore = existing;
     return tx.remoteSource.update({
