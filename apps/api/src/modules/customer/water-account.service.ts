@@ -682,6 +682,24 @@ export class WaterAccountService {
     if (existing.status === 'CLOSED') throw invalidTransition('CLOSED', 'PATCH');
     if (body.usageCategory !== undefined) {
       assertUsageCategory(body.usageCategory);
+      // E8 RC3: category change must not break the closed system-principal
+      // pair — the account keeps its customer/settle, so the POST-PATCH
+      // category is checked against the CURRENT pair.
+      const [customer, settle] = await Promise.all([
+        tx.customer.findFirst({
+          where: { tenantId: ctx.tenantId, id: existing.customerId },
+          select: { systemKey: true },
+        }),
+        tx.settleAccount.findFirst({
+          where: { tenantId: ctx.tenantId, id: existing.settleAccountId },
+          select: { settleNo: true },
+        }),
+      ]);
+      this.assertSystemPrincipalPair(
+        body.usageCategory === 'MONITORING',
+        customer?.systemKey === MONITORING_SYSTEM_KEY,
+        settle?.settleNo === MONITORING_SETTLE_NO,
+      );
     }
     req.auditBefore = existing;
     return tx.waterAccount.update({

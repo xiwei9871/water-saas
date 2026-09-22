@@ -1148,3 +1148,63 @@ describe('release-gate: system principal pair is closed (P1 RC2)', () => {
     expect(r2.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
   });
 });
+
+/**
+ * Release-gate RC3 regression (P1): PATCH /water-accounts/:id changing
+ * usageCategory must hold the closed system-principal pair invariant —
+ * MONITORING ⇔ MONITORING_INTERNAL customer + SYS-MONITORING settle —
+ * on every write path that can alter the (category, customer, settle)
+ * combination.
+ */
+describe('release-gate: PATCH usageCategory keeps the system pair closed (P1 RC3)', () => {
+  it('Case 1: MONITORING on system pair → PATCH to RES_METERED → 400, row unchanged', async () => {
+    const mon = await post('/water-accounts/onboard', {
+      account: { usageCategory: 'MONITORING', addr: 'rc3 gatehouse' },
+      meter: { brand: 't18-brand', caliber: 'DN15' },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
+    }).expect(201);
+    const res = await patch(
+      `/water-accounts/${mon.body.waterAccount.id}`,
+      { usageCategory: 'RES_METERED' },
+    ).expect(400);
+    expect(res.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+    const after = await get(
+      `/water-accounts/${mon.body.waterAccount.id}`,
+    ).expect(200);
+    expect(after.body.usageCategory).toBe('MONITORING');
+    expect(after.body.billable).toBe(false);
+  });
+
+  it('Case 2: ordinary account → PATCH to MONITORING → 400, row unchanged', async () => {
+    const a = await onboard('rc3Ord');
+    const res = await patch(
+      `/water-accounts/${a.waterAccount.id}`,
+      { usageCategory: 'MONITORING' },
+    ).expect(400);
+    expect(res.body.code).toBe('SYSTEM_PRINCIPAL_NOT_ALLOWED');
+    const after = await get(
+      `/water-accounts/${a.waterAccount.id}`,
+    ).expect(200);
+    expect(after.body.usageCategory).toBe('RES_METERED');
+    expect(after.body.billable).toBe(true);
+  });
+
+  it('Case 3: ordinary → ordinary category switch still works', async () => {
+    const a = await onboard('rc3Cat');
+    const res = await patch(
+      `/water-accounts/${a.waterAccount.id}`,
+      { usageCategory: 'NON_RES' },
+    ).expect(200);
+    expect(res.body.usageCategory).toBe('NON_RES');
+    expect(res.body.billable).toBe(true);
+  });
+
+  it('Case 4: PATCH addr only still works', async () => {
+    const a = await onboard('rc3Addr');
+    const res = await patch(
+      `/water-accounts/${a.waterAccount.id}`,
+      { addr: 'rc3 new addr' },
+    ).expect(200);
+    expect(res.body.addr).toBe('rc3 new addr');
+  });
+});
