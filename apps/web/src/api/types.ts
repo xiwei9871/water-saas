@@ -1115,3 +1115,71 @@ export interface RemoteImportReport {
   outcomes: IngestOutcome[];
   counts: Record<string, number>;
 }
+
+/* ------------------------------------------------------------------ */
+/* E8 — WaterAccount 360                                               */
+/* ------------------------------------------------------------------ */
+
+/** GET /water-accounts/:id/360 — D1-frozen core summary: customer-domain
+ * data ONLY. Cross-domain cards are fetched through each domain's own
+ * permission-gated endpoint. */
+export interface WaterAccountSummary360 {
+  account: WaterAccount & {
+    householdSize: number | null;
+    customer: {
+      id: string;
+      customerNo: string;
+      name: string;
+      custType: string;
+    } | null;
+    settleAccount: {
+      id: string;
+      settleNo: string;
+      name: string;
+      status: string;
+    } | null;
+  };
+  /** E7 rule: ACTIVE installation ORDER BY installed_at DESC, id — index
+   * semantics handled server-side; null when no ACTIVE installation. */
+  currentInstallation: AccountInstallation | null;
+  activeInstallationCount: number;
+  /** Lifecycle-derived warnings only (NO_ACTIVE_METER / MULTI_ACTIVE_METER). */
+  warnings: string[];
+}
+
+/** GET /water-accounts/:id/events — account lifecycle (≠ meter lifecycle). */
+export interface AccountEvent {
+  id: string;
+  waterAccountId: string;
+  type: 'TRANSFER' | 'SUSPEND' | 'RESUME' | 'CLOSE';
+  payload: Record<string, unknown> | null;
+  effectiveDate: string;
+  createdAt: string;
+}
+
+/**
+ * GET /water-accounts/:id/payment-activity — D4 discriminated union on
+ * `source`. PAYMENT rows carry the cashier payment; PREPAYMENT rows carry
+ * the ledger APPLY entry — never a fake payment.
+ */
+export type PaymentActivityRow = {
+  id: string;
+  allocatedAmount: string;
+  createdAt: string;
+  bill: {
+    id: string;
+    period: string;
+    billKind: BillKind;
+    status: BillStatus;
+    totalAmount: string;
+  };
+} & (
+  | { source: 'PAYMENT'; payment: Payment | null }
+  | {
+      source: 'PREPAYMENT';
+      prepaymentEntry: Pick<
+        PrepaymentEntry,
+        'id' | 'type' | 'amount' | 'operatorId' | 'reason' | 'createdAt'
+      > | null;
+    }
+);

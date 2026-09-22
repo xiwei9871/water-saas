@@ -57,15 +57,18 @@ export class ReadingBookController {
     @Query('name') name?: string,
     @Query('bookNo') bookNo?: string,
     @Query('orgUnitId') orgUnitId?: string,
+    @Query('waterAccountId') waterAccountId?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
     if (orgUnitId !== undefined) assertUuid(orgUnitId, 'orgUnitId');
+    if (waterAccountId !== undefined) assertUuid(waterAccountId, 'waterAccountId');
     return this.svc.list(currentTenant(), {
       ...pageArgs(take, skip),
       name,
       bookNo,
       orgUnitId,
+      waterAccountId,
     });
   }
 

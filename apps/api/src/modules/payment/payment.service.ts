@@ -9,6 +9,10 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { SequenceService } from '../../common/sequence.service.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import {
+  assertAccountScopeTx,
+  outOfScopeSettleAccountIds,
+} from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { lockAccountForUpdate } from '../billing/pricing.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
@@ -168,11 +172,22 @@ export class PaymentService {
       channel?: PayChannel;
     },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.payment.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8 read-scope: explicit settleAccountId asserts strict scope;
+      // unfiltered scoped lists drop payments on out-of-scope settle
+      // accounts (E6 strict coverage rule).
+      if (q.settleAccountId) {
+        await this.assertSettleScope(tx, ctx, q.settleAccountId);
+      }
+      const hidden =
+        !q.settleAccountId && ctx.scope !== 'ALL'
+          ? await outOfScopeSettleAccountIds(tx, ctx)
+          : [];
+      return tx.payment.findMany({
         where: {
           tenantId: ctx.tenantId,
           settleAccountId: q.settleAccountId,
+          ...(hidden.length ? { settleAccountId: { notIn: hidden } } : {}),
           cashierId: q.cashierId,
           status: q.status,
           channel: q.channel,
@@ -181,8 +196,8 @@ export class PaymentService {
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+    });
   }
 
   /** GET /payments/:id — payment + its allocs + the receipt (null on a
@@ -194,6 +209,7 @@ export class PaymentService {
         select: PAYMENT_SELECT,
       });
       if (!payment) throw new NotFoundException({ code: 'PAYMENT_NOT_FOUND' });
+      await this.assertSettleScope(tx, ctx, payment.settleAccountId);
       return this.withDetail(tx, ctx, payment);
     });
   }
@@ -382,6 +398,8 @@ export class PaymentService {
     if (!account) {
       throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     }
+    // E8 read-scope: the counter probe must not expose another branch's debt.
+    await assertAccountScopeTx(tx, ctx, waterAccountId);
     const bills = await tx.bill.findMany({
       where: {
         tenantId: ctx.tenantId,
@@ -454,6 +472,75 @@ export class PaymentService {
       totalOutstanding,
       prepaymentBalance,
     };
+  }
+
+  /**
+   * GET /water-accounts/:id/payment-activity — E8 D4: 本户账单偿付记录.
+   * Rows are payment_allocs on THIS account's bills (never payment.amount
+   * — a settle account may span accounts and a payment may split across
+   * bills). Discriminated union on `source`: PAYMENT → counter payment
+   * object; PREPAYMENT → the ledger entry that produced the APPLY —
+   * never dressed up as a fake payment row.
+   */
+  async paymentActivityTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+    q: { take: number; skip: number },
+  ) {
+    const account = await tx.waterAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: waterAccountId },
+      select: { id: true },
+    });
+    if (!account) {
+      throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    }
+    await assertAccountScopeTx(tx, ctx, waterAccountId);
+    const allocs = await tx.paymentAlloc.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        bill: { tenantId: ctx.tenantId, waterAccountId },
+      },
+      select: {
+        id: true,
+        source: true,
+        amount: true,
+        createdAt: true,
+        bill: {
+          select: {
+            id: true,
+            period: true,
+            billKind: true,
+            status: true,
+            totalAmount: true,
+          },
+        },
+        payment: { select: PAYMENT_SELECT },
+        prepaymentEntry: {
+          select: {
+            id: true,
+            type: true,
+            amount: true,
+            operatorId: true,
+            reason: true,
+            createdAt: true,
+          },
+        },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+      take: q.take,
+      skip: q.skip,
+    });
+    return allocs.map((a) => ({
+      id: a.id,
+      source: a.source,
+      allocatedAmount: a.amount,
+      createdAt: a.createdAt,
+      bill: a.bill,
+      ...(a.source === 'PAYMENT'
+        ? { payment: a.payment }
+        : { prepaymentEntry: a.prepaymentEntry }),
+    }));
   }
 
   /**

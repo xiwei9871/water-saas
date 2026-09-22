@@ -119,6 +119,31 @@ export class WaterAccountController {
   }
 
   /**
+   * GET /water-accounts/:id/360 — E8 core summary (customer:read domain
+   * only; cross-domain cards load through their own permissioned APIs).
+   */
+  @Get(':id/360')
+  @Permissions('customer:read')
+  summary(@Param('id') id: string) {
+    return this.svc.summary360(currentTenant(), assertUuid(id, 'id'));
+  }
+
+  /** GET /water-accounts/:id/events — account lifecycle timeline. */
+  @Get(':id/events')
+  @Permissions('customer:read')
+  events(
+    @Param('id') id: string,
+    @Query('take') take?: string,
+    @Query('skip') skip?: string,
+  ) {
+    return this.svc.listEvents(
+      currentTenant(),
+      assertUuid(id, 'id'),
+      pageArgs(take, skip),
+    );
+  }
+
+  /**
    * POST /water-accounts — standalone open against existing customer +
    * settle_account; account_no from sys_sequence unless supplied.
    */

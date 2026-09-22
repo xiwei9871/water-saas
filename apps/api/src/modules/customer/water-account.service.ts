@@ -11,6 +11,11 @@ import { isValidPeriod } from '../../common/reading-cadence.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import {
+  assertAccountScopeTx,
+  assertSettleScopeTx,
+  outOfScopeAccountIds,
+} from '../../common/account-scope.js';
+import {
   assertUsageCategory,
   USAGE_CATEGORIES,
 } from '../../common/usage-categories.js';
@@ -149,21 +154,27 @@ export class WaterAccountService {
       accountNo?: string;
     },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.waterAccount.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E8 read-scope: coverage exclusion applies to every filter shape —
+      // an explicit customerId/settleAccountId/accountNo lookup must not
+      // resurrect an out-of-scope account.
+      const hidden =
+        ctx.scope === 'ALL' ? [] : await outOfScopeAccountIds(tx, ctx);
+      return tx.waterAccount.findMany({
         where: {
           tenantId: ctx.tenantId,
           customerId: q.customerId,
           settleAccountId: q.settleAccountId,
           status: q.status,
           accountNo: q.accountNo,
+          ...(hidden.length ? { id: { notIn: hidden } } : {}),
         },
         select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
         orderBy: { accountNo: 'asc' },
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+    });
   }
 
   usageCategories(_ctx: TenantCtx) {
@@ -183,6 +194,7 @@ export class WaterAccountService {
         },
       });
       if (!account) return null;
+      await assertAccountScopeTx(tx, ctx, id);
       // 当前人数 = 生效账期 ≤ 当前账期的最新申报 —— 未来生效的申报只在
       // 历史列表可见，不冒充当前值。display-only；计费走结算快照。
       const now = new Date();
@@ -200,6 +212,78 @@ export class WaterAccountService {
     });
     if (!row) throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     return row;
+  }
+
+  /**
+   * GET /water-accounts/:id/360 — E8 D1 frozen: the core summary returns
+   * ONLY customer:read-domain data. Cross-domain cards (readings, books,
+   * settlement, bills, outstanding, prepayment, payment activity) are
+   * fetched by the UI through each domain's own endpoint + permission —
+   * this endpoint must never become an RBAC bypass.
+   */
+  async summary360(ctx: TenantCtx, id: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const account = await tx.waterAccount.findFirst({
+        where: { tenantId: ctx.tenantId, id },
+        select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
+      });
+      if (!account) {
+        throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+      }
+      await assertAccountScopeTx(tx, ctx, id);
+      const now = new Date();
+      const currentPeriod = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+      const profile = await tx.waterAccountHouseholdProfile.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: id,
+          effectiveFromPeriod: { lte: currentPeriod },
+        },
+        orderBy: { effectiveFromPeriod: 'desc' },
+        select: { householdSize: true },
+      });
+      // Current meter resolution = E7 frozen rule (shared with the
+      // meter-reading resolver): ACTIVE ORDER BY installed_at DESC, id.
+      const actives = await tx.meterInstallation.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: id,
+          status: 'ACTIVE',
+        },
+        select: INSTALLATION_TIMELINE.meterInstallations.select,
+        orderBy: [{ installedAt: 'desc' }, { id: 'desc' }],
+      });
+      // Lifecycle-derived warnings only — financial/metering warnings are
+      // derived by the UI from each domain's own (permission-gated) data.
+      const warnings: string[] = [];
+      if (actives.length === 0 && account.status !== 'CLOSED') {
+        warnings.push('NO_ACTIVE_METER');
+      }
+      if (actives.length > 1) warnings.push('MULTI_ACTIVE_METER');
+      return {
+        account: { ...account, householdSize: profile?.householdSize ?? null },
+        currentInstallation: actives[0] ?? null,
+        activeInstallationCount: actives.length,
+        warnings,
+      };
+    });
+  }
+
+  /**
+   * GET /water-accounts/:id/events — account lifecycle timeline
+   * (TRANSFER/SUSPEND/RESUME/CLOSE, append-only). Paginated; scope via
+   * loadAccount like every other account path.
+   */
+  listEvents(ctx: TenantCtx, id: string, q: { take: number; skip: number }) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      await this.loadAccount(tx, ctx, id);
+      return tx.accountEvent.findMany({
+        where: { tenantId: ctx.tenantId, waterAccountId: id },
+        orderBy: [{ effectiveDate: 'desc' }, { createdAt: 'desc' }],
+        take: q.take,
+        skip: q.skip,
+      });
+    });
   }
 
   private async writeEvent(
@@ -228,6 +312,9 @@ export class WaterAccountService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!account) throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    // E8: every account write/read path funnels through this loader —
+    // out-of-scope callers get 403 before any mutation or read.
+    await assertAccountScopeTx(tx, ctx, id);
     return account;
   }
 
@@ -247,6 +334,8 @@ export class WaterAccountService {
       where: { tenantId: ctx.tenantId, id: body.settleAccountId },
     });
     if (!settle) throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+    // The account binds a financial anchor — same strict scope as E6.
+    await assertSettleScopeTx(tx, ctx, body.settleAccountId);
     const accountNo =
       body.accountNo?.trim() ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'account_no', 'A', ctx.staffId));
@@ -414,6 +503,7 @@ export class WaterAccountService {
     if (!existing) {
       throw new NotFoundException({ code: 'HOUSEHOLD_PROFILE_NOT_FOUND' });
     }
+    await assertAccountScopeTx(tx, ctx, waterAccountId);
     if (
       body.householdSize === undefined ||
       !Number.isInteger(body.householdSize) ||

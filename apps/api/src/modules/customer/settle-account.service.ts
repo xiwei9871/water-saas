@@ -3,6 +3,10 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
+import {
+  assertSettleScopeTx,
+  outOfScopeSettleAccountIds,
+} from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
 
@@ -45,19 +49,24 @@ export class SettleAccountService {
     ctx: TenantCtx,
     q: { take: number; skip: number; name?: string; status?: 'NORMAL' | 'SUSPENDED' | 'CLOSED' },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.settleAccount.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // E6 strict rule, extended to reads by E8: ANY linked account
+      // out-of-scope hides the whole settle account.
+      const hidden =
+        ctx.scope === 'ALL' ? [] : await outOfScopeSettleAccountIds(tx, ctx);
+      return tx.settleAccount.findMany({
         where: {
           tenantId: ctx.tenantId,
           name: q.name ? { contains: q.name } : undefined,
           status: q.status,
+          ...(hidden.length ? { id: { notIn: hidden } } : {}),
         },
         select: SETTLE_ACCOUNT_SELECT,
         orderBy: { settleNo: 'asc' },
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+    });
   }
 
   async getById(ctx: TenantCtx, id: string) {
@@ -73,6 +82,11 @@ export class SettleAccountService {
       }),
     );
     if (!row) throw new NotFoundException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+    // E6 strict rule on reads — a hidden settle account 403s, not 404s,
+    // so the caller can't distinguish "exists out-of-scope" probing.
+    await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      assertSettleScopeTx(tx, ctx, id),
+    );
     return row;
   }
 
@@ -111,6 +125,7 @@ export class SettleAccountService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+    await assertSettleScopeTx(tx, ctx, id);
     // A CLOSED settle account stays closed — reopening goes through a future
     // business flow, not a profile PATCH that could resurrect it silently.
     if (existing.status === 'CLOSED') {
