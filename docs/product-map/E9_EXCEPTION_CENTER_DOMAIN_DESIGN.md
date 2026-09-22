@@ -1,6 +1,6 @@
-# E9 Exception Center — Domain Design（Rev3，按 Gate D1–D14 修订）
+# E9 Exception Center — Domain Design（Rev4 Final，按 Gate D1–D23 定稿）
 
-> 对应 Product Gate：`E9_EXCEPTION_CENTER_V1.md` Rev2。核心架构：**Detector / Reconciler / Query 三件套分离**。
+> 对应 Product Gate：`E9_EXCEPTION_CENTER_V1.md` Rev4。核心架构：**Detector / Reconciler / Query 三件套分离**。
 
 ## 1. 架构总览（D1）
 
@@ -58,17 +58,32 @@ interface AnomalyFact {
 | MULTI_ACTIVE_METER | BLOCKING | installation group by account having count(ACTIVE)>1 | 同上 |
 | NO_BOOK | WARNING | status≠CLOSED ∧ billable ∧ **current BookMeter count=0**（D14：不查 historical plan_item——历史计划项不是当前册归属 SoT） | **TENANT**（无册即无 owner） |
 | MULTI_BOOK | WARNING | current BookMeter count > 1（D13，E8 D3 语义延伸） | ACCOUNT |
-| READING_QC_REVIEW | WARNING | meter_reading qcStatus=MANUAL_REVIEW ∧ supersededById IS NULL | ACCOUNT(via installation→account) |
-| READING_QC_REJECTED | WARNING | qcStatus=REJECTED ∧ 未 superseded | ACCOUNT |
+| READING_QC_REVIEW | WARNING | qcStatus=MANUAL_REVIEW ∧ **未被 supersede**（D23 谓词见下注） | ACCOUNT(via installation→account) |
+| READING_QC_REJECTED | WARNING | qcStatus=REJECTED ∧ 未被 supersede | ACCOUNT |
 | ESTIMATE_STREAK | WARNING | **抽取 `SettlementService.estimateStreaks` 为共享 helper**（当前在 settlement.service.ts 内私有，report 注释处引用但 report 未实现阈值判断）；连续 isEstimated ≥ N（N Pilot，默认 2） | ACCOUNT |
-| REMOTE_EVENT_UNBOUND | WARNING | `processingStatus='UNBOUND'` | REMOTE_SOURCE |
-| REMOTE_EVENT_WAITING_PLAN | WARNING | `processingStatus='WAITING_PLAN'` | binding→ACCOUNT 或 REMOTE_SOURCE |
-| REMOTE_EVENT_FAILED | WARNING | `processingStatus='FAILED'` | 同上 |
-| REMOTE_EVENT_CONFLICT | WARNING | `processingStatus='CONFLICT'`（D11：读数事实冲突 REMOTE_VS_ACTUAL / REMOTE_VS_REMOTE） | 同上 |
-| REMOTE_EVENT_KEY_CONFLICT | WARNING | `currentIssueCode='EVENT_KEY_CONFLICT'`（D11：同 externalEventKey+不同 canonical payload；issue code 列独立于 processingStatus，可与 CONFLICT 并存） | REMOTE_SOURCE |
+| REMOTE_EVENT_UNBOUND | WARNING | `processingStatus='UNBOUND'`（未解析 binding/account） | **REMOTE_SOURCE**（D21） |
+| REMOTE_EVENT_WAITING_PLAN | WARNING | `processingStatus='WAITING_PLAN'`（已解析 waterAccount，缺 plan item） | **ACCOUNT**（resolved 户；off-book→TENANT） |
+| REMOTE_EVENT_FAILED | WARNING | `processingStatus='FAILED'`（当前来源 PLAN_ITEM_AMBIGUOUS，已解析 waterAccount） | **ACCOUNT**（同上） |
+| REMOTE_EVENT_CONFLICT | WARNING | `processingStatus='CONFLICT'`（D11：REMOTE_VS_ACTUAL / REMOTE_VS_REMOTE 读数事实冲突） | **ACCOUNT**（同上） |
+| REMOTE_EVENT_KEY_CONFLICT | WARNING | `currentIssueCode='EVENT_KEY_CONFLICT'`（D11；独立于 processingStatus，可与 CONFLICT 并存） | **REMOTE_SOURCE** |
 | UNPAID_BILL_OVERDUE | WARNING | bill status∈{POSTED,PARTIAL_PAID} ∧ dueDate<today ∧ (totalAmount − Σ本bill alloc)>0 —— **bill-level，只读本 bill 的 PaymentAlloc** | ACCOUNT |
 
 非 V1（Gate 条目，阈值待 Pilot）：READING_MISSING（PENDING≠异常，缺 deadline 语义）、DEVICE_SILENT（无 lastSeenAt）、SETTLEMENT_DRAFT_STALE、CLOSED_WITH_DEBT（settle-level，strict scope 已冻结但入队待 Pilot）、SHARED_SETTLE_SCOPE。
+
+**D23 QC anti-supersede 谓词**（schema 无 `supersededById`，子记录持 `supersedesReadingId`）：
+
+```sql
+qcStatus IN ('MANUAL_REVIEW','REJECTED')
+AND NOT EXISTS (
+  SELECT 1 FROM meter_reading child
+  WHERE child.tenant_id = r.tenant_id
+    AND child.supersedes_reading_id = r.id
+)
+```
+
+实现期评估补 `@@index([tenantId, supersedesReadingId])`（当前无此索引）。
+
+**D22 KEY_CONFLICT anomalyKey**：`event:{eventId}:EVENT_KEY_CONFLICT:{currentIssueAt}`（currentIssueAt 用稳定序列化格式，如 ISO）。每次新冲突刷新 issueAt → 旧 fact 消失、episode cleared、新 fact→新 episode——避免首 episode 被 IGNORE 后新冲突被永久吞掉。
 
 **排除集**：REMOTE 不含 RECEIVED/CONVERTED/IGNORED；QC 不含 PENDING（普通待办）和被 superseded 的读数；plan_item SKIPPED 不算 missing；MONITORING/非 billable 户不触发户级异常。
 
@@ -169,7 +184,7 @@ POST /exceptions/refresh           (exception:manage) —— 显式 reconcile tr
 |---|---|
 | ACCOUNT | E8 覆盖链批量化：收集本页 waterAccountIds → `outOfScopeAccountIds` 一次过滤 |
 | TENANT（off-book 户异常，D12） | 户无 BookMeter → 无确定营业所 owner → **仅 tenant 级角色可见/assign**。E8 read permissive 是读侧宽放，不等于队列 ownership——不得让所有 Branch 同时看到/接手无册任务 |
-| REMOTE_SOURCE | `remote_source.orgUnitId` ∈ 子树；null → tenant-only |
+| REMOTE_SOURCE | `remote_source.orgUnitId` ∈ 子树；null → tenant-only（适用 UNBOUND、KEY_CONFLICT；已解析 account 的 remote 异常走 ACCOUNT，D21） |
 | SETTLE | strict settle scope（`outOfScopeSettleAccountIds`）→ 跨所 settle fact scoped 不可见 |
 
 **户级异常 anchor 判定顺序**：先查 current BookMeter count——0 → TENANT anchor（不看历史 plan_item，D14）；≥1 → ACCOUNT anchor 走 E8 覆盖链（多册任一覆盖出界即不可见）。
@@ -180,7 +195,7 @@ POST /exceptions/refresh           (exception:manage) —— 显式 reconcile tr
 
 - Detector：每类一条带索引 query；户级三类（NO_ACTIVE/NO_BOOK/MULTI）可合并为一次 installation/book_meter 聚合
 - 列表：detector 各类并行 → 合并 → scope 批过滤 → join episode → 分页。`take=50` 默认
-- 热点：READING_QC_* 走 `meter_reading` 的 qcStatus+supersededById（需确认索引，实现期评估 `@@index([tenantId,qcStatus])` 是否补）
+- 热点：READING_QC_* 走 `meter_reading` 的 qcStatus + anti-supersede 子查询（D23）；实现期评估 `@@index([tenantId, qcStatus])` 与 `@@index([tenantId, supersedesReadingId])`
 - Reconcile 频率：实现期定（建议起步 cron 5–15min + 显式 refresh），写量 = Δ episodes，不是全量
 
 ## 9. 错误语义
@@ -201,6 +216,8 @@ POST /exceptions/refresh           (exception:manage) —— 显式 reconcile tr
 
 - **Detector 正确性**：每类正例+排除例（MONITORING/非 billable 户不触发户级异常；superseded reading 不列 QC；SKIPPED item；REVERSED bill；remote RECEIVED/CONVERTED/IGNORED 不入列；event key conflict 由 currentIssueCode 而非 processingStatus 判定，可与 CONFLICT 并存）
 - **Remote replay（D10）**：event UNBOUND→replay→WAITING_PLAN = UNBOUND episode RESOLVED + WAITING_PLAN 新 episode，旧 episode anomalyType 不被改写
+- **KEY_CONFLICT occurrence（D22）**：T1 冲突 IGNORE → T2 新冲突（currentIssueAt 变）→ 新 OPEN episode，不被旧 IGNORE 吞掉
+- **Remote anchor（D21）**：UNBOUND 按 source.orgUnitId；WAITING_PLAN/FAILED/CONFLICT 按 resolved account 覆盖链（off-book→TENANT）
 - **Episode**：同 key fact 消失→RESOLVED AUTO→复现→新 episode（行数+1，不 reopen 旧行）；IGNORED→fact 消失→cleared→复现→新 OPEN episode（不继承 IGNORED）
 - **GET 无写**：mock 计数器断言 GET 不产生 work_item 写
 - **D3 拦截**：fact active 时 resolve→409

@@ -1,6 +1,6 @@
-# E9 — Exception Center / Operational Work Queue V1（Product Gate，Rev3）
+# E9 — Exception Center / Operational Work Queue V1（Product Gate，Rev4 Final）
 
-> 状态：**Rev3，按 Gate Review D10–D14 修订**。E8 已合并（main @ 062bba5）。本 Epic 从「看一个户」（E8 Object Center）走向「今天该处理哪些户」——运营工作队列，不是新的业务事实源。
+> 状态：**Rev4，按 Gate Review D10–D23 定稿**。E8 已合并（main @ 062bba5）。本 Epic 从「看一个户」（E8 Object Center）走向「今天该处理哪些户」——运营工作队列，不是新的业务事实源。
 
 ## 0. 冻结前提
 
@@ -28,7 +28,7 @@
 ## 2. 页面 IA
 
 ```
-异常中心（exception:read 可见，内容按 scope+权限域裁剪）
+异常中心（exception:read 可见，内容按 exception RBAC + anomaly scope 裁剪；drill-down 再校验原 domain permission）
 ├─ 顶部统计条：OPEN / ACK / 今日新增 / 今日清除（本 scope）
 ├─ 过滤器：异常类型 | 严重度 | 状态 | 册/营业所 | 期间
 ├─ 队列表（分页）：severity | type | 对象 | 摘要 | episode 开始 | assignee | status
@@ -52,14 +52,18 @@
 | `READING_QC_REVIEW` | WARNING | meter_reading qcStatus=MANUAL_REVIEW 且未 superseded | `reading:{readingId}:QC_REVIEW` | ACCOUNT |
 | `READING_QC_REJECTED` | WARNING | qcStatus=REJECTED 且未 superseded | `reading:{readingId}:QC_REJECTED` | ACCOUNT |
 | `ESTIMATE_STREAK` | WARNING | 连续 isEstimated settlement ≥ N（抽取 SettlementService.estimateStreaks 共享 helper，不复制算法；N Pilot 定，默认 2） | `wa:{id}:ESTIMATE_STREAK` | ACCOUNT |
-| `REMOTE_EVENT_UNBOUND` | WARNING | raw_remote_event.processingStatus=UNBOUND | `event:{eventId}:UNBOUND` | REMOTE_SOURCE |
-| `REMOTE_EVENT_WAITING_PLAN` | WARNING | processingStatus=WAITING_PLAN | `event:{eventId}:WAITING_PLAN` | binding→ACCOUNT 或 REMOTE_SOURCE |
-| `REMOTE_EVENT_FAILED` | WARNING | processingStatus=FAILED | `event:{eventId}:FAILED` | 同上 |
-| `REMOTE_EVENT_CONFLICT` | WARNING | **processingStatus=CONFLICT**（D11：远传读数与已有读数事实冲突——REMOTE_VS_ACTUAL / REMOTE_VS_REMOTE） | `event:{eventId}:CONFLICT` | 同上 |
-| `REMOTE_EVENT_KEY_CONFLICT` | WARNING | **currentIssueCode='EVENT_KEY_CONFLICT'**（D11：同 externalEventKey + 不同 canonical payload；与 processingStatus 独立，可与上者并存） | `event:{eventId}:EVENT_KEY_CONFLICT` | REMOTE_SOURCE |
+| `REMOTE_EVENT_UNBOUND` | WARNING | `processingStatus='UNBOUND'`（未能解析 binding/account） | `event:{eventId}:UNBOUND` | **REMOTE_SOURCE**（D21） |
+| `REMOTE_EVENT_WAITING_PLAN` | WARNING | `processingStatus='WAITING_PLAN'`（已解析 binding→installation→waterAccount，仅缺 plan item） | `event:{eventId}:WAITING_PLAN` | **ACCOUNT**（resolved 户；off-book→TENANT） |
+| `REMOTE_EVENT_FAILED` | WARNING | `processingStatus='FAILED'`（当前实际来源 PLAN_ITEM_AMBIGUOUS——已解析 waterAccount） | `event:{eventId}:FAILED` | **ACCOUNT**（同上） |
+| `REMOTE_EVENT_CONFLICT` | WARNING | `processingStatus='CONFLICT'`（D11：已解析 plan item/读数，REMOTE_VS_ACTUAL / REMOTE_VS_REMOTE 读数事实冲突） | `event:{eventId}:CONFLICT` | **ACCOUNT**（同上） |
+| `REMOTE_EVENT_KEY_CONFLICT` | WARNING | `currentIssueCode='EVENT_KEY_CONFLICT'`（D11：同 externalEventKey+不同 canonical payload；issue code 独立于 processingStatus，可与 CONFLICT 并存） | `event:{eventId}:EVENT_KEY_CONFLICT:{currentIssueAt}`（D22，见下注） | **REMOTE_SOURCE** |
 | `UNPAID_BILL_OVERDUE` | WARNING | bill.status∈{POSTED,PARTIAL_PAID} ∧ dueDate<today ∧ 本 bill outstanding>0（仅 Bill+本 bill PaymentAlloc → bill/account-level fact） | `bill:{billId}:OVERDUE` | ACCOUNT（非 settle-level，D5） |
 
-**REMOTE key 含 type（D10）**：同一 event 经 replay 状态迁移（UNBOUND→WAITING_PLAN）时，旧 fact 消失→旧 episode RESOLVED，新 fact→新 OPEN episode；不得改旧 episode 的 anomalyType 冒充同一事实。`REMOTE_EVENT_KEY_CONFLICT` 用 issue code 而非 status，可与 processing-status anomaly 同时存在。
+**REMOTE key 含 type（D10）**：同一 event 经 replay 状态迁移（UNBOUND→WAITING_PLAN）时，旧 fact 消失→旧 episode RESOLVED，新 fact→新 OPEN episode；不得改旧 episode 的 anomalyType 冒充同一事实。
+
+**REMOTE anchor 完全确定（D21）**：UNBOUND 尚未解析到 account → REMOTE_SOURCE；WAITING_PLAN/FAILED/CONFLICT 在当前 RemoteProcessor 中均已解析 binding→installation→waterAccount → ACCOUNT anchor（account off-book 时按 D12 降 TENANT）；KEY_CONFLICT 未涉及读数归属 → REMOTE_SOURCE。不允许实现期在 ACCOUNT/REMOTE_SOURCE 间自选。
+
+**KEY_CONFLICT occurrence identity（D22）**：每次收到同 externalEventKey+不同 payload 都会刷新 `currentIssueCode`/`currentIssueAt`——若 key 不含 occurrence，第一次 episode 被 IGNORE 后，后续新冲突会被旧 IGNORED 永久吞掉。故 key 带 `{currentIssueAt}`（稳定序列化格式）：T2 冲突发生时 T1 fact 消失→episode A cleared，T2 fact→新 episode B OPEN。
 
 **REMOTE 队列不含** `RECEIVED`（正常瞬态）/ `CONVERTED`（已成功）/ `IGNORED`（已处理）。
 
@@ -127,7 +131,7 @@ drill 到业务页面仍要求原域权限；assignee 必须对该 anomaly scope
 - S3 人工 resolve 拦截：fact 仍在→409
 - S4 IGNORED episode：fact 消失再复现→新 OPEN episode
 - S5 remote replay：event UNBOUND→replay→WAITING_PLAN = 旧 episode RESOLVED + 新 episode OPEN
-- S6 KEY_CONFLICT 并存：同 event 可同时挂 CONFLICT(processingStatus) 与 EVENT_KEY_CONFLICT(issueCode) 两条异常
+- S6 KEY_CONFLICT 并存与复现：同 event 可同时挂 CONFLICT(processingStatus) 与 EVENT_KEY_CONFLICT(issueCode)；KEY_CONFLICT@T1 被 IGNORE 后，T2 新冲突仍产生新 OPEN episode（D22）
 - S7 RBAC：exception:read 无 billing:read→能看 UNPAID_BILL_OVERDUE，drill 被拒
 - S8 MULTI_BOOK：户挂两册→WARNING 入队→人工清理后消失
 

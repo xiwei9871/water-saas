@@ -1,6 +1,6 @@
-# E10 — Operations Dashboard / Reporting V1（Product Gate Draft，Rev3）
+# E10 — Operations Dashboard / Reporting V1（Product Gate Draft，Rev4 Final）
 
-> 状态：**Draft Rev3，按 Gate Review D7–D20 修订；implementation HOLD**。原则不变且更严格：**Dashboard 不拥有任何计算口径**。详细口径见 `E10_METRIC_DICTIONARY.md`。
+> 状态：**Draft Rev4，按 Gate Review D7–D27 定稿；implementation HOLD**。原则不变且更严格：**Dashboard 不拥有任何计算口径**。详细口径见 `E10_METRIC_DICTIONARY.md`。
 
 ## 1. 定位
 
@@ -34,7 +34,7 @@
 - refund/reversal 是 **signed negative Payment**（`reversalOfId → original`，status=RECEIVED/DAY_CLOSED），**不是**把原 payment 置 REVERSED——`PaymentStatus.REVERSED` 当前是 vestigial
 - `PaymentAlloc.source=PREPAYMENT` 是 APPLY 产生的独立 alloc（历史现金冲抵当期账单），无 `payment.receivedAt`，不属于当期现金收款
 
-E10 全部金额指标按 **signed-money 语义**出数：`status IN (RECEIVED, DAY_CLOSED)` ∧ `Σ signed amount`，负数自然净掉（D16）。
+E10 **payment-derived cash 指标**（CASHIER_COLLECTED / TERRITORY_DEBT_COLLECTION / PAYMENT_CHANNEL_MIX 类）按 **signed-money 语义**出数：`status IN (RECEIVED, DAY_CLOSED)` ∧ `Σ signed amount`，负数自然净掉（D16）。注意 BILLED / RECEIVABLE / PREPAYMENT_BALANCE 不以 Payment.status 为谓词，不适用此条。
 
 ## 3. 页面 IA
 
@@ -42,7 +42,7 @@ E10 全部金额指标按 **signed-money 语义**出数：`status IN (RECEIVED, 
 运营看板（默认 landing 候选，权限域自适应）
 ├─ 顶部：period 选择器（默认当前期）+ 营业所筛选（scope 内，tenant 级才有对比）
 ├─ 指标卡组 1「抄表」：应抄 | 已抄 | 未抄 | 异常读数 | 实抄率 | 估抄率
-├─ 指标卡组 2「账务」：本期用水量 | 出账 | 辖区实收 | 柜员实收 | 回收率 | 欠费 | 预存余额
+├─ 指标卡组 2「账务」：本期用水量 | 出账 | 辖区账款回收 | 柜员实收 | 回收率 | 欠费 | 预存余额
 ├─ 指标卡组 3「资产/远传」：ACTIVE 表 | 本期换表 | 本期销户 | 远传在线率
 └─ 异常摘要组：OPEN 异常数 → 跳 E9 队列（E9 落地后启用）
 ```
@@ -56,7 +56,7 @@ E10 全部金额指标按 **signed-money 语义**出数：`status IN (RECEIVED, 
 | 未抄户数 | Reading Plan 页（period + status=PENDING 预填） |
 | 异常读数/异常户数 | E9 Exception Center（未上线前隐藏） |
 | 欠费金额 | 账单列表（overdue 过滤）→ 户 360 |
-| 辖区实收/出账 | 对应月报/明细列表 |
+| 辖区账款回收/出账 | 对应月报/明细列表 |
 | 柜员实收 | cashier-daily 对应视图 |
 | 远传在线率 | Remote source/device 页 |
 | 换表/销户 | Account events / 水表列表（日期范围预填） |
@@ -76,10 +76,30 @@ E10 全部金额指标按 **signed-money 语义**出数：`status IN (RECEIVED, 
 - **Org Anchor 决定一切**（D8）：
   - 抄表指标 → `ReadingBook.orgUnitId` 子树
   - 柜员业绩 → `Payment.orgUnitId`（收款发生的营业所）
-  - 辖区应收/账款回收/回收率 → `Bill.waterAccountId` / `PaymentAlloc(source=PAYMENT)→Bill→WaterAccount` 的 E8 account coverage（账单**归属**的营业所）
+  - 辖区应收/账款回收/回收率 → `Bill.waterAccountId` / `PaymentAlloc(source=PAYMENT)→Bill→WaterAccount` 的 **ACCOUNT_AGGREGATION_OWNERSHIP**（D24，非裸 E8 read scope）
   - 远传 → `RemoteSource.orgUnitId`
 - 典型分裂场景已入字典：Branch A 的账单在 Branch B 柜台收款 → **柜员实收记 B，辖区账款回收记 A**——两个指标并存，不得混算
 - 营业所对比维度仅 tenant 级可见
+
+### 6.1 ACCOUNT_AGGREGATION_OWNERSHIP（D24——统计归属 ≠ 读可见性）
+
+**E8 `ACCOUNT_READ_SCOPE` ≠ E10 `ACCOUNT_AGGREGATION_OWNERSHIP`**。E8 对无册户读侧宽放是为「新户可访问」；若直接套用到聚合，同一 off-book 户会被 A/B/C 各所 dashboard 重复计数。冻结：
+
+| current BookMeter count | 归属 |
+|---|---|
+| = 0 | **UNASSIGNED / TENANT**——scoped branch aggregate **不计**，tenant aggregate 计入 |
+| ≥ 1 | E8 account coverage：任一覆盖册出 caller scope → **不计**（fail closed）；全部在 scope → 计一次 |
+
+适用全部 WaterAccount-anchor 指标：READING_ANOMALY_COUNT / ESTIMATE_RATE / PERIOD_USAGE_QTY / BILLED_AMOUNT / TERRITORY_DEBT_COLLECTION / GROSS_BILL_RECEIVABLE / ACTIVE_METER_COUNT / METER_REPLACEMENT_COUNT / ACCOUNT_CLOSED_COUNT。ReadingBook / Payment.orgUnitId / RemoteSource anchor 指标不受影响。
+
+### 6.2 历史归属语义（D25——CURRENT-PORTFOLIO VIEW）
+
+当前模型无 `WaterAccount→Org` effective-dated ownership snapshot，Bill/Settlement 也无营业所快照——**无法回答「9 月账单在 9 月当时属哪个所」**。冻结：
+
+- **WaterAccount-anchor 历史指标 = current-portfolio view**：查询历史 period 时按**查询时点**的 current BookMeter ownership 归属，不得声称是历史营业所绩效
+- ReadingBook-anchor 指标用 plan/book 的历史 anchor（plan 生成时的册）
+- Payment cashier 指标用 `Payment.orgUnitId` 的发生时 anchor
+- Pilot 若要求「历史营业所业绩不随户迁移」→ 另开 effective ownership / org snapshot Epic，**不在 E10 V1 偷造**
 
 ## 7. shared-settle 与 settle 级指标（D9 + D20）
 
