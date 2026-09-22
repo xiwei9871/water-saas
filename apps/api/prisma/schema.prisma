@@ -1182,8 +1182,9 @@ model RemoteDevice {
   updatedAt       DateTime           @updatedAt @map("updated_at")
   updatedBy       String?            @map("updated_by") @db.Uuid
 
-  remoteSource RemoteSource          @relation(fields: [tenantId, remoteSourceId], references: [tenantId, id], onDelete: Restrict)
-  bindings     RemoteDeviceBinding[]
+  remoteSource   RemoteSource          @relation(fields: [tenantId, remoteSourceId], references: [tenantId, id], onDelete: Restrict)
+  bindings       RemoteDeviceBinding[]
+  resolvedEvents RawRemoteEvent[]      @relation("resolvedDevice")
 
   @@unique([tenantId, remoteSourceId, vendorDeviceKey])
   @@unique([tenantId, remoteSourceId, id])
@@ -1213,6 +1214,7 @@ model RemoteDeviceBinding {
   remoteSource RemoteSource      @relation(fields: [tenantId, remoteSourceId], references: [tenantId, id], onDelete: Restrict)
   remoteDevice RemoteDevice      @relation(fields: [tenantId, remoteSourceId, remoteDeviceId], references: [tenantId, remoteSourceId, id], onDelete: Restrict)
   installation MeterInstallation @relation(fields: [tenantId, installationId], references: [tenantId, id], onDelete: Restrict)
+  resolvedEvents RawRemoteEvent[] @relation("resolvedBinding")
 
   @@unique([tenantId, id])
   @@index([tenantId, remoteDeviceId, effectiveFrom])
@@ -1256,6 +1258,8 @@ model RawRemoteEvent {
   updatedBy             String?           @map("updated_by") @db.Uuid
 
   remoteSource RemoteSource             @relation(fields: [tenantId, remoteSourceId], references: [tenantId, id], onDelete: Restrict)
+  resolvedRemoteDevice RemoteDevice?    @relation("resolvedDevice", fields: [tenantId, resolvedRemoteDeviceId], references: [tenantId, id], onDelete: Restrict)
+  resolvedBinding RemoteDeviceBinding?  @relation("resolvedBinding", fields: [tenantId, resolvedBindingId], references: [tenantId, id], onDelete: Restrict)
   processLogs  RemoteEventProcessLog[]
   reading      MeterReading?
 

@@ -33,6 +33,7 @@ let device2Id: string;
 let installationId: string;
 let meterId: string;
 let eventId: string;
+let planItemId: string;
 
 const expectPgError = async (fn: () => Promise<unknown>, code: string) => {
   await expect(fn()).rejects.toMatchObject({ code });
@@ -166,6 +167,64 @@ beforeAll(async () => {
       await owner.query(
         `SELECT id FROM raw_remote_event WHERE tenant_id=$1 AND remote_source_id=$2 AND external_event_key='evt-001'`,
         [TENANT_A, sourceId],
+      )
+    ).rows[0].id;
+
+  // Plan chain — adapter readings must always be plan-bound (frozen invariant).
+  const org = await owner.query(
+    `INSERT INTO org_unit (id, tenant_id, name, type, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, 'e5-org', 'BRANCH', now(), now())
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [TENANT_A],
+  );
+  const orgId =
+    org.rows[0]?.id ??
+    (
+      await owner.query(
+        `SELECT id FROM org_unit WHERE tenant_id=$1 AND name='e5-org'`,
+        [TENANT_A],
+      )
+    ).rows[0].id;
+  const book = await owner.query(
+    `INSERT INTO reading_book (id, tenant_id, org_unit_id, book_no, name, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, 'e5-book', 'e5 book', now(), now())
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [TENANT_A, orgId],
+  );
+  const bookId =
+    book.rows[0]?.id ??
+    (
+      await owner.query(
+        `SELECT id FROM reading_book WHERE tenant_id=$1 AND book_no='e5-book'`,
+        [TENANT_A],
+      )
+    ).rows[0].id;
+  const plan = await owner.query(
+    `INSERT INTO reading_plan (id, tenant_id, book_id, period, plan_date, status, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, '202609', '2026-09-01', 'OPEN', now(), now())
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [TENANT_A, bookId],
+  );
+  const planId =
+    plan.rows[0]?.id ??
+    (
+      await owner.query(
+        `SELECT id FROM reading_plan WHERE tenant_id=$1 AND book_id=$2 AND period='202609'`,
+        [TENANT_A, bookId],
+      )
+    ).rows[0].id;
+  const item = await owner.query(
+    `INSERT INTO reading_plan_item (id, tenant_id, plan_id, water_account_id, seq_no, planned_installation_id, status, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, 'eeeeeeee-1111-4111-8111-111111111111', 1, $3, 'PENDING', now(), now())
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [TENANT_A, planId, installationId],
+  );
+  planItemId =
+    item.rows[0]?.id ??
+    (
+      await owner.query(
+        `SELECT id FROM reading_plan_item WHERE tenant_id=$1 AND plan_id=$2`,
+        [TENANT_A, planId],
       )
     ).rows[0].id;
 });
@@ -326,10 +385,11 @@ describe('meter_reading remote invariants', () => {
     source: string;
     operatorId: string | null;
     sourceEventId?: string | null;
+    planItemId?: string | null;
   }) =>
     owner.query(
-      `INSERT INTO meter_reading (id, tenant_id, installation_id, meter_id, period, read_date, result_type, reading_value, source, operator_id, source_event_id, qc_status, created_at, updated_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, '202609', '2026-09-21', $4, 123.45, $5, $6, $7, 'PENDING', now(), now())`,
+      `INSERT INTO meter_reading (id, tenant_id, plan_item_id, installation_id, meter_id, period, read_date, result_type, reading_value, source, operator_id, source_event_id, qc_status, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $8, $2, $3, '202609', '2026-09-21', $4, 123.45, $5, $6, $7, 'PENDING', now(), now())`,
       [
         TENANT_A,
         installationId,
@@ -338,15 +398,17 @@ describe('meter_reading remote invariants', () => {
         opts.source,
         opts.operatorId,
         opts.sourceEventId ?? null,
+        opts.planItemId ?? null,
       ],
     );
 
-  it('allows adapter REMOTE reading with NULL operator + source_event_id', async () => {
+  it('allows adapter REMOTE reading with NULL operator + source_event_id + plan_item', async () => {
     const r = await insertReading({
       resultType: 'REMOTE',
       source: 'REMOTE',
       operatorId: null,
       sourceEventId: eventId,
+      planItemId,
     });
     expect(r.rowCount).toBe(1);
   });
@@ -359,8 +421,28 @@ describe('meter_reading remote invariants', () => {
           source: 'REMOTE',
           operatorId: null,
           sourceEventId: eventId,
+          planItemId,
         }),
       '23505',
+    );
+  });
+
+  it('rejects a plan-less adapter reading (source_event_id without plan_item)', async () => {
+    const ev3 = await owner.query(
+      `INSERT INTO raw_remote_event (id, tenant_id, remote_source_id, external_event_key, canonical_payload_hash, vendor_device_key, business_period, collected_at, reading_value, raw_payload, canonical_payload, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, 'evt-003', 'hash-003', 'D001', '202609', '2026-09-21T02:00:00Z', 125, '{}'::jsonb, '{}'::jsonb, now(), now()) RETURNING id`,
+      [TENANT_A, sourceId],
+    );
+    await expectPgError(
+      () =>
+        insertReading({
+          resultType: 'REMOTE',
+          source: 'REMOTE',
+          operatorId: null,
+          sourceEventId: ev3.rows[0].id,
+          planItemId: null,
+        }),
+      '23514',
     );
   });
 
@@ -378,6 +460,7 @@ describe('meter_reading remote invariants', () => {
           source: 'WEB',
           operatorId: 'ffffffff-1111-4111-8111-111111111111',
           sourceEventId: ev2.rows[0].id,
+          planItemId,
         }),
       '23514',
     );
