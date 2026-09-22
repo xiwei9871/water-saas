@@ -27,6 +27,11 @@ import {
 } from './canonical.js';
 import { RemoteEventService } from './remote-event.service.js';
 import {
+  columnConfigOf,
+  parseVendorFile,
+} from './file-import-adapter.js';
+import { sha256Hex } from './canonical.js';
+import {
   RemoteSourceService,
   type RemoteSourceBody,
   type RemoteSourcePatchBody,
@@ -147,6 +152,73 @@ export class RemoteSourceController {
     const ctx = currentTenant();
     return this.events.ingestBatch(ctx, sourceId, canonical);
   }
+
+  /**
+   * POST /remote-sources/:id/import — FileImportAdapter (E5 T8).
+   * Body: { targetPeriod:'YYYYMM', format:'csv'|'xlsx', content, fileName? }
+   *   - CSV: content is utf-8 text; XLSX: base64 of the workbook
+   *   - vendor column mapping lives in source.config (design §23)
+   *   - naive timestamps resolve through source.timezone
+   *   - PARTIAL SUCCESS: per-row outcomes + invalid rows in the report;
+   *     re-importing the same file yields IDEMPOTENT_REPLAY per row.
+   */
+  @Post(':id/import')
+  @Permissions('metering:remote:manage')
+  async import(@Param('id') id: string, @Body() body: ImportBody) {
+    const sourceId = assertUuid(id, 'id');
+    if (!isBusinessPeriod(body?.targetPeriod)) {
+      throw new BadRequestException({ code: 'INVALID_TARGET_PERIOD' });
+    }
+    const format =
+      body.format ??
+      (body.fileName?.toLowerCase().endsWith('.xlsx') ? 'xlsx' : 'csv');
+    if (format !== 'csv' && format !== 'xlsx') {
+      throw new BadRequestException({ code: 'INVALID_FILE_FORMAT' });
+    }
+    if (!body.content) {
+      throw new BadRequestException({ code: 'FILE_CONTENT_REQUIRED' });
+    }
+    const ctx = currentTenant();
+    const source = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const s = await tx.remoteSource.findFirst({
+        where: { tenantId: ctx.tenantId, id: sourceId },
+      });
+      if (!s) throw new BadRequestException({ code: 'REMOTE_SOURCE_NOT_FOUND' });
+      return s;
+    });
+    const columns = columnConfigOf(source.config);
+    if (!columns) {
+      throw new BadRequestException({ code: 'FILE_COLUMNS_NOT_CONFIGURED' });
+    }
+    const parsed = parseVendorFile({
+      format,
+      content: body.content,
+      targetPeriod: body.targetPeriod,
+      timezone: source.timezone,
+      columns,
+      fileSha256: sha256Hex(body.content),
+    });
+    const outcomes = await this.events.ingestBatch(ctx, sourceId, parsed.events);
+    const counts: Record<string, number> = {};
+    for (const o of outcomes) counts[o.outcome] = (counts[o.outcome] ?? 0) + 1;
+    return {
+      fileSha256: parsed.fileSha256,
+      fileName: body.fileName ?? null,
+      targetPeriod: body.targetPeriod,
+      totalRows: parsed.events.length + parsed.invalid.length,
+      parsed: parsed.events.length,
+      invalid: parsed.invalid,
+      outcomes,
+      counts,
+    };
+  }
+}
+
+interface ImportBody {
+  targetPeriod?: string;
+  format?: 'csv' | 'xlsx';
+  fileName?: string;
+  content?: string;
 }
 
 interface IngestEventBody {
