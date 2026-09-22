@@ -28,6 +28,7 @@ export const METER_READING_SELECT = {
   qcAt: true,
   source: true,
   operatorId: true,
+  sourceEventId: true,
   photoRef: true,
   remark: true,
   createdAt: true,

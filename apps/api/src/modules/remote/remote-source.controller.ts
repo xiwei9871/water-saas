@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -8,6 +9,7 @@ import {
   Post,
   Query,
   Req,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { IdempotencyService } from '../../common/idempotency.service.js';
@@ -16,6 +18,14 @@ import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
+import {
+  canonicalDecimal,
+  fingerprintEventKey,
+  buildCanonicalPayload,
+  isBusinessPeriod,
+  type CanonicalRemoteEvent,
+} from './canonical.js';
+import { RemoteEventService } from './remote-event.service.js';
 import {
   RemoteSourceService,
   type RemoteSourceBody,
@@ -37,6 +47,7 @@ const pageArgs = (take?: string, skip?: string) => ({
 export class RemoteSourceController {
   constructor(
     private readonly svc: RemoteSourceService,
+    private readonly events: RemoteEventService,
     private readonly prisma: TenantPrismaService,
     private readonly idem: IdempotencyService,
   ) {}
@@ -114,4 +125,79 @@ export class RemoteSourceController {
       this.svc.updateTx(tx, ctx, id, body, req),
     );
   }
+
+  /**
+   * POST /remote-sources/:id/events — canonical ingest entry point. Body:
+   *   { vendorDeviceKey, businessPeriod, collectedAt, readingValue,
+   *     externalEventKey?, vendorQuality?, rawPayload? } | {events: [...]}
+   * Server normalizes + fingerprints; each event lands its own
+   * RawRemoteEvent and immediately runs the resolution pipeline.
+   * Adapters (file import in T8) call the service directly — this endpoint
+   * exists for canonical JSON ingest + tests.
+   */
+  @Post(':id/events')
+  @Permissions('metering:remote:manage')
+  ingest(@Param('id') id: string, @Body() body: { events?: IngestEventBody[] } & IngestEventBody) {
+    const sourceId = assertUuid(id, 'id');
+    const rows = Array.isArray(body?.events) ? body.events : [body];
+    if (rows.length === 0) {
+      throw new BadRequestException({ code: 'EVENTS_REQUIRED' });
+    }
+    const canonical = rows.map((row) => toCanonical(row));
+    const ctx = currentTenant();
+    return this.events.ingestBatch(ctx, sourceId, canonical);
+  }
 }
+
+interface IngestEventBody {
+  externalEventKey?: string;
+  vendorDeviceKey?: string;
+  businessPeriod?: string;
+  collectedAt?: string;
+  readingValue?: string | number;
+  vendorQuality?: string;
+  rawPayload?: Record<string, unknown>;
+}
+
+const toCanonical = (row: IngestEventBody): CanonicalRemoteEvent => {
+  if (!row?.vendorDeviceKey?.trim()) {
+    throw new BadRequestException({ code: 'EVENT_FIELDS_REQUIRED', field: 'vendorDeviceKey' });
+  }
+  if (!isBusinessPeriod(row.businessPeriod)) {
+    throw new BadRequestException({ code: 'EVENT_FIELDS_REQUIRED', field: 'businessPeriod' });
+  }
+  const collectedAt = row.collectedAt ? new Date(row.collectedAt) : null;
+  if (!collectedAt || Number.isNaN(collectedAt.getTime())) {
+    throw new BadRequestException({ code: 'EVENT_FIELDS_REQUIRED', field: 'collectedAt' });
+  }
+  const readingValue = canonicalDecimal(row.readingValue);
+  if (readingValue === null) {
+    throw new UnprocessableEntityException({ code: 'INVALID_READING_VALUE' });
+  }
+  const externalEventKey =
+    row.externalEventKey?.trim() ||
+    fingerprintEventKey({
+      vendorDeviceKey: row.vendorDeviceKey.trim(),
+      businessPeriod: row.businessPeriod!,
+      collectedAt,
+      readingValue,
+    });
+  const { canonicalPayload, payloadHash } = buildCanonicalPayload({
+    vendorDeviceKey: row.vendorDeviceKey.trim(),
+    businessPeriod: row.businessPeriod!,
+    collectedAt,
+    readingValue,
+    vendorQuality: row.vendorQuality,
+  });
+  return {
+    externalEventKey,
+    vendorDeviceKey: row.vendorDeviceKey.trim(),
+    businessPeriod: row.businessPeriod!,
+    collectedAt,
+    readingValue,
+    vendorQuality: row.vendorQuality ?? null,
+    rawPayload: row.rawPayload ?? (row as unknown as Record<string, unknown>),
+    canonicalPayload,
+    payloadHash,
+  };
+};
