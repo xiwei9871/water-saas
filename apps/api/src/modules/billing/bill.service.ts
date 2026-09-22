@@ -410,6 +410,11 @@ export class BillService {
     // it consumes prepayment in this same tx.
     if (replacement.totalAmount > 0n) {
       await this.prepay.applyForPostedDebtTx(tx, ctx, original.settleAccountId);
+      // Re-read — the APPLY recompute may have flipped the status.
+      replacement = await tx.bill.findFirstOrThrow({
+        where: { tenantId: ctx.tenantId, id: replacement.id },
+        select: BILL_SELECT,
+      });
     }
     return this.withItems(tx, ctx, replacement);
   }

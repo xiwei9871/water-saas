@@ -4,7 +4,6 @@ import {
   Controller,
   Get,
   Headers,
-  Param,
   Post,
   Query,
   Req,

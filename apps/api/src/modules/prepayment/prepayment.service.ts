@@ -53,11 +53,6 @@ interface DebtRow {
   outstanding: bigint;
 }
 
-interface LotRow {
-  id: string;
-  remaining: bigint;
-}
-
 const mapEntry = (r: LedgerRow) => ({
   id: r.id,
   settleAccountId: r.settle_account_id,
@@ -165,7 +160,7 @@ export class PrepaymentService {
       { id: string; amount: bigint; remaining: bigint; created_at: Date }[]
     >`
       SELECT e.id, e.amount::bigint AS amount,
-             e.amount + COALESCE(SUM(c.amount), 0) AS remaining,
+             (e.amount + COALESCE(SUM(c.amount), 0))::bigint AS remaining,
              e.created_at
       FROM prepayment_ledger_entry e
       LEFT JOIN prepayment_ledger_entry c
@@ -185,7 +180,7 @@ export class PrepaymentService {
     topUpId: string,
   ): Promise<bigint> {
     const rows = await tx.$queryRaw<{ remaining: bigint | null }[]>`
-      SELECT e.amount + COALESCE(SUM(c.amount), 0) AS remaining
+      SELECT (e.amount + COALESCE(SUM(c.amount), 0))::bigint AS remaining
       FROM prepayment_ledger_entry e
       LEFT JOIN prepayment_ledger_entry c
         ON c.tenant_id = e.tenant_id AND c.origin_top_up_id = e.id
@@ -358,10 +353,10 @@ export class PrepaymentService {
         await tx.$queryRaw`
           INSERT INTO payment_alloc
             (id, tenant_id, source, payment_id, prepayment_entry_id,
-             bill_id, amount, created_by, updated_by)
+             bill_id, amount, created_at, updated_at, created_by, updated_by)
           VALUES (gen_random_uuid(), ${ctx.tenantId}::uuid, 'PREPAYMENT',
                   NULL, ${entry.id}::uuid, ${bill.id}::uuid, ${take},
-                  ${ctx.staffId}::uuid, ${ctx.staffId}::uuid)
+                  now(), now(), ${ctx.staffId}::uuid, ${ctx.staffId}::uuid)
           ON CONFLICT (tenant_id, prepayment_entry_id) DO NOTHING`;
         outstanding -= take;
         lot.remaining -= take;
@@ -417,10 +412,10 @@ export class PrepaymentService {
       await tx.$queryRaw`
         INSERT INTO payment_alloc
           (id, tenant_id, source, payment_id, prepayment_entry_id,
-           bill_id, amount, created_by, updated_by)
+           bill_id, amount, created_at, updated_at, created_by, updated_by)
         VALUES (gen_random_uuid(), ${ctx.tenantId}::uuid, 'PREPAYMENT',
                 NULL, ${entry.id}::uuid, ${billId}::uuid, ${-restore},
-                ${ctx.staffId}::uuid, ${ctx.staffId}::uuid)
+                now(), now(), ${ctx.staffId}::uuid, ${ctx.staffId}::uuid)
         ON CONFLICT (tenant_id, prepayment_entry_id) DO NOTHING`;
       restored += restore;
     }
