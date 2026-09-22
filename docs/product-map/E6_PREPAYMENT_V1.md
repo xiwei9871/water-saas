@@ -48,7 +48,7 @@
 6. **抵扣排序冻结**：`dueDate ASC → period ASC → issuedAt ASC → id ASC`（dueDate 为空时回退 period）。与现有 Bill 模型对齐——任何重试得到相同分配结果。
 7. 允许部分抵扣；抵扣后账单状态按既有规则走 PARTIAL_PAID/PAID。
 8. 手工收费与自动抵扣同源：收费员收现金抵扣账单 = Allocation(payment)；系统自动抵扣 = Allocation(prepaymentApply)。两种 Allocation 共享 outstanding 计算。
-9. **现金口径分离**：`TOP_UP` 是现金/银行实收（cash inflow）；`APPLY` 是内部资金销账（non-cash settlement），**绝不二次计入实收**；`REFUND` 是现金流出（cash outflow）；`REVERSAL` 按被冲事实产生反向效果。DayClose/报表必须分列：现金收款、预存充值、退款/冲正、预存抵扣（非现金信息项）——绝不能混成一个数字。
+9. **现金口径分离**：`TOP_UP` 是现金/银行实收（cash inflow）；`APPLY` 是内部资金销账（non-cash settlement），**绝不二次计入实收**；`REFUND` 是现金流出（cash outflow）；`REVERSAL` 按被冲事实产生反向效果。DayClose/报表必须分列：现金收款、预存充值、退款/冲正、预存抵扣（非现金信息项）——绝不能混成一个数字。**澄清（Domain Gate 对齐）**：`CashierDayClose` 是柜员级签字现金事实，SYSTEM 自动 APPLY 无柜员归属——不进入任何柜员的 `totalAmount`，只在日结界面/运营日报作为 non-cash informational metric 单列；柜员 close 可附当日收款的预存用途拆分 snapshot（欠费收费/转预存/退款/冲正），其合计恒等于该柜员现金净额。
 10. **红冲联动**：账单被 reversal/replacement 时，其上已发生的预存 APPLY 必须追加反向 ledger entry 恢复余额——绝不修改原 APPLY。混合支付（现金+预存）的红冲按各自来源分别逆转：预存部分恢复余额，现金部分走既有 Payment reversal 规则。
 11. REVERSAL/REFUND 必须指向原流水并新增负向 entry，reason 必填。**已消耗 TOP_UP 保护**：未被 APPLY 消耗的 TOP_UP 可按权限 REVERSAL；已部分/全部被 APPLY 消耗的 TOP_UP 禁止直接全额冲正（拒绝 `PREPAYMENT_ALREADY_APPLIED`），否则会造成负余额——纠错须先按业务原因回退相关 Bill/APPLY，或仅对当前可用余额做 REFUND；V1 不自动跨多张历史账单反向展开所有 APPLY。
 12. TOP_UP 必须开收据；APPLY 的抵扣在账单收据/详情中可解释；REFUND/REVERSAL 进流水与日结口径。
