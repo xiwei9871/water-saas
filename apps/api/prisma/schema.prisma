@@ -233,6 +233,18 @@ enum DayCloseStatus {
   POSTED
 }
 
+enum PrepaymentEntryType {
+  TOP_UP
+  APPLY
+  REFUND
+  REVERSAL
+}
+
+enum PaymentAllocSource {
+  PAYMENT
+  PREPAYMENT
+}
+
 // ---------------------------------------------------------------------------
 // remote reading (E5) — docs/product-map/E5_REMOTE_READING_DOMAIN_DESIGN.md
 // ---------------------------------------------------------------------------
@@ -488,8 +500,9 @@ model SettleAccount {
   updatedAt DateTime      @updatedAt @map("updated_at")
   updatedBy String?       @map("updated_by") @db.Uuid
 
-  waterAccounts WaterAccount[]
-  bills         Bill[]
+  waterAccounts     WaterAccount[]
+  bills             Bill[]
+  prepaymentEntries PrepaymentLedgerEntry[]
 
   @@unique([tenantId, settleNo])
   @@unique([tenantId, id])
@@ -976,9 +989,12 @@ model Bill {
   settleAccount SettleAccount  @relation(fields: [tenantId, settleAccountId], references: [tenantId, id], onDelete: Restrict)
   allocs        PaymentAlloc[]
   items         BillItem[]
+  prepaymentEntries PrepaymentLedgerEntry[]
 
   @@unique([tenantId, sourceType, sourceId, billKind])
   @@unique([tenantId, id])
+  // FK target for prepayment_ledger_entry.bill → same settle_account (E6).
+  @@unique([tenantId, settleAccountId, id], map: "bill_tenant_settle_id_key")
   @@index([tenantId, waterAccountId, period])
   @@index([tenantId, settleAccountId, status])
   @@index([tenantId, billingRunId])
@@ -1051,10 +1067,14 @@ model Payment {
   updatedAt       DateTime      @updatedAt @map("updated_at")
   updatedBy       String?       @map("updated_by") @db.Uuid
 
-  allocs PaymentAlloc[]
+  allocs             PaymentAlloc[]
+  prepaymentEntries  PrepaymentLedgerEntry[]
 
   @@unique([tenantId, paymentNo])
   @@unique([tenantId, id])
+  // FK target for prepayment_ledger_entry.payment → same settle_account
+  // (E6): ledger references are (tenant, settleAccount, target) composite.
+  @@unique([tenantId, settleAccountId, id], map: "payment_tenant_settle_id_key")
   @@index([tenantId, settleAccountId, status])
   @@index([tenantId, cashierId, status])
   // First-class day-close membership (T12 review I2) — stamped by the
@@ -1066,19 +1086,28 @@ model Payment {
 }
 
 model PaymentAlloc {
-  id        String   @id @default(uuid()) @db.Uuid
-  tenantId  String   @map("tenant_id") @db.Uuid
-  paymentId String   @map("payment_id") @db.Uuid
-  billId    String   @map("bill_id") @db.Uuid
-  amount    BigInt
-  createdAt DateTime @default(now()) @map("created_at")
-  createdBy String?  @map("created_by") @db.Uuid
-  updatedAt DateTime @updatedAt @map("updated_at")
-  updatedBy String?  @map("updated_by") @db.Uuid
+  id                String             @id @default(uuid()) @db.Uuid
+  tenantId          String             @map("tenant_id") @db.Uuid
+  // E6 dual-source: PAYMENT rows carry payment_id; PREPAYMENT rows carry
+  // prepayment_entry_id → the ledger settlement entry that produced this
+  // allocation (APPLY → +amount, REVERSAL-of-APPLY → −amount, 1:1).
+  source            PaymentAllocSource @default(PAYMENT)
+  paymentId         String?            @map("payment_id") @db.Uuid
+  prepaymentEntryId String?            @map("prepayment_entry_id") @db.Uuid
+  billId            String             @map("bill_id") @db.Uuid
+  amount            BigInt
+  createdAt         DateTime           @default(now()) @map("created_at")
+  createdBy         String?            @map("created_by") @db.Uuid
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+  updatedBy         String?            @map("updated_by") @db.Uuid
 
-  payment Payment @relation(fields: [tenantId, paymentId], references: [tenantId, id], onDelete: Restrict)
-  bill    Bill    @relation(fields: [tenantId, billId], references: [tenantId, id], onDelete: Restrict)
+  payment         Payment?                @relation(fields: [tenantId, paymentId], references: [tenantId, id], onDelete: Restrict)
+  bill            Bill                    @relation(fields: [tenantId, billId], references: [tenantId, id], onDelete: Restrict)
+  // Composite FK: alloc.billId ≡ entry.billId at the DB layer — a
+  // PREPAYMENT alloc can never point at a settlement entry of another bill.
+  prepaymentEntry PrepaymentLedgerEntry?  @relation(fields: [tenantId, prepaymentEntryId, billId], references: [tenantId, id, billId], map: "payment_alloc_prepay_fkey")
 
+  @@unique([tenantId, prepaymentEntryId], map: "payment_alloc_tenant_prepay_entry_key")
   @@index([tenantId, paymentId])
   @@index([tenantId, billId])
   @@map("payment_alloc")
@@ -1098,6 +1127,8 @@ model Receipt {
   updatedBy String?     @map("updated_by") @db.Uuid
 
   @@unique([tenantId, receiptNo])
+  // E6 freeze: one real money event → at most one receipt.
+  @@unique([tenantId, paymentId], map: "receipt_tenant_payment_key")
   @@index([tenantId, paymentId])
   @@map("receipt")
 }
@@ -1111,6 +1142,11 @@ model CashierDayClose {
   totalCount  Int            @map("total_count")
   totalAmount BigInt         @map("total_amount")
   byChannel   Json           @map("by_channel") @db.JsonB
+  // E6: immutable snapshot of each swept payment's prepayment usage
+  // ({debtCollectionAmount, topUpAmount, refundAmount, reversalAmount};
+  // the four legs always sum to totalAmount). SYSTEM APPLY stays a
+  // non-cash informational metric — never inside a signed close.
+  prepaymentBreakdown Json?  @map("prepayment_breakdown") @db.JsonB
   status      DayCloseStatus @default(POSTED)
   closedAt    DateTime       @default(now()) @map("closed_at")
   createdAt   DateTime       @default(now()) @map("created_at")
@@ -1121,6 +1157,54 @@ model CashierDayClose {
   @@index([tenantId, cashierId, closeDate])
   @@index([tenantId, closeDate])
   @@map("cashier_day_close")
+}
+
+// ---------------------------------------------------------------------------
+// prepayment (E6) — docs/product-map/E6_PREPAYMENT_DOMAIN_DESIGN.md
+// ---------------------------------------------------------------------------
+
+/// Append-only prepayment ledger — the ONLY new money object in E6. The
+/// settle-account balance is always `Σ amount` (never a cached column).
+/// Sign rule: TOP_UP +, APPLY −, REFUND −, REVERSAL = −original.amount.
+/// Every lot-affecting non-TOP_UP entry carries origin_top_up_id so a
+/// lot's remaining balance is a single-level sum. References are
+/// (tenant, settleAccount, target) composite FKs — same tenant AND same
+/// money principal, not just same tenant.
+model PrepaymentLedgerEntry {
+  id                String              @id @default(uuid()) @db.Uuid
+  tenantId          String              @map("tenant_id") @db.Uuid
+  settleAccountId   String              @map("settle_account_id") @db.Uuid
+  type              PrepaymentEntryType
+  amount            BigInt
+  paymentId         String?             @map("payment_id") @db.Uuid
+  billId            String?             @map("bill_id") @db.Uuid
+  originTopUpId     String?             @map("origin_top_up_id") @db.Uuid
+  reversalOfEntryId String?             @map("reversal_of_entry_id") @db.Uuid
+  idempotencyKey    String              @map("idempotency_key")
+  operatorId        String?             @map("operator_id") @db.Uuid
+  reason            String?
+  createdAt         DateTime            @default(now()) @map("created_at")
+  createdBy         String?             @map("created_by") @db.Uuid
+
+  settleAccount SettleAccount          @relation(fields: [tenantId, settleAccountId], references: [tenantId, id], onDelete: Restrict)
+  payment       Payment?               @relation(fields: [tenantId, settleAccountId, paymentId], references: [tenantId, settleAccountId, id], map: "prepay_entry_payment_fkey")
+  bill          Bill?                  @relation(fields: [tenantId, settleAccountId, billId], references: [tenantId, settleAccountId, id], map: "prepay_entry_bill_fkey")
+  originTopUp   PrepaymentLedgerEntry? @relation("OriginLot", fields: [tenantId, settleAccountId, originTopUpId], references: [tenantId, settleAccountId, id], map: "prepay_entry_origin_topup_fkey")
+  reversalOf    PrepaymentLedgerEntry? @relation("ReversalOf", fields: [tenantId, settleAccountId, reversalOfEntryId], references: [tenantId, settleAccountId, id], map: "prepay_entry_reversal_of_fkey")
+
+  originChildren   PrepaymentLedgerEntry[] @relation("OriginLot")
+  reversalChildren PrepaymentLedgerEntry[] @relation("ReversalOf")
+  allocs           PaymentAlloc[]
+
+  @@unique([tenantId, idempotencyKey])
+  // Self-reference composite FK target (same settle_account lot chain).
+  @@unique([tenantId, settleAccountId, id], map: "prepay_entry_tenant_settle_id_key")
+  // Composite FK target for payment_alloc — alloc.billId ≡ entry.billId.
+  @@unique([tenantId, id, billId], map: "prepay_entry_tenant_id_bill_key")
+  @@index([tenantId, settleAccountId, createdAt])
+  @@index([tenantId, billId])
+  @@index([tenantId, originTopUpId])
+  @@map("prepayment_ledger_entry")
 }
 
 // ---------------------------------------------------------------------------

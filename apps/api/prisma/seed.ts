@@ -64,6 +64,7 @@ async function seedTenant({ code, name }: TenantSeed) {
     'billing:write',
     'payment:read',
     'payment:write',
+    'prepayment:reverse',
     'iam:read',
     'iam:write',
     'report:read',
