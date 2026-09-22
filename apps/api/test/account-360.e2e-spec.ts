@@ -758,3 +758,213 @@ describe('GET /water-accounts/:id/360 (customer-domain summary)', () => {
     await get(`/water-accounts/${b.waterAccount.id}/360`, branchToken).expect(403);
   });
 });
+
+/**
+ * Release-gate regressions (E8 RC fix):
+ *  P0 — /outstanding must obey STRICT settle scope, not just account scope.
+ *  P1 — transfer/create/onboard must scope-check the TARGET references.
+ *  P1 — /payment-activity must never project payment.amount (D4: the
+ *       allocatedAmount line is the only money fact).
+ */
+describe('release-gate: outstanding obeys strict settle scope (P0)', () => {
+  let sharedA: string; // A-covered account on a SHARED settle
+  let sharedSettle: string;
+  let soloA: Awaited<ReturnType<typeof onboard>>;
+  let offBook: Awaited<ReturnType<typeof onboard>>;
+
+  beforeAll(async () => {
+    const a = await onboard('osA');
+    const b = await onboard('osB');
+    await coverAccount(ORG_BRANCH_A, a.waterAccount.id, 'osA');
+    await coverAccount(ORG_BRANCH_B, b.waterAccount.id, 'osB');
+    // shared settle S: repoint the A-covered account onto B's settle so S
+    // serves one in-scope + one out-of-scope account.
+    sharedSettle = b.waterAccount.settleAccountId;
+    sharedA = a.waterAccount.id;
+    await owner.query(
+      `UPDATE water_account SET settle_account_id = $3, updated_at = now()
+       WHERE tenant_id = $1 AND id = $2`,
+      [T18, sharedA, sharedSettle],
+    );
+    soloA = await onboard('osSolo');
+    await coverAccount(ORG_BRANCH_A, soloA.waterAccount.id, 'osSolo');
+    offBook = await onboard('osOff'); // no coverage → off-book carve-out
+  });
+
+  it('account in scope but settle shared with B → 403 ORG_OUT_OF_SCOPE', async () => {
+    // sanity: the ACCOUNT itself is visible to Branch A — the refusal must
+    // come from the settle-scope check, not account scope.
+    await get(`/water-accounts/${sharedA}`, branchToken).expect(200);
+    const res = await get(
+      `/water-accounts/${sharedA}/outstanding`,
+      branchToken,
+    ).expect(403);
+    expect(res.body.code).toBe('ORG_OUT_OF_SCOPE');
+    // admin still sees the facts (whole-tenant scope)
+    await get(`/water-accounts/${sharedA}/outstanding`).expect(200);
+  });
+
+  it('single in-scope settle → 200; off-book settle → 200 (carve-out)', async () => {
+    await get(
+      `/water-accounts/${soloA.waterAccount.id}/outstanding`,
+      branchToken,
+    ).expect(200);
+    await get(
+      `/water-accounts/${offBook.waterAccount.id}/outstanding`,
+      branchToken,
+    ).expect(200);
+  });
+});
+
+describe('release-gate: target-reference scope on transfer/create/onboard (P1)', () => {
+  let src: Awaited<ReturnType<typeof onboard>>;
+  let src2: Awaited<ReturnType<typeof onboard>>;
+  let tgtB: Awaited<ReturnType<typeof onboard>>;
+  let offBookSettle: string;
+  let sharedCustomerId: string;
+
+  beforeAll(async () => {
+    src = await onboard('tgSrc');
+    src2 = await onboard('tgSrc2');
+    tgtB = await onboard('tgB');
+    await coverAccount(ORG_BRANCH_A, src.waterAccount.id, 'tgSrc');
+    await coverAccount(ORG_BRANCH_A, src2.waterAccount.id, 'tgSrc2');
+    await coverAccount(ORG_BRANCH_B, tgtB.waterAccount.id, 'tgB');
+    // permissive settle (off-book accounts only) for the create probes
+    const off = await onboard('tgOff');
+    offBookSettle = off.waterAccount.settleAccountId;
+    // shared customer: one A-covered + one B-covered account → identity is
+    // readable by Branch A under the D2 rule.
+    const sh = await onboard('tgSh');
+    sharedCustomerId = sh.waterAccount.customerId;
+    await coverAccount(ORG_BRANCH_A, sh.waterAccount.id, 'tgSh');
+    const b2 = await post('/water-accounts', {
+      customerId: sharedCustomerId,
+      settleAccountId: sh.waterAccount.settleAccountId,
+      usageCategory: 'RES_METERED',
+      addr: 'tgShB st',
+    }).expect(201);
+    await coverAccount(ORG_BRANCH_B, b2.body.id, 'tgShB');
+  });
+
+  it('transfer to B-only settle → 403, source row unchanged', async () => {
+    const res = await post(
+      `/water-accounts/${src.waterAccount.id}/transfer`,
+      { settleAccountId: tgtB.waterAccount.settleAccountId },
+      branchToken,
+    ).expect(403);
+    expect(res.body.code).toBe('ORG_OUT_OF_SCOPE');
+    const after = await get(
+      `/water-accounts/${src.waterAccount.id}`,
+    ).expect(200);
+    expect(after.body.customerId).toBe(src.waterAccount.customerId);
+    expect(after.body.settleAccountId).toBe(src.waterAccount.settleAccountId);
+  });
+
+  it('transfer to B-only customer → 403', async () => {
+    const res = await post(
+      `/water-accounts/${src.waterAccount.id}/transfer`,
+      { customerId: tgtB.waterAccount.customerId },
+      branchToken,
+    ).expect(403);
+    expect(res.body.code).toBe('ORG_OUT_OF_SCOPE');
+  });
+
+  it('POST /water-accounts binding a B-only customer → 403', async () => {
+    const res = await post(
+      '/water-accounts',
+      {
+        customerId: tgtB.waterAccount.customerId,
+        settleAccountId: offBookSettle, // permissive → 403 must be the customer
+        usageCategory: 'RES_METERED',
+        addr: 'probe st',
+      },
+      branchToken,
+    ).expect(403);
+    expect(res.body.code).toBe('ORG_OUT_OF_SCOPE');
+  });
+
+  it('onboard binding a B-only customer → 403', async () => {
+    const res = await post(
+      '/water-accounts/onboard',
+      {
+        customerId: tgtB.waterAccount.customerId,
+        account: { usageCategory: 'RES_METERED', addr: 'probe st' },
+        meter: { brand: 't18-brand', caliber: 'DN15' },
+        installation: { initialReading: 0, installedAt: '2026-01-01' },
+      },
+      branchToken,
+    ).expect(403);
+    expect(res.body.code).toBe('ORG_OUT_OF_SCOPE');
+  });
+
+  it('shared-visible customer still allowed as transfer target', async () => {
+    await post(
+      `/water-accounts/${src2.waterAccount.id}/transfer`,
+      { customerId: sharedCustomerId },
+      branchToken,
+    ).expect(201);
+    const after = await get(
+      `/water-accounts/${src2.waterAccount.id}`,
+    ).expect(200);
+    expect(after.body.customerId).toBe(sharedCustomerId);
+  });
+});
+
+describe('release-gate: payment-activity field minimization (P1)', () => {
+  it('split payment: only allocatedAmount + metadata, no payment.amount', async () => {
+    const a = await onboard('minA');
+    const b = await onboard('minB');
+    await coverAccount(ORG_BRANCH_A, a.waterAccount.id, 'minA');
+    await coverAccount(ORG_BRANCH_B, b.waterAccount.id, 'minB');
+    // shared settle so one payment legitimately splits across accounts
+    const settleId = b.waterAccount.settleAccountId;
+    await owner.query(
+      `UPDATE water_account SET settle_account_id = $3, updated_at = now()
+       WHERE tenant_id = $1 AND id = $2`,
+      [T18, a.waterAccount.id, settleId],
+    );
+    const billA = await seedBill(a.waterAccount.id, settleId, '202606', 3000n);
+    const billB = await seedBill(b.waterAccount.id, settleId, '202606', 7000n);
+    const paymentId = (
+      await owner.query(
+        `INSERT INTO payment
+           (id, tenant_id, payment_no, settle_account_id, cashier_id,
+            org_unit_id, channel, amount, status, received_at,
+            created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'CASH', 10000,
+                 'RECEIVED', now(), now(), now())
+         RETURNING id::text AS id`,
+        [T18, `t18-split-${RUN}`, settleId, STAFF_ADMIN, ORG_A],
+      )
+    ).rows[0].id;
+    for (const [billId, amt] of [
+      [billA, 3000n],
+      [billB, 7000n],
+    ] as [string, bigint][]) {
+      await owner.query(
+        `INSERT INTO payment_alloc
+           (id, tenant_id, source, payment_id, bill_id, amount,
+            created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, 'PAYMENT', $2, $3, $4, now(), now())`,
+        [T18, paymentId, billId, amt],
+      );
+    }
+
+    const res = await get(
+      `/water-accounts/${a.waterAccount.id}/payment-activity`,
+      branchToken,
+    ).expect(200);
+    // exactly A's alloc — B's 7000 line must not appear
+    expect(res.body).toHaveLength(1);
+    const row = res.body[0];
+    expect(row.source).toBe('PAYMENT');
+    expect(Number(row.allocatedAmount)).toBe(3000);
+    expect(row.bill.id).toBe(billA);
+    expect(row.payment.id).toBe(paymentId);
+    expect(row.payment.amount).toBeUndefined();
+    expect(Object.keys(row.payment).sort()).toEqual(
+      ['cashierId', 'channel', 'id', 'paymentNo', 'receivedAt', 'status'].sort(),
+    );
+  });
+});

@@ -8,14 +8,27 @@ import {
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { SequenceService } from '../../common/sequence.service.js';
-import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import type { TenantCtx } from '../../common/tenant-context.js';
 import {
   assertAccountScopeTx,
+  assertSettleScopeTx,
   outOfScopeSettleAccountIds,
 } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { lockAccountForUpdate } from '../billing/pricing.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
+
+/** E8 P1: payment metadata for /payment-activity — deliberately omits
+ * amount/reversalOfId/dayCloseId so an account-scoped reader sees only
+ * the alloc line, never the whole payment's money. */
+const PAYMENT_ACTIVITY_PAYMENT_SELECT = {
+  id: true,
+  paymentNo: true,
+  cashierId: true,
+  channel: true,
+  status: true,
+  receivedAt: true,
+} satisfies Prisma.PaymentSelect;
 
 export const PAYMENT_SELECT = {
   id: true,
@@ -66,8 +79,6 @@ type BillStatus = 'DRAFT' | 'POSTED' | 'PARTIAL_PAID' | 'PAID' | 'REVERSED';
 const PAYABLE_STATUSES = new Set<BillStatus>(['POSTED', 'PARTIAL_PAID']);
 /** The guarded-update predicate shared by both recompute directions. */
 const RECOMPUTE_STATUSES: BillStatus[] = ['POSTED', 'PARTIAL_PAID', 'PAID'];
-
-const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
 
 const notPayable = (billId: string, status: string, reason?: string) =>
   new ConflictException({ code: 'BILL_NOT_PAYABLE', billId, status, reason });
@@ -177,7 +188,7 @@ export class PaymentService {
       // unfiltered scoped lists drop payments on out-of-scope settle
       // accounts (E6 strict coverage rule).
       if (q.settleAccountId) {
-        await this.assertSettleScope(tx, ctx, q.settleAccountId);
+        await assertSettleScopeTx(tx, ctx, q.settleAccountId);
       }
       const hidden =
         !q.settleAccountId && ctx.scope !== 'ALL'
@@ -209,7 +220,7 @@ export class PaymentService {
         select: PAYMENT_SELECT,
       });
       if (!payment) throw new NotFoundException({ code: 'PAYMENT_NOT_FOUND' });
-      await this.assertSettleScope(tx, ctx, payment.settleAccountId);
+      await assertSettleScopeTx(tx, ctx, payment.settleAccountId);
       return this.withDetail(tx, ctx, payment);
     });
   }
@@ -239,7 +250,7 @@ export class PaymentService {
     if (!settleAccount) {
       throw new NotFoundException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
     }
-    await this.assertSettleScope(tx, ctx, body.settleAccountId);
+    await assertSettleScopeTx(tx, ctx, body.settleAccountId);
 
     // Sorted FOR UPDATE on every target bill — serializes concurrent
     // payments (and reversals) against the same rows in the same order.
@@ -399,7 +410,12 @@ export class PaymentService {
       throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     }
     // E8 read-scope: the counter probe must not expose another branch's debt.
+    // Account coverage alone is not enough — the returned facts are
+    // settle-account-level (bills, reversed credit, prepay balance), so a
+    // settle shared with an out-of-scope account is refused outright
+    // (strict E6 rule, P0 release gate).
     await assertAccountScopeTx(tx, ctx, waterAccountId);
+    await assertSettleScopeTx(tx, ctx, account.settleAccountId);
     const bills = await tx.bill.findMany({
       where: {
         tenantId: ctx.tenantId,
@@ -515,12 +531,16 @@ export class PaymentService {
             totalAmount: true,
           },
         },
-        payment: { select: PAYMENT_SELECT },
+        // P1 release gate: never project payment.amount — the caller may
+        // only see THIS account's allocatedAmount (a payment can split
+        // across accounts on a shared settle).
+        payment: { select: PAYMENT_ACTIVITY_PAYMENT_SELECT },
         prepaymentEntry: {
+          // P1: entry.amount mirrors the alloc — allocatedAmount is the
+          // only money fact this endpoint returns.
           select: {
             id: true,
             type: true,
-            amount: true,
             operatorId: true,
             reason: true,
             createdAt: true,
@@ -603,7 +623,7 @@ export class PaymentService {
         reversalPaymentId: dup.id,
       });
     }
-    await this.assertSettleScope(tx, ctx, original.settleAccountId);
+    await assertSettleScopeTx(tx, ctx, original.settleAccountId);
 
     // E6 (domain §10): a REFUND payment is itself a money-out fact —
     // "undoing a refund" is a fresh top-up, never a reversal.
@@ -854,46 +874,5 @@ export class PaymentService {
       _sum: { amount: true },
     });
     return new Map(rows.map((r) => [r.billId, r._sum.amount ?? 0n]));
-  }
-
-  /**
-   * Org guard for payment writes on a settle_account — the
-   * settleAccount → waterAccounts → plan-items → plans → books chain.
-   * A payment is a write on every bound book's account, so EVERY
-   * covering book's org must be in the caller's subtree (same rule as
-   * ReconciliationService.assertAccountScope: all bindings, any period).
-   * A settle account whose water accounts are bound to no reading plan
-   * has no org anchor and returns permissively (the established MVP
-   * carve-out for off-book accounts).
-   */
-  private async assertSettleScope(
-    tx: Prisma.TransactionClient,
-    ctx: TenantCtx,
-    settleAccountId: string,
-  ) {
-    const accounts = await tx.waterAccount.findMany({
-      where: { tenantId: ctx.tenantId, settleAccountId },
-      select: { id: true },
-    });
-    if (accounts.length === 0) return;
-    const items = await tx.readingPlanItem.findMany({
-      where: {
-        tenantId: ctx.tenantId,
-        waterAccountId: { in: accounts.map((a) => a.id) },
-      },
-      select: { planId: true },
-    });
-    if (items.length === 0) return;
-    const plans = await tx.readingPlan.findMany({
-      where: { tenantId: ctx.tenantId, id: { in: items.map((i) => i.planId) } },
-      select: { bookId: true },
-    });
-    const books = await tx.readingBook.findMany({
-      where: { tenantId: ctx.tenantId, id: { in: plans.map((p) => p.bookId) } },
-      select: { orgUnitId: true },
-    });
-    for (const b of books) {
-      if (!orgInScope(ctx, b.orgUnitId)) throw outOfScope();
-    }
   }
 }

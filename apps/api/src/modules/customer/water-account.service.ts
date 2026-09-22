@@ -12,6 +12,7 @@ import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import {
   assertAccountScopeTx,
+  assertCustomerReadScopeTx,
   assertSettleScopeTx,
   outOfScopeAccountIds,
 } from '../../common/account-scope.js';
@@ -330,6 +331,14 @@ export class WaterAccountService {
       where: { tenantId: ctx.tenantId, id: body.customerId },
     });
     if (!customer) throw new BadRequestException({ code: 'CUSTOMER_NOT_FOUND' });
+    // E8 P1: binding to an EXISTING customer is a target-reference — the
+    // caller must be able to read that customer (D2 rule). The tenant's
+    // monitoring system principal (MONITORING_INTERNAL) is an internal
+    // object created lazily by monitoring onboard, exempt so scoped staff
+    // can still onboard MONITORING meters — it is never operator data.
+    if (customer.systemKey !== MONITORING_SYSTEM_KEY) {
+      await assertCustomerReadScopeTx(tx, ctx, body.customerId);
+    }
     const settle = await tx.settleAccount.findFirst({
       where: { tenantId: ctx.tenantId, id: body.settleAccountId },
     });
@@ -682,12 +691,17 @@ export class WaterAccountService {
         where: { tenantId: ctx.tenantId, id: body.customerId },
       });
       if (!c) throw new BadRequestException({ code: 'CUSTOMER_NOT_FOUND' });
+      // E8 P1: target reference scope — source-account scope (loadAccount
+      // above) does NOT license pointing the account at a customer the
+      // caller can't read.
+      await assertCustomerReadScopeTx(tx, ctx, body.customerId);
     }
     if (body.settleAccountId !== undefined) {
       const s = await tx.settleAccount.findFirst({
         where: { tenantId: ctx.tenantId, id: body.settleAccountId },
       });
       if (!s) throw new BadRequestException({ code: 'SETTLE_ACCOUNT_NOT_FOUND' });
+      await assertSettleScopeTx(tx, ctx, body.settleAccountId);
     }
     req.auditBefore = existing;
 

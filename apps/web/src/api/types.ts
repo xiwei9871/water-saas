@@ -1174,12 +1174,19 @@ export type PaymentActivityRow = {
     totalAmount: string;
   };
 } & (
-  | { source: 'PAYMENT'; payment: Payment | null }
+  | {
+      source: 'PAYMENT';
+      // D4/P1: no payment.amount — the alloc line is the only money fact.
+      payment: Pick<
+        Payment,
+        'id' | 'paymentNo' | 'cashierId' | 'channel' | 'status' | 'receivedAt'
+      > | null;
+    }
   | {
       source: 'PREPAYMENT';
       prepaymentEntry: Pick<
         PrepaymentEntry,
-        'id' | 'type' | 'amount' | 'operatorId' | 'reason' | 'createdAt'
+        'id' | 'type' | 'operatorId' | 'reason' | 'createdAt'
       > | null;
     }
 );
