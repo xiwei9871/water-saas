@@ -74,6 +74,9 @@ const acct: Record<string, string> = {};
 const settleAcct: Record<string, string> = {};
 const bill: Record<string, string> = {};
 const settle: Record<string, string> = {};
+const inst: Record<string, string> = {};
+const meter: Record<string, string> = {};
+const reading: Record<string, string> = {};
 
 const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
 const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
@@ -100,7 +103,34 @@ const onboard = async (label: string) => {
   }).expect(201);
   acct[label] = res.body.waterAccount.id;
   settleAcct[label] = res.body.settleAccount.id;
+  inst[label] = res.body.installation.id;
+  meter[label] = res.body.installation.meterId;
   return res.body;
+};
+
+/** Insert a trusted meter_reading (PASSED ACTUAL) — recon fixtures. */
+const seedReading = async (
+  label: string,
+  instId: string,
+  meterId: string,
+  period: string,
+  readDate: string,
+  value: string,
+) => {
+  const row = (
+    await owner.query(
+      `INSERT INTO meter_reading
+         (id, tenant_id, installation_id, meter_id, period, read_date,
+          result_type, reading_value, qc_status, source, operator_id,
+          created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'ACTUAL', $6,
+               'PASSED', 'WEB', $7, now(), now())
+       RETURNING id::text AS id`,
+      [T16A, instId, meterId, period, readDate, value, STAFF_ADMIN_A],
+    )
+  ).rows[0];
+  reading[label] = row.id;
+  return row.id as string;
 };
 
 const seedSettlement = async (
@@ -507,6 +537,72 @@ describe('APPLY — new POSTED debt consumes prepayment', () => {
 });
 
 // ---------------------------------------------------------------------------
+// reconciliation ADJUSTMENT entry point (domain §9)
+// ---------------------------------------------------------------------------
+
+describe('reconciliation ADJUSTMENT — positive applies, non-positive skips', () => {
+  it('正 ADJUSTMENT 账单自动 APPLY', async () => {
+    await onboard('ADJ1');
+    // anchor 1000 + FINAL settlement 30@202607 → billing run posts 100.00
+    await seedReading(
+      'ADJ1-anchor', inst['ADJ1'], meter['ADJ1'], '202606', '2026-06-30', '1000',
+    );
+    await seedSettlement('ADJ1-07', acct['ADJ1'], '202607', 30);
+    const run = (await post('/billing-runs', { period: '202607' }).expect(201)).body;
+    await post(`/billing-runs/${run.id}/post`, {}).expect(201);
+    // 充值 200：清欠 100 + 预存 100
+    await topUp(settleAcct['ADJ1'], 20000).expect(201);
+    // actual 1040 → span usage 40 → correctCharge 130.00 vs posted 100.00
+    // → positive ADJUSTMENT 30.00 POSTED → 同事务 APPLY
+    await seedReading(
+      'ADJ1-actual', inst['ADJ1'], meter['ADJ1'], '202608', '2026-08-31', '1040',
+    );
+    await post('/reconciliations', { waterAccountId: acct['ADJ1'] }).expect(201);
+    const bills = (await get(`/bills?waterAccountId=${acct['ADJ1']}`)).body as {
+      billKind: string;
+      status: string;
+      totalAmount: string;
+    }[];
+    const adj = bills.find((b) => b.billKind === 'ADJUSTMENT');
+    expect(adj).toBeTruthy();
+    expect(Number(adj!.totalAmount)).toBeGreaterThan(0);
+    expect(adj!.status).toBe('PAID'); // auto-applied in the same tx
+    // 10000 预存 − 正调整额
+    expect((await balance(settleAcct['ADJ1'])).balance).toBe(
+      (10000 - Number(adj!.totalAmount)).toString(),
+    );
+  });
+
+  it('负 ADJUSTMENT 不触发 APPLY（余额不动）', async () => {
+    await onboard('ADJ2');
+    await seedReading(
+      'ADJ2-anchor', inst['ADJ2'], meter['ADJ2'], '202606', '2026-06-30', '1000',
+    );
+    await seedSettlement('ADJ2-07', acct['ADJ2'], '202607', 30);
+    const run = (await post('/billing-runs', { period: '202607' }).expect(201)).body;
+    await post(`/billing-runs/${run.id}/post`, {}).expect(201);
+    await topUp(settleAcct['ADJ2'], 20000).expect(201);
+    // actual 1020 → usage 20 → correct 70.00 < posted 100.00 → −3000 调整单
+    await seedReading(
+      'ADJ2-actual', inst['ADJ2'], meter['ADJ2'], '202608', '2026-08-31', '1020',
+    );
+    const before = (await balance(settleAcct['ADJ2'])).balance;
+    await post('/reconciliations', { waterAccountId: acct['ADJ2'] }).expect(201);
+    const bills = (await get(`/bills?waterAccountId=${acct['ADJ2']}`)).body as {
+      id: string;
+      billKind: string;
+      totalAmount: string;
+    }[];
+    const adj = bills.find((b) => b.billKind === 'ADJUSTMENT');
+    expect(adj).toBeTruthy();
+    expect(Number(adj!.totalAmount)).toBeLessThan(0);
+    const legs = await entries(settleAcct['ADJ2'], 'APPLY');
+    expect(legs.filter((e) => e.billId === adj!.id)).toEqual([]);
+    expect((await balance(settleAcct['ADJ2'])).balance).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // reversal semantics
 // ---------------------------------------------------------------------------
 
@@ -686,6 +782,86 @@ describe('bill red-flush — PAID+预存可纠正，纯现金 PAID 仍禁', () =
 // ---------------------------------------------------------------------------
 // day close breakdown + transfer
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// old-debt rescan + concurrency (domain §9/§14)
+// ---------------------------------------------------------------------------
+
+describe('rescan + concurrency', () => {
+  it('老欠费随新债务入口整户重扫', async () => {
+    await onboard('C1');
+    await topUp(settleAcct['C1'], 10000).expect(201); // 无欠费 → 全预存
+    // 直插两张老欠费（绕过 APPLY 入口，模拟存量欠费）
+    const o1 = await seedBill('C1-a', acct['C1'], settleAcct['C1'], '202401', 3000);
+    const o2 = await seedBill('C1-b', acct['C1'], settleAcct['C1'], '202402', 4000);
+    // 新 POSTED 债务入口 → apply 整户重扫：老账单先于新账单被 APPLY
+    await seedSettlement('C1-09', acct['C1'], '202609', 10); // 10×3+10=4000
+    const run = (await post('/billing-runs', { period: '202609' }).expect(201)).body;
+    await post(`/billing-runs/${run.id}/post`, {}).expect(201);
+    expect(await billStatus(o1)).toBe('PAID');
+    expect(await billStatus(o2)).toBe('PAID');
+    const legs = await entries(settleAcct['C1'], 'APPLY');
+    expect(legs.map((l) => l.billId).sort()).toEqual(
+      [o1, o2, run.bills[0].id].sort(),
+    );
+    // 10000 − 3000 − 4000 = 3000 全打给新账单（新账单 4000 → PARTIAL_PAID）
+    expect((await balance(settleAcct['C1'])).balance).toBe('0');
+    expect(await billStatus(run.bills[0].id)).toBe('PARTIAL_PAID');
+  });
+
+  it('并发：Payment reversal || Bill reverse — 两合法终态，不双写不负额', async () => {
+    await onboard('C2');
+    await topUp(settleAcct['C2'], 20000, cashierToken).expect(201); // 全预存
+    await seedSettlement('C2-11', acct['C2'], '202611', 10); // 4000
+    const run = (await post('/billing-runs', { period: '202611' }).expect(201)).body;
+    await post(`/billing-runs/${run.id}/post`, {}).expect(201);
+    const paidBill = run.bills[0].id;
+    expect(await billStatus(paidBill)).toBe('PAID'); // APPLY 4000
+    const topupPaymentId = (await entries(settleAcct['C2'], 'TOP_UP'))[0]
+      .paymentId!;
+    const [r1, r2] = await Promise.all([
+      post(`/payments/${topupPaymentId}/reverse`, {}, cashierToken),
+      post(`/bills/${paidBill}/reverse`, {}),
+    ]);
+    // 两合法终态：账单红冲先恢复批次→收款红冲放行(201,201)；
+    // 收款红冲先查批次已消耗→409，账单红冲仍成功(409,201)。
+    expect(r2.status).toBe(201);
+    expect([201, 409]).toContain(r1.status);
+    const bal = await balance(settleAcct['C2']);
+    expect(Number(bal.balance)).toBeGreaterThanOrEqual(0);
+    // 幂等键防双写：批次恢复/回滚各至多一条 REVERSAL 腿
+    const revs = await entries(settleAcct['C2'], 'REVERSAL');
+    const lotRestore = revs.filter((e) => e.billId === paidBill);
+    expect(lotRestore).toHaveLength(1);
+  });
+
+  it('并发：Payment reversal || postOneBill — 锁序同向无死锁、余额不为负', async () => {
+    await onboard('C3');
+    const pay = (await topUp(settleAcct['C3'], 20000, cashierToken).expect(201))
+      .body;
+    await seedSettlement('C3-12', acct['C3'], '202612', 10); // 4000
+    const run = (await post('/billing-runs', { period: '202612' }).expect(201)).body;
+    const [r1, r2] = await Promise.all([
+      post(`/payments/${pay.payment.id}/reverse`, {}, cashierToken),
+      post(`/billing-runs/${run.id}/post`, {}),
+    ]);
+    expect(r2.status).toBe(201);
+    expect([201, 409]).toContain(r1.status);
+    const bal = await balance(settleAcct['C3']);
+    expect(Number(bal.balance)).toBeGreaterThanOrEqual(0);
+    const billId = run.bills[0].id;
+    const st = await billStatus(billId);
+    if (r1.status === 409) {
+      // apply 先消耗批次 → 收款红冲被拒
+      expect(st).toBe('PAID');
+      expect(bal.balance).toBe('16000');
+    } else {
+      // 收款红冲先 → 批次回滚，post 时余额 0 → 账单保持 POSTED
+      expect(st).toBe('POSTED');
+      expect(bal.balance).toBe('0');
+    }
+  });
+});
 
 describe('DayClose breakdown + WaterAccount transfer', () => {
   it('prepaymentBreakdown 四项守恒；SYSTEM APPLY 单列非现金', async () => {

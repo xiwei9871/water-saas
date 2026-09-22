@@ -4,7 +4,7 @@ const requireApi = createRequire(resolve('apps/api/package.json'));
 const { PrismaClient } = requireApi('@prisma/client');
 const bcrypt = requireApi('bcrypt');
 const databaseName = process.env.UAT_DATABASE_NAME ?? 'water_uat_v011';
-if (!['water_uat_v011', 'water_pilot_fix_uat_v012', 'water_recovery_uat_20260920', 'water_uat_v02', 'water_uat_e5'].includes(databaseName)) throw new Error('Refusing non-UAT database');
+if (!['water_uat_v011', 'water_pilot_fix_uat_v012', 'water_recovery_uat_20260920', 'water_uat_v02', 'water_uat_e5', 'water_uat_e6'].includes(databaseName)) throw new Error('Refusing non-UAT database');
 export const ownerUrl = `postgresql://postgres:postgres@localhost:5432/${databaseName}`;
 export async function db<T>(run: (prisma: any) => Promise<T>): Promise<T> {
   const prisma = new PrismaClient({ datasourceUrl: ownerUrl });
