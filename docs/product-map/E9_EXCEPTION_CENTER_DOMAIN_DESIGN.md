@@ -1,181 +1,208 @@
-# E9 Exception Center — Domain Design（Draft）
+# E9 Exception Center — Domain Design（Rev2，按 Gate D1–D6 修订）
 
-> 对应 Product Gate：`E9_EXCEPTION_CENTER_V1.md`。原则：**异常事实动态推导，处理状态最小持久化**。
+> 对应 Product Gate：`E9_EXCEPTION_CENTER_V1.md` Rev2。核心架构：**Detector / Reconciler / Query 三件套分离**。
 
-## 1. 数据流总览
+## 1. 架构总览（D1）
 
 ```
-现有 SoT（不变）
-├─ water_account / meter_installation / book_meter
-├─ reading_plan / reading_plan_item / meter_reading
-├─ consumption_settlement / bill / payment / payment_alloc
-├─ prepayment_lot(+entry) / remote_source / remote_device(_binding) / raw_remote_event
+┌─ Detector（纯函数式查询，无写）
+│    SoT → AnomalyFact[]
+│    不读 work_item；fact 存在性永远由 SoT 决定
 │
-▼ 推导层（新，纯查询，不写业务事实）
-anomaly_detector：每类 type 一条 query → AnomalyFact{key,type,severity,anchorId,period?,summary,firstSeen?,lastSeen}
+├─ Reconciler（独立机制，唯一写 work_item 的系统路径）
+│    fact 集 × open episodes → 新建 OPEN episode / 清除消失 episode
+│    实现形态实现期选：定时任务 / 显式 POST /exceptions/refresh / 域写后触发
+│    Gate 冻结的只是：「不在 GET 里做」
 │
-▼ 处理层（唯一新增表）
-work_item：anomalyKey → {assignee, status, note, acknowledgedAt, resolvedAt, createdAt...}
-│
-▼ API
-GET /exceptions            列表（推导 ∪ work_item 状态 join）
-GET /exceptions/:key       单条（事实快照 + 处理记录）
-POST /exceptions/:key/ack|assign|resolve|ignore   （写 work_item，不碰事实）
+└─ Query（GET，只读）
+     detector 当前结果 LEFT JOIN open episode handling state
+     允许 GET 不触发 reconcile——episode 状态可能滞后一个 reconcile 周期，
+     列表标注 asOf 时间即可；查询语义诚实优先于实时性
 ```
 
-**关键不变式**：`work_item` 行的存在与否、状态如何，都不影响 `anomaly_detector` 的输出。列表 = detector 结果 LEFT JOIN work_item。
+**禁止**：Controller GET 路径上任何 INSERT/UPDATE/auto-resolve。读 API 带业务写副作用会让缓存、重试、只读副本、权限审计全部变复杂，而收益只是「少一个 refresh 按钮」。
 
-## 2. AnomalyFact 推导契约
+## 2. AnomalyFact 契约
 
 ```ts
-type AnomalyKey =
-  | `wa:${string}`              // 户级，无期
-  | `wa:${string}:${string}`    // 户级+期间 (YYYYMM)
-  | `bill:${string}` | `reading:${string}` | `settlement:${string}`
-  | `event:${string}` | `device:${string}` | `settle:${string}`;
+type AnomalyKey = string;
+// wa:{waterAccountId}:{TYPE}
+// wa:{waterAccountId}:{period}:{TYPE}   （期级事实，如未来 ESTIMATE_STREAK 按 period 计）
+// bill:{billId}:{TYPE}  reading:{readingId}:{TYPE}  settlement:{id}:{TYPE}
+// event:{eventId}  device:{deviceId}:{TYPE}  settle:{settleId}:{TYPE}
 
 interface AnomalyFact {
-  key: AnomalyKey;
-  type: AnomalyType;            // NO_ACTIVE_METER | MULTI_ACTIVE_METER | ...
-  severity: 'BLOCKING' | 'WARNING';
-  waterAccountId?: string;      // 户锚点（scope 判断主键）
-  anchorRef: { kind; id };      // 跳转目标
-  period?: string;              // 期级异常的期间
-  summary: string;              // 列表行展示，如「202606 未抄，计划日 2026-06-05」
-  detectedAt: Date;             // 本次推导时刻（快照字段，不持久化）
+  key: AnomalyKey;              // deterministic fact identity —— 同一事实永远同 key
+  type: AnomalyType;
+  severity: 'BLOCKING' | 'WARNING';   // 由 type 映射，非存储字段
+  waterAccountId?: string;      // 户锚点 → account coverage
+  sourceOrgUnitId?: string;     // 远传锚点 → source.orgUnitId
+  scopeAnchor: 'ACCOUNT' | 'REMOTE_SOURCE' | 'SETTLE' | 'TENANT';
+  anchorRef: { kind: string; id: string };  // drill-down 目标
+  period?: string;
+  summary: string;
+  detectedAt: Date;             // 计算时刻
 }
 ```
 
-### firstSeen 怎么办（设计取舍）
+**anomalyKey ≠ episode id**。key 是「这种事实在这个对象上」的永久身份；episode 是「这一次发生」。
 
-`detectedAt` 是实时的，「首次出现时间」需要历史。两个选项：
+## 3. Detector 推导表（V1 冻结 11 类）
 
-- **A（推荐 V1）**：首次出现 = WorkItem 创建时间。detector 命中时若该 key 无 work_item 则 upsert 一行 `status=OPEN`。首次出现即首次入队，天然正确。
-- **B**：另建 anomaly_seen 表记首次命中。多一张表只为一个字段，不值。
+| type | severity | 谓词（全部 EXISTS/GROUP BY 级） | anchor |
+|---|---|---|---|
+| NO_ACTIVE_METER | WARNING | `water_account` status≠CLOSED ∧ billable ∧ NOT EXISTS(installation ACTIVE)；排除 MONITORING（billable=false 天然排除） | ACCOUNT |
+| MULTI_ACTIVE_METER | BLOCKING | installation group by account having count(ACTIVE)>1 | ACCOUNT |
+| NO_BOOK | WARNING | status≠CLOSED ∧ billable ∧ NOT EXISTS book_meter ∧ NOT EXISTS 有效 plan_item | ACCOUNT |
+| READING_QC_REVIEW | WARNING | meter_reading qcStatus=MANUAL_REVIEW ∧ supersededById IS NULL | ACCOUNT(via installation→account) |
+| READING_QC_REJECTED | WARNING | qcStatus=REJECTED ∧ 未 superseded | ACCOUNT |
+| ESTIMATE_STREAK | WARNING | **抽取 `SettlementService.estimateStreaks` 为共享 helper**（当前在 settlement.service.ts 内私有，report 注释处引用但 report 未实现阈值判断）；连续 isEstimated ≥ N（N Pilot，默认 2） | ACCOUNT |
+| REMOTE_EVENT_UNBOUND | WARNING | raw_remote_event.status=UNBOUND | REMOTE_SOURCE |
+| REMOTE_EVENT_WAITING_PLAN | WARNING | status=WAITING_PLAN | ACCOUNT（经 binding→installation）或 REMOTE_SOURCE |
+| REMOTE_EVENT_FAILED | WARNING | status=FAILED | 同上 |
+| REMOTE_EVENT_CONFLICT | WARNING | status=CONFLICT | 同上 |
+| UNPAID_BILL_OVERDUE | WARNING | bill status∈{POSTED,PARTIAL_PAID} ∧ dueDate<today ∧ (totalAmount − Σ本bill alloc)>0 —— **bill-level，只读本 bill 的 PaymentAlloc** | ACCOUNT |
 
-因此 work_item 实际承担「出现记录 + 处理状态」双职能，schema 仍极简。
+非 V1（Gate 条目，阈值待 Pilot）：READING_MISSING（PENDING≠异常，缺 deadline 语义）、DEVICE_SILENT（无 lastSeenAt）、SETTLEMENT_DRAFT_STALE、CLOSED_WITH_DEBT（settle-level，strict scope 已冻结但入队待 Pilot）、SHARED_SETTLE_SCOPE。
 
-## 3. 逐类型推导规则（SoT → 谓词）
+**排除集**：REMOTE 不含 RECEIVED/CONVERTED/IGNORED；QC 不含 PENDING（普通待办）和被 superseded 的读数；plan_item SKIPPED 不算 missing。
 
-| type | 推导 query 概要 | 排除 |
-|---|---|---|
-| NO_ACTIVE_METER | `water_account` where status≠CLOSED AND NOT EXISTS(meter_installation where accountId=id AND status=ACTIVE) | MONITORING 户豁免 |
-| MULTI_ACTIVE_METER | group by installation having count(ACTIVE)>1 | — |
-| NO_BOOK | 非 CLOSED 户 AND NOT EXISTS book_meter AND NOT EXISTS 未过期 plan_item | — |
-| READING_MISSING | plan_item join plan where item.status=PENDING AND plan.planDate < now() AND plan.period=当前期 | item.status=SKIPPED 不算 missing（已人工标记） |
-| READING_QC_FAILED | meter_reading where qcStatus IN (REJECTED,MANUAL_REVIEW) AND supersededById IS NULL | superseded 的不重复列 |
-| ESTIMATE_STREAK | settlement where accountId AND isEstimated order by period desc，连续计数≥阈值 | 阈值 Pilot 定，默认建议 ≥2 |
-| UNSETTLED_PERIOD | 非 CLOSED billable 户，期已过，无 settlement 行 | MONITORING |
-| SETTLEMENT_DRAFT_STALE | settlement status=DRAFT AND updatedAt < now()-N天 | — |
-| UNPAID_BILL_OVERDUE | bill where status IN (POSTED,PARTIAL_PAID) AND dueDate<today AND outstanding>0（outstanding 走现有 alloc Σ 逻辑） | REVERSED 排除 |
-| CLOSED_WITH_DEBT | account CLOSED AND outstanding>0 | — |
-| SHARED_SETTLE_SCOPE | settle 关联户的 book 覆盖跨 org 子树（E8 scope helper 反用） | 仅 tenant 级可见 |
-| REMOTE_EVENT_UNBOUND/FAILED | raw_remote_event.status ∈ 对应集合 AND 未被 CONVERTED | IGNORED 事件不进 |
-| REMOTE_DEVICE_SILENT | active binding 设备 max(raw_event.receivedAt) < now()-N天 | 阈值待定，可先 badge-only |
-
-所有推导都是 **EXISTS/GROUP BY 级查询**，无 JOIN 大宽表。户锚点类统一先取 `water_account.id` 再套 scope helper。
-
-## 4. WorkItem 最小 schema（E9 唯一新增表）
+## 4. WorkItem episode 模型（D2，E9 唯一新表）
 
 ```prisma
 model WorkItem {
-  id           String   @id @default(uuid()) @db.Uuid
-  tenantId     String   @map("tenant_id") @db.Uuid
-  anomalyKey   String   @map("anomaly_key")           // wa:xxx / bill:xxx / ...
-  anomalyType  String   @map("anomaly_type")          // 冗余便于按类型过滤/索引
-  assigneeId   String?  @map("assignee_id") @db.Uuid
-  status       WorkItemStatus @default(OPEN)          // OPEN ACK RESOLVED IGNORED RESOLVED_AUTO
-  note         String?                                 // IGNORE 必填
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  anomalyKey    String   @map("anomaly_key")          // fact identity，可重复出现于不同 episode
+  anomalyType   String   @map("anomaly_type")         // string 非 enum：新增 type 免 migration
+  status        WorkItemStatus @default(OPEN)          // OPEN ACK IGNORED RESOLVED
+  resolutionSource ResolutionSource? @map("resolution_source") // AUTO | MANUAL，仅 RESOLVED 时有值
+  assigneeId    String?  @map("assignee_id") @db.Uuid
+  note          String?                                // IGNORE 必填；普通备注
   acknowledgedAt DateTime? @map("acknowledged_at")
-  resolvedAt     DateTime? @map("resolved_at")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
-  @@unique([tenantId, anomalyKey])      // 同 key 单行，天然去重
+  resolvedAt    DateTime? @map("resolved_at")
+  clearedAt     DateTime? @map("cleared_at")          // episode 终结时刻；NULL = 活动 episode
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
   @@index([tenantId, anomalyType, status])
   @@index([tenantId, assigneeId, status])
+  @@index([tenantId, clearedAt])
   @@map("work_item")
 }
-enum WorkItemStatus { OPEN ACKNOWLEDGED RESOLVED IGNORED RESOLVED_AUTO }
+enum WorkItemStatus { OPEN ACK IGNORED RESOLVED }
+enum ResolutionSource { AUTO MANUAL }
 ```
 
-- 无 severity 字段（从 type 映射，前端拿）；无 title/body（事实在 detector）；无外键到具体业务表（key 是逻辑引用，业务行可能被删/换——WorkItem 不因此级联）。
-- `anomalyType` 冗余存 string 而非 enum：新增 type 不需要 migration。
+**episode 唯一性（D2 核心约束）**——Prisma 表达不了 partial unique，migration 里原生 SQL：
 
-## 5. 生命周期协调（核心设计）
+```sql
+CREATE UNIQUE INDEX work_item_active_episode_key
+  ON work_item (tenant_id, anomaly_key)
+  WHERE cleared_at IS NULL;
+```
 
-每次列表/详情查询时 detector 重算当前事实集，与 work_item 做 reconcile：
+语义：同一 fact 同一时间最多一个活动 episode；清除后同 key 可再开新 episode。历史 episode 永久保留（审计/频率统计 → Pilot 异常样本数据源）。
 
-| 事实 | work_item | 表现 |
+**注意 `clearedAt` 与 `resolvedAt` 的分工**：
+- `clearedAt`：episode 是否还活着的技术标记（唯一索引载体）。RESOLVED 和「IGNORED 且 fact 消失」都会置 clearedAt。
+- `resolvedAt`：业务解决时刻。IGNORED episode 被 fact 消失清掉时 clearedAt 置位但 resolvedAt 可留空（它没被解决，是被淘汰）。
+
+## 5. Reconciler 语义（D3）
+
+每次 reconcile run：
+
+| fact | 活动 episode | 动作 |
 |---|---|---|
-| 命中 | 无 | upsert OPEN，入队 |
-| 命中 | OPEN/ACK | 正常显示 |
-| 命中 | IGNORED | 不显示（已人工压下）；note 保留 |
-| 命中 | RESOLVED* | 同一事实复活→视策略（V1 不复活，见 Q4） |
-| 未命中 | OPEN/ACK | 置 RESOLVED_AUTO（系统标记，resolvedAt=now） |
-| 未命中 | IGNORED/RESOLVED* | 不动作（终态幂等） |
+| 命中 | 无 | INSERT OPEN episode |
+| 命中 | OPEN/ACK | 不动（episode 继续） |
+| 命中 | IGNORED | 不动（仍被抑制） |
+| 命中 | — | （RESOLVED 必有 clearedAt，不可能是活动态） |
+| 未命中 | OPEN/ACK | `status=RESOLVED, resolutionSource=AUTO, resolvedAt=now, clearedAt=now` |
+| 未命中 | IGNORED | `clearedAt=now`（episode 终结，为下次复现腾位；不改 status） |
 
-「RESOLVED 后同事实还在」的处理：V1 约定 **RESOLVED 表示人已确认处理动作做完，事实若还在说明业务闭环没完 → 下次命中复活为新 OPEN**（key 相同 → 实际是 reopen 同一行，重置 status/resolvedAt，note 追加）。这让 RESOLVED 语义诚实：解决=人标记，事实=系统判定，两者不一致时事实说了算。
+**人工 resolve（写 API，不是 GET）**：
 
-## 6. API 设计（草案，Gate 后细化）
+```
+POST /exceptions/:key/resolve
+  → detector.evaluate(key) 重跑
+  → fact active → 409 ANOMALY_STILL_ACTIVE
+  → fact gone   → episode.status=RESOLVED, resolutionSource=MANUAL, resolvedAt, clearedAt
+```
+
+**IGNORED 不继承**（D3）：episode A 被 IGNORED → fact 消失 → A cleared → 同一 fact 复现 → **新 episode B（OPEN）**。旧 IGNORED 不传染。这保证「忽略」是对这一次发生的人工判断，不是对这类事实的永久豁免。
+
+## 6. API 设计
 
 ```
 GET  /exceptions?type=&severity=&status=&bookId=&orgUnitId=&period=&page=&take=
-     → {items: AnomalyFact & {workItem?: {assigneeId,status,note,acknowledgedAt}}, total}
-     权限：任一站内角色；返回自动 scope 裁剪
+     → {items: AnomalyFact & {episode?: {id,status,assigneeId,note,acknowledgedAt}}, total, asOf}
+     权限 exception:read；只读，不触发 reconcile
 
-GET  /exceptions/summary    → 统计条 {open, ack, resolvedToday, newToday}
+GET  /exceptions/summary → {open, ack, newToday, clearedToday, asOf}
+GET  /exceptions/:key    → fact + 当前 episode + episode 历史(同 key 已清除 episodes)
 
-POST /exceptions/:key/ack       → {workItem}    （认领）
-POST /exceptions/:key/assign    {assigneeId}    （指派，校验 assignee 可见该 key）
-POST /exceptions/:key/resolve   {note?}         （人工标记已处理）
-POST /exceptions/:key/ignore    {note}          （note 必填）
-POST /exceptions/:key/reopen                    （IGNORED/RESOLVED 手动复活）
+POST /exceptions/:key/ack          (exception:manage)
+POST /exceptions/:key/assign       {assigneeId}   —— 校验 assignee 对该 key scope 可见
+POST /exceptions/:key/ignore       {note}         —— note 必填
+POST /exceptions/:key/resolve      —— 重跑 detector，fact active → 409
+POST /exceptions/:key/unignore     —— IGNORED 且 fact 仍 active 时解除抑制
+POST /exceptions/refresh           (exception:manage) —— 显式 reconcile trigger（可选，取决于实现期选的形态）
 ```
 
-所有写端点先查 detector 确认 key 当前命中（对 IGNORED 的复活例外）→ 再写 work_item → 全程租户隔离。**不存在对不存在事实建 WorkItem 的接口**。
+写端点顺序：**先 detector.evaluate(key) 确认 fact 当前命中**（resolve 除外——resolve 是确认不命中）→ scope 校验 → 写 work_item。不存在对不存在 fact 建 episode 的接口。
 
-## 7. Scope 矩阵
+## 7. RBAC 与 scope（D4+D5）
 
-| 锚点 | scope 判断 | scoped 可见性 |
-|---|---|---|
-| `wa:*` `bill:*` `reading:*` `settlement:*` | E8 `assertAccountScopeTx` 等价链（读侧版） | 覆盖内可见 |
-| `event:*`（bound） | event→binding→installation→account 同上 | 覆盖内可见 |
-| `event:*`（UNBOUND） | `remote_source.orgUnitId` 子树 | 子树内可见；null→仅 tenant |
-| `device:*` | active binding → installation → account | 覆盖内可见 |
-| `settle:*` | strict settle scope | **仅 tenant 级**（shared-settle 天然跨界） |
+### RBAC
 
-列表查询 = detector 全量 → 逐条套 scope 谓词过滤（与 E8 读列表同模式，批量化：先 collect accountIds 再 `outOfScopeAccountIds` 一次过滤）。
+- `exception:read` / `exception:manage` 两个新权限，独立挂角色
+- drill-down URL 仍走原域 controller → 原域 permission 照常拦截；E9 只做投影不放宽任何域
+
+### Scope per anchor
+
+| scopeAnchor | 判定 |
+|---|---|
+| ACCOUNT | E8 覆盖链批量化：收集本页 waterAccountIds → `outOfScopeAccountIds` 一次过滤 |
+| REMOTE_SOURCE | `remote_source.orgUnitId` ∈ 子树；null → tenant-only |
+| SETTLE | strict settle scope（`outOfScopeSettleAccountIds`）→ 跨所 settle fact scoped 不可见 |
+| TENANT | 仅 tenant 级角色 |
+
+**bill-level vs settle-level**（D5）：detector 声明自己的 anchor，不要一刀切。UNPAID_BILL_OVERDUE 只读本 bill + 本 bill alloc → ACCOUNT anchor；依赖 settle 净头寸的（CLOSED_WITH_DEBT）→ SETTLE anchor → fail closed。
 
 ## 8. 性能
 
-- 每类 detector 一条带索引 query；户级三类可合并成一次 installation/book 聚合。
-- 列表默认 `take=50`；summary 用 work_item 聚合（状态计数持久化易得）+ detector count。
-- 大租户风险点：`READING_MISSING` 全量扫描 plan_item×plan——已有 `@@index([tenantId,status])`，加 planDate 谓词即可。
-- reconcile 的 RESOLVED_AUTO 批量 update 在查询事务内做（读请求带小写——可接受；若 Pilot 证明热点，改定时 reconcile job）。
+- Detector：每类一条带索引 query；户级三类（NO_ACTIVE/NO_BOOK/MULTI）可合并为一次 installation/book_meter 聚合
+- 列表：detector 各类并行 → 合并 → scope 批过滤 → join episode → 分页。`take=50` 默认
+- 热点：READING_QC_* 走 `meter_reading` 的 qcStatus+supersededById（需确认索引，实现期评估 `@@index([tenantId,qcStatus])` 是否补）
+- Reconcile 频率：实现期定（建议起步 cron 5–15min + 显式 refresh），写量 = Δ episodes，不是全量
 
 ## 9. 错误语义
 
 | 场景 | 结果 |
 |---|---|
 | key 语法非法 | 400 `ANOMALY_KEY_INVALID` |
-| key 命中事实但超 scope | 403 `ORG_OUT_OF_SCOPE`（复用 E8 code） |
-| key 当前不命中事实且非复活场景 | 404 `ANOMALY_NOT_FOUND` |
+| key 超 scope | 403 `ORG_OUT_OF_SCOPE` |
+| key 无 fact 命中且非 resolve 场景 | 404 `ANOMALY_NOT_FOUND` |
+| resolve 但 fact 仍 active | **409 `ANOMALY_STILL_ACTIVE`**（D3 核心） |
 | IGNORE 无 note | 400 `NOTE_REQUIRED` |
-| assign 给不可见该异常的 staff | 403 `ASSIGNEE_OUT_OF_SCOPE` |
-| 对终态 IGNORED 调 ack | 409 `WORK_ITEM_FINAL_STATE` |
+| assign 给不可见 staff | 403 `ASSIGNEE_OUT_OF_SCOPE` |
+| 对活动态已 ACK 再 ack | 200 幂等 |
+| 对已清除 episode 操作 | 409 `EPISODE_CLEARED` |
+| 无 exception:manage 调写端点 | 403（标准 RBAC） |
 
-## 10. 测试矩阵（草案）
+## 10. 测试矩阵
 
-- 推导正确性：每类 ≥1 正例 + 排除例（superseded reading / SKIPPED item / REVERSED bill / MONITORING 户）
-- scope：跨所户异常不可见 / 无册宽放可见 / UNBOUND event 按 source orgUnitId / shared-settle 仅 tenant
-- 生命周期：出现→OPEN；事实消失→RESOLVED_AUTO；IGNORED 不复活；RESOLVED 后事实仍在→reopen
-- 权限域：无 metering:read 不见抄表类
-- 幂等：重复 ack/resolve；并发同 key upsert（唯一约束兜底）
-- UAT：对应 Product Gate §7 的 6 slices
+- **Detector 正确性**：每类正例+排除例（MONITORING 户不触发 NO_BOOK/NO_ACTIVE_METER；superseded reading 不列 QC；SKIPPED item；REVERSED bill；remote RECEIVED/CONVERTED/IGNORED 不入列）
+- **Episode**：同 key fact 消失→RESOLVED AUTO→复现→新 episode（行数+1，不 reopen 旧行）；IGNORED→fact 消失→cleared→复现→新 OPEN episode（不继承 IGNORED）
+- **GET 无写**：mock 计数器断言 GET 不产生 work_item 写
+- **D3 拦截**：fact active 时 resolve→409
+- **Scope**：跨所户不可见 / UNBOUND event 按 source orgUnitId / UNPAID_BILL_OVERDUE（bill-level）scoped 可见 vs CLOSED_WITH_DEBT（settle-level）scoped 不可见
+- **RBAC**：无 exception:read→403；有 read 无 manage→写端点 403；drill URL 无原域权限→原域 403
+- **并发**：同 key 并发 reconcile 由 partial unique index 兜底（第二个 INSERT 冲突→幂等跳过）
 
-## 11. Gate 决策点（待拍板，对应产品文档 §9）
+## 11. 实现期才定的项（Gate 不冻结）
 
-- 阈值类参数（ESTIMATE_STREAK 连续期数、DRAFT_STALE 天数、DEVICE_SILENT 天数）：硬编码常量先行，值待 Pilot
-- `IN_PROGRESS` 是否砍：建议砍
-- RESOLVED-后-事实仍在 → reopen 策略：建议 reopen（诚实语义）
-- WorkItem 是否需要 `type` 过滤索引之外的 bookId/orgUnitId 物化：建议不物化，靠 detector 实时 filter
+- Reconciler 形态：cron / 显式 refresh / 域写后触发（建议 V1 = cron + 手动 refresh 按钮）
+- ESTIMATE_STREAK 阈值默认值（Pilot，暂 2）
+- episode 历史展示深度（V1 详情抽屉列出同 key 历史即可）
+- `meter_reading` QC 索引是否补充
