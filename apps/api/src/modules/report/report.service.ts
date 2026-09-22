@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { PayChannel, Prisma } from '@prisma/client';
+import {
+  aggregationScopeAccountIds,
+  aggOwnPredicate,
+} from '../../common/account-aggregation-ownership.js';
 import { type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
@@ -213,6 +217,10 @@ export class ReportService {
    */
   async cashierDaily(ctx: TenantCtx, q: { date: string }) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const orgIn =
+        ctx.scope === 'ALL'
+          ? Prisma.empty
+          : Prisma.sql`AND p.org_unit_id = ANY(${ctx.orgScope}::uuid[])`;
       const rows = await tx.$queryRaw<
         {
           cashier_id: string;
@@ -231,6 +239,7 @@ export class ReportService {
         WHERE p.tenant_id = ${ctx.tenantId}::uuid
           AND p.status IN ('RECEIVED', 'DAY_CLOSED')
           AND p.received_at::date = ${q.date}::date
+          ${orgIn}
         GROUP BY p.cashier_id, s.name, p.channel
         ORDER BY p.cashier_id, p.channel`;
 
@@ -281,6 +290,10 @@ export class ReportService {
    */
   async arMonthly(ctx: TenantCtx, q: { period: string }) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const wa = aggOwnPredicate(
+        await aggregationScopeAccountIds(tx, ctx),
+        Prisma.sql`b.water_account_id`,
+      );
       const rows = await tx.$queryRaw<
         { category: string; amount: bigint; cnt: number }[]
       >`
@@ -293,6 +306,7 @@ export class ReportService {
           AND b.period = ${q.period}
           AND b.bill_kind <> 'REVERSAL'
           AND b.status IN ('POSTED', 'PARTIAL_PAID', 'PAID')
+          ${wa}
         GROUP BY wa.usage_category
         ORDER BY wa.usage_category`;
       const byCategory: Record<string, { count: number; amount: bigint }> = {};
@@ -311,22 +325,31 @@ export class ReportService {
   /**
    * GET /reports/collected-monthly?period= — 实收月报： Σ payment.amount
    * for received_at inside the month (documented predicate), split by
-   * channel, plus the alloc-side Σ for the same month. allocated ≡
-   * collected by construction (see class docblock) — both are returned
-   * so the 对数 check is an assertion, not an assumption.
+   * channel, plus the alloc-side Σ (PAYMENT-source debt allocs only —
+   * the TOP_UP leg lives in prepayment_ledger_entry, so post-E6
+   * allocated ≤ collected; a divergence is no longer an error).
    */
   async collectedMonthly(ctx: TenantCtx, q: { period: string }) {
     const window = monthWindow(q.period);
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const orgIn =
+        ctx.scope === 'ALL'
+          ? Prisma.empty
+          : Prisma.sql`AND p.org_unit_id = ANY(${ctx.orgScope}::uuid[])`;
+      const wa = aggOwnPredicate(
+        await aggregationScopeAccountIds(tx, ctx),
+        Prisma.sql`b.water_account_id`,
+      );
       const rows = await tx.$queryRaw<
         { channel: PayChannel; amount: bigint; cnt: number }[]
       >`
         SELECT channel::text AS channel, sum(amount)::bigint AS amount, count(*)::int AS cnt
-        FROM payment
-        WHERE tenant_id = ${ctx.tenantId}::uuid
-          AND status IN ('RECEIVED', 'DAY_CLOSED')
+        FROM payment p
+        WHERE p.tenant_id = ${ctx.tenantId}::uuid
+          AND p.status IN ('RECEIVED', 'DAY_CLOSED')
           AND received_at >= ${window.gte}
           AND received_at < ${window.lt}
+          ${orgIn}
         GROUP BY channel`;
       const byChannel = emptyChannelBuckets();
       let collected = 0n;
@@ -341,10 +364,12 @@ export class ReportService {
         FROM payment_alloc a
         JOIN payment p
           ON p.tenant_id = a.tenant_id AND p.id = a.payment_id
+        JOIN bill b ON b.tenant_id = a.tenant_id AND b.id = a.bill_id
         WHERE a.tenant_id = ${ctx.tenantId}::uuid
           AND p.status IN ('RECEIVED', 'DAY_CLOSED')
           AND p.received_at >= ${window.gte}
-          AND p.received_at < ${window.lt}`;
+          AND p.received_at < ${window.lt}
+          ${wa}`;
       return {
         period: q.period,
         collected,
@@ -365,42 +390,54 @@ export class ReportService {
    */
   async recoveryRate(ctx: TenantCtx, q: { period: string; through?: string }) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const orgIn =
+        ctx.scope === 'ALL'
+          ? Prisma.empty
+          : Prisma.sql`AND p.org_unit_id = ANY(${ctx.orgScope}::uuid[])`;
+      const wa = aggOwnPredicate(
+        await aggregationScopeAccountIds(tx, ctx),
+        Prisma.sql`b.water_account_id`,
+      );
       let billed: bigint;
       let collected: bigint;
       if (q.through === undefined) {
         const billRows = await tx.$queryRaw<{ amount: bigint | null }[]>`
           SELECT sum(total_amount)::bigint AS amount
-          FROM bill
-          WHERE tenant_id = ${ctx.tenantId}::uuid
-            AND period = ${q.period}
-            AND bill_kind <> 'REVERSAL'
-            AND status IN ('POSTED', 'PARTIAL_PAID', 'PAID')`;
+          FROM bill b
+          WHERE b.tenant_id = ${ctx.tenantId}::uuid
+            AND b.period = ${q.period}
+            AND b.bill_kind <> 'REVERSAL'
+            AND b.status IN ('POSTED', 'PARTIAL_PAID', 'PAID')
+            ${wa}`;
         billed = billRows[0]?.amount ?? 0n;
         const window = monthWindow(q.period);
         const payRows = await tx.$queryRaw<{ amount: bigint | null }[]>`
           SELECT sum(amount)::bigint AS amount
-          FROM payment
-          WHERE tenant_id = ${ctx.tenantId}::uuid
-            AND status IN ('RECEIVED', 'DAY_CLOSED')
-            AND received_at >= ${window.gte}
-            AND received_at < ${window.lt}`;
+          FROM payment p
+          WHERE p.tenant_id = ${ctx.tenantId}::uuid
+            AND p.status IN ('RECEIVED', 'DAY_CLOSED')
+            AND p.received_at >= ${window.gte}
+            AND p.received_at < ${window.lt}
+            ${orgIn}`;
         collected = payRows[0]?.amount ?? 0n;
       } else {
         const billRows = await tx.$queryRaw<{ amount: bigint | null }[]>`
           SELECT sum(total_amount)::bigint AS amount
-          FROM bill
-          WHERE tenant_id = ${ctx.tenantId}::uuid
-            AND period <= ${q.through}
-            AND bill_kind <> 'REVERSAL'
-            AND status IN ('POSTED', 'PARTIAL_PAID', 'PAID')`;
+          FROM bill b
+          WHERE b.tenant_id = ${ctx.tenantId}::uuid
+            AND b.period <= ${q.through}
+            AND b.bill_kind <> 'REVERSAL'
+            AND b.status IN ('POSTED', 'PARTIAL_PAID', 'PAID')
+            ${wa}`;
         billed = billRows[0]?.amount ?? 0n;
         const window = monthWindow(q.through);
         const payRows = await tx.$queryRaw<{ amount: bigint | null }[]>`
           SELECT sum(amount)::bigint AS amount
-          FROM payment
-          WHERE tenant_id = ${ctx.tenantId}::uuid
-            AND status IN ('RECEIVED', 'DAY_CLOSED')
-            AND received_at < ${window.lt}`;
+          FROM payment p
+          WHERE p.tenant_id = ${ctx.tenantId}::uuid
+            AND p.status IN ('RECEIVED', 'DAY_CLOSED')
+            AND p.received_at < ${window.lt}
+            ${orgIn}`;
         collected = payRows[0]?.amount ?? 0n;
       }
       const rate =
