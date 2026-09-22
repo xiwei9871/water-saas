@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { RemoteDeviceController } from './remote-device.controller.js';
+import { RemoteDeviceService } from './remote-device.service.js';
 import { RemoteSourceController } from './remote-source.controller.js';
 import { RemoteSourceService } from './remote-source.service.js';
 
@@ -11,7 +13,7 @@ import { RemoteSourceService } from './remote-source.service.js';
  * CommonModule.
  */
 @Module({
-  controllers: [RemoteSourceController],
-  providers: [RemoteSourceService],
+  controllers: [RemoteSourceController, RemoteDeviceController],
+  providers: [RemoteSourceService, RemoteDeviceService],
 })
 export class RemoteModule {}

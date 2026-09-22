@@ -232,6 +232,17 @@ export class MeterInstallationService {
       where: { tenantId_id: { tenantId: ctx.tenantId, id: existing.meterId } },
       data: { status: 'AVAILABLE', updatedBy: ctx.staffId },
     });
+    // E5 T3: removing an installation closes its remote-device bindings in
+    // the same transaction — a binding must never outlive its installation.
+    // Rows ending before removedAt are already within the lifetime and stay.
+    await tx.remoteDeviceBinding.updateMany({
+      where: {
+        tenantId: ctx.tenantId,
+        installationId: id,
+        OR: [{ effectiveTo: null }, { effectiveTo: { gt: removedAt } }],
+      },
+      data: { effectiveTo: removedAt, updatedBy: ctx.staffId },
+    });
     return tx.meterInstallation.findUniqueOrThrow({
       where: { tenantId_id: { tenantId: ctx.tenantId, id } },
       select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
