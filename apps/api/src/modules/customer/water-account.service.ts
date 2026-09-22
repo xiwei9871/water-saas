@@ -642,6 +642,18 @@ export class WaterAccountService {
     body: EventBody,
     req: Request,
   ) {
+    // E7 C1: lock the account row FOR UPDATE *before* reading state —
+    // install/replace take the same lock and re-check inside it, so close
+    // and a concurrent meter-mount are mutually exclusive. All status
+    // judgments below run on the locked row, not a pre-lock snapshot
+    // (a racing transition must not leak into auditBefore/oldValue).
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM water_account
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
+      FOR UPDATE`;
+    if (!locked.length) {
+      throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    }
     const existing = await this.loadAccount(tx, ctx, id);
     const allowed: Record<string, AccountStatus[]> = {
       SUSPENDED: ['NORMAL'], // suspend: NORMAL → SUSPENDED
@@ -653,15 +665,6 @@ export class WaterAccountService {
     }
     req.auditBefore = existing;
 
-    // E7 C1: lock the account row FOR UPDATE before deciding — install/
-    // replace take the same lock and re-check status inside it, so close
-    // and a concurrent meter-mount are mutually exclusive. Without the
-    // lock the sequence "close sees 0 ACTIVE → install commits → close
-    // commits" would commit CLOSED + ACTIVE.
-    await tx.$queryRaw`
-      SELECT id FROM water_account
-      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
-      FOR UPDATE`;
     if (to === 'CLOSED') {
       const active = await tx.meterInstallation.count({
         where: { tenantId: ctx.tenantId, waterAccountId: id, status: 'ACTIVE' },

@@ -242,6 +242,11 @@ describe('replace endpoint (换表)', () => {
       reason: 'REPLACE',
     }).expect(201);
 
+    // canonical post-write snapshot on BOTH halves of the response
+    expect(res.body.removed.status).toBe('REMOVED');
+    expect(Number(res.body.removed.finalReading)).toBe(100);
+    expect(res.body.removed.removedAt).toBeTruthy();
+    expect(res.body.removed.meter.meterNo).toBeTruthy();
     expect(res.body.installed.status).toBe('ACTIVE');
     expect(res.body.installed.meterId).toBe(m2.id);
     expect(Number(res.body.installed.initialReading)).toBe(5);
@@ -438,6 +443,208 @@ describe('replace endpoint (换表)', () => {
     );
     expect(migrated.rows[0].n).toBe(0);
   });
+
+  it('reason: FAULT and PERIODIC_CHECK succeed; NEW is rejected (400)', async () => {
+    for (const reason of ['FAULT', 'PERIODIC_CHECK'] as const) {
+      const a = await onboard(`reason-${reason}`);
+      const m2 = await newMeter();
+      const res = await post(
+        `/meter-installations/${a.installation.id}/replace`,
+        {
+          newMeterId: m2.id,
+          oldFinalReading: 10,
+          newInitialReading: 0,
+          reason,
+        },
+      ).expect(201);
+      expect(res.body.installed.reason).toBe(reason);
+    }
+    const a = await onboard('reason-NEW');
+    const m2 = await newMeter();
+    const res = await post(`/meter-installations/${a.installation.id}/replace`, {
+      newMeterId: m2.id,
+      oldFinalReading: 10,
+      newInitialReading: 0,
+      reason: 'NEW',
+    }).expect(400);
+    expect(res.body.code).toBe('INSTALL_REASON_INVALID');
+  });
+
+  it('oldFinalReading < initialReading → 400 FINAL_READING_BEFORE_INITIAL', async () => {
+    const a = await onboard('r-low');
+    // below-initial needs a positive initial to be reachable — install a
+    // fresh meter with initial 50 (account can hold multi-ACTIVE).
+    const m3 = await newMeter();
+    const inst3 = await post('/meter-installations', {
+      waterAccountId: a.waterAccount.id,
+      meterId: m3.id,
+      initialReading: 50,
+    }).expect(201);
+    const m4 = await newMeter();
+    const res = await post(
+      `/meter-installations/${inst3.body.id}/replace`,
+      {
+        newMeterId: m4.id,
+        oldFinalReading: 20, // < initial 50
+        newInitialReading: 0,
+      },
+    ).expect(400);
+    expect(res.body.code).toBe('FINAL_READING_BEFORE_INITIAL');
+  });
+
+  it('replacedAt before installedAt → 400 REMOVE_BEFORE_INSTALL', async () => {
+    const a = await onboard('r-early');
+    const m2 = await newMeter();
+    const res = await post(`/meter-installations/${a.installation.id}/replace`, {
+      newMeterId: m2.id,
+      oldFinalReading: 10,
+      newInitialReading: 0,
+      replacedAt: '2025-12-01', // onboard installedAt was 2026-01-01
+    }).expect(400);
+    expect(res.body.code).toBe('REMOVE_BEFORE_INSTALL');
+  });
+
+  it('Idempotency-Key replay: same response, no duplicate installation', async () => {
+    const a = await onboard('r-idem');
+    const m2 = await newMeter();
+    const key = `t17-replace-${RUN}`;
+    const body = {
+      newMeterId: m2.id,
+      oldFinalReading: 42,
+      newInitialReading: 0,
+    };
+    const first = await request(app.getHttpServer())
+      .post(`/meter-installations/${a.installation.id}/replace`)
+      .set(auth(adminToken))
+      .set('Idempotency-Key', key)
+      .send(body)
+      .expect(201);
+    const replay = await request(app.getHttpServer())
+      .post(`/meter-installations/${a.installation.id}/replace`)
+      .set(auth(adminToken))
+      .set('Idempotency-Key', key)
+      .send(body)
+      .expect(201);
+    expect(replay.body.installed.id).toBe(first.body.installed.id);
+    expect(replay.body.removed.id).toBe(first.body.removed.id);
+    const insts = await owner.query(
+      `SELECT count(*)::int AS n FROM meter_installation
+       WHERE tenant_id = $1 AND water_account_id = $2`,
+      [T17A, a.waterAccount.id],
+    );
+    expect(insts.rows[0].n).toBe(2); // old REMOVED + new ACTIVE, exactly once
+  });
+
+  it('resolved event after replacedAt → 409 BINDING_CLOSE_ORPHANS_EVENT + full rollback', async () => {
+    const a = await onboard('r-orphan');
+    const source = (
+      await post('/remote-sources', {
+        code: `t17-src2-${RUN}`,
+        name: 'T17 Source2',
+        type: 'FILE_IMPORT',
+        adapterKey: 'file-csv',
+        timezone: 'Asia/Shanghai',
+      }).expect(201)
+    ).body;
+    const device = (
+      await post('/remote-devices', {
+        remoteSourceId: source.id,
+        vendorDeviceKey: `t17-dev2-${RUN}`,
+      }).expect(201)
+    ).body;
+    const binding = (
+      await post(`/remote-devices/${device.id}/bindings`, {
+        installationId: a.installation.id,
+        effectiveFrom: '2026-01-01T00:00:00Z',
+      }).expect(201)
+    ).body;
+    // resolved event collected AFTER the requested replacedAt
+    await owner.query(
+      `INSERT INTO raw_remote_event (
+         id, tenant_id, remote_source_id, external_event_key,
+         canonical_payload_hash, vendor_device_key, business_period,
+         collected_at, reading_value, raw_payload, canonical_payload,
+         resolved_remote_device_id, resolved_binding_id,
+         processing_status, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 'h', 'x', '202603', '2026-03-10',
+               1, '{}'::jsonb, '{}'::jsonb, $4, $5, 'CONVERTED', now(), now())`,
+      [T17A, source.id, `orphan-${RUN}`, device.id, binding.id],
+    );
+    const m2 = await newMeter();
+    const res = await post(`/meter-installations/${a.installation.id}/replace`, {
+      newMeterId: m2.id,
+      oldFinalReading: 10,
+      newInitialReading: 0,
+      replacedAt: '2026-03-05', // before the event's collectedAt
+    }).expect(409);
+    expect(res.body.code).toBe('BINDING_CLOSE_ORPHANS_EVENT');
+    // rollback: old inst still ACTIVE, old meter INSTALLED, new meter AVAILABLE
+    expect((await instRow(a.installation.id)).status).toBe('ACTIVE');
+    expect(await meterStatus(a.meter.id)).toBe('INSTALLED');
+    expect(await meterStatus(m2.id)).toBe('AVAILABLE');
+  });
+
+  it('SUSPENDED account: replace succeeds (permissive per frozen decision)', async () => {
+    const a = await onboard('r-susp');
+    await post(`/water-accounts/${a.waterAccount.id}/suspend`, {}).expect(201);
+    const m2 = await newMeter();
+    const res = await post(`/meter-installations/${a.installation.id}/replace`, {
+      newMeterId: m2.id,
+      oldFinalReading: 10,
+      newInitialReading: 0,
+    }).expect(201);
+    expect(res.body.installed.status).toBe('ACTIVE');
+  });
+
+  it('mid-period replace → settlement carries two installation components', async () => {
+    const a = await onboard('r-mid');
+    const m2 = await newMeter();
+    const res = await post(`/meter-installations/${a.installation.id}/replace`, {
+      newMeterId: m2.id,
+      oldFinalReading: 80,
+      newInitialReading: 10,
+      replacedAt: '2026-02-15',
+    }).expect(201);
+    const newInstId = res.body.installed.id;
+    // a trusted in-period reading on the NEW meter: 10 → 35
+    await owner.query(
+      `INSERT INTO meter_reading
+         (id, tenant_id, installation_id, meter_id, period, read_date,
+          result_type, reading_value, qc_status, source, operator_id,
+          created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, '202602', '2026-02-28',
+               'ACTUAL', 35, 'PASSED', 'WEB', $4, now(), now())`,
+      [T17A, newInstId, m2.id, STAFF_ADMIN_A],
+    );
+    const st = await post('/consumption-settlements', {
+      waterAccountId: a.waterAccount.id,
+      period: '202602',
+    }).expect(201);
+    const comps = (
+      await owner.query(
+        `SELECT installation_id::text AS inst,
+                prev_reading_value::text AS prev,
+                end_reading_value::text AS endv,
+                usage_qty::text AS usage
+         FROM consumption_component
+         WHERE tenant_id = $1 AND settlement_id = $2
+         ORDER BY installation_id`,
+        [T17A, st.body.id],
+      )
+    ).rows;
+    expect(comps).toHaveLength(2);
+    const oldC = comps.find((c) => c.inst === a.installation.id);
+    const newC = comps.find((c) => c.inst === newInstId);
+    // 旧表段：装表始码 0 → 止码 80
+    expect(Number(oldC.prev)).toBe(0);
+    expect(Number(oldC.endv)).toBe(80);
+    expect(Number(oldC.usage)).toBe(80);
+    // 新表段：新表始码 10 → 期内读数 35
+    expect(Number(newC.prev)).toBe(10);
+    expect(Number(newC.endv)).toBe(35);
+    expect(Number(newC.usage)).toBe(25);
+    expect(Number(st.body.totalUsageQty ?? st.body.usageQty)).toBe(105);
+  });
 });
 
 describe('close guard + account status (销户拦截)', () => {
@@ -520,13 +727,42 @@ describe('org data scope (营业所隔离)', () => {
   });
 
   it('branch staff reads own-scope list/detail; branch B is hidden/403', async () => {
+    // second own-scope account — the explicit-filter regression probe needs
+    // acctA1 results to NOT bleed acctA2 rows (P0: notIn must not overwrite
+    // the explicit waterAccountId equality).
+    const a2 = await onboard('sA2');
+    await coverAccount(ORG_BRANCH_A, a2.waterAccount.id, 'sA2');
+    const acctA2 = a2.waterAccount.id;
+
     const filtered = await get(
-      '/meter-installations?take=100',
+      '/meter-installations?take=200',
       branchToken,
     ).expect(200);
-    const ids = filtered.body.map((i: { id: string }) => i.id);
-    expect(ids).toContain(instA);
+    const ids = filtered.body.map(
+      (i: { id: string; waterAccountId: string }) => i.id,
+    );
+    // instB's installation must not appear anywhere in the scoped list
     expect(ids).not.toContain(instB);
+    // every row belongs to an in-scope account
+    const rowsB = filtered.body.filter(
+      (i: { waterAccountId: string }) => i.waterAccountId === acctB,
+    );
+    expect(rowsB).toHaveLength(0);
+
+    // explicit filter → strict equality on the requested account only,
+    // and instA IS reachable through it (scope doesn't hide own-branch data)
+    const explicit = await get(
+      `/meter-installations?waterAccountId=${acctA}`,
+      branchToken,
+    ).expect(200);
+    expect(explicit.body.length).toBeGreaterThan(0);
+    expect(
+      explicit.body.map((i: { id: string }) => i.id),
+    ).toContain(instA);
+    for (const i of explicit.body as { waterAccountId: string }[]) {
+      expect(i.waterAccountId).toBe(acctA);
+      expect(i.waterAccountId).not.toBe(acctA2);
+    }
 
     const scoped = await get(
       `/meter-installations?waterAccountId=${acctB}`,

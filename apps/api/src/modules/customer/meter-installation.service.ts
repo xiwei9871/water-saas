@@ -77,23 +77,26 @@ export class MeterInstallationService {
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // Mutually exclusive filters: an explicit waterAccountId is a scoped
+      // single-account read (403 when out of scope, strict equality
+      // otherwise); only the unfiltered list applies the notIn exclusion.
       if (q.waterAccountId) {
         await this.assertAccountScopeTx(tx, ctx, q.waterAccountId);
       }
-      // E7 scope fix: same coverage rule as assertAccountScopeTx —
-      // any covering book outside the caller's subtree hides the whole
-      // account's installations. Uncovered accounts stay permissive.
       const scopedIds =
-        ctx.scope === 'ALL'
-          ? null
-          : await this.outOfScopeAccountIds(tx, ctx);
+        !q.waterAccountId && ctx.scope !== 'ALL'
+          ? await this.outOfScopeAccountIds(tx, ctx)
+          : null;
       return tx.meterInstallation.findMany({
         where: {
           tenantId: ctx.tenantId,
-          waterAccountId: q.waterAccountId,
+          ...(q.waterAccountId
+            ? { waterAccountId: q.waterAccountId }
+            : scopedIds && scopedIds.length > 0
+              ? { waterAccountId: { notIn: scopedIds } }
+              : {}),
           meterId: q.meterId,
           status: q.status,
-          ...(scopedIds ? { waterAccountId: { notIn: scopedIds } } : {}),
         },
         select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
         orderBy: { installedAt: 'desc' },
@@ -347,7 +350,13 @@ export class MeterInstallationService {
       },
       data: { parentMeterId: existing.meterId, updatedBy: ctx.staffId },
     });
-    return { removed: { ...existing, status: 'REMOVED' as const }, installed: installation };
+    // Canonical post-write snapshot — audit-after and the API response must
+    // reflect committed columns, not the stale head read.
+    const removed = await tx.meterInstallation.findUniqueOrThrow({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
+    });
+    return { removed, installed: installation };
   }
 
   // -----------------------------------------------------------------------

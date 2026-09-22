@@ -78,7 +78,7 @@
 ### 3.3 不变量（事务级）
 
 - 任一失败整笔回滚：不存在"旧已拆新未装"的中间态。
-- 三块锁写按序：installation → oldMeter → newMeter → binding → new installation insert。两个并发 replace 同一 installation：后者在 step 7 `flipped.count=0` → `INSTALLATION_NOT_ACTIVE`。
+- 锁写按序（与 §10 冻结锁序一致）：`water_account → meter_installation → meter(s) → remote_device_binding`，随后 new installation insert。两个并发 replace 同一 installation：后者在 step 7 `flipped.count=0` → `INSTALLATION_NOT_ACTIVE`。
 - 换表同 idempotency key 重放：withOptionalIdem 层直接返回首响应，不二次进 service。
 - **审计**：`req.auditBefore` = 旧 installation（含 meter）；响应体含 removed + installed 两个对象供 auditAfter。
 
