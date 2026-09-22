@@ -539,3 +539,95 @@ describe('late recovery + plan ambiguity', () => {
     expect(reading.body.planItemId).toBe(item1);
   });
 });
+
+describe('T11: REMOTE reading → QC → reconciliation trusted chain', () => {
+  it('REMOTE+PASSED lands as the reconciliation actual reading', async () => {
+    // Fresh account C + its own bound device.
+    const c = await onboard('C');
+    acct.C = c.waterAccount.id;
+    inst.C = c.installation.id;
+    instAt.C = c.installation.installedAt;
+    const dev = await request(app.getHttpServer())
+      .post('/remote-devices')
+      .set(auth(adminToken))
+      .send({ remoteSourceId: sourceId, vendorDeviceKey: `DEVC-${RUN}` })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/remote-devices/${dev.body.id}/bindings`)
+      .set(auth(adminToken))
+      .send({ installationId: inst.C, effectiveFrom: instAt.C })
+      .expect(201);
+
+    // Anchor: manual ACTUAL 202704 = 100, QC PASSED.
+    const p1 = await mkPlan('202704', [acct.C], 'r1');
+    const anchorId = (
+      await request(app.getHttpServer())
+        .post('/meter-readings')
+        .set(auth(adminToken))
+        .send({
+          planItemId: itemFor(p1.items, acct.C),
+          resultType: 'ACTUAL',
+          readingValue: 100,
+        })
+        .expect(201)
+    ).body.id;
+    await request(app.getHttpServer())
+      .post(`/meter-readings/${anchorId}/qc`)
+      .set(auth(adminToken))
+      .send({ action: 'pass' })
+      .expect(201);
+
+    // Remote 202705 = 140 → CONVERTED → QC PASSED.
+    await mkPlan('202705', [acct.C], 'r2');
+    const res = await ingest({
+      vendorDeviceKey: `DEVC-${RUN}`,
+      businessPeriod: '202705',
+      collectedAt: '2027-05-05T00:30:00Z',
+      readingValue: '140',
+    }).expect(201);
+    expect(res.body[0].outcome).toBe('CONVERTED');
+    const remoteReadingId = res.body[0].readingId as string;
+    await request(app.getHttpServer())
+      .post(`/meter-readings/${remoteReadingId}/qc`)
+      .set(auth(adminToken))
+      .send({ action: 'pass' })
+      .expect(201);
+
+    // A settled span is required — DRAFT estimate for 202705 (absorb path,
+    // no tariff/bill dependency).
+    const stl = (
+      await owner.query(
+        `INSERT INTO consumption_settlement
+           (id, tenant_id, water_account_id, period, total_usage_qty, is_estimated,
+            estimate_method, estimate_reason, status, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, '202705', 38, true, 'MANUAL',
+                 'e5p-estimate', 'DRAFT', now(), now())
+         RETURNING id::text AS id`,
+        [TENANT, acct.C],
+      )
+    ).rows[0].id as string;
+    await owner.query(
+      `INSERT INTO consumption_component
+         (id, tenant_id, settlement_id, installation_id, prev_reading_value,
+          end_reading_value, usage_qty, source_type, source_reading_id,
+          created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 100, 138, 38, 'ESTIMATE', NULL,
+               now(), now())`,
+      [TENANT, stl, inst.C],
+    );
+
+    // Reconciliation must treat REMOTE+PASSED as the trusted actual.
+    const recon = await request(app.getHttpServer())
+      .post('/reconciliations')
+      .set(auth(adminToken))
+      .send({ waterAccountId: acct.C })
+      .expect(201);
+    expect(recon.body.anchorReadingId).toBe(anchorId);
+    expect(recon.body.actualReadingId).toBe(remoteReadingId);
+    expect(recon.body.actualTotalUsage).toBe('40');
+    expect(recon.body.fromPeriod).toBe('202705');
+    expect(recon.body.toPeriod).toBe('202705');
+    expect(recon.body.absorbedSettlementId).toBe(stl);
+    expect(recon.body.status).toBe('ABSORBED');
+  });
+});
