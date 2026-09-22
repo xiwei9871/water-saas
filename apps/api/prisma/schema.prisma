@@ -234,6 +234,53 @@ enum DayCloseStatus {
 }
 
 // ---------------------------------------------------------------------------
+// remote reading (E5) — docs/product-map/E5_REMOTE_READING_DOMAIN_DESIGN.md
+// ---------------------------------------------------------------------------
+
+enum RemoteSourceType {
+  FILE_IMPORT
+  API_PULL
+  WEBHOOK
+}
+
+enum RemoteSourceStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum RemoteDeviceStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum RemoteEventStatus {
+  RECEIVED
+  UNBOUND
+  WAITING_PLAN
+  FAILED
+  CONFLICT
+  CONVERTED
+  IGNORED
+}
+
+enum RemoteEventActorType {
+  SYSTEM
+  USER
+}
+
+enum CoordinateSystem {
+  WGS84
+  GCJ02
+  BD09
+}
+
+enum LocationSource {
+  MANUAL
+  GPS
+  IMPORT
+}
+
+// ---------------------------------------------------------------------------
 // iam
 // ---------------------------------------------------------------------------
 
@@ -262,7 +309,8 @@ model OrgUnit {
   updatedAt DateTime @updatedAt @map("updated_at")
   updatedBy String?  @map("updated_by") @db.Uuid
 
-  staff Staff[]
+  staff         Staff[]
+  remoteSources RemoteSource[]
 
   @@unique([tenantId, id])
   @@index([tenantId, parentId])
@@ -540,6 +588,13 @@ model MeterInstallation {
   finalReading   Decimal?           @map("final_reading") @db.Decimal(18, 4)
   reason         InstallReason
   status         InstallationStatus @default(ACTIVE)
+  // Minimal install-point location (E5 §3.5) — location belongs to the
+  // install point, not the meter asset. No PostGIS in V1.
+  latitude         Decimal?          @map("latitude") @db.Decimal(9, 6)
+  longitude        Decimal?          @map("longitude") @db.Decimal(10, 6)
+  coordinateSystem CoordinateSystem? @map("coordinate_system")
+  locationSource   LocationSource?   @map("location_source")
+  locationRemark   String?           @map("location_remark")
   createdAt      DateTime           @default(now()) @map("created_at")
   createdBy      String?            @map("created_by") @db.Uuid
   updatedAt      DateTime           @updatedAt @map("updated_at")
@@ -549,6 +604,7 @@ model MeterInstallation {
   waterAccount WaterAccount           @relation(fields: [tenantId, waterAccountId], references: [tenantId, id], onDelete: Restrict)
   components   ConsumptionComponent[]
   readings     MeterReading[]
+  remoteBindings RemoteDeviceBinding[]
 
   @@unique([tenantId, id])
   @@index([tenantId, waterAccountId, status])
@@ -681,7 +737,11 @@ model MeterReading {
   qcBy                String?        @map("qc_by") @db.Uuid
   qcAt                DateTime?      @map("qc_at")
   source              ReadSource
-  operatorId          String         @map("operator_id") @db.Uuid
+  // Adapter-produced remote readings have no human operator; nullable only
+  // for result_type=REMOTE + source=REMOTE + source_event_id (DB CHECK).
+  operatorId          String?        @map("operator_id") @db.Uuid
+  // Provenance to the raw remote event that produced this reading (E5).
+  sourceEventId       String?        @map("source_event_id") @db.Uuid
   photoRef            String?        @map("photo_ref")
   remark              String?
   createdAt           DateTime       @default(now()) @map("created_at")
@@ -691,7 +751,10 @@ model MeterReading {
 
   planItem     ReadingPlanItem?  @relation(fields: [tenantId, planItemId], references: [tenantId, id], onDelete: Restrict)
   installation MeterInstallation @relation(fields: [tenantId, installationId], references: [tenantId, id], onDelete: Restrict)
+  sourceEvent  RawRemoteEvent?   @relation(fields: [tenantId, sourceEventId], references: [tenantId, id], onDelete: Restrict)
 
+  // One raw event yields at most one business reading.
+  @@unique([tenantId, sourceEventId])
   @@index([tenantId, period])
   @@index([tenantId, installationId, period])
   @@index([tenantId, planItemId])
@@ -1058,4 +1121,179 @@ model CashierDayClose {
   @@index([tenantId, cashierId, closeDate])
   @@index([tenantId, closeDate])
   @@map("cashier_day_close")
+}
+
+// ---------------------------------------------------------------------------
+// remote reading (E5) — docs/product-map/E5_REMOTE_READING_DOMAIN_DESIGN.md
+// ---------------------------------------------------------------------------
+
+/// A tenant-configured external remote-metering source (vendor platform,
+/// webhook endpoint, or file import channel). Kernel only knows `adapterKey`
+/// — never vendor specifics. `credentialRef` stores a vault/env reference,
+/// never plaintext secrets.
+model RemoteSource {
+  id            String             @id @default(uuid()) @db.Uuid
+  tenantId      String             @map("tenant_id") @db.Uuid
+  code          String
+  name          String
+  type          RemoteSourceType
+  adapterKey    String             @map("adapter_key")
+  status        RemoteSourceStatus @default(ACTIVE)
+  // IANA timezone (e.g. Asia/Shanghai) — required: vendor exports often carry
+  // naive local timestamps the adapter must interpret.
+  timezone      String
+  config        Json?              @db.JsonB
+  credentialRef String?            @map("credential_ref")
+  // Scope for UNBOUND events that have no book/account to derive org from:
+  // set → that org unit; NULL → tenant-wide (restricted visibility).
+  orgUnitId     String?            @map("org_unit_id") @db.Uuid
+  createdAt     DateTime           @default(now()) @map("created_at")
+  createdBy     String?            @map("created_by") @db.Uuid
+  updatedAt     DateTime           @updatedAt @map("updated_at")
+  updatedBy     String?            @map("updated_by") @db.Uuid
+
+  orgUnit   OrgUnit?              @relation(fields: [tenantId, orgUnitId], references: [tenantId, id], onDelete: Restrict)
+  devices   RemoteDevice[]
+  bindings  RemoteDeviceBinding[]
+  rawEvents RawRemoteEvent[]
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@map("remote_source")
+}
+
+/// Vendor-side smart-device identity (厂商认得的设备) — decoupled from the
+/// business Meter asset: a comm-module swap is a re-binding, not a new meter.
+/// vendorDeviceKey is the vendor's primary identity; do NOT assume it equals
+/// meter_no.
+model RemoteDevice {
+  id              String             @id @default(uuid()) @db.Uuid
+  tenantId        String             @map("tenant_id") @db.Uuid
+  remoteSourceId  String             @map("remote_source_id") @db.Uuid
+  vendorDeviceKey String             @map("vendor_device_key")
+  vendorMeterNo   String?            @map("vendor_meter_no")
+  // IMEI / DevEUI / comm-module number.
+  communicationId String?            @map("communication_id")
+  model           String?
+  status          RemoteDeviceStatus @default(ACTIVE)
+  metadata        Json?              @db.JsonB
+  createdAt       DateTime           @default(now()) @map("created_at")
+  createdBy       String?            @map("created_by") @db.Uuid
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+  updatedBy       String?            @map("updated_by") @db.Uuid
+
+  remoteSource   RemoteSource          @relation(fields: [tenantId, remoteSourceId], references: [tenantId, id], onDelete: Restrict)
+  bindings       RemoteDeviceBinding[]
+  resolvedEvents RawRemoteEvent[]      @relation("resolvedDevice")
+
+  @@unique([tenantId, remoteSourceId, vendorDeviceKey])
+  @@unique([tenantId, remoteSourceId, id])
+  @@unique([tenantId, id])
+  @@map("remote_device")
+}
+
+/// Effective-dated device → installation binding. Half-open range
+/// [effectiveFrom, effectiveTo); historical events resolve by `collectedAt`,
+/// never by the current binding. Overlap is forbidden by DB exclusion
+/// constraints (see migration — cannot be expressed in Prisma schema).
+model RemoteDeviceBinding {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  // Denormalized for exclusion-constraint grouping; the triple composite FK
+  // to remote_device guarantees it always equals the device's source.
+  remoteSourceId String    @map("remote_source_id") @db.Uuid
+  remoteDeviceId String    @map("remote_device_id") @db.Uuid
+  installationId String    @map("installation_id") @db.Uuid
+  effectiveFrom  DateTime  @map("effective_from") @db.Timestamptz
+  effectiveTo    DateTime? @map("effective_to") @db.Timestamptz
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by") @db.Uuid
+
+  remoteSource RemoteSource      @relation(fields: [tenantId, remoteSourceId], references: [tenantId, id], onDelete: Restrict)
+  remoteDevice RemoteDevice      @relation(fields: [tenantId, remoteSourceId, remoteDeviceId], references: [tenantId, remoteSourceId, id], onDelete: Restrict)
+  installation MeterInstallation @relation(fields: [tenantId, installationId], references: [tenantId, id], onDelete: Restrict)
+  resolvedEvents RawRemoteEvent[] @relation("resolvedBinding")
+
+  @@unique([tenantId, id])
+  // Target of RawRemoteEvent's 4-column provenance FK (source+device agree).
+  @@unique([tenantId, remoteSourceId, remoteDeviceId, id], map: "remote_device_binding_tenant_source_device_id_key")
+  @@index([tenantId, remoteDeviceId, effectiveFrom])
+  @@index([tenantId, installationId])
+  @@map("remote_device_binding")
+}
+
+/// Immutable raw ingest fact. Identity + payloads never mutate (DB trigger);
+/// processing status may evolve and every transition lands in
+/// remote_event_process_log. Idempotency: UNIQUE(tenant, source,
+/// external_event_key); same key + different canonical payload is logged as
+/// EVENT_KEY_CONFLICT on the original event — never overwritten.
+model RawRemoteEvent {
+  id                    String            @id @default(uuid()) @db.Uuid
+  tenantId              String            @map("tenant_id") @db.Uuid
+  remoteSourceId        String            @map("remote_source_id") @db.Uuid
+  externalEventKey      String            @map("external_event_key")
+  canonicalPayloadHash  String            @map("canonical_payload_hash")
+  // Raw vendor key as received (留痕) — the resolved device/binding live in
+  // the resolved_* columns once processing succeeds.
+  vendorDeviceKey       String            @map("vendor_device_key")
+  // Business billing period YYYYMM — produced by the adapter, never derived
+  // from collectedAt (bimonthly books / late arrivals would corrupt it).
+  businessPeriod        String            @map("business_period") @db.Char(6)
+  collectedAt           DateTime          @map("collected_at") @db.Timestamptz
+  readingValue          Decimal           @map("reading_value") @db.Decimal(18, 4)
+  vendorQuality         String?           @map("vendor_quality")
+  rawPayload            Json              @map("raw_payload") @db.JsonB
+  canonicalPayload      Json              @map("canonical_payload") @db.JsonB
+  processingStatus      RemoteEventStatus @default(RECEIVED) @map("processing_status")
+  resolvedRemoteDeviceId String?          @map("resolved_remote_device_id") @db.Uuid
+  resolvedBindingId     String?           @map("resolved_binding_id") @db.Uuid
+  // Latest issue marker (e.g. EVENT_KEY_CONFLICT) — informational column,
+  // deliberately separate from processingStatus.
+  currentIssueCode      String?           @map("current_issue_code")
+  currentIssueAt        DateTime?         @map("current_issue_at") @db.Timestamptz
+  receivedAt            DateTime          @default(now()) @map("received_at") @db.Timestamptz
+  createdAt             DateTime          @default(now()) @map("created_at")
+  createdBy             String?           @map("created_by") @db.Uuid
+  updatedAt             DateTime          @updatedAt @map("updated_at")
+  updatedBy             String?           @map("updated_by") @db.Uuid
+
+  remoteSource RemoteSource             @relation(fields: [tenantId, remoteSourceId], references: [tenantId, id], onDelete: Restrict)
+  // Provenance must agree on the event's own remote_source; the resolved
+  // binding must additionally belong to the resolved device.
+  resolvedRemoteDevice RemoteDevice?    @relation("resolvedDevice", fields: [tenantId, remoteSourceId, resolvedRemoteDeviceId], references: [tenantId, remoteSourceId, id], onDelete: Restrict, map: "raw_remote_event_resolved_device_fkey")
+  resolvedBinding RemoteDeviceBinding?  @relation("resolvedBinding", fields: [tenantId, remoteSourceId, resolvedRemoteDeviceId, resolvedBindingId], references: [tenantId, remoteSourceId, remoteDeviceId, id], onDelete: Restrict, map: "raw_remote_event_resolved_binding_fkey")
+  processLogs  RemoteEventProcessLog[]
+  reading      MeterReading?
+
+  @@unique([tenantId, remoteSourceId, externalEventKey])
+  @@unique([tenantId, id])
+  @@index([tenantId, processingStatus])
+  @@index([tenantId, businessPeriod])
+  @@map("raw_remote_event")
+}
+
+/// Append-only processing/audit trail for RawRemoteEvent — every status
+/// transition, replay, conflict resolution and key-conflict observation.
+/// ws_app may INSERT/SELECT only (REVOKE UPDATE/DELETE/TRUNCATE, same
+/// hardening as audit_log).
+model RemoteEventProcessLog {
+  id            String               @id @default(uuid()) @db.Uuid
+  tenantId      String               @map("tenant_id") @db.Uuid
+  remoteEventId String               @map("remote_event_id") @db.Uuid
+  action        String
+  fromStatus    RemoteEventStatus?   @map("from_status")
+  toStatus      RemoteEventStatus?   @map("to_status")
+  code          String?
+  message       String?
+  actorType     RemoteEventActorType @map("actor_type")
+  actorStaffId  String?              @map("actor_staff_id") @db.Uuid
+  detail        Json?                @db.JsonB
+  createdAt     DateTime             @default(now()) @map("created_at")
+
+  remoteEvent RawRemoteEvent @relation(fields: [tenantId, remoteEventId], references: [tenantId, id], onDelete: Restrict)
+
+  @@index([tenantId, remoteEventId])
+  @@map("remote_event_process_log")
 }

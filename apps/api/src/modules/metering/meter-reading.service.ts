@@ -28,6 +28,7 @@ export const METER_READING_SELECT = {
   qcAt: true,
   source: true,
   operatorId: true,
+  sourceEventId: true,
   photoRef: true,
   remark: true,
   createdAt: true,
@@ -275,7 +276,7 @@ export class MeterReadingService {
         addr: installation.waterAccount.addr,
       },
       meterNo: installation.meter.meterNo,
-      operatorName: names.get(r.operatorId) ?? null,
+      operatorName: r.operatorId ? (names.get(r.operatorId) ?? null) : null,
       qcByName: r.qcBy ? (names.get(r.qcBy) ?? null) : null,
     }));
   }

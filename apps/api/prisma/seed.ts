@@ -59,6 +59,7 @@ async function seedTenant({ code, name }: TenantSeed) {
     'metering:read',
     'metering:write',
     'metering:qc',
+    'metering:remote:manage',
     'billing:read',
     'billing:write',
     'payment:read',
