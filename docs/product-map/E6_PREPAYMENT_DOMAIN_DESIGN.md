@@ -66,12 +66,20 @@ billKind)` 挡二次红冲）。**PAID 与 DRAFT 不可红冲**。REVERSED 账�
 既有 alloc 留存 → `outstandingTx.reversedBillCredit` 把这部分记为
 "客户应退"信用，提示走 Payment reversal 退款而非再收。
 
-### D. postOneBill 是唯一的 POSTED 翻转点
+### D. 可支付 POSTED 债务的产出不只 postOneBill 一处
 
 `postOneBill`（每账单独立事务）：`water_account FOR UPDATE`（CLOSED 拒绝）
 → `tariff_plan FOR UPDATE` → 守护 `DRAFT→POSTED`（count=0 时重读，
 POSTED 视为已成功幂等返回）。锁序固定 `water_account → tariff_plan →
-bill`。这是 E6 自动 APPLY 的唯一插入点（§9）。
+bill`。
+
+但 `BillService.replaceTx` 也直接 `create` 一条 `status=POSTED` 的
+REPLACEMENT bill——POSTED 债务的产出不只有 run 入口。因此 E6 自动
+APPLY 的触发点冻结为**领域事件**"新的正向可支付债务进入 POSTED"，
+而不是某个 service 方法名（§9）。实现时必须再全库搜索一遍
+`status: 'POSTED'`/`bill.create` 路径（含未来 ADJUSTMENT/correction
+入口），确保无一漏接；`billKind='REVERSAL'` 是负向纠正单，恒不触发
+APPLY。
 
 ### E. CashierDayClose 是签字现金事实
 
@@ -121,22 +129,29 @@ created_at             timestamptz
 created_by             uuid NULL
 
 UNIQUE (tenant_id, idempotency_key)
+UNIQUE (tenant_id, settle_account_id, id)   -- 供 ledger 自引用复合 FK
 FK (tenant_id, settle_account_id) → settle_account(tenant_id, id)
-FK (tenant_id, payment_id)        → payment(tenant_id, id)
-FK (tenant_id, bill_id)           → bill(tenant_id, id)
-FK (tenant_id, origin_top_up_id)  → prepayment_ledger_entry(tenant_id, id)
-FK (tenant_id, reversal_of_entry_id) → prepayment_ledger_entry(tenant_id, id)
+FK (tenant_id, settle_account_id, payment_id)   → payment(tenant_id, settle_account_id, id)
+FK (tenant_id, settle_account_id, bill_id)      → bill(tenant_id, settle_account_id, id)
+FK (tenant_id, settle_account_id, origin_top_up_id)     → self(tenant_id, settle_account_id, id)
+FK (tenant_id, settle_account_id, reversal_of_entry_id) → self(tenant_id, settle_account_id, id)
 RLS: 与其它租户表同款 ENABLE + FORCE + tenant policy
 ```
 
+Ledger 引用全部按 **(tenant, settleAccount, target)** 复合 FK——不只
+保证同租户，还保证同资金主体：一条 entry 的 payment / bill /
+originTopUp / reversalOf 必然落在同一个 settle_account 名下（为此
+`payment` / `bill` 各补 `UNIQUE(tenant_id, settle_account_id, id)`）。
+
 DB CHECK：
 
-- `type='APPLY'        ⟹ bill_id NOT NULL AND origin_top_up_id NOT NULL`
-- `type='TOP_UP'       ⟹ amount > 0 AND payment_id NOT NULL AND origin_top_up_id IS NULL`
-- `type='REFUND'       ⟹ amount < 0 AND payment_id NOT NULL AND origin_top_up_id NOT NULL AND reason NOT NULL`
-- `type='REVERSAL'     ⟹ reversal_of_entry_id NOT NULL AND reason NOT NULL`
-- `type='APPLY'        ⟹ amount < 0`（APPLY 恒为消耗）
+- `type='TOP_UP'   ⟹ amount > 0 AND payment_id NOT NULL AND origin_top_up_id IS NULL AND reversal_of_entry_id IS NULL AND bill_id IS NULL`
+- `type='APPLY'    ⟹ amount < 0 AND bill_id NOT NULL AND origin_top_up_id NOT NULL AND payment_id IS NULL`
+- `type='REFUND'   ⟹ amount < 0 AND payment_id NOT NULL AND origin_top_up_id NOT NULL AND reason NOT NULL`
+- `type='REVERSAL' ⟹ reversal_of_entry_id NOT NULL AND origin_top_up_id NOT NULL AND reason NOT NULL`
 - `reversal_of_entry_id ≠ id`、`origin_top_up_id ≠ id`
+- REVERSAL target 仅 `TOP_UP`/`APPLY`（跨行规则，CHECK 表达不了——
+  服务层拒绝其它 target，e2e 覆盖）。
 
 **append-only**：迁移内 `REVOKE UPDATE, DELETE, TRUNCATE ON
 prepayment_ledger_entry FROM ws_app`（与 `remote_event_process_log`、
@@ -171,13 +186,27 @@ TOP_UP B +100 ──┘                                        → B.remaining =
 balance = 120
 ```
 
-- APPLY / REFUND 必须 `origin_top_up_id →` 某条 TOP_UP。
-- 某 lot 的可用余额：`lot.remaining = topUp.amount + Σ(归属该 lot 的
-  APPLY/REFUND amount) + Σ(冲了该 lot TOP_UP 的 REVERSAL amount)
-  + Σ(冲了该 lot 名下 APPLY 的 REVERSAL amount)`。
-  实现上等价于：`lot.remaining = Σ ledger.amount WHERE id=topUpId OR
-  origin_top_up_id=topUpId OR reversal_of_entry_id ∈ {topUpId} ∪
-  {该 lot 名下 APPLY ids}`——SQL 两层子查询即可，V1 不需要物化。
+- **一切影响某 lot 余额的非 TOP_UP entry 都必须写
+  `origin_top_up_id`**（DB CHECK 强制，§3）：APPLY、REFUND、
+  REVERSAL-of-APPLY、REVERSAL-of-TOP_UP 全部直接归属 lot——
+
+```
+TOP_UP A +100   origin=null
+APPLY    −80    origin=A
+REFUND   −10    origin=A
+REVERSAL +80    origin=A, reversal_of=那条APPLY
+REVERSAL −100   origin=A, reversal_of=TOP_UP A
+```
+
+  于是 lot 余额是**单层聚合**，不需要二层追踪：
+
+```
+lot.remaining = topUp.amount + Σ entry.amount
+                WHERE origin_top_up_id = topUp.id
+```
+
+- REVERSAL 的合法 target 只有 `TOP_UP` 与 `APPLY` 两种。REFUND 自身的
+  "撤销退款" Product Spec 未定义——V1 不支持，也不悄悄留口。
 - **消耗顺序冻结：TOP_UP `created_at ASC → id ASC`（FIFO）**。用户不选
   "花哪次充值的钱"；任何重试/重放得到相同分配结果。
 - `PREPAYMENT_ALREADY_APPLIED`：冲正一条 TOP_UP 要求其 `remaining ==
@@ -213,11 +242,22 @@ prepayment_entry_id   uuid NULL              -- → prepayment_ledger_entry
 CHECK (source='PAYMENT'    ⟹ payment_id NOT NULL AND prepayment_entry_id IS NULL)
 CHECK (source='PREPAYMENT' ⟹ payment_id IS NULL AND prepayment_entry_id NOT NULL)
 FK (tenant_id, prepayment_entry_id) → prepayment_ledger_entry(tenant_id, id)
+UNIQUE (tenant_id, prepayment_entry_id)   -- 一条 settlement entry 至多一条 alloc
 ```
 
-- PREPAYMENT alloc 的 `prepayment_entry_id` 指向 **APPLY 那条 ledger
-  entry**（不是 TOP_UP）——一笔 APPLY 对应一条 alloc，`apply_entry.amount
-  = −alloc.amount`。
+- **`prepayment_entry_id` 指向产生该 Allocation 的那条 ledger
+  entry**（冻结，不是指向 lot 的 TOP_UP）：
+
+```
+正常抵扣：  Ledger APPLY     −60  →  PaymentAlloc +60 → prepaymentEntryId=APPLY
+账单红冲：  Ledger REVERSAL  +60  →  PaymentAlloc −60 → prepaymentEntryId=REVERSAL
+```
+
+  统一不变量：`PREPAYMENT alloc.prepaymentEntryId` 的目标 entry 满足
+  `type='APPLY'` 或 `type='REVERSAL' AND reversal_of_entry_id 指向一条
+  APPLY`，且 `ledgerEntry.amount = −alloc.amount`（触发器或服务纪律 +
+  e2e 验证；`UNIQUE(tenant, prepayment_entry_id)` 保证一条 settlement
+  entry 至多产出一条 alloc，模型保持 1:1）。
 - Bill 已付仍是 `Σ payment_alloc.amount`；`appliedByBill`、
   `outstandingTx`、`reversedBillCredit` 全部分源不改逻辑（不区分
   source 的 Σ 天然正确）。需要区分资金来源的展示/红冲路径按
@@ -234,47 +274,79 @@ FK (tenant_id, prepayment_entry_id) → prepayment_ledger_entry(tenant_id, id)
 allocs 参数**，清欠顺序由系统冻结决定：
 
 ```
-事务内（一个柜台资金事件）：
+事务内（一个柜台资金事件；写入顺序受 FK 约束——alloc/ledger 都引用
+Payment，Payment 必须先落行。"先清欠"是资金用途的优先顺序，不是
+INSERT 的物理顺序）：
   1. settle_account 存在性 + assertSettleScope
   2. settle_account 行 FOR UPDATE（预存资金锁，§14）
   3. 扫欠费队列：settleAccount 名下 status ∈ {POSTED, PARTIAL_PAID}
-     且 bill_kind ≠ REVERSAL 且 outstanding > 0 的 bill
-  4. 冻结排序：dueDate ASC NULLS LAST → period ASC → issuedAt ASC → id ASC
-     （dueDate NULL 回退 period；与 Bill 字段对齐）
-  5. 按序填满：每 bill alloc = min(outstanding, remaining) →
-     PaymentAlloc(source=PAYMENT) + 守护重算账单状态
-  6. 余款 > 0 → Ledger TOP_UP(remaining, payment_id=本 Payment,
+     且 bill_kind ≠ REVERSAL 且 outstanding > 0 的 bill，
+     行锁按 sorted(id) 取（与既有 createTx 同款）
+  4. 按冻结 comparator（§8a）计算本次用途拆分
+     （欠费 X、转预存 amount−X）——纯内存计算，先不写库
+  5. 创建 Payment(amount=全额, RECEIVED)
+  6. 创建欠费 PaymentAlloc(source=PAYMENT) 各行
+  7. 余款 > 0 → Ledger TOP_UP(remaining, payment_id=Payment.id,
      idempotency_key=topup:{paymentId})
-  7. Payment(amount=全额, RECEIVED) + Receipt × 1
+  8. 创建 Receipt × 1
+  9. 守护重算各 bill 状态（POSTED→PARTIAL_PAID→PAID）
 ```
 
+### 8a. 欠费排序 comparator（冻结，唯一实现）
+
+TOP_UP 清欠与自动 APPLY 必须调用**同一个排序 helper**。冻结算法：
+
+```
+effectiveDueKey(bill) = bill.dueDate ?? endOfMonth(bill.period)
+   -- dueDate 为 NULL 时回退 period 当月最后一天（冻结此口径，
+   --    不允许各实现自行理解"NULLS LAST"）
+
+ORDER BY effectiveDueKey ASC
+       → period ASC
+       → issuedAt ASC NULLS LAST
+       → id ASC
+```
+
+即：`period='202607'` 且无 dueDate 的账单按 `2026-07-31` 参与比较——
+有明确 dueDate 的 6 月账单仍排在它之前，而无 dueDate 的 202401 老账
+（key=2024-01-31）排在最前。比 `dueDate ASC NULLS LAST` 更贴近
+"账龄"语义：NULL dueDate 不是"永不逾期"，而是"以出账期月为准"。
+
 欠费清偿排序是 Domain 冻结，**前端不可重排、不可选"先付新账单"**。
-全部缴清则无 TOP_UP；无欠费则全额 TOP_UP。Bill 行锁在§14 锁序内
-按 sorted(id) 取——与既有 `createTx` 同款。
+全部缴清则无 TOP_UP；无欠费则全额 TOP_UP。
 
 幂等：HTTP Idempotency-Key 外层 + ledger `topup:{paymentId}` 内层
 （§12）。一次请求重放不产生第二条 Payment/TOP_UP。
 
 ---
 
-## 9. Bill POSTED 自动 APPLY：整户队列重扫，不止新账单
+## 9. 自动 APPLY：触发点是"新正向 POSTED 债务"，不是某个方法名
 
-`postOneBill` 在 DRAFT→POSTED 翻转后、**同一事务内**调用领域函数：
+冻结为领域函数 + 明确的调用集合：
 
 ```
-applyAvailablePrepaymentTx(tx, ctx, settleAccountId)
-  1. settle_account FOR UPDATE
+applyAvailablePrepaymentForPostedDebtTx(tx, ctx, settleAccountId)
+  1. settle_account FOR UPDATE（§14；调用方须已持 water_account 锁）
   2. balance = Σ ledger.amount；balance ≤ 0 → return
   3. 欠费队列 = 全户 {POSTED, PARTIAL_PAID, ≠REVERSAL, outstanding>0}
-     按 §8.4 冻结排序（不只是刚 POST 的那张——旧欠费优先）
+     按 §8a 冻结 comparator（不只是刚 POST 的那张——旧欠费优先）；
+     队列内 bill 行锁按 sorted(id) 取
   4. FIFO 消耗 lot（§5），逐账单：
-     alloc = min(lot.remaining, bill.outstanding, …)
+     alloc = min(lot.remaining, bill.outstanding)
      → Ledger APPLY(−alloc, bill_id, origin_top_up_id=lot,
-        idempotency_key=apply:{billId}:{applyEntrySeq} 见 §12)
+        idempotency_key=apply:{billId}:{topUpId})
      → PaymentAlloc(source=PREPAYMENT, prepayment_entry_id=APPLY.id,
         bill_id, amount=+alloc)
      → 守护重算账单状态（POSTED→PARTIAL_PAID→PAID）
 ```
+
+**调用集合（冻结，实现时全库搜索 `bill` POSTED 产出点逐一核对）**：
+
+| 路径 | 接入方式 |
+|---|---|
+| `BillingRunService.postOneBill` | DRAFT→POSTED 翻转后同事务调用 |
+| `BillService.replaceTx` | REPLACEMENT bill 建为 POSTED 后同事务调用 |
+| 未来任何"正向可支付债务进入 POSTED"的路径 | 必须调用；`billKind='REVERSAL'`（负向纠正单）恒不触发 |
 
 旧欠费 A 50 + B 30、余额 60、新单 C POSTED 100：按冻结序 A 50 → B 10 →
 C 0，C 保持 POSTED 欠 100。**不是** "current bill first"。
@@ -282,9 +354,6 @@ C 0，C 保持 POSTED 欠 100。**不是** "current bill first"。
 同一事务保证无半状态（不可能"账单 POSTED 了但预存没抵"）。幂等：
 `postOneBill` 重跑时账单已 POSTED 直接 return，不重复进 apply 路径；
 apply 的 ledger 幂等键兜底 worker/API 级重试（§12）。
-
-`applyAvailablePrepaymentTx` 是公共领域函数：账单过账、未来人工"立即
-抵扣"入口、修复脚本共用。
 
 ---
 
@@ -307,9 +376,15 @@ Ledger REVERSAL −120（reversal_of_entry_id=TOP_UP 条目，
 消耗），否则 **409 `PREPAYMENT_ALREADY_APPLIED`**——不允许拿别的 lot
 余额兜底。若名下 APPLY 已被账单红冲反向、lot 恢复全额，则允许。
 
-锁序：Payment FOR UPDATE → settle_account FOR UPDATE →
-water_accounts(sorted) → bills(sorted)（§14）。RECEIVED 原单进日结、
-负单进下一个日结、DAY_CLOSED 原单不改历史——语义全部沿用。
+锁序：Payment FOR UPDATE → water_accounts(sorted) →
+settle_account FOR UPDATE → bills(sorted)（§14——与现有实现同向，
+且与 postOneBill 的 `water→settle` 不构成反向等待对）。RECEIVED 原单
+进日结、负单进下一个日结、DAY_CLOSED 原单不改历史——语义全部沿用。
+
+**退款 Payment 不可再冲正**：REFUND 生成的负 Payment 是资金流出事实，
+`/payments/:id/reverse` 对它再 reverse 会凭空造出正腿。冻结：
+被 REFUND ledger entry 引用的 Payment → `reverse` 拒绝
+`PAYMENT_NOT_REVERSABLE`（与"reversal 不可再 reverse"同码族）。
 
 ## 11. REFUND：真钱流出，必须有负 Payment
 
@@ -364,25 +439,30 @@ REFUND / TOP_UP-REVERSAL 路径必须持有。
 
 ```
 Payment reversal（含混合）：
-  payment → settle_account → water_accounts(sorted) → bills(sorted)
+  payment → water_accounts(sorted) → settle_account → bills(sorted)
 
-TOP_UP / REFUND / applyAvailablePrepaymentTx：
+TOP_UP / REFUND：
   settle_account → bills(sorted)
 
-postOneBill（含 APPLY 联动）：
+新 POSTED 债务（postOneBill / replaceTx，含 APPLY 联动）：
   water_account → settle_account → tariff_plan → bills(sorted) → ledger
+
+Bill reverse / replace（含预存回退）：
+  water_account → settle_account → tariff_plan（如需要）→ bills/ledger
 ```
 
-铁律：绝不出现一条路径 `bill → settle_account` 而另一条
-`settle_account → bill`。`postOneBill` 原本 `water_account →
-tariff_plan → bill`；加入预存后 settle_account 插在 water_account 之后、
-bill 之前——账户锁先于资金锁，资金锁先于账单锁，单向无环。
+铁律（冻结）：**任何路径都不允许 `settle_account → water_account` 的
+锁序**——`postOneBill`/`replaceTx` 是 `water → settle`，若 Payment
+reversal 写成 `settle → water` 则并发时 Tx A 持 settle 等 water、
+Tx B 持 water 等 settle，构成标准 deadlock。统一方向后所有路径都是
+`账户 → 资金 → 账单` 单向链。同理不允许一条 `bill → settle` 对另一条
+`settle → bill`。
 
-与既有路径的相容性：`createTx`/`reverseTx` 锁 bills(sorted)；日结锁
-staff 行后扫 payment（不碰 settle_account/bill）；`reverseTx` 的
-payment→accounts→bills 序与新序一致（payment 锁只在自身路径出现）。
-postOneBill 的 `water_account → settle_account` 与 reversal 的
-`payment → water_accounts → settle_account` 同向；无反向等待对。
+与既有路径的相容性：`createTx`/`reverseTx` 锁 bills(sorted)（reverse
+本就是 `payment → accounts → bills`，插入 settle_account 于
+accounts 之后、bills 之前即可，与现状最接近、改动最小）；日结锁
+staff 行后扫 payment（不碰 settle_account/bill）；payment 行锁只在
+reversal 自身路径出现，无环。
 
 ## 15. WaterAccount 改挂：余额不迁移，UI 警告
 
@@ -407,7 +487,16 @@ SYSTEM APPLY 没有柜员归属，**绝不塞进任何人的签字 close**（三
 - `cashier_day_close` 增 `prepayment_breakdown JSONB`（immutable
   snapshot，与 `by_channel` 同批生成）：
   `{debtCollectionAmount, topUpAmount, refundAmount, reversalAmount}`——
-  该柜员当日 Payment 的**用途拆分**，合计恒等于 totalAmount；
+  该柜员当日 Payment 的**用途拆分**，合计恒等于 totalAmount。
+  计算口径冻结（按 Payment 整条归类，不二次拆负单，否则一笔 −200
+  混合冲正会被再拆成 −80 debt + −120 reversal 双计）：
+
+  | Payment 形态 | 归类 |
+  |---|---|
+  | 普通正 Payment（reversalOfId=null，无 REFUND 引用） | debtCollection = Σ 其 PAYMENT allocs；topUp = Σ 其名下 TOP_UP；两者合计 = amount |
+  | REFUND 产生的负 Payment | 整笔 → refundAmount |
+  | reversal Payment（reversalOfId ≠ null，含混合冲正） | 整笔 → reversalAmount |
+  | 无预存参与的普通缴费 | debtCollection = amount |
 - 全公司当日 APPLY 总额（`Σ ledger WHERE type='APPLY' AND
   created_at::date = closeDate`）作为 **non-cash informational
   metric** 在日结界面/运营日报单列，不进 `totalAmount`，不属于任何
@@ -492,11 +581,16 @@ REPLACEMENT POSTED 后立即走 §9 自动 APPLY——恢复出来的余额可�
 1. `prepayment_ledger_entry`：ws_app 仅 SELECT/INSERT（REVOKE
    UPDATE/DELETE/TRUNCATE）。
 2. `payment_alloc`：ws_app REVOKE UPDATE/DELETE/TRUNCATE。
-3. Ledger type↔字段 CHECK（§3 六条）。
+3. Ledger type↔字段 CHECK（§3 七条：非 TOP_UP 必带
+   `origin_top_up_id`；REVERSAL 必带 `reversal_of_entry_id+reason`）。
 4. `UNIQUE(tenant_id, idempotency_key)`。
 5. `receipt` 增 `UNIQUE(tenant_id, payment_id)`。
-6. `payment_alloc` source CHECK（§7 两条）+ `prepayment_entry_id` FK。
-7. Ledger FK 全部 `(tenant_id, …)` 复合形式（对齐全库惯例）。
+6. `payment_alloc` source CHECK（§7 两条）+ `prepayment_entry_id` FK +
+   `UNIQUE(tenant_id, prepayment_entry_id)`（1 settlement entry : 1 alloc）。
+7. Ledger 引用全部 `(tenant_id, settle_account_id, target)` 复合 FK；
+   配套 `payment`/`bill` 增 `UNIQUE(tenant_id, settle_account_id, id)`、
+   ledger 自身 `UNIQUE(tenant_id, settle_account_id, id)`——同租户且
+   同资金主体，不止同租户。
 8. 余额非负不由 CHECK 表达（余额是 Σ，不是行）——由"settle_account
    锁内重算 + lot.remaining ≥ 消耗额"的服务纪律保证，e2e 并发用例
    验证不为负。
@@ -529,7 +623,19 @@ REPLACEMENT POSTED 后立即走 §9 自动 APPLY——恢复出来的余额可�
   信息项不进任何柜员 close。
 - 改挂：old 户余额 100 改挂 → old=100 new=0。
 - 并发：同一 settleAccount 两笔并发 TOP_UP/APPLY 序列化，余额
-  永不为负；Payment reversal ∥ Bill reverse 不撕裂混合腿。
+  永不为负；Payment reversal ∥ Bill reverse 不撕裂混合腿；
+  Payment reversal ∥ postOneBill 走同向锁序（water→settle），
+  无 deadlock。
+- REPLACEMENT bill 触发 APPLY：`replaceTx` 产出的正向 POSTED 债务
+  立即参与抵扣；REVERSAL-kind bill 不触发。
+- 排序 comparator：dueDate NULL 的 202401 老账（key=月末）排在前，
+  有 dueDate 的新账按 dueDate；两实现（TOP_UP 清欠 / 自动 APPLY）
+  同序。
+- REFUND Payment 再冲正 → `PAYMENT_NOT_REVERSABLE`。
+- 红冲 alloc 归因：REVERSED 账单上 PREPAYMENT 腿的 −X alloc 指向
+  REVERSAL entry（不指向原 APPLY），1:1。
+- prepayment_breakdown：混合正单拆分 debtCollection/topUp；REFUND/
+  reversal 负单整笔归类，四项合计 = totalAmount。
 
 **DB 级**（ws_app 直连，沿用 remote-schema spec 模式）：ledger
 UPDATE/DELETE/TRUNCATE → 42501；payment_alloc UPDATE/DELETE →
