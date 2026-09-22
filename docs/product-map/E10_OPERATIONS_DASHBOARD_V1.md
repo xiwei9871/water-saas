@@ -1,6 +1,6 @@
-# E10 — Operations Dashboard / Reporting V1（Product Gate Draft，Rev2）
+# E10 — Operations Dashboard / Reporting V1（Product Gate Draft，Rev3）
 
-> 状态：**Draft Rev2，按 Gate Review D7–D9 修订；implementation HOLD**。原则不变且更严格：**Dashboard 不拥有任何计算口径**。详细口径见 `E10_METRIC_DICTIONARY.md`。
+> 状态：**Draft Rev3，按 Gate Review D7–D20 修订；implementation HOLD**。原则不变且更严格：**Dashboard 不拥有任何计算口径**。详细口径见 `E10_METRIC_DICTIONARY.md`。
 
 ## 1. 定位
 
@@ -24,7 +24,17 @@
 
 - E10 实现前，每个 metric 必须先完成 `Metric → SoT → Org Anchor → Scope predicate` 矩阵登记（字典已加 Org Anchor 列）
 - 复用某 report 端点的前提是**先给它补/定义 scope 语义**，那是 API 层改造，不是前端整合
-- 「Cashier collected」与「Territory collected」是**两个不同指标**（D8），现有 collected-monthly 只覆盖前者口径
+- 「Cashier collected」与「Territory debt collection」是**两个不同指标**（D8/D17），现有 collected-monthly 只覆盖前者口径
+
+### 2.1 E6 后账务语义变化告警（D16–D19 前置）
+
+**`collected-monthly` / `recovery-rate` 需 E6 后重新审计，修正前不得直接作为 Dashboard SoT**。E6 Prepayment 上线后旧不变式 `allocated ≡ collected` 不再普遍成立：
+
+- 一笔 Payment 可同时含 debt alloc + TOP_UP：`Payment 100 = alloc 30 + top-up 70` → `payment.amount ≠ Σ bill alloc`
+- refund/reversal 是 **signed negative Payment**（`reversalOfId → original`，status=RECEIVED/DAY_CLOSED），**不是**把原 payment 置 REVERSED——`PaymentStatus.REVERSED` 当前是 vestigial
+- `PaymentAlloc.source=PREPAYMENT` 是 APPLY 产生的独立 alloc（历史现金冲抵当期账单），无 `payment.receivedAt`，不属于当期现金收款
+
+E10 全部金额指标按 **signed-money 语义**出数：`status IN (RECEIVED, DAY_CLOSED)` ∧ `Σ signed amount`，负数自然净掉（D16）。
 
 ## 3. 页面 IA
 
@@ -66,15 +76,38 @@
 - **Org Anchor 决定一切**（D8）：
   - 抄表指标 → `ReadingBook.orgUnitId` 子树
   - 柜员业绩 → `Payment.orgUnitId`（收款发生的营业所）
-  - 辖区应收/实收/回收率 → `Bill.waterAccountId` / `PaymentAlloc→Bill→WaterAccount` 的 E8 account coverage（账单**归属**的营业所）
+  - 辖区应收/账款回收/回收率 → `Bill.waterAccountId` / `PaymentAlloc(source=PAYMENT)→Bill→WaterAccount` 的 E8 account coverage（账单**归属**的营业所）
   - 远传 → `RemoteSource.orgUnitId`
-- 典型分裂场景已入字典：Branch A 的账单在 Branch B 柜台收款 → **柜员业绩记 B，辖区回收记 A**——两个指标并存，不得混算
+- 典型分裂场景已入字典：Branch A 的账单在 Branch B 柜台收款 → **柜员实收记 B，辖区账款回收记 A**——两个指标并存，不得混算
 - 营业所对比维度仅 tenant 级可见
 
-## 7. shared-settle（D9 冻结）
+## 7. shared-settle 与 settle 级指标（D9 + D20）
 
-- 安全行为现在就冻结：**归属无法安全判定 → fail closed**。OUTSTANDING/PREPAYMENT_BALANCE 等 settle 级指标 V1 仅 tenant 级可见。
+- 安全行为现在就冻结：**归属无法安全判定 → fail closed**。
+- **D20 措辞澄清**：`PREPAYMENT_BALANCE` 等 settle 级指标的底层是 strict settle scope——**单个 settle 若全部关联户都在 caller scope 内，E6 strict scope 本身允许 scoped 读取**。V1 Dashboard 的「aggregate prepayment 仅 tenant 级展示」是**产品限制**（避免跨所 settle 数字误导），不是 strict settle 本身意味着 tenant-only。文档与实现必须区分这两层。
 - Pilot 只验证「是否需要显式 settle ownership model」，不决定是否先泄露。
+
+## 7.1 OUTSTANDING 口径二选一（D19 冻结）
+
+E8 已冻结的柜台 SoT 是 `PaymentService.outstandingTx`（settle 净头寸：live bills + alloc + negative adjustment + reversedBillCredit + prepayment balance），E10 不得重造：
+
+| 选项 | 口径 | Anchor | V1 决定 |
+|---|---|---|---|
+| **A `NET_OUTSTANDING`** | 复用 outstandingTx shared query | SETTLE → strict scope / fail closed | 柜台 360 保持此口径 |
+| **B `GROSS_BILL_RECEIVABLE`** | Σ positive per-bill remaining（`totalAmount − Σ alloc`，正数才计） | Bill.waterAccountId → account coverage | **V1 辖区 dashboard 用 B** |
+
+V1 冻结 Option B 上 dashboard，命名 `GROSS_BILL_RECEIVABLE`（辖区账单毛欠款），**不得叫 `OUTSTANDING_AMOUNT`** 以免与柜台 net outstanding 混淆。Option A 保留给柜台/360 场景。
+
+## 7.2 RECOVERY_RATE —— IMPLEMENTATION HOLD（D18）
+
+E6 后「回收率」至少有两个不同概念，**V1 指哪一个必须由 Product/Pilot 决定，实现者不得自选**：
+
+| 语义 | 分子 | 含义 |
+|---|---|---|
+| Cash recovery | 窗口内 `PaymentAlloc.source=PAYMENT` 的 signed amount | 当期真实现金偿付 AR |
+| Debt extinguishment | 上者 + `source=PREPAYMENT` APPLY alloc | 含历史预存冲抵新账单的债务消灭 |
+
+冻结前 `RECOVERY_RATE` 标记 **IMPLEMENTATION HOLD**；现有 recovery-rate 端点在审计（§2.1）完成前不得直接复用。
 
 ## 8. Not in Scope（V1）
 
