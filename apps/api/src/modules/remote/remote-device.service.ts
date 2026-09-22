@@ -45,6 +45,8 @@ const INSTALLATION_SUMMARY = {
   installedAt: true,
   removedAt: true,
   status: true,
+  meter: { select: { meterNo: true } },
+  waterAccount: { select: { accountNo: true } },
 } satisfies Prisma.MeterInstallationSelect;
 
 export interface RemoteDeviceBody {

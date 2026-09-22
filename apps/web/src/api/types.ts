@@ -893,7 +893,17 @@ export interface RemoteDeviceBinding {
   effectiveTo: string | null;
   createdAt: string;
   updatedAt: string;
-  installation?: MeterInstallation | null;
+  /** Hydrated summary (binding list/detail only). */
+  installation?: {
+    id: string;
+    waterAccountId: string;
+    meterId: string;
+    installedAt: string;
+    removedAt: string | null;
+    status: InstallationStatus;
+    meter: { meterNo: string };
+    waterAccount: { accountNo: string };
+  } | null;
 }
 
 export interface RemoteDeviceDetail extends RemoteDevice {
