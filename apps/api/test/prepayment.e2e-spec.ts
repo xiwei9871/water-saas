@@ -24,6 +24,7 @@
  *     a pure-cash payment
  */
 import { INestApplication } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { Test, TestingModule } from '@nestjs/testing';
 import bcrypt from 'bcrypt';
 import pg from 'pg';
@@ -31,6 +32,8 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module.js';
+import { TenantPrismaService } from '../src/common/tenant-prisma.js';
+import { BillingRunService } from '../src/modules/billing/billing-run.service.js';
 
 process.env.DATABASE_URL =
   process.env.DATABASE_URL_TEST ??
@@ -59,6 +62,9 @@ const STAFF_CASHIER_A = 'aa16aa16-0000-4000-8000-0000000a0003';
 const STAFF_SUPERVISOR_A = 'aa16aa16-0000-4000-8000-0000000c0003';
 const STAFF_CASHIER2_A = 'aa16aa16-0000-4000-8000-0000000a0004';
 const STAFF_B_ADMIN = 'bb16bb16-0000-4000-8000-0000000a0001';
+const ORG_CHILD_A = 'aa16aa16-0000-4000-8000-0000000000d1';
+const ORG_CHILD_B = 'aa16aa16-0000-4000-8000-0000000000d2';
+const STAFF_BRANCH_A = 'aa16aa16-0000-4000-8000-0000000a0005';
 
 const owner = new pg.Client({ connectionString: OWNER_URL });
 let app: INestApplication<App>;
@@ -68,6 +74,7 @@ let cashierToken = '';
 let cashier2Token = '';
 let supervisorToken = '';
 let tenantBToken = '';
+let branchAToken = '';
 let planId = '';
 
 const acct: Record<string, string> = {};
@@ -189,6 +196,43 @@ const seedBill = async (
   return row.id as string;
 };
 
+/** Anchor a water account to a reading book under `orgId` — gives its
+ *  settle account an org anchor for data-scope tests. */
+const coverAccount = async (
+  orgId: string,
+  waterAccountId: string,
+  tag: string,
+) => {
+  const bookId = (
+    await owner.query(
+      `INSERT INTO reading_book
+         (id, tenant_id, book_no, name, org_unit_id, cadence, meter_channel,
+          created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, 'MONTHLY', 'MECHANICAL',
+               now(), now())
+       RETURNING id::text AS id`,
+      [T16A, `t16-${tag}-${RUN}`, `T16 Book ${tag}`, orgId],
+    )
+  ).rows[0].id;
+  const planId = (
+    await owner.query(
+      `INSERT INTO reading_plan
+         (id, tenant_id, book_id, period, plan_date, status, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, '209901', '2099-01-05', 'OPEN',
+               now(), now())
+       RETURNING id::text AS id`,
+      [T16A, bookId],
+    )
+  ).rows[0].id;
+  await owner.query(
+    `INSERT INTO reading_plan_item
+       (id, tenant_id, plan_id, water_account_id, seq_no, status,
+        created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, $3, 1, 'PENDING', now(), now())`,
+    [T16A, planId, waterAccountId],
+  );
+};
+
 const balance = async (settleAccountId: string, token = adminToken) =>
   (await get(`/prepayments/balance?settleAccountId=${settleAccountId}`, token))
     .body as { balance: string; lots: { topUpEntryId: string; remaining: string }[] };
@@ -206,6 +250,8 @@ const entries = async (settleAccountId: string, type?: string) =>
     paymentId: string | null;
     originTopUpId: string | null;
     reversalOfEntryId: string | null;
+    operatorId: string | null;
+    settleAccountId: string;
   }[];
 
 const billStatus = async (id: string) =>
@@ -234,9 +280,11 @@ beforeAll(async () => {
   await owner.query(
     `INSERT INTO org_unit (id, tenant_id, parent_id, name, type, created_at, updated_at)
      VALUES ($1, $2, NULL, 'T16 Company', 'COMPANY', now(), now()),
-            ($3, $4, NULL, 'T16B Company', 'COMPANY', now(), now())
+            ($3, $4, NULL, 'T16B Company', 'COMPANY', now(), now()),
+            ($5, $2, $1, 'T16 Branch A', 'BRANCH', now(), now()),
+            ($6, $2, $1, 'T16 Branch B', 'BRANCH', now(), now())
      ON CONFLICT DO NOTHING`,
-    [ORG_A, T16A, ORG_B, T16B],
+    [ORG_A, T16A, ORG_B, T16B, ORG_CHILD_A, ORG_CHILD_B],
   );
   await owner.query(
     `INSERT INTO role (id, tenant_id, code, name, data_scope, created_at, updated_at)
@@ -273,11 +321,13 @@ beforeAll(async () => {
             ($3, $5, $7, 't16-cashier', $8, 'T16 Cashier', 'ACTIVE', now(), now()),
             ($4, $5, $7, 't16-super', $8, 'T16 Supervisor', 'ACTIVE', now(), now()),
             ($6, $9, $10, 't16b-admin', $8, 'T16B Admin', 'ACTIVE', now(), now()),
-            ($11, $5, $7, 't16-cashier2', $8, 'T16 Cashier2', 'ACTIVE', now(), now())
+            ($11, $5, $7, 't16-cashier2', $8, 'T16 Cashier2', 'ACTIVE', now(), now()),
+            ($12, $5, $13, 't16-branch', $8, 'T16 BranchA', 'ACTIVE', now(), now())
      ON CONFLICT (tenant_id, login) DO NOTHING`,
     [
       STAFF_ADMIN_A, STAFF_READER_A, STAFF_CASHIER_A, STAFF_SUPERVISOR_A,
       T16A, STAFF_B_ADMIN, ORG_A, hash, T16B, ORG_B, STAFF_CASHIER2_A,
+      STAFF_BRANCH_A, ORG_CHILD_A,
     ],
   );
   await owner.query(
@@ -287,12 +337,13 @@ beforeAll(async () => {
             ($1, $4, $7, now(), now()),
             ($1, $8, $9, now(), now()),
             ($10, $11, $12, now(), now()),
-            ($1, $13, $7, now(), now())
+            ($1, $13, $7, now(), now()),
+            ($1, $14, $6, now(), now())
      ON CONFLICT DO NOTHING`,
     [
       T16A, STAFF_ADMIN_A, STAFF_READER_A, STAFF_CASHIER_A, ROLE_ADMIN_A,
       ROLE_READER_A, ROLE_CASHIER_A, STAFF_SUPERVISOR_A, ROLE_SUPERVISOR_A,
-      T16B, STAFF_B_ADMIN, ROLE_B_ADMIN, STAFF_CASHIER2_A,
+      T16B, STAFF_B_ADMIN, ROLE_B_ADMIN, STAFF_CASHIER2_A, STAFF_BRANCH_A,
     ],
   );
 
@@ -351,6 +402,7 @@ beforeAll(async () => {
   cashier2Token = await login('t16-water', 't16-cashier2');
   supervisorToken = await login('t16-water', 't16-super');
   tenantBToken = await login('t16-other', 't16b-admin');
+  branchAToken = await login('t16-water', 't16-branch');
 
   // ACTIVE plan for the billing-run/replace paths: 3.0/m³ + 10 fixed.
   const waterItem = (
@@ -801,8 +853,10 @@ describe('rescan + concurrency', () => {
     expect(await billStatus(o1)).toBe('PAID');
     expect(await billStatus(o2)).toBe('PAID');
     const legs = await entries(settleAcct['C1'], 'APPLY');
-    expect(legs.map((l) => l.billId).sort()).toEqual(
-      [o1, o2, run.bills[0].id].sort(),
+    const byId = (a: string | null, b: string | null) =>
+      String(a).localeCompare(String(b));
+    expect(legs.map((l) => l.billId).sort(byId)).toEqual(
+      [o1, o2, run.bills[0].id].sort(byId),
     );
     // 10000 − 3000 − 4000 = 3000 全打给新账单（新账单 4000 → PARTIAL_PAID）
     expect((await balance(settleAcct['C1'])).balance).toBe('0');
@@ -859,6 +913,106 @@ describe('rescan + concurrency', () => {
       // 收款红冲先 → 批次回滚，post 时余额 0 → 账单保持 POSTED
       expect(st).toBe('POSTED');
       expect(bal.balance).toBe('0');
+    }
+  });
+
+  it('并发：postOneBill || postOneBill — 输家看到 APPLY 后的 PAID 视为成功', async () => {
+    await onboard('C4');
+    await topUp(settleAcct['C4'], 20000).expect(201);
+    const billId = await seedBill(
+      'C4', acct['C4'], settleAcct['C4'], '202613', 4000, { status: 'DRAFT' },
+    );
+    const svc = app.get(BillingRunService);
+    const prisma = app.get(TenantPrismaService);
+    const ctx = {
+      tenantId: T16A,
+      staffId: STAFF_ADMIN_A,
+      scope: 'ALL' as const,
+      orgScope: [] as string[],
+    };
+    const postOne = (
+      svc as unknown as {
+        postOneBill(
+          tx: Prisma.TransactionClient,
+          c: typeof ctx,
+          b: string,
+        ): Promise<void>;
+      }
+    ).postOneBill.bind(svc);
+    const results = await Promise.allSettled([
+      prisma.runAsTenant(T16A, (tx) => postOne(tx, ctx, billId)),
+      prisma.runAsTenant(T16A, (tx) => postOne(tx, ctx, billId)),
+    ]);
+    // 双方都成功：赢者 POSTED→APPLY→PAID；输者 DRAFT flip count=0 后
+    // 看到 PAID 必须视为"另一事务已成功过账"，不能记成失败。
+    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+    expect(await billStatus(billId)).toBe('PAID');
+    const legs = (await entries(settleAcct['C4'], 'APPLY')).filter(
+      (l) => l.billId === billId,
+    );
+    expect(legs).toHaveLength(1); // apply 幂等键防双写
+    // SYSTEM APPLY：operatorId 为 NULL，不记触发人
+    expect(legs[0].operatorId).toBeNull();
+    // 对照：TOP_UP 仍记操作员
+    const tops = await entries(settleAcct['C4'], 'TOP_UP');
+    expect(tops[0].operatorId).toBe(STAFF_ADMIN_A);
+  });
+
+  it('并发：cash 结清 || bill reverse — 纯现金 PAID 不可被红冲', async () => {
+    await onboard('C5');
+    const b = await seedBill('C5', acct['C5'], settleAcct['C5'], '202614', 8000);
+    await post('/payments', {
+      settleAccountId: settleAcct['C5'], channel: 'CASH', amount: '3000',
+      allocs: [{ billId: b, amount: '3000' }],
+    }).expect(201);
+    expect(await billStatus(b)).toBe('PARTIAL_PAID');
+    const [payRes, revRes] = await Promise.all([
+      post('/payments', {
+        settleAccountId: settleAcct['C5'], channel: 'CASH', amount: '5000',
+        allocs: [{ billId: b, amount: '5000' }],
+      }),
+      post(`/bills/${b}/reverse`, {}),
+    ]);
+    const st = await billStatus(b);
+    if (st === 'PAID') {
+      // 现金先结清 → 纯现金 PAID → 红冲必须被拒
+      expect(payRes.status).toBe(201);
+      expect(revRes.status).toBe(409);
+      expect(revRes.body.code).toBe('BILL_NOT_REVERSABLE');
+    } else {
+      // 红冲先赢 → 现金落在 REVERSED 账单上被 BILL_NOT_PAYABLE 拒
+      expect(st).toBe('REVERSED');
+      expect(revRes.status).toBe(201);
+      expect(payRes.status).toBe(409);
+    }
+  });
+
+  it('并发：cash 结清 || bill replace — 纯现金 PAID 不可被换开', async () => {
+    await onboard('C6');
+    const b = await seedBill('C6', acct['C6'], settleAcct['C6'], '202615', 8000, {
+      tariffPlanId: planId,
+    });
+    await post('/payments', {
+      settleAccountId: settleAcct['C6'], channel: 'CASH', amount: '3000',
+      allocs: [{ billId: b, amount: '3000' }],
+    }).expect(201);
+    expect(await billStatus(b)).toBe('PARTIAL_PAID');
+    const [payRes, repRes] = await Promise.all([
+      post('/payments', {
+        settleAccountId: settleAcct['C6'], channel: 'CASH', amount: '5000',
+        allocs: [{ billId: b, amount: '5000' }],
+      }),
+      post(`/bills/${b}/replace`, { usageQty: '50' }),
+    ]);
+    const st = await billStatus(b);
+    if (st === 'PAID') {
+      expect(payRes.status).toBe(201);
+      expect(repRes.status).toBe(409);
+      expect(repRes.body.code).toBe('BILL_NOT_REPLACEABLE');
+    } else {
+      expect(st).toBe('REVERSED');
+      expect(repRes.status).toBe(201);
+      expect(payRes.status).toBe(409);
     }
   });
 });
@@ -919,5 +1073,58 @@ describe('permissions + reads', () => {
       tenantBToken,
     );
     expect(res.body.items).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// org data scope — same-tenant branches (Release fix #1)
+// ---------------------------------------------------------------------------
+
+describe('org data scope — 同租户跨营业所隔离', () => {
+  it('Branch A 员工不可读 Branch B 的余额/流水；ALL 可读全部', async () => {
+    await onboard('SCA');
+    await onboard('SCB');
+    // SCA 挂 Branch A 册，SCB 挂 Branch B 册 —— 结算户获得 org 锚点
+    await coverAccount(ORG_CHILD_A, acct['SCA'], 'sca');
+    await coverAccount(ORG_CHILD_B, acct['SCB'], 'scb');
+    await topUp(settleAcct['SCA'], 500).expect(201);
+    await topUp(settleAcct['SCB'], 700).expect(201);
+
+    // 本所可读
+    const own = await balance(settleAcct['SCA'], branchAToken);
+    expect(own.balance).toBe('500');
+
+    // 跨所显式读 → 403 ORG_OUT_OF_SCOPE
+    const balDeny = await request(app.getHttpServer())
+      .get(`/prepayments/balance?settleAccountId=${settleAcct['SCB']}`)
+      .set(auth(branchAToken));
+    expect(balDeny.status).toBe(403);
+    expect(balDeny.body.code).toBe('ORG_OUT_OF_SCOPE');
+    const entDeny = await request(app.getHttpServer())
+      .get(`/prepayments/entries?settleAccountId=${settleAcct['SCB']}`)
+      .set(auth(branchAToken));
+    expect(entDeny.status).toBe(403);
+
+    // 不带 settleAccountId 的流水列表：Branch B 的行被过滤，
+    // Branch A 的行仍在（无册锚点的户按既有约定可见）
+    const scoped = (
+      await request(app.getHttpServer())
+        .get('/prepayments/entries?take=200')
+        .set(auth(branchAToken))
+        .expect(200)
+    ).body.items as { settleAccountId: string }[];
+    expect(scoped.some((e) => e.settleAccountId === settleAcct['SCB'])).toBe(
+      false,
+    );
+    expect(scoped.some((e) => e.settleAccountId === settleAcct['SCA'])).toBe(
+      true,
+    );
+
+    // ALL 可见两所
+    const all = (await get('/prepayments/entries?take=200')).body.items as {
+      settleAccountId: string;
+    }[];
+    expect(all.some((e) => e.settleAccountId === settleAcct['SCA'])).toBe(true);
+    expect(all.some((e) => e.settleAccountId === settleAcct['SCB'])).toBe(true);
   });
 });

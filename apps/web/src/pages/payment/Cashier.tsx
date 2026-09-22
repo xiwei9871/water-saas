@@ -771,6 +771,12 @@ export default function Cashier() {
               render: fmtCent,
             },
             {
+              title: '操作人',
+              dataIndex: 'operatorId',
+              width: 90,
+              render: (v: string | null) => v ?? 'SYSTEM',
+            },
+            {
               title: '批次/关联',
               key: 'ref',
               render: (_: unknown, e: PrepaymentEntry) => (

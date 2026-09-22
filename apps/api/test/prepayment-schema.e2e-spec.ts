@@ -275,6 +275,22 @@ describe('composite FK / unique invariants', () => {
     );
   });
 
+  it('origin_top_up_id self-reference → 23514', async () => {
+    // prepay_entry_no_self_origin: an entry can never be its own lot.
+    await expectPgError(
+      () =>
+        owner.query(
+          `INSERT INTO prepayment_ledger_entry
+             (id, tenant_id, settle_account_id, type, amount, bill_id,
+              origin_top_up_id, idempotency_key, created_at)
+           VALUES ('e6e1f000-0000-4000-8000-000000000001',$1,$2,'APPLY',-500,$3,
+                   'e6e1f000-0000-4000-8000-000000000001',gen_random_uuid()::text,now())`,
+          [TENANT, SETTLE, BILL],
+        ),
+      '23514',
+    );
+  });
+
   it('idempotency_key unique per tenant', async () => {
     await expectPgError(
       () =>

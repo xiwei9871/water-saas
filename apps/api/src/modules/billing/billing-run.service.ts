@@ -669,7 +669,16 @@ export class BillingRunService {
         where: { tenantId: ctx.tenantId, id: billId },
         select: { status: true },
       });
-      if (cur?.status === 'POSTED') return;
+      // E6 lost-race: the winner may have already auto-APPLIED in the
+      // same tx, leaving the bill PARTIAL_PAID or PAID — every
+      // posted-side status means posting succeeded elsewhere.
+      if (
+        cur?.status === 'POSTED' ||
+        cur?.status === 'PARTIAL_PAID' ||
+        cur?.status === 'PAID'
+      ) {
+        return;
+      }
       throw new RecordedFailure(
         'BILL_POST_GUARD',
         `bill is ${cur?.status ?? 'gone'}, expected DRAFT`,

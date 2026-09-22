@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { SequenceService } from '../../common/sequence.service.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -235,8 +235,12 @@ export class PrepaymentService {
       reversalOfEntryId?: string | null;
       idempotencyKey: string;
       reason?: string | null;
+      // Audit identity: undefined → acting staff; explicit null → SYSTEM
+      // (automatic APPLY is a system money move, not an operator's).
+      operatorId?: string | null;
     },
   ): Promise<{ id: string; replayed: boolean }> {
+    const operatorId = data.operatorId === undefined ? ctx.staffId : data.operatorId;
     const ins = await tx.$queryRaw<{ id: string }[]>`
       INSERT INTO prepayment_ledger_entry
         (id, tenant_id, settle_account_id, type, amount, payment_id, bill_id,
@@ -247,7 +251,7 @@ export class PrepaymentService {
               ${data.amount}, ${data.paymentId ?? null}::uuid,
               ${data.billId ?? null}::uuid, ${data.originTopUpId ?? null}::uuid,
               ${data.reversalOfEntryId ?? null}::uuid, ${data.idempotencyKey},
-              ${ctx.staffId}::uuid, ${data.reason ?? null}, ${ctx.staffId}::uuid)
+              ${operatorId}::uuid, ${data.reason ?? null}, ${ctx.staffId}::uuid)
       ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
       RETURNING id`;
     if (ins.length) return { id: ins[0].id, replayed: false };
@@ -346,6 +350,7 @@ export class PrepaymentService {
           billId: bill.id,
           originTopUpId: lot.id,
           idempotencyKey: `apply:${bill.id}:${lot.id}`,
+          operatorId: null,
         });
         // A replayed apply key means the alloc already exists — the
         // UNIQUE(tenant, prepayment_entry_id) constraint enforces the
@@ -711,6 +716,9 @@ export class PrepaymentService {
           id: settleAccountId,
         });
       }
+      // Read-side org scope — same gate as the write path; an
+      // ORG_SUBTREE/SELF cashier must not read another branch's funds.
+      await this.assertSettleScope(tx, ctx, settleAccountId);
       const lots = await this.lotsTx(tx, ctx, settleAccountId);
       return {
         settleAccount: settle,
@@ -730,6 +738,30 @@ export class PrepaymentService {
     args: { settleAccountId?: string; take: number; skip: number; type?: string },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      if (args.settleAccountId) {
+        await this.assertSettleScope(tx, ctx, args.settleAccountId);
+      }
+      // Unfiltered reads: ALL sees the tenant; ORG_SUBTREE/SELF only see
+      // settle accounts whose covering books are ALL inside orgScope —
+      // the same coverage rule as assertSettleScope (out-of-scope
+      // covering book ⇒ the whole settle account is hidden). The
+      // off-book carve-out is preserved: no covering book ⇒ visible.
+      const scopeFilter =
+        ctx.scope === 'ALL'
+          ? Prisma.empty
+          : Prisma.sql`AND NOT EXISTS (
+              SELECT 1 FROM water_account wa
+              JOIN reading_plan_item rpi
+                ON rpi.tenant_id = wa.tenant_id
+               AND rpi.water_account_id = wa.id
+              JOIN reading_plan rp
+                ON rp.tenant_id = wa.tenant_id AND rp.id = rpi.plan_id
+              JOIN reading_book rb
+                ON rb.tenant_id = wa.tenant_id AND rb.id = rp.book_id
+              WHERE wa.tenant_id = prepayment_ledger_entry.tenant_id
+                AND wa.settle_account_id = prepayment_ledger_entry.settle_account_id
+                AND rb.org_unit_id <> ALL(${ctx.orgScope}::uuid[])
+            )`;
       const rows = await tx.$queryRaw<LedgerRow[]>`
         SELECT * FROM prepayment_ledger_entry
         WHERE tenant_id = ${ctx.tenantId}::uuid
@@ -737,6 +769,7 @@ export class PrepaymentService {
                OR settle_account_id = ${args.settleAccountId ?? null}::uuid)
           AND (${args.type ?? null}::"PrepaymentEntryType" IS NULL
                OR type = ${args.type ?? null}::"PrepaymentEntryType")
+          ${scopeFilter}
         ORDER BY created_at DESC, id DESC
         LIMIT ${args.take} OFFSET ${args.skip}`;
       const count = await tx.$queryRaw<{ n: bigint }[]>`
@@ -745,7 +778,8 @@ export class PrepaymentService {
           AND (${args.settleAccountId ?? null}::uuid IS NULL
                OR settle_account_id = ${args.settleAccountId ?? null}::uuid)
           AND (${args.type ?? null}::"PrepaymentEntryType" IS NULL
-               OR type = ${args.type ?? null}::"PrepaymentEntryType")`;
+               OR type = ${args.type ?? null}::"PrepaymentEntryType")
+          ${scopeFilter}`;
       return { total: Number(count[0]?.n ?? 0n), items: rows.map(mapEntry) };
     });
   }

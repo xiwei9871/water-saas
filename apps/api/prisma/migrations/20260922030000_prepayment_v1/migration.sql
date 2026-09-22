@@ -116,6 +116,10 @@ ALTER TABLE "prepayment_ledger_entry" ADD CONSTRAINT
   "prepay_entry_no_self_ref"
   CHECK ("reversal_of_entry_id" IS NULL OR "reversal_of_entry_id" <> "id");
 
+ALTER TABLE "prepayment_ledger_entry" ADD CONSTRAINT
+  "prepay_entry_no_self_origin"
+  CHECK ("origin_top_up_id" IS NULL OR "origin_top_up_id" <> "id");
+
 -- payment_alloc dual-source XOR (design §7)
 ALTER TABLE "payment_alloc" ADD CONSTRAINT
   "payment_alloc_source_shape"
