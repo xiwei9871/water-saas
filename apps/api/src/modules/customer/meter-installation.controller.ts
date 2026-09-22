@@ -21,9 +21,11 @@ import {
   MeterInstallationService,
   type InstallBody,
   type RemoveBody,
+  type ReplaceBody,
 } from './meter-installation.service.js';
 
 const INSTALL_REASONS = new Set(['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK']);
+const REPLACE_REASONS = new Set(['REPLACE', 'FAULT', 'PERIODIC_CHECK']);
 const INSTALLATION_STATUSES = new Set(['ACTIVE', 'REMOVED']);
 
 const pageArgs = (take?: string, skip?: string) => ({
@@ -42,6 +44,14 @@ interface InstallWireBody {
 interface RemoveWireBody {
   finalReading?: unknown;
   removedAt?: unknown;
+}
+
+interface ReplaceWireBody {
+  newMeterId?: string;
+  oldFinalReading?: unknown;
+  newInitialReading?: unknown;
+  replacedAt?: unknown;
+  reason?: string;
 }
 
 @Controller('meter-installations')
@@ -142,6 +152,55 @@ export class MeterInstallationController {
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
       (tx) => this.svc.removeTx(tx, ctx, id, parsed, req),
+    );
+  }
+
+  /**
+   * POST /meter-installations/:id/replace — 换表. Atomic remove+install in
+   * one transaction; oldFinalReading and newInitialReading are independent
+   * dials and both mandatory (never default one from the other).
+   */
+  @Post(':id/replace')
+  @Permissions('customer:write')
+  replace(
+    @Param('id') id: string,
+    @Body() body: ReplaceWireBody,
+    @Req() req: Request,
+    @Headers('idempotency-key') key?: string,
+  ) {
+    assertUuid(id, 'id');
+    if (
+      !body?.newMeterId ||
+      body?.oldFinalReading === undefined ||
+      body?.oldFinalReading === null ||
+      body?.newInitialReading === undefined ||
+      body?.newInitialReading === null
+    ) {
+      throw new BadRequestException({ code: 'REPLACE_FIELDS_REQUIRED' });
+    }
+    const parsed: ReplaceBody = {
+      newMeterId: assertUuid(body.newMeterId, 'newMeterId'),
+      oldFinalReading: assertDecimal(body.oldFinalReading, 'oldFinalReading', {
+        min: 0,
+      }),
+      newInitialReading: assertDecimal(
+        body.newInitialReading,
+        'newInitialReading',
+        { min: 0 },
+      ),
+      replacedAt: assertOptionalDate(body.replacedAt, 'replacedAt'),
+      reason: body.reason as ReplaceBody['reason'],
+    };
+    if (body.reason !== undefined && !REPLACE_REASONS.has(body.reason)) {
+      throw new BadRequestException({ code: 'INSTALL_REASON_INVALID' });
+    }
+    const ctx = currentTenant();
+    return withOptionalIdem(
+      this.prisma,
+      this.idem,
+      ctx,
+      { key, method: 'POST', route: req.path, body, responseStatus: 201 },
+      (tx) => this.svc.replaceTx(tx, ctx, id, parsed, req),
     );
   }
 }

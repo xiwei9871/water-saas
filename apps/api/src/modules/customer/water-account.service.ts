@@ -653,6 +653,26 @@ export class WaterAccountService {
     }
     req.auditBefore = existing;
 
+    // E7 C1: lock the account row FOR UPDATE before deciding — install/
+    // replace take the same lock and re-check status inside it, so close
+    // and a concurrent meter-mount are mutually exclusive. Without the
+    // lock the sequence "close sees 0 ACTIVE → install commits → close
+    // commits" would commit CLOSED + ACTIVE.
+    await tx.$queryRaw`
+      SELECT id FROM water_account
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
+      FOR UPDATE`;
+    if (to === 'CLOSED') {
+      const active = await tx.meterInstallation.count({
+        where: { tenantId: ctx.tenantId, waterAccountId: id, status: 'ACTIVE' },
+      });
+      if (active > 0) {
+        throw new ConflictException({
+          code: 'ACCOUNT_HAS_ACTIVE_INSTALLATION',
+          activeInstallations: active,
+        });
+      }
+    }
     // Guarded transition: the allowed-from predicate is part of the UPDATE so
     // a concurrent transition loses the race (count=0) instead of double-
     // writing events (e.g. two SUSPEND records).

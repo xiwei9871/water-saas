@@ -854,6 +854,18 @@ describe('getOutstanding ↔ close-account after payment', () => {
     expect(draftBlocks.body).toMatchObject({ outstanding: '3000' });
 
     await owner.query(`DELETE FROM bill WHERE id = $1`, [bill['D4']]);
+    // E7 close guard: detach ACTIVE installations before close.
+    await owner.query(
+      `UPDATE meter m SET status='AVAILABLE' FROM meter_installation mi
+       WHERE mi.tenant_id=$1 AND mi.water_account_id=$2 AND mi.meter_id=m.id`,
+      [T12A, acct['A4']],
+    );
+    await owner.query(
+      `UPDATE meter_installation SET status='REMOVED', final_reading=initial_reading,
+             removed_at=now()
+       WHERE tenant_id=$1 AND water_account_id=$2 AND status='ACTIVE'`,
+      [T12A, acct['A4']],
+    );
     const ok = await post(`/water-accounts/${acct['A4']}/close`, {}).expect(201);
     expect(ok.body.status).toBe('CLOSED');
   });
@@ -877,6 +889,18 @@ describe('getOutstanding ↔ close-account after payment', () => {
     expect(credit.body).toMatchObject({ outstanding: '-2000' });
 
     await post(`/payments/${pay['P5']}/reverse`, {}).expect(201);
+    // E7 close guard: detach ACTIVE installations before close.
+    await owner.query(
+      `UPDATE meter m SET status='AVAILABLE' FROM meter_installation mi
+       WHERE mi.tenant_id=$1 AND mi.water_account_id=$2 AND mi.meter_id=m.id`,
+      [T12A, acct['A5']],
+    );
+    await owner.query(
+      `UPDATE meter_installation SET status='REMOVED', final_reading=initial_reading,
+             removed_at=now()
+       WHERE tenant_id=$1 AND water_account_id=$2 AND status='ACTIVE'`,
+      [T12A, acct['A5']],
+    );
     const ok = await post(`/water-accounts/${acct['A5']}/close`, {}).expect(201);
     expect(ok.body.status).toBe('CLOSED');
   });
@@ -954,6 +978,18 @@ describe('review: probe credit surface + closed-account reversal guard', () => {
       allocs: [{ billId: bill['B11'], amount: 3000 }],
     }).expect(201);
     pay['P11'] = p.body.id;
+    // E7 close guard: detach ACTIVE installations before close.
+    await owner.query(
+      `UPDATE meter m SET status='AVAILABLE' FROM meter_installation mi
+       WHERE mi.tenant_id=$1 AND mi.water_account_id=$2 AND mi.meter_id=m.id`,
+      [T12A, acct['A9']],
+    );
+    await owner.query(
+      `UPDATE meter_installation SET status='REMOVED', final_reading=initial_reading,
+             removed_at=now()
+       WHERE tenant_id=$1 AND water_account_id=$2 AND status='ACTIVE'`,
+      [T12A, acct['A9']],
+    );
     const closed = await post(`/water-accounts/${acct['A9']}/close`, {}).expect(201);
     expect(closed.body.status).toBe('CLOSED');
 

@@ -247,6 +247,49 @@ export interface WaterAccount {
  * 计费永远走结算快照，不读这个值。 */
 export interface WaterAccountDetail extends WaterAccount {
   householdSize: number | null;
+  /** E7: installation timeline, installed_at DESC — index 0 of the ACTIVE
+   * subset is the "current meter" (same rule as the reading resolver). */
+  meterInstallations: AccountInstallation[];
+}
+
+/** WaterAccount detail timeline row — slimmer than the list-row
+ * MeterInstallation (meter join carries no id/status). */
+export interface AccountInstallation {
+  id: string;
+  meterId: string;
+  installedAt: string;
+  removedAt: string | null;
+  initialReading: string;
+  finalReading: string | null;
+  reason: InstallReason;
+  status: InstallationStatus;
+  meter: {
+    meterNo: string;
+    brand: string | null;
+    model: string | null;
+    caliber: string | null;
+  };
+}
+
+/** POST /meter-installations/:id/replace — atomic swap result. */
+export interface ReplaceResult {
+  removed: MeterInstallation;
+  installed: MeterInstallation;
+}
+
+/** GET /meters/:id — meter + (scope-filtered) installation history. */
+export interface MeterDetail extends Meter {
+  installations: {
+    id: string;
+    waterAccountId: string;
+    installedAt: string;
+    removedAt: string | null;
+    initialReading: string;
+    finalReading: string | null;
+    reason: InstallReason;
+    status: InstallationStatus;
+    waterAccount: { accountNo: string };
+  }[];
 }
 
 /** GET /water-accounts/:id/household-profiles — 一户多人口申报历史。 */

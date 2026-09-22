@@ -494,6 +494,24 @@ describe('account events (过户/暂停/恢复/销户)', () => {
   });
 
   it('close with outstanding cleared → CLOSED + closedAt + CLOSE event; second close → 409', async () => {
+    // E7 close guard: the ACTIVE installation from the swap test must be
+    // removed first — closing with an ACTIVE meter is a 409.
+    const detail = await request(app.getHttpServer())
+      .get(`/water-accounts/${acctId}`)
+      .set(auth(adminToken))
+      .expect(200);
+    for (const i of detail.body.meterInstallations as {
+      id: string;
+      status: string;
+    }[]) {
+      if (i.status === 'ACTIVE') {
+        await request(app.getHttpServer())
+          .post(`/meter-installations/${i.id}/remove`)
+          .set(auth(adminToken))
+          .send({ finalReading: 30 })
+          .expect(201);
+      }
+    }
     const res = await request(app.getHttpServer())
       .post(`/water-accounts/${acctId}/close`)
       .set(auth(adminToken))

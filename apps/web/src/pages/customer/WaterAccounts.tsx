@@ -3,6 +3,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SwapOutlined,
+  ToolOutlined,
 } from '@ant-design/icons';
 import {
   Alert,
@@ -10,6 +11,8 @@ import {
   Button,
   Card,
   DatePicker,
+  Descriptions,
+  Drawer,
   Form,
   Input,
   InputNumber,
@@ -25,10 +28,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
+  AccountInstallation,
   AccountStatus,
   Customer,
   HouseholdProfile,
+  InstallReason,
   PrepaymentBalance,
+  ReplaceResult,
   WaterAccount,
   WaterAccountDetail,
 } from '../../api/types';
@@ -36,10 +42,12 @@ import { useAuth } from '../../auth/AuthContext';
 import {
   ACCOUNT_STATUS_LABELS,
   cleanBody,
+  DECIMAL_RULE,
   fmtCent,
   fmtDate,
   fmtPeriod,
   fmtTime,
+  INSTALL_REASON_LABELS,
   newIdemKey,
   USAGE_CATEGORY_LABELS,
   USAGE_CATEGORY_OPTIONS,
@@ -47,6 +55,8 @@ import {
 import {
   AccountStatusTag,
   CustomerSelect,
+  InstallationStatusTag,
+  MeterSelect,
   SettleAccountSelect,
 } from '../pickers';
 
@@ -105,6 +115,32 @@ interface HouseholdFormValues {
   effectiveMonth: dayjs.Dayjs;
 }
 
+interface MeterInstallFormValues {
+  meterId: string;
+  initialReading: string;
+  installedAt?: dayjs.Dayjs;
+  reason?: InstallReason;
+}
+
+interface MeterRemoveFormValues {
+  finalReading: string;
+  removedAt?: dayjs.Dayjs;
+}
+
+interface MeterReplaceFormValues {
+  newMeterId: string;
+  oldFinalReading: string;
+  newInitialReading: string;
+  replacedAt?: dayjs.Dayjs;
+  reason?: 'REPLACE' | 'FAULT' | 'PERIODIC_CHECK';
+}
+
+type MeterModalState =
+  | { kind: 'install' }
+  | { kind: 'remove'; inst: AccountInstallation }
+  | { kind: 'replace'; inst: AccountInstallation }
+  | null;
+
 /**
  * 水表户：户号精确搜索 + 状态/客户过滤 + 开户 + 编辑 + 生命周期操作
  * （暂停/恢复/销户/过户，各走独立 POST + account_event）。
@@ -142,6 +178,15 @@ export default function WaterAccounts() {
   const [hhLoading, setHhLoading] = useState(false);
   const [hhCurrent, setHhCurrent] = useState<number | null>(null);
   const [hhProfiles, setHhProfiles] = useState<HouseholdProfile[]>([]);
+
+  // ---- E7 水表对象抽屉：当前表 + 安装史 + 装/换/拆 ----
+  const [meterDrawerId, setMeterDrawerId] = useState<string | null>(null);
+  const [meterDetail, setMeterDetail] = useState<WaterAccountDetail | null>(null);
+  const [meterLoading, setMeterLoading] = useState(false);
+  const [meterModal, setMeterModal] = useState<MeterModalState>(null);
+  const [meterInstallForm] = Form.useForm<MeterInstallFormValues>();
+  const [meterRemoveForm] = Form.useForm<MeterRemoveFormValues>();
+  const [meterReplaceForm] = Form.useForm<MeterReplaceFormValues>();
 
   // Same-route navigations only swap the query string — keep the filters in
   // sync so 抽屉里的“查看全部”链接总是生效。setState 走 microtask，不在
@@ -367,6 +412,124 @@ export default function WaterAccounts() {
     }
   };
 
+  const loadMeterDetail = useCallback(
+    async (accountId: string) => {
+      setMeterLoading(true);
+      try {
+        const res = await api.get<WaterAccountDetail>(
+          `/water-accounts/${accountId}`,
+        );
+        setMeterDetail(res.data);
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setMeterLoading(false);
+      }
+    },
+    [message],
+  );
+
+  const openMeterDrawer = (account: WaterAccount) => {
+    setMeterDrawerId(account.id);
+    setMeterDetail(null);
+    setMeterModal(null);
+    void loadMeterDetail(account.id);
+  };
+
+  /** 装/换/拆完成后统一刷新详情 + 列表。 */
+  const afterMeterMutation = async () => {
+    setMeterModal(null);
+    if (meterDrawerId) await loadMeterDetail(meterDrawerId);
+    await load(page, pageSize);
+  };
+
+  const submitMeterInstall = async () => {
+    let values: MeterInstallFormValues;
+    try {
+      values = await meterInstallForm.validateFields();
+    } catch {
+      return;
+    }
+    if (!meterDrawerId) return;
+    setSaving(true);
+    try {
+      await api.post(
+        '/meter-installations',
+        cleanBody({
+          waterAccountId: meterDrawerId,
+          meterId: values.meterId,
+          initialReading: values.initialReading,
+          installedAt: values.installedAt?.format('YYYY-MM-DD'),
+          reason: values.reason,
+        }),
+        { headers: { 'Idempotency-Key': idemKey } },
+      );
+      message.success('装表完成');
+      await afterMeterMutation();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const submitMeterRemove = async () => {
+    let values: MeterRemoveFormValues;
+    try {
+      values = await meterRemoveForm.validateFields();
+    } catch {
+      return;
+    }
+    if (meterModal?.kind !== 'remove') return;
+    setSaving(true);
+    try {
+      await api.post(
+        `/meter-installations/${meterModal.inst.id}/remove`,
+        cleanBody({
+          finalReading: values.finalReading,
+          removedAt: values.removedAt?.format('YYYY-MM-DD'),
+        }),
+        { headers: { 'Idempotency-Key': idemKey } },
+      );
+      message.success('拆表完成');
+      await afterMeterMutation();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const submitMeterReplace = async () => {
+    let values: MeterReplaceFormValues;
+    try {
+      values = await meterReplaceForm.validateFields();
+    } catch {
+      return;
+    }
+    if (meterModal?.kind !== 'replace') return;
+    setSaving(true);
+    try {
+      await api.post<ReplaceResult>(
+        `/meter-installations/${meterModal.inst.id}/replace`,
+        cleanBody({
+          newMeterId: values.newMeterId,
+          oldFinalReading: values.oldFinalReading,
+          newInitialReading: values.newInitialReading,
+          replacedAt: values.replacedAt?.format('YYYY-MM-DD'),
+          reason: values.reason,
+        }),
+        { headers: { 'Idempotency-Key': idemKey } },
+      );
+      message.success('换表完成');
+      await afterMeterMutation();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const submitEvent = async () => {
     let values: EventFormValues;
     try {
@@ -457,7 +620,7 @@ export default function WaterAccounts() {
           {
             title: '操作',
             key: 'actions',
-            width: 250,
+            width: 300,
             render: (_: unknown, record: WaterAccount) => {
               const closed = record.status === 'CLOSED';
               return (
@@ -494,6 +657,13 @@ export default function WaterAccounts() {
                       过户
                     </Button>
                   )}
+                  <Button
+                    size="small"
+                    icon={<ToolOutlined />}
+                    onClick={() => openMeterDrawer(record)}
+                  >
+                    水表
+                  </Button>
                   {record.status === 'NORMAL' && (
                     <Button
                       size="small"
@@ -875,6 +1045,328 @@ export default function WaterAccounts() {
           ]}
         />
       </Modal>
+
+      {/* E7 水表抽屉：当前表 + 安装史 + 装/换/拆 */}
+      <Drawer
+        open={meterDrawerId !== null}
+        title={
+          meterDetail
+            ? `水表 — ${meterDetail.accountNo}`
+            : '水表'
+        }
+        width={760}
+        onClose={() => setMeterDrawerId(null)}
+        loading={meterLoading}
+      >
+        {meterDetail && (
+          <MeterSection
+            detail={meterDetail}
+            canWrite={canWrite}
+            onInstall={() => {
+              meterInstallForm.resetFields();
+              setIdemKey(newIdemKey());
+              setMeterModal({ kind: 'install' });
+            }}
+            onRemove={(inst) => {
+              meterRemoveForm.resetFields();
+              setIdemKey(newIdemKey());
+              setMeterModal({ kind: 'remove', inst });
+            }}
+            onReplace={(inst) => {
+              meterReplaceForm.resetFields();
+              meterReplaceForm.setFieldValue('reason', 'REPLACE');
+              setIdemKey(newIdemKey());
+              setMeterModal({ kind: 'replace', inst });
+            }}
+          />
+        )}
+      </Drawer>
+
+      {/* 装表（户内） */}
+      <Modal
+        open={meterModal?.kind === 'install'}
+        title="装表"
+        okText="确认装表"
+        cancelText="取消"
+        confirmLoading={saving}
+        onOk={() => void submitMeterInstall()}
+        onCancel={() => setMeterModal(null)}
+        destroyOnHidden
+      >
+        <Form form={meterInstallForm} layout="vertical">
+          <Form.Item
+            name="meterId"
+            label="水表（仅可用表可安装）"
+            rules={[{ required: true, message: '请选择水表' }]}
+          >
+            <MeterSelect status="AVAILABLE" />
+          </Form.Item>
+          <Form.Item
+            name="initialReading"
+            label="初始读数"
+            rules={[{ required: true, message: '请输入初始读数' }, DECIMAL_RULE]}
+          >
+            <Input placeholder="如 0" />
+          </Form.Item>
+          <Form.Item name="installedAt" label="装表日期">
+            <DatePicker style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="reason" label="装表原因">
+            <Select
+              allowClear
+              options={(
+                ['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
+              ).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }))}
+              placeholder="默认新装"
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 拆表（户内） */}
+      <Modal
+        open={meterModal?.kind === 'remove'}
+        title={
+          meterModal?.kind === 'remove'
+            ? `拆表 — ${meterModal.inst.meter.meterNo}`
+            : ''
+        }
+        okText="确认拆除"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        confirmLoading={saving}
+        onOk={() => void submitMeterRemove()}
+        onCancel={() => setMeterModal(null)}
+        destroyOnHidden
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="拆表后安装记录转为已拆除，水表回到可用状态。"
+          description={
+            meterModal?.kind === 'remove'
+              ? `拆除读数须不小于装表初始读数（${meterModal.inst.initialReading}）。`
+              : undefined
+          }
+        />
+        <Form form={meterRemoveForm} layout="vertical">
+          <Form.Item
+            name="finalReading"
+            label="拆除读数"
+            rules={[{ required: true, message: '请输入拆除读数' }, DECIMAL_RULE]}
+          >
+            <Input />
+          </Form.Item>
+          <Form.Item name="removedAt" label="拆表日期">
+            <DatePicker style={{ width: '100%' }} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 换表（户内）— 原子操作，两个读数分属不同物理表盘 */}
+      <Modal
+        open={meterModal?.kind === 'replace'}
+        title={
+          meterModal?.kind === 'replace'
+            ? `换表 — ${meterModal.inst.meter.meterNo}`
+            : ''
+        }
+        okText="确认换表"
+        cancelText="取消"
+        confirmLoading={saving}
+        onOk={() => void submitMeterReplace()}
+        onCancel={() => setMeterModal(null)}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="换表为单事务操作：旧表按止码拆除、新表按始码挂装，两块物理表盘读数互相独立。"
+          description="远传设备绑定不会自动迁移，新表需重新绑定。"
+        />
+        <Form form={meterReplaceForm} layout="vertical">
+          <Form.Item
+            name="newMeterId"
+            label="新表（仅可用表）"
+            rules={[{ required: true, message: '请选择新表' }]}
+          >
+            <MeterSelect status="AVAILABLE" />
+          </Form.Item>
+          <Form.Item
+            name="oldFinalReading"
+            label="旧表止码"
+            rules={[{ required: true, message: '请输入旧表止码' }, DECIMAL_RULE]}
+          >
+            <Input />
+          </Form.Item>
+          <Form.Item
+            name="newInitialReading"
+            label="新表始码"
+            rules={[{ required: true, message: '请输入新表始码' }, DECIMAL_RULE]}
+            extra="新表自身表盘读数，通常不等于旧表止码"
+          >
+            <Input />
+          </Form.Item>
+          <Form.Item name="replacedAt" label="换表日期">
+            <DatePicker style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="reason" label="换表原因">
+            <Select
+              allowClear
+              options={(['REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const).map(
+                (r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }),
+              )}
+              placeholder="默认换表"
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Card>
+  );
+}
+
+/**
+ * 水表户详情的“水表”区（E7 对象中心视图）：
+ * - 0 ACTIVE：装表入口
+ * - 1 ACTIVE：当前表卡片 + 换表/拆表
+ * - >1 ACTIVE：如实展示 + 异常警示（domain 允许多表，UI 不自动修复）
+ * “当前表” = installed_at 最新的 ACTIVE，与抄表解析规则一致。
+ */
+function MeterSection({
+  detail,
+  canWrite,
+  onInstall,
+  onRemove,
+  onReplace,
+}: {
+  detail: WaterAccountDetail;
+  canWrite: boolean;
+  onInstall: () => void;
+  onRemove: (inst: AccountInstallation) => void;
+  onReplace: (inst: AccountInstallation) => void;
+}) {
+  const installations = detail.meterInstallations ?? [];
+  const actives = installations.filter((i) => i.status === 'ACTIVE');
+  const current = actives[0]; // installed_at DESC — the newest
+  const closed = detail.status === 'CLOSED';
+
+  return (
+    <>
+      {actives.length > 1 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`该户存在 ${actives.length} 只在册水表`}
+          description="一户多表为异常数据（多为历史遗留）。已全部如实展示，当前表按装表时间最新的一块解析；请在核实后拆除多余安装记录。"
+        />
+      )}
+      {current ? (
+        <Descriptions
+          column={2}
+          size="small"
+          bordered
+          title="当前表"
+          style={{ marginBottom: 16 }}
+        >
+          <Descriptions.Item label="表号">
+            {current.meter.meterNo}
+          </Descriptions.Item>
+          <Descriptions.Item label="品牌/口径">
+            {[current.meter.brand, current.meter.caliber]
+              .filter(Boolean)
+              .join(' ') || '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="装表时间">
+            {fmtDate(current.installedAt)}
+          </Descriptions.Item>
+          <Descriptions.Item label="装表始码">
+            {current.initialReading}
+          </Descriptions.Item>
+        </Descriptions>
+      ) : (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="该户当前没有在册水表"
+        />
+      )}
+      {canWrite && !closed && (
+        <Space style={{ marginBottom: 16 }}>
+          {actives.length === 0 && (
+            <Button type="primary" onClick={onInstall}>
+              装表
+            </Button>
+          )}
+          {current && (
+            <>
+              <Button icon={<SwapOutlined />} onClick={() => onReplace(current)}>
+                换表
+              </Button>
+              <Button danger onClick={() => onRemove(current)}>
+                拆表
+              </Button>
+            </>
+          )}
+        </Space>
+      )}
+      <Table<AccountInstallation>
+        rowKey="id"
+        size="small"
+        dataSource={installations}
+        pagination={false}
+        locale={{ emptyText: '暂无安装记录' }}
+        columns={[
+          {
+            title: '表号',
+            key: 'meterNo',
+            render: (_: unknown, r) => r.meter.meterNo,
+          },
+          {
+            title: '装表时间',
+            dataIndex: 'installedAt',
+            render: (v: string) => fmtDate(v),
+          },
+          {
+            title: '拆表时间',
+            dataIndex: 'removedAt',
+            render: (v: string | null) => fmtDate(v),
+          },
+          { title: '始码', dataIndex: 'initialReading' },
+          {
+            title: '止码',
+            dataIndex: 'finalReading',
+            render: (v: string | null) => v ?? '—',
+          },
+          {
+            title: '原因',
+            dataIndex: 'reason',
+            render: (r: InstallReason) => INSTALL_REASON_LABELS[r],
+          },
+          {
+            title: '状态',
+            dataIndex: 'status',
+            render: (s) => <InstallationStatusTag status={s} />,
+          },
+          ...(canWrite && !closed && actives.length > 1
+            ? [
+                {
+                  title: '操作',
+                  key: 'actions',
+                  render: (_: unknown, r: AccountInstallation) =>
+                    r.status === 'ACTIVE' && r.id !== current?.id ? (
+                      <Button size="small" danger onClick={() => onRemove(r)}>
+                        拆除
+                      </Button>
+                    ) : null,
+                },
+              ]
+            : []),
+        ]}
+      />
+    </>
   );
 }

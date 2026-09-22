@@ -928,6 +928,18 @@ describe('RC-fix M-1: closed account gains no settlement activity', () => {
       })
       .expect(201);
 
+    // E7 close guard: detach the onboarded ACTIVE installation first.
+    await owner.query(
+      `UPDATE meter m SET status='AVAILABLE' FROM meter_installation mi
+       WHERE mi.tenant_id=$1 AND mi.water_account_id=$2 AND mi.meter_id=m.id`,
+      [T7A, a.waterAccount.id],
+    );
+  await owner.query(
+      `UPDATE meter_installation SET status='REMOVED', final_reading=initial_reading,
+             removed_at=now()
+       WHERE tenant_id=$1 AND water_account_id=$2 AND status='ACTIVE'`,
+      [T7A, a.waterAccount.id],
+    );
     await request(app.getHttpServer())
       .post(`/water-accounts/${a.waterAccount.id}/close`)
       .set(auth(adminToken))

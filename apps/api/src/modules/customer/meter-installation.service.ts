@@ -1,12 +1,13 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
-import type { TenantCtx } from '../../common/tenant-context.js';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
 export const INSTALLATION_SELECT = {
@@ -42,6 +43,16 @@ export interface RemoveBody {
   removedAt?: Date;
 }
 
+export interface ReplaceBody {
+  newMeterId: string;
+  /** 旧表止码 — belongs to the OLD installation's own dial chain. */
+  oldFinalReading: Prisma.Decimal;
+  /** 新表始码 — independent physical dial; never defaults to oldFinalReading. */
+  newInitialReading: Prisma.Decimal;
+  replacedAt?: Date;
+  reason?: 'REPLACE' | 'FAULT' | 'PERIODIC_CHECK';
+}
+
 /**
  * MeterInstallation （安装关系） — one row = one meter mounted on one water
  * account for a time span (spec §2.1). The schema deliberately allows several
@@ -65,29 +76,42 @@ export class MeterInstallationService {
       status?: 'ACTIVE' | 'REMOVED';
     },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.meterInstallation.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      if (q.waterAccountId) {
+        await this.assertAccountScopeTx(tx, ctx, q.waterAccountId);
+      }
+      // E7 scope fix: same coverage rule as assertAccountScopeTx —
+      // any covering book outside the caller's subtree hides the whole
+      // account's installations. Uncovered accounts stay permissive.
+      const scopedIds =
+        ctx.scope === 'ALL'
+          ? null
+          : await this.outOfScopeAccountIds(tx, ctx);
+      return tx.meterInstallation.findMany({
         where: {
           tenantId: ctx.tenantId,
           waterAccountId: q.waterAccountId,
           meterId: q.meterId,
           status: q.status,
+          ...(scopedIds ? { waterAccountId: { notIn: scopedIds } } : {}),
         },
         select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
         orderBy: { installedAt: 'desc' },
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+    });
   }
 
   async getById(ctx: TenantCtx, id: string) {
-    const row = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.meterInstallation.findFirst({
+    const row = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const r = await tx.meterInstallation.findFirst({
         where: { tenantId: ctx.tenantId, id },
         select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
-      }),
-    );
+      });
+      if (r) await this.assertAccountScopeTx(tx, ctx, r.waterAccountId);
+      return r;
+    });
     if (!row) throw new NotFoundException({ code: 'INSTALLATION_NOT_FOUND' });
     return row;
   }
@@ -95,14 +119,15 @@ export class MeterInstallationService {
   /**
    * Install/reinstall: meter must exist and be AVAILABLE (the state machine's
    * only path to INSTALLED). Runs inside the caller's tenant tx.
+   *
+   * E7 C1: the water_account row is locked FOR UPDATE first and its status
+   * re-checked inside the lock — this serializes install against a
+   * concurrent account close so `CLOSED + ACTIVE installation` can never
+   * commit.
    */
   async installTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: InstallBody) {
-    const account = await tx.waterAccount.findFirst({
-      where: { tenantId: ctx.tenantId, id: body.waterAccountId },
-    });
-    if (!account) {
-      throw new BadRequestException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
-    }
+    await this.assertAccountScopeTx(tx, ctx, body.waterAccountId);
+    const account = await this.lockAccountForUpdateTx(tx, ctx, body.waterAccountId);
     if (account.status === 'CLOSED') {
       throw new ConflictException({ code: 'ACCOUNT_CLOSED' });
     }
@@ -165,35 +190,225 @@ export class MeterInstallationService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'INSTALLATION_NOT_FOUND' });
+    await this.assertAccountScopeTx(tx, ctx, existing.waterAccountId);
+    // Uniform lock direction (E7 §10): water_account → installation →
+    // meter → binding. The account lock serializes against close/install.
+    await this.lockAccountForUpdateTx(tx, ctx, existing.waterAccountId);
+    const removedAt = await this.assertRemovableTx(tx, ctx, existing, {
+      finalReading: body.finalReading,
+      at: body.removedAt,
+    });
+    req.auditBefore = existing;
+
+    // Guarded transition (see installTx): a concurrent remove/replace loses
+    // the race here instead of overwriting the winner's final_reading.
+    const flipped = await tx.meterInstallation.updateMany({
+      where: { tenantId: ctx.tenantId, id, status: 'ACTIVE' },
+      data: {
+        status: 'REMOVED',
+        removedAt,
+        finalReading: body.finalReading,
+        updatedBy: ctx.staffId,
+      },
+    });
+    if (flipped.count === 0) {
+      throw new ConflictException({ code: 'INSTALLATION_NOT_ACTIVE' });
+    }
+    await tx.meter.update({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id: existing.meterId } },
+      data: { status: 'AVAILABLE', updatedBy: ctx.staffId },
+    });
+    await this.closeBindingsTx(tx, ctx, id, removedAt);
+    return tx.meterInstallation.findUniqueOrThrow({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
+    });
+  }
+
+  /**
+   * Replace （换表） — atomic remove+install in ONE transaction (E7 §3).
+   * The two readings belong to two different physical dials and are both
+   * explicit inputs; nothing defaults newInitialReading to oldFinalReading.
+   * Bindings close on the old installation and are NEVER migrated — the
+   * remote device is a physical fact that needs explicit re-binding.
+   */
+  async replaceTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+    body: ReplaceBody,
+    req: Request,
+  ) {
+    const existing = await tx.meterInstallation.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+    });
+    if (!existing) throw new NotFoundException({ code: 'INSTALLATION_NOT_FOUND' });
+    await this.assertAccountScopeTx(tx, ctx, existing.waterAccountId);
+    if (existing.meterId === body.newMeterId) {
+      throw new BadRequestException({ code: 'SAME_METER_REPLACE' });
+    }
+    const account = await this.lockAccountForUpdateTx(
+      tx,
+      ctx,
+      existing.waterAccountId,
+    );
+    if (account.status === 'CLOSED') {
+      throw new ConflictException({ code: 'ACCOUNT_CLOSED' });
+    }
+    // Recheck on the locked row — a concurrent remove/replace may have
+    // already closed this installation since the head read.
+    const lockedRows = await tx.$queryRaw<{ status: string }[]>`
+      SELECT status::text AS status FROM meter_installation
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
+      FOR UPDATE`;
+    if (!lockedRows.length) {
+      throw new NotFoundException({ code: 'INSTALLATION_NOT_FOUND' });
+    }
+    if (lockedRows[0].status !== 'ACTIVE') {
+      throw new ConflictException({ code: 'INSTALLATION_NOT_ACTIVE' });
+    }
+    const at = await this.assertRemovableTx(tx, ctx, existing, {
+      finalReading: body.oldFinalReading,
+      at: body.replacedAt,
+    });
+    const oldMeter = await tx.meter.findFirst({
+      where: { tenantId: ctx.tenantId, id: existing.meterId },
+      select: { id: true, status: true },
+    });
+    if (!oldMeter || oldMeter.status !== 'INSTALLED') {
+      throw new ConflictException({
+        code: 'METER_NOT_INSTALLED',
+        status: oldMeter?.status ?? 'gone',
+      });
+    }
+    const newMeter = await tx.meter.findFirst({
+      where: { tenantId: ctx.tenantId, id: body.newMeterId },
+    });
+    if (!newMeter) throw new BadRequestException({ code: 'METER_NOT_FOUND' });
+    if (newMeter.status !== 'AVAILABLE') {
+      throw new ConflictException({
+        code: 'METER_NOT_AVAILABLE',
+        status: newMeter.status,
+      });
+    }
+    req.auditBefore = existing;
+
+    const flipped = await tx.meterInstallation.updateMany({
+      where: { tenantId: ctx.tenantId, id, status: 'ACTIVE' },
+      data: {
+        status: 'REMOVED',
+        removedAt: at,
+        finalReading: body.oldFinalReading,
+        updatedBy: ctx.staffId,
+      },
+    });
+    if (flipped.count === 0) {
+      throw new ConflictException({ code: 'INSTALLATION_NOT_ACTIVE' });
+    }
+    const oldFlip = await tx.meter.updateMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: existing.meterId,
+        status: 'INSTALLED',
+      },
+      data: { status: 'AVAILABLE', updatedBy: ctx.staffId },
+    });
+    if (oldFlip.count === 0) {
+      throw new ConflictException({ code: 'METER_NOT_INSTALLED' });
+    }
+    const newFlip = await tx.meter.updateMany({
+      where: { tenantId: ctx.tenantId, id: body.newMeterId, status: 'AVAILABLE' },
+      data: { status: 'INSTALLED', updatedBy: ctx.staffId },
+    });
+    if (newFlip.count === 0) {
+      throw new ConflictException({ code: 'METER_NOT_AVAILABLE' });
+    }
+    await this.closeBindingsTx(tx, ctx, id, at);
+    const installation = await tx.meterInstallation.create({
+      data: {
+        tenantId: ctx.tenantId,
+        waterAccountId: existing.waterAccountId,
+        meterId: body.newMeterId,
+        installedAt: at,
+        initialReading: body.newInitialReading,
+        reason: body.reason ?? 'REPLACE',
+        status: 'ACTIVE',
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+      select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
+    });
+    // Replacement lineage — set only when the new meter has no parent yet.
+    await tx.meter.updateMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: body.newMeterId,
+        parentMeterId: null,
+      },
+      data: { parentMeterId: existing.meterId, updatedBy: ctx.staffId },
+    });
+    return { removed: { ...existing, status: 'REMOVED' as const }, installed: installation };
+  }
+
+  // -----------------------------------------------------------------------
+  // internals
+  // -----------------------------------------------------------------------
+
+  /**
+   * `SELECT … FOR UPDATE` on water_account — the first lock in the E7
+   * order. Serializes meter ops against account close (C1) and lets the
+   * caller re-read status on the locked row.
+   */
+  private async lockAccountForUpdateTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+  ): Promise<{ status: string }> {
+    const rows = await tx.$queryRaw<{ status: string }[]>`
+      SELECT status::text AS status FROM water_account
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${waterAccountId}::uuid
+      FOR UPDATE`;
+    if (!rows.length) {
+      throw new BadRequestException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    }
+    return rows[0];
+  }
+
+  /**
+   * Shared removal leg for removeTx/replaceTx: reading-domain checks +
+   * fail-closed period check (RC audit I-2 — a removal dated into a FINAL
+   * settlement or posted-debt period would orphan the final_reading delta
+   * above the settled chain-end). Returns the effective removal instant.
+   */
+  private async assertRemovableTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    existing: {
+      waterAccountId: string;
+      installedAt: Date;
+      initialReading: Prisma.Decimal;
+      status: string;
+    },
+    args: { finalReading: Prisma.Decimal; at?: Date },
+  ): Promise<Date> {
     if (existing.status !== 'ACTIVE') {
       throw new ConflictException({ code: 'INSTALLATION_NOT_ACTIVE' });
     }
-    if (body.finalReading.lessThan(existing.initialReading)) {
+    if (args.finalReading.lessThan(existing.initialReading)) {
       throw new BadRequestException({
         code: 'FINAL_READING_BEFORE_INITIAL',
         initialReading: existing.initialReading.toString(),
-        finalReading: body.finalReading.toString(),
+        finalReading: args.finalReading.toString(),
       });
     }
-
-    // Fail closed BEFORE any mutation (RC audit I-2): a removal dated into
-    // a period whose settlement is already FINAL — or that already carries
-    // posted debt — would orphan the final_reading delta above the settled
-    // chain-end. That usage can never be billed (the period can't be
-    // re-settled and later periods see no installation). The period key
-    // follows the settlement convention (settlement.service.periodBounds):
-    // YYYYMM of the UTC month containing removedAt. Historical back-fills
-    // need a dedicated correction workflow — out of MVP scope.
-    const removedAt = body.removedAt ?? new Date();
-    // removedAt is the end of the installation's life — a removal dated
-    // before the install is a data error, not a DB exception.
-    if (removedAt < existing.installedAt) {
+    const at = args.at ?? new Date();
+    if (at < existing.installedAt) {
       throw new BadRequestException({
         code: 'REMOVE_BEFORE_INSTALL',
         installedAt: existing.installedAt,
       });
     }
-    const period = `${removedAt.getUTCFullYear()}${String(removedAt.getUTCMonth() + 1).padStart(2, '0')}`;
+    const period = `${at.getUTCFullYear()}${String(at.getUTCMonth() + 1).padStart(2, '0')}`;
     const [finalized, posted] = await Promise.all([
       tx.consumptionSettlement.findFirst({
         where: {
@@ -220,64 +435,99 @@ export class MeterInstallationService {
         period,
       });
     }
-    req.auditBefore = existing;
+    return at;
+  }
 
-    // Guarded transition (see installTx): a concurrent remove loses the race
-    // here instead of overwriting the winner's final_reading.
-    const flipped = await tx.meterInstallation.updateMany({
-      where: { tenantId: ctx.tenantId, id, status: 'ACTIVE' },
-      data: {
-        status: 'REMOVED',
-        removedAt,
-        finalReading: body.finalReading,
-        updatedBy: ctx.staffId,
-      },
-    });
-    if (flipped.count === 0) {
-      throw new ConflictException({ code: 'INSTALLATION_NOT_ACTIVE' });
-    }
-    await tx.meter.update({
-      where: { tenantId_id: { tenantId: ctx.tenantId, id: existing.meterId } },
-      data: { status: 'AVAILABLE', updatedBy: ctx.staffId },
-    });
-    // E5 T3: removing an installation closes its remote-device bindings in
-    // the same transaction — a binding must never outlive its installation.
-    // Rows ending before removedAt are already within the lifetime and stay.
+  /**
+   * E5 T3 binding close, shared by removeTx/replaceTx: bindings ending
+   * after `at` (or open-ended) are closed at `at`; a resolved event
+   * collected after `at` refuses the whole operation (orphan provenance).
+   */
+  private async closeBindingsTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    installationId: string,
+    at: Date,
+  ) {
     const closable = await tx.remoteDeviceBinding.findMany({
       where: {
         tenantId: ctx.tenantId,
-        installationId: id,
-        OR: [{ effectiveTo: null }, { effectiveTo: { gt: removedAt } }],
+        installationId,
+        OR: [{ effectiveTo: null }, { effectiveTo: { gt: at } }],
       },
       select: { id: true },
     });
-    if (closable.length > 0) {
-      // Same invariant as PATCH close (BINDING_CLOSE_ORPHANS_EVENT): a
-      // resolved event collected after removedAt must not be stranded
-      // outside its own binding's window — refuse the removal instead of
-      // silently orphaning the provenance chain.
-      const orphan = await tx.rawRemoteEvent.findFirst({
-        where: {
-          tenantId: ctx.tenantId,
-          resolvedBindingId: { in: closable.map((b) => b.id) },
-          collectedAt: { gte: removedAt },
-        },
-        select: { id: true },
-      });
-      if (orphan) {
-        throw new ConflictException({
-          code: 'BINDING_CLOSE_ORPHANS_EVENT',
-          eventId: orphan.id,
-        });
-      }
-      await tx.remoteDeviceBinding.updateMany({
-        where: { tenantId: ctx.tenantId, id: { in: closable.map((b) => b.id) } },
-        data: { effectiveTo: removedAt, updatedBy: ctx.staffId },
+    if (closable.length === 0) return;
+    const orphan = await tx.rawRemoteEvent.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        resolvedBindingId: { in: closable.map((b) => b.id) },
+        collectedAt: { gte: at },
+      },
+      select: { id: true },
+    });
+    if (orphan) {
+      throw new ConflictException({
+        code: 'BINDING_CLOSE_ORPHANS_EVENT',
+        eventId: orphan.id,
       });
     }
-    return tx.meterInstallation.findUniqueOrThrow({
-      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
-      select: { ...INSTALLATION_SELECT, ...INSTALLATION_INCLUDE },
+    await tx.remoteDeviceBinding.updateMany({
+      where: { tenantId: ctx.tenantId, id: { in: closable.map((b) => b.id) } },
+      data: { effectiveTo: at, updatedBy: ctx.staffId },
     });
+  }
+
+  /**
+   * Account coverage rule (same as prepayment assertSettleScope /
+   * billing assertAccountScope): EVERY covering reading book's org must
+   * sit inside the caller's orgScope; an account with no plan coverage
+   * is off-book and returns permissively.
+   */
+  private async assertAccountScopeTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+  ): Promise<void> {
+    if (ctx.scope === 'ALL') return;
+    const items = await tx.readingPlanItem.findMany({
+      where: { tenantId: ctx.tenantId, waterAccountId },
+      select: { planId: true },
+    });
+    if (items.length === 0) return;
+    const plans = await tx.readingPlan.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: items.map((i) => i.planId) } },
+      select: { bookId: true },
+    });
+    const books = await tx.readingBook.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: plans.map((p) => p.bookId) } },
+      select: { orgUnitId: true },
+    });
+    for (const b of books) {
+      if (!orgInScope(ctx, b.orgUnitId)) {
+        throw new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
+      }
+    }
+  }
+
+  /**
+   * Accounts that are out of scope for the caller (any covering book
+   * outside orgScope). Used by list filters — the mirror image of
+   * assertAccountScopeTx's permissive off-book rule.
+   */
+  private async outOfScopeAccountIds(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+  ): Promise<string[]> {
+    const rows = await tx.$queryRaw<{ water_account_id: string }[]>`
+      SELECT DISTINCT rpi.water_account_id
+      FROM reading_plan_item rpi
+      JOIN reading_plan rp
+        ON rp.tenant_id = rpi.tenant_id AND rp.id = rpi.plan_id
+      JOIN reading_book rb
+        ON rb.tenant_id = rpi.tenant_id AND rb.id = rp.book_id
+      WHERE rpi.tenant_id = ${ctx.tenantId}::uuid
+        AND rb.org_unit_id <> ALL(${ctx.orgScope}::uuid[])`;
+    return rows.map((r) => r.water_account_id);
   }
 }

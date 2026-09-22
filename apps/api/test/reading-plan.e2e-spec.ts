@@ -591,6 +591,18 @@ describe('org-scope guards on plan writes (I1)', () => {
         .expect(201);
     }
     // F joined while NORMAL, then is closed — generation must skip it.
+    // E7 close guard: detach the onboarded ACTIVE installation first.
+    await owner.query(
+      `UPDATE meter m SET status='AVAILABLE' FROM meter_installation mi
+       WHERE mi.tenant_id=$1 AND mi.water_account_id=$2 AND mi.meter_id=m.id`,
+      [T5A, f.waterAccount.id],
+    );
+  await owner.query(
+      `UPDATE meter_installation SET status='REMOVED', final_reading=initial_reading,
+             removed_at=now()
+       WHERE tenant_id=$1 AND water_account_id=$2 AND status='ACTIVE'`,
+      [T5A, f.waterAccount.id],
+    );
     await request(app.getHttpServer())
       .post(`/water-accounts/${f.waterAccount.id}/close`)
       .set(auth(adminToken))
