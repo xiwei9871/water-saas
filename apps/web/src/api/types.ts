@@ -663,9 +663,20 @@ export interface BillItem {
   updatedAt: string;
 }
 
-/** GET /bills/:id — bill + items inline. */
+/** payment_alloc row as embedded in GET /bills/:id — E6 dual-source. */
+export interface BillAlloc {
+  id: string;
+  source: 'PAYMENT' | 'PREPAYMENT';
+  paymentId: string | null;
+  prepaymentEntryId: string | null;
+  amount: string;
+  createdAt: string;
+}
+
+/** GET /bills/:id — bill + items + source-attributed allocations. */
 export interface BillDetail extends Bill {
   items: BillItem[];
+  allocs: BillAlloc[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -691,15 +702,36 @@ export interface Payment {
   updatedAt: string;
 }
 
-/** payment_alloc — per-bill write-off line (bigint cents string). */
+/** payment_alloc — per-bill write-off line (bigint cents string).
+ *  E6 dual-source: PAYMENT rows carry paymentId, PREPAYMENT rows carry
+ *  prepaymentEntryId → the ledger settlement entry (APPLY/REVERSAL). */
 export interface PaymentAlloc {
   id: string;
   tenantId: string;
-  paymentId: string;
+  source: 'PAYMENT' | 'PREPAYMENT';
+  paymentId: string | null;
+  prepaymentEntryId: string | null;
   billId: string;
   amount: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** prepayment_ledger_entry — append-only, signed bigint cents. */
+export interface PrepaymentEntry {
+  id: string;
+  settleAccountId: string;
+  type: 'TOP_UP' | 'APPLY' | 'REFUND' | 'REVERSAL';
+  amount: string;
+  paymentId: string | null;
+  billId: string | null;
+  originTopUpId: string | null;
+  reversalOfEntryId: string | null;
+  idempotencyKey: string;
+  operatorId: string | null;
+  reason: string | null;
+  createdAt: string;
+  createdBy: string;
 }
 
 /** receipt — issued with every non-reversal payment; voided on reversal. */
@@ -715,10 +747,12 @@ export interface Receipt {
   updatedAt: string;
 }
 
-/** GET /payments/:id — payment + allocs + receipt (null on reversals). */
+/** GET /payments/:id — payment + allocs + receipt (null on reversals)
+ *  + the payment's prepayment ledger legs (E6). */
 export interface PaymentDetail extends Payment {
   allocs: PaymentAlloc[];
   receipt: Receipt | null;
+  prepaymentEntries: PrepaymentEntry[];
 }
 
 /** One payable line inside GET /water-accounts/:id/outstanding. */
@@ -743,6 +777,8 @@ export interface AccountOutstanding {
   /** Money applied to since-REVERSED bills — owed back to the customer. */
   reversedBillCredit: string;
   totalOutstanding: string;
+  /** E6: settle account's prepayment balance (Σ ledger, cents string). */
+  prepaymentBalance: string;
 }
 
 /** byChannel jsonb bucket on a cashier_day_close row (amounts strings). */
@@ -763,6 +799,13 @@ export interface CashierDayClose {
   /** BigInt cents — string on the wire. */
   totalAmount: string;
   byChannel: Partial<Record<PayChannel, ChannelBucket>>;
+  /** E6 cash split — four parts always sum to totalAmount. */
+  prepaymentBreakdown: {
+    debtCollection: string;
+    topUp: string;
+    refundAmount: string;
+    reversalAmount: string;
+  } | null;
   status: DayCloseStatus;
   closedAt: string;
   createdAt: string;
@@ -783,7 +826,48 @@ export interface DayClosePayment {
 
 /** GET /cashier-day-close/:id — the close + the payments it swept. */
 export interface CashierDayCloseDetail extends CashierDayClose {
+  /** E6: company-wide SYSTEM APPLY on the close date — non-cash info. */
+  systemApplyAmount: string;
   payments: DayClosePayment[];
+}
+
+/* ------------------------------------------------------------------ */
+/* prepayment domain (E6)                                                */
+/* ------------------------------------------------------------------ */
+
+/** GET /prepayments/balance — balance + FIFO top-up lots. */
+export interface PrepaymentBalance {
+  settleAccount: { id: string; settleNo: string; name: string };
+  balance: string;
+  lots: {
+    topUpEntryId: string;
+    amount: string;
+    remaining: string;
+    createdAt: string;
+  }[];
+}
+
+/** GET /prepayments/entries — paged ledger rows. */
+export interface PrepaymentEntriesPage {
+  total: number;
+  items: PrepaymentEntry[];
+}
+
+/** POST /prepayments/top-ups result. */
+export interface TopUpResult {
+  payment: Payment;
+  receipt: Receipt;
+  billAllocs: { billId: string; amount: string }[];
+  topUp: string;
+  topUpEntryId: string | null;
+  balance: string;
+}
+
+/** POST /prepayments/refunds result. */
+export interface RefundResult {
+  payment: Payment;
+  entries: { id: string; originTopUpId: string; amount: string }[];
+  balance: string;
 }
 
 /* ------------------------------------------------------------------ */

@@ -424,6 +424,48 @@ export default function DayClose() {
             <Space size={4} wrap>
               {channelBuckets(detail.byChannel)}
             </Space>
+            {detail.prepaymentBreakdown && (
+              <>
+                <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
+                  资金用途拆分（合计 = 柜员现金净额）
+                </div>
+                <Descriptions
+                  bordered
+                  size="small"
+                  column={4}
+                  items={[
+                    {
+                      key: 'debt',
+                      label: '清欠收款',
+                      children: fmtCent(detail.prepaymentBreakdown.debtCollection),
+                    },
+                    {
+                      key: 'topup',
+                      label: '预存充值',
+                      children: fmtCent(detail.prepaymentBreakdown.topUp),
+                    },
+                    {
+                      key: 'refund',
+                      label: '预存退款',
+                      children: fmtCent(detail.prepaymentBreakdown.refundAmount),
+                    },
+                    {
+                      key: 'reversal',
+                      label: '收款红冲',
+                      children: fmtCent(detail.prepaymentBreakdown.reversalAmount),
+                    },
+                  ]}
+                />
+              </>
+            )}
+            {Number(detail.systemApplyAmount ?? 0) > 0 && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginTop: 12 }}
+                message={`当日系统自动预存抵扣 ${fmtCent(detail.systemApplyAmount)}（非现金，不计入柜员合计）`}
+              />
+            )}
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
               扫入收款（{detail.payments.length} 笔）
             </div>

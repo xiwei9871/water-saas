@@ -28,6 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type {
   Bill,
+  BillAlloc,
   BillDetail,
   BillItem,
   BillStatus,
@@ -68,9 +69,13 @@ const shortId = (id: string | null | undefined) =>
     '—'
   );
 
-/** 可纠正（红冲/换票）的账单：POSTED|PARTIAL_PAID 且非红冲单。 */
-const correctable = (b: Bill) =>
-  b.billKind !== 'REVERSAL' && (b.status === 'POSTED' || b.status === 'PARTIAL_PAID');
+/** 可纠正（红冲/换票）的账单：POSTED|PARTIAL_PAID 且非红冲单；
+ *  E6 起 PAID 且带预存分摊的账单也可纠正（服务端校验预存腿）。 */
+const correctable = (b: Bill, allocs?: BillAlloc[]) =>
+  b.billKind !== 'REVERSAL' &&
+  (b.status === 'POSTED' ||
+    b.status === 'PARTIAL_PAID' ||
+    (b.status === 'PAID' && (allocs?.some((a) => a.source === 'PREPAYMENT') ?? false)));
 
 /**
  * 账单（Bill）：已出账债权 —— 列表 + 全条件过滤 + 明细抽屉 +
@@ -682,7 +687,48 @@ export default function Bills() {
               dataSource={detail.items}
               pagination={false}
             />
-            {canWrite && correctable(detail) && (
+            {(detail.allocs?.length ?? 0) > 0 && (
+              <>
+                <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>销账分摊</div>
+                <Table<BillAlloc>
+                  rowKey="id"
+                  size="small"
+                  dataSource={detail.allocs}
+                  pagination={false}
+                  columns={[
+                    {
+                      title: '来源',
+                      dataIndex: 'source',
+                      width: 80,
+                      render: (s: BillAlloc['source']) =>
+                        s === 'PREPAYMENT' ? <Tag color="blue">预存</Tag> : <Tag>现金</Tag>,
+                    },
+                    {
+                      title: '金额',
+                      dataIndex: 'amount',
+                      width: 120,
+                      align: 'right',
+                      render: (v: string) => fmtCent(v),
+                    },
+                    {
+                      title: '收款/流水',
+                      key: 'ref',
+                      render: (_: unknown, a: BillAlloc) =>
+                        a.source === 'PREPAYMENT'
+                          ? shortId(a.prepaymentEntryId)
+                          : shortId(a.paymentId),
+                    },
+                    {
+                      title: '时间',
+                      dataIndex: 'createdAt',
+                      width: 165,
+                      render: fmtTime,
+                    },
+                  ]}
+                />
+              </>
+            )}
+            {canWrite && correctable(detail, detail.allocs) && (
               <Space style={{ marginTop: 16 }}>
                 <Popconfirm
                   title="红冲该账单？"
