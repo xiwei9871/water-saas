@@ -25,6 +25,7 @@ import {
 import { loadPilotClock } from './lib/clock.ts';
 import { bootHarness, pilotCtx } from './lib/harness.ts';
 import { runBaseline, type BaselineResult } from './lib/baseline/index.ts';
+import { loadFaultProfile, ProfileError } from './lib/fault/plan.ts';
 import {
   gitSha,
   ManifestWriter,
@@ -35,7 +36,8 @@ import {
 
 const fatal = (e: unknown): never => {
   const msg =
-    e instanceof CliError || e instanceof DbGuardError || e instanceof TenantGuardError
+    e instanceof CliError || e instanceof DbGuardError || e instanceof TenantGuardError ||
+    e instanceof ProfileError
       ? e.message
       : e instanceof Error
         ? (e.stack ?? e.message)
@@ -76,6 +78,7 @@ async function main(): Promise<void> {
   const warnings: string[] = [];
   const errors: string[] = [];
   const runId = newRunId(args.seed);
+  const t0 = Date.now();
 
   // owner conn for guard/reset/clock (RLS bypass; pilot DB only)
   const owner = await connect({
@@ -132,10 +135,20 @@ async function main(): Promise<void> {
     }
 
     // Nest harness → G3 baseline domain flows → close. No HTTP listener.
+    const faultProfile =
+      args.profile === 'default' ? undefined : loadFaultProfile(args.profile);
+    if (faultProfile) {
+      console.log(
+        `profile: ${faultProfile.name} — ${faultProfile.totalAccounts} total accounts ` +
+          `(${Object.values(faultProfile.scenarioCounts).reduce((a, b) => a + b, 0) +
+            Object.values(faultProfile.composites).reduce((a, b) => a + b, 0)} scenarios)`,
+      );
+    }
     const h = await phase(phases, 'harness', () => bootHarness());
     try {
       baseline = await runBaseline(h, pilotCtx(tenant.id, ''), args, {
         asOf: clock.asOf,
+        faultProfile,
       });
       phases.push(...baseline.phases);
     } finally {
@@ -189,6 +202,7 @@ async function main(): Promise<void> {
     databaseCurrentDate: clock.databaseCurrentDate,
     generatedAt: clock.generatedAt,
     clockDrift: clock.clockDrift,
+    totalDurationMs: Date.now() - t0,
     database: { host: db.runtime.host, name: db.runtime.name },
     tenant: { id: tenant.id, code: tenant.code },
     phases,

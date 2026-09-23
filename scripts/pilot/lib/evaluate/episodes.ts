@@ -10,6 +10,7 @@ import { apiRequire } from '../pg.ts';
 import { keys } from '../keys.ts';
 import { withTenantTx, type Harness, type TenantCtx } from '../harness.ts';
 import { services } from '../baseline/flow.ts';
+import { NS } from '../fault/plan.ts';
 import type { GroundTruthEntry } from '../manifest.ts';
 
 const Pr = apiRequire('@prisma/client') as typeof import('@prisma/client');
@@ -139,14 +140,16 @@ export async function evaluateEpisodes(
   const namWaId = scenarioKey('NO_ACTIVE_METER')!.entityIds.waterAccountId;
   const xbmWaId = scenarioKey('CROSS_BRANCH_MULTI_BOOK')!.entityIds.waterAccountId;
 
-  // fault book ids by business key
+  // fault book ids by business key — allocator namespace: branch-major
+  // books at seq 9000+; FA/FB = branch0 pair, FC = branch1 first book.
+  const bk = (i: number) => keys.bookCode(seed, NS.BOOK_BASE + i);
   const books = await q<{ id: string; book_no: string }[]>(
     Pr.Prisma.sql`SELECT id::text, book_no FROM reading_book
-      WHERE tenant_id=${ctx.tenantId}::uuid AND book_no IN (${keys.bookCode(seed, 900)}, ${keys.bookCode(seed, 901)}, ${keys.bookCode(seed, 902)})`,
+      WHERE tenant_id=${ctx.tenantId}::uuid AND book_no IN (${bk(0)}, ${bk(1)}, ${bk(2)})`,
   );
-  const FA = books.find((b) => b.book_no === keys.bookCode(seed, 900))!.id;
-  const FB = books.find((b) => b.book_no === keys.bookCode(seed, 901))!.id;
-  const FC = books.find((b) => b.book_no === keys.bookCode(seed, 902))!.id;
+  const FA = books.find((b) => b.book_no === bk(0))!.id;
+  const FB = books.find((b) => b.book_no === bk(1))!.id;
+  const FC = books.find((b) => b.book_no === bk(2))!.id;
 
   const refresh = () =>
     excSvc.refresh(ctx) as Promise<{
@@ -258,7 +261,7 @@ export async function evaluateEpisodes(
     fail(notes, 'ack did not produce ACK + acknowledgedAt');
 
   const m = (await withTenantTx(h, 'MeterService.createTx', ctx.tenantId, (tx) =>
-    meter.createTx(tx, ctx, { meterNo: keys.meterNo(seed, 6960), caliber: 'DN15' } as never),
+    meter.createTx(tx, ctx, { meterNo: keys.meterNo(seed, 7500), caliber: 'DN15' } as never),
   )) as { id: string };
   const newInst = (await withTenantTx(h, 'MeterInstallationService.installTx', ctx.tenantId, (tx) =>
     install.installTx(tx, ctx, {
@@ -337,6 +340,86 @@ export async function evaluateEpisodes(
       r2.created === 0 && r2.resolved === 0 && r2.cleared === 0 &&
       dupRows.length === 0 && concurrentCreate.pass && rejected &&
       !!nbkRecur && !!namRecur && !!mbkRecur && finalDup.length === 0,
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// G6 scale smoke — full profiles run hundreds of episodes; the deep
+// lifecycle state machine was proven at G5, here we only verify scale
+// invariants: 1 active episode per detected key, idempotent + parallel
+// refresh, zero duplicates.
+// ---------------------------------------------------------------------------
+
+export interface EpisodeScaleReport {
+  mode: 'scale';
+  detectedFacts: number;
+  initialOpen: number;
+  idempotentRefresh: { created: number; resolved: number; cleared: number };
+  concurrentRefresh: { rejectedCalls: number; duplicates: number };
+  duplicateActiveKeys: number;
+  pass: boolean;
+  notes: string[];
+}
+
+export async function evaluateEpisodeScale(
+  h: Harness,
+  ctx: TenantCtx,
+  detectedKeys: string[],
+): Promise<EpisodeScaleReport> {
+  const notes: string[] = [];
+  const excMod = await apiImport('modules/exception/exception.service');
+  const excSvc = h.get((excMod as Record<string, unknown>).ExceptionService) as Svc;
+  const q = <T>(sql: unknown, ...args: unknown[]): Promise<T> =>
+    h.tenantPrisma.runAsTenant(ctx.tenantId, (tx) =>
+      (tx as Tx).$queryRaw<T>(sql, ...args),
+    );
+  const refresh = () =>
+    excSvc.refresh(ctx) as Promise<{
+      detected: number; created: number; resolved: number; cleared: number;
+    }>;
+  const dupQuery = () =>
+    q<{ anomaly_key: string; c: bigint }[]>(
+      Pr.Prisma.sql`SELECT anomaly_key, count(*) c FROM work_item
+        WHERE tenant_id=${ctx.tenantId}::uuid AND cleared_at IS NULL
+        GROUP BY anomaly_key HAVING count(*) > 1`,
+    );
+
+  const r1 = await refresh();
+  const active = await q<{ anomaly_key: string; status: string }[]>(
+    Pr.Prisma.sql`SELECT anomaly_key, status FROM work_item
+      WHERE tenant_id=${ctx.tenantId}::uuid AND cleared_at IS NULL`,
+  );
+  const keySet = new Set(detectedKeys);
+  const missing = detectedKeys.filter(
+    (k) => !active.some((e) => e.anomaly_key === k),
+  );
+  const dup1 = await dupQuery();
+  const notOpen = active.filter((e) => e.status !== 'OPEN');
+  if (missing.length) fail(notes, `${missing.length} detected keys lack an active episode`);
+  if (notOpen.length) fail(notes, `${notOpen.length} active episodes not OPEN`);
+  if (dup1.length) fail(notes, `duplicate active keys after initial refresh: ${dup1.length}`);
+  if (active.length !== keySet.size)
+    fail(notes, `active=${active.length} != detected=${keySet.size}`);
+
+  const r2 = await refresh();
+  if (r2.created !== 0 || r2.resolved !== 0 || r2.cleared !== 0)
+    fail(notes, `second refresh not idempotent: ${JSON.stringify(r2)}`);
+
+  const race = await Promise.allSettled([refresh(), refresh()]);
+  const rejectedCalls = race.filter((s) => s.status === 'rejected').length;
+  if (rejectedCalls) fail(notes, `concurrent refresh rejected ×${rejectedCalls}`);
+  const dup2 = await dupQuery();
+  if (dup2.length) fail(notes, `duplicate active keys after race: ${dup2.length}`);
+
+  return {
+    mode: 'scale',
+    detectedFacts: keySet.size,
+    initialOpen: r1.created,
+    idempotentRefresh: { created: r2.created, resolved: r2.resolved, cleared: r2.cleared },
+    concurrentRefresh: { rejectedCalls, duplicates: dup2.length },
+    duplicateActiveKeys: dup2.length,
+    pass: notes.length === 0 && rejectedCalls === 0 && !dup1.length && !dup2.length,
     notes,
   };
 }

@@ -1,15 +1,15 @@
 /**
- * G4 — fault injection. 13 primary anomaly types + 2 composites
- * (KEY_CONFLICT_RECURRENCE, CROSS_BRANCH_MULTI_BOOK). ALL injections
- * are DOMAIN_FLOW: real services, real state machines, no direct
- * mutation of bill/payment/ledger tables.
+ * G4–G6 — fault injection. Plan-driven: lib/fault/plan.ts allocates
+ * FaultScenarioPlan[] (deterministic namespaces, instance-scoped keys);
+ * this module is CONSTRUCTION only — it consumes plans through real
+ * domain flows (no direct mutation of bill/payment/ledger tables).
  *
- * Isolation: scenario accounts live in dedicated FAULT books so their
- * plans/readings/settlements never touch baseline members. Structural
- * scenarios (no-book / no-meter) simply get no membership.
+ * Isolation: scenario accounts live in dedicated FAULT books (seq
+ * 9000+) so their plans/readings/settlements never touch baseline
+ * members. Structural scenarios (no-book) simply get no membership.
  *
- * Scope: construction + Ground Truth only. No precision/recall, no
- * reconciler lifecycle, no operator evidence (that's G5).
+ * Ground Truth keys come from the INDEPENDENT oracle (frozen product
+ * contract literals) — never from production key helpers.
  */
 
 import { apiImport } from '../api-import.ts';
@@ -22,63 +22,42 @@ import {
   createBillingRun,
   executeBillingRun,
   generateAccounts,
+  mapLimit,
   services,
   type GeneratedAccount,
   type GeneratedBook,
 } from '../baseline/flow.ts';
-import { periodDay, type AccountPlan } from '../baseline/allocate.ts';
+import { periodDay, shiftPeriod, type AccountPlan } from '../baseline/allocate.ts';
+import { ANCHOR, oKey, T } from './oracle.ts';
+import {
+  allocateFaults,
+  DEFAULT_FAULT_PROFILE,
+  FAULT_KINDS,
+  KIND_SCENARIO,
+  NS,
+  type FaultProfile,
+  type FaultScenarioPlan,
+} from './plan.ts';
 
 const Pr = apiRequire('@prisma/client') as typeof import('@prisma/client');
 const Dec = Pr.Prisma.Decimal;
 const REQ = { user: { perms: ['*'] } };
 type Svc = Record<string, (...a: unknown[]) => unknown>;
 
-// Ground Truth keys come from the INDEPENDENT oracle (frozen product
-// contract literals) — never from production key helpers, so a format
-// drift in the product surfaces as a smoke mismatch.
-import { ANCHOR, oKey, T } from './oracle.ts';
-
-// deterministic seq space per scenario tag — seq ≥ 6000 is beyond the
-// --accounts hard cap (5000), so scenario account/customer/settle/meter
-// business keys can never collide with a baseline account's seq.
-export const TAG_SEQ: Record<string, number> = {
-  NBK: 6000, NAM: 6001, MAM: 6002, MBK: 6003, XBM: 6004,
-  QCR: 6005, QCJ: 6006, EST: 6007, WPL: 6008, FLD: 6009,
-  CFL: 6010, KCF: 6011, KCR: 6012, OVD: 6013,
-};
-export const SCENARIO_OF_TAG: Record<string, string> = {
-  NBK: 'NO_BOOK',
-  NAM: 'NO_ACTIVE_METER',
-  MAM: 'MULTI_ACTIVE_METER',
-  MBK: 'MULTI_BOOK',
-  XBM: 'CROSS_BRANCH_MULTI_BOOK',
-  QCR: 'READING_QC_REVIEW',
-  QCJ: 'READING_QC_REJECTED',
-  EST: 'ESTIMATE_STREAK',
-  WPL: 'REMOTE_EVENT_WAITING_PLAN',
-  FLD: 'REMOTE_EVENT_FAILED',
-  CFL: 'REMOTE_EVENT_CONFLICT',
-  KCF: 'REMOTE_EVENT_KEY_CONFLICT',
-  KCR: 'KEY_CONFLICT_RECURRENCE',
-  OVD: 'UNPAID_BILL_OVERDUE',
-};
-
-/** All 15 scenario keys — 13 primary + KEY_CONFLICT_RECURRENCE +
- * CROSS_BRANCH_MULTI_BOOK. UNBOUND has no tag (no account), so it is
- * appended here rather than keyed in SCENARIO_OF_TAG. */
+/** All scenario labels — 13 primary + 2 composites (order frozen). */
 export const SCENARIO_TYPES = [
-  ...Object.values(SCENARIO_OF_TAG),
-  'REMOTE_EVENT_UNBOUND',
+  ...FAULT_KINDS.map((k) => KIND_SCENARIO[k]),
 ] as const;
 
 interface InjectCtx {
   h: Harness;
   ctx: TenantCtx;
   seed: number;
-  books: { FA: GeneratedBook; FB: GeneratedBook; FC: GeneratedBook };
-  accounts: Map<string, GeneratedAccount>;
+  books: GeneratedBook[]; // fault books, branch-major order
+  accounts: Map<number, GeneratedAccount>; // accountSeq → account
   entries: GroundTruthEntry[];
   seqNoByBook: Map<string, number>;
+  items: Map<string, Map<string, string>>; // `${bookId}:${period}` → waId→itemId
 }
 
 export interface ExpectedAnomaly {
@@ -101,13 +80,17 @@ export async function injectFaults(
   branchIds: string[],
   faultPeriod: string, // historical; due_date already past
   readPeriod: string,  // baseline period for reading scenarios
+  opts: { concurrency: number; profile?: FaultProfile },
 ): Promise<InjectResult> {
+  const profile = opts.profile ?? DEFAULT_FAULT_PROFILE;
+  const alloc = allocateFaults(profile, branchIds.length);
   const ic: InjectCtx = {
     h, ctx, seed,
-    books: {} as InjectCtx['books'],
+    books: [],
     accounts: new Map(),
     entries: [],
     seqNoByBook: new Map(),
+    items: new Map(),
   };
   let events = 0;
 
@@ -133,84 +116,83 @@ export async function injectFaults(
   }>('modules/remote/canonical');
 
   // ---- helpers ----
-  const onboard = async (tag: string, installedAt: Date) => {
-    const seq = TAG_SEQ[tag];
-    const plan: AccountPlan = {
-      seq, tag: tag as AccountPlan['tag'], branchIdx: 0, bookIdx: 0,
-      remote: false, payProfile: 'A', usage: [10, 13],
-    };
-    const [a] = await generateAccounts(h, ctx, seed, [plan], 1, installedAt);
-    ic.accounts.set(tag, a);
-    return a;
-  };
+  const acct = (p: FaultScenarioPlan) => ic.accounts.get(p.accountSeq!)!;
+  const book = (idx: number) => ic.books[idx];
 
-  const member = async (book: GeneratedBook, a: GeneratedAccount) => {
-    const seqNo = (ic.seqNoByBook.get(book.id) ?? 0) + 1;
-    ic.seqNoByBook.set(book.id, seqNo);
-    await withTenantTx(h, 'ReadingBookService.addMemberTx', ctx.tenantId, (tx) =>
-      bookSvc.addMemberTx(tx, ctx, book.id, {
+  const member = (b: GeneratedBook, a: GeneratedAccount) => {
+    const seqNo = (ic.seqNoByBook.get(b.id) ?? 0) + 1;
+    ic.seqNoByBook.set(b.id, seqNo);
+    return withTenantTx(h, 'ReadingBookService.addMemberTx', ctx.tenantId, (tx) =>
+      bookSvc.addMemberTx(tx, ctx, b.id, {
         waterAccountId: a.waterAccountId, seqNo,
       } as never),
     );
   };
 
-  const genPlan = async (book: GeneratedBook, period: string) => {
+  const genPlan = async (b: GeneratedBook, period: string) => {
     const r = (await withTenantTx(h, 'ReadingPlanService.generateTx', ctx.tenantId, (tx) =>
       planSvc.generateTx(tx, ctx, {
-        bookId: book.id, period, planDate: periodDay(period, 5),
+        bookId: b.id, period, planDate: periodDay(period, 5),
       } as never),
     )) as { items: { id: string; waterAccountId: string }[] };
-    return new Map(r.items.map((i) => [i.waterAccountId, i.id]));
+    ic.items.set(
+      `${b.id}:${period}`,
+      new Map(r.items.map((i) => [i.waterAccountId, i.id])),
+    );
   };
 
-  const submitReading = async (
-    a: GeneratedAccount, items: Map<string, string>, period: string,
-  ) => {
-    const rows = (await withTenantTx(
+  const submitReading = (a: GeneratedAccount, b: GeneratedBook, period: string) =>
+    withTenantTx(
       h, 'MeterReadingService.createBatchTx', ctx.tenantId,
       (tx) => readingSvc.createBatchTx(tx, ctx, [{
-        planItemId: items.get(a.waterAccountId)!,
+        planItemId: ic.items.get(`${b.id}:${period}`)!.get(a.waterAccountId)!,
         resultType: 'ACTUAL',
         readingValue: new Dec(11),
         readDate: periodDay(period, 15),
         source: 'WEB',
       }] as never),
-    )) as { id: string }[];
-    return rows[0];
-  };
+    ).then((rows) => (rows as { id: string }[])[0]);
 
   const qc = (id: string, action: 'pass' | 'review' | 'reject') =>
     withTenantTx(h, 'MeterReadingService.qcTx', ctx.tenantId, (tx) =>
       readingSvc.qcTx(tx, ctx, id, action, REQ));
 
-  const settleFinal = async (a: GeneratedAccount, period: string, estimateReason?: string) =>
+  const settleFinal = (a: GeneratedAccount, period: string, estimated = false) =>
     withTenantTx(h, 'SettlementService.generateTx', ctx.tenantId, async (tx) => {
       const s = (await settleSvc.generateTx(tx, ctx, {
         waterAccountId: a.waterAccountId, period,
-        ...(estimateReason ? { estimateReason } : {}),
+        // EST path: operator override → isEstimated (MANUAL method);
+        // OVD path: real PASSED reading → usageQty override would throw
+        // OVERRIDE_TARGET_INVALID.
+        ...(estimated
+          ? {
+              usageQty: new Dec(10),
+              estimateReason: 'PILOT: operator override — meter unread',
+            }
+          : {}),
       } as never)) as { id: string };
       await settleSvc.finalizeTx(tx, ctx, s.id, REQ);
     });
 
   const entry = (
-    tag: string,
-    a: GeneratedAccount | null,
+    p: FaultScenarioPlan,
     anomalies: { type: string; key: string }[],
     orgOwnership: string[] = [],
     extraBiz: Record<string, string> = {},
     extraIds: Record<string, string> = {},
   ) => {
+    const a = p.accountSeq === null ? null : acct(p);
     ic.entries.push({
-      scenarioKey: keys.scenarioKey(SCENARIO_OF_TAG[tag], 0),
+      scenarioKey: p.scenarioKey,
       injectionMethod: 'DOMAIN_FLOW',
       reachableInNormalOperation: true,
       businessKeys: {
         ...(a
           ? {
               accountNo: a.accountNo,
-              customerNo: keys.customerNo(seed, tag, TAG_SEQ[tag]),
-              settleNo: keys.settleNo(seed, tag, TAG_SEQ[tag]),
-              meterNo: keys.meterNo(seed, TAG_SEQ[tag]),
+              customerNo: keys.customerNo(seed, p.kind, p.accountSeq!),
+              settleNo: keys.settleNo(seed, p.kind, p.accountSeq!),
+              meterNo: keys.meterNo(seed, p.accountSeq!),
             }
           : {}),
         ...extraBiz,
@@ -264,140 +246,139 @@ export async function injectFaults(
     return out;
   };
 
-  // ---- fault books: FA+FB (branch0), FC (branch1) ----
-  const mkBook = async (seq: number, orgUnitId: string): Promise<GeneratedBook> => {
+  // ---- fault books: per branch × faultBooksPerBranch, seq 9000+ ----
+  const perBook = profile.faultBooksPerBranch;
+  for (const seq of alloc.bookSeqs) {
+    const b = Math.floor((seq - NS.BOOK_BASE) / perBook);
     const r = (await withTenantTx(h, 'ReadingBookService.createTx', ctx.tenantId, (tx) =>
       bookSvc.createTx(tx, ctx, {
         bookNo: keys.bookCode(seed, seq),
         name: keys.bookName(seed, seq),
-        orgUnitId, cadence: 'MONTHLY', meterChannel: 'MECHANICAL',
+        orgUnitId: branchIds[b], cadence: 'MONTHLY', meterChannel: 'MECHANICAL',
       } as never),
     )) as { id: string };
-    return { id: r.id, branchIdx: 0, seq, bookNo: keys.bookCode(seed, seq), orgUnitId };
-  };
-  ic.books = {
-    FA: await mkBook(900, branchIds[0]),
-    FB: await mkBook(901, branchIds[0]),
-    FC: await mkBook(902, branchIds[1]),
-  };
+    ic.books.push({ id: r.id, branchIdx: b, seq, bookNo: keys.bookCode(seed, seq), orgUnitId: branchIds[b] });
+  }
 
   const installedAt = periodDay(readPeriod, 1);
-  // next calendar month — no plan is generated for it (WAITING_PLAN slot)
-  const np = (() => {
-    const y = +readPeriod.slice(0, 4), m = +readPeriod.slice(4);
-    return m === 12 ? `${y + 1}01` : `${y}${String(m + 1).padStart(2, '0')}`;
-  })();
-
-  // ---- scenario accounts ----
   const installedOvd = periodDay(faultPeriod, 1);
-  const A = {
-    NBK: await onboard('NBK', installedAt),
-    NAM: await onboard('NAM', installedAt),
-    MAM: await onboard('MAM', installedAt),
-    MBK: await onboard('MBK', installedAt),
-    XBM: await onboard('XBM', installedAt),
-    QCR: await onboard('QCR', installedAt),
-    QCJ: await onboard('QCJ', installedAt),
-    EST: await onboard('EST', installedAt),
-    WPL: await onboard('WPL', installedAt),
-    FLD: await onboard('FLD', installedAt),
-    CFL: await onboard('CFL', installedAt),
-    KCF: await onboard('KCF', installedAt),
-    KCR: await onboard('KCR', installedAt),
-    OVD: await onboard('OVD', installedOvd),
-  };
+  const np = shiftPeriod(readPeriod, 1); // no plan is generated for it
 
-  // memberships (only NBK stays bookless; NAM joins FA so the
-  // NO_ACTIVE_METER anomaly is primary-isolated, no NO_BOOK co-hit)
-  await member(ic.books.FA, A.NAM);
-  await member(ic.books.FA, A.MAM);
-  await member(ic.books.FA, A.MBK); await member(ic.books.FB, A.MBK);
-  await member(ic.books.FA, A.XBM); await member(ic.books.FC, A.XBM);
-  for (const a of [A.QCR, A.QCJ, A.EST, A.WPL, A.FLD, A.CFL, A.KCF, A.KCR, A.OVD]) {
-    await member(ic.books.FA, a);
+  const byKind = (k: string) => alloc.plans.filter((p) => p.kind === k);
+
+  // ---- scenario accounts (batched; OVD installs in faultPeriod) ----
+  const planFor = (p: FaultScenarioPlan): AccountPlan => ({
+    seq: p.accountSeq!, tag: p.kind, branchIdx: p.branchIdx, bookIdx: 0,
+    remote: false, payProfile: 'A', usage: [10, 13],
+  });
+  const accountPlans = alloc.plans.filter((p) => p.accountSeq !== null);
+  for (const [kinds, at] of [
+    [accountPlans.filter((p) => p.kind !== 'OVD'), installedAt],
+    [accountPlans.filter((p) => p.kind === 'OVD'), installedOvd],
+  ] as const) {
+    const gen = await generateAccounts(
+      h, ctx, seed, kinds.map(planFor), opts.concurrency, at,
+    );
+    for (const a of gen) ic.accounts.set(a.plan.seq, a);
   }
-  await member(ic.books.FB, A.FLD); // 2nd book → ambiguous plan items
+
+  // ---- memberships (before plans so items exist) ----
+  await mapLimit(accountPlans, opts.concurrency, async (p) => {
+    if (p.primaryBookIdx !== null) await member(book(p.primaryBookIdx), acct(p));
+    if (p.secondaryBookIdx !== null) await member(book(p.secondaryBookIdx), acct(p));
+  });
+
+  // ---- reading plans: every NON-EMPTY fault book × readPeriod;
+  //      non-empty primary books × faultPeriod (OVD members live in
+  //      primary books only). generateTx rejects EMPTY_BOOK. ----
+  const nonEmpty = ic.books.filter((b) => (ic.seqNoByBook.get(b.id) ?? 0) > 0);
+  for (const b of nonEmpty) await genPlan(b, readPeriod);
+  for (let i = 0; i < ic.books.length; i += perBook)
+    if ((ic.seqNoByBook.get(ic.books[i].id) ?? 0) > 0)
+      await genPlan(ic.books[i], faultPeriod);
+
+  // FLD: drop the secondary membership AFTER plans — current
+  // BookMeter=1 but 2 historical plan items → PLAN_ITEM_AMBIGUOUS.
+  await mapLimit(byKind('FLD'), opts.concurrency, (p) =>
+    withTenantTx(h, 'ReadingBookService.removeMemberTx', ctx.tenantId, (tx) =>
+      bookSvc.removeMemberTx(tx, ctx, book(p.secondaryBookIdx!).id, acct(p).waterAccountId, REQ),
+    ),
+  );
 
   // ---- structural anomalies ----
-  // NAM: in FA (BookMeter=1) + remove the only ACTIVE installation →
-  // isolated NO_ACTIVE_METER, anchor ACCOUNT, owner = FA's org.
-  await withTenantTx(h, 'MeterInstallationService.removeTx', ctx.tenantId, (tx) =>
-    install.removeTx(tx, ctx, A.NAM.installationId, {
-      finalReading: new Dec(0), removedAt: periodDay(readPeriod, 2),
-    }, REQ),
-  );
-  entry('NAM', A.NAM, [
-    { type: T.NO_ACTIVE_METER, key: oKey.wa(A.NAM.waterAccountId, T.NO_ACTIVE_METER) },
-  ], [ic.books.FA.orgUnitId]);
-  // NBK: bookless → NO_BOOK only, TENANT-anchored (no determinable owner)
-  entry('NBK', A.NBK, [
-    { type: T.NO_BOOK, key: oKey.wa(A.NBK.waterAccountId, T.NO_BOOK) },
-  ]);
+  // NAM: member of primary book + remove only ACTIVE installation →
+  // isolated NO_ACTIVE_METER, anchor ACCOUNT.
+  await mapLimit(byKind('NAM'), opts.concurrency, async (p) => {
+    await withTenantTx(h, 'MeterInstallationService.removeTx', ctx.tenantId, (tx) =>
+      install.removeTx(tx, ctx, acct(p).installationId, {
+        finalReading: new Dec(0), removedAt: periodDay(readPeriod, 2),
+      }, REQ),
+    );
+    entry(p, [
+      { type: T.NO_ACTIVE_METER, key: oKey.wa(acct(p).waterAccountId, T.NO_ACTIVE_METER) },
+    ], [book(p.primaryBookIdx!).orgUnitId]);
+  });
 
-  const m2 = (await withTenantTx(h, 'MeterService.createTx', ctx.tenantId, (tx) =>
-    meter.createTx(tx, ctx, { meterNo: keys.meterNo(seed, 6950), caliber: 'DN15' } as never),
-  )) as { id: string };
-  const inst2 = (await withTenantTx(h, 'MeterInstallationService.installTx', ctx.tenantId, (tx) =>
-    install.installTx(tx, ctx, {
-      waterAccountId: A.MAM.waterAccountId, meterId: m2.id,
-      initialReading: new Dec(0), installedAt: periodDay(readPeriod, 2), reason: 'NEW',
-    } as never),
-  )) as { id: string };
-  entry('MAM', A.MAM, [
-    { type: T.MULTI_ACTIVE_METER, key: oKey.wa(A.MAM.waterAccountId, T.MULTI_ACTIVE_METER) },
-  ], [ic.books.FA.orgUnitId], {}, { extraInstallationId: inst2.id });
+  // NBK: bookless → NO_BOOK only, TENANT-anchored.
+  for (const p of byKind('NBK')) {
+    entry(p, [
+      { type: T.NO_BOOK, key: oKey.wa(acct(p).waterAccountId, T.NO_BOOK) },
+    ]);
+  }
 
-  // coveringOrgs is a Set of book orgs — FA and FB share branch0 so
-  // MBK's covering set dedupes to a single org.
-  entry('MBK', A.MBK, [
-    { type: T.MULTI_BOOK, key: oKey.wa(A.MBK.waterAccountId, T.MULTI_BOOK) },
-  ], [ic.books.FA.orgUnitId]);
-  entry('XBM', A.XBM, [
-    { type: T.MULTI_BOOK, key: oKey.wa(A.XBM.waterAccountId, T.MULTI_BOOK) },
-  ], [ic.books.FA.orgUnitId, ic.books.FC.orgUnitId]);
+  // MAM: second meter + ACTIVE install.
+  await mapLimit(byKind('MAM'), opts.concurrency, async (p) => {
+    const m = (await withTenantTx(h, 'MeterService.createTx', ctx.tenantId, (tx) =>
+      meter.createTx(tx, ctx, { meterNo: keys.meterNo(seed, p.extraMeterSeq!), caliber: 'DN15' } as never),
+    )) as { id: string };
+    const inst = (await withTenantTx(h, 'MeterInstallationService.installTx', ctx.tenantId, (tx) =>
+      install.installTx(tx, ctx, {
+        waterAccountId: acct(p).waterAccountId, meterId: m.id,
+        initialReading: new Dec(0), installedAt: periodDay(readPeriod, 2), reason: 'NEW',
+      } as never),
+    )) as { id: string };
+    entry(p, [
+      { type: T.MULTI_ACTIVE_METER, key: oKey.wa(acct(p).waterAccountId, T.MULTI_ACTIVE_METER) },
+    ], [book(p.primaryBookIdx!).orgUnitId], {}, { extraInstallationId: inst.id });
+  });
 
-  // ---- fault-book plans ----
-  const itemsRP = await genPlan(ic.books.FA, readPeriod);
-  await genPlan(ic.books.FB, readPeriod);
-  const itemsFP = await genPlan(ic.books.FA, faultPeriod);
-
-  // FLD: 2 historical plan items exist (FA+FB both generated) — now
-  // remove the FB membership so CURRENT BookMeter=1 while matching
-  // plan items stay 2 → the bound event fails PLAN_ITEM_AMBIGUOUS
-  // WITHOUT a MULTI_BOOK co-anomaly.
-  await withTenantTx(h, 'ReadingBookService.removeMemberTx', ctx.tenantId, (tx) =>
-    bookSvc.removeMemberTx(tx, ctx, ic.books.FB.id, A.FLD.waterAccountId, REQ),
-  );
+  // MBK: two books same branch → coveringOrgs dedupes to one org.
+  for (const p of byKind('MBK')) {
+    entry(p, [
+      { type: T.MULTI_BOOK, key: oKey.wa(acct(p).waterAccountId, T.MULTI_BOOK) },
+    ], [book(p.primaryBookIdx!).orgUnitId]);
+  }
+  // XBM (composite): two books across branches → 2 covering orgs.
+  for (const p of byKind('XBM')) {
+    entry(p, [
+      { type: T.MULTI_BOOK, key: oKey.wa(acct(p).waterAccountId, T.MULTI_BOOK) },
+    ], [book(p.primaryBookIdx!).orgUnitId, book(p.secondaryBookIdx!).orgUnitId]);
+  }
 
   // ---- QC anomalies ----
-  const rQCR = await submitReading(A.QCR, itemsRP, readPeriod);
-  await qc(rQCR.id, 'review');
-  entry('QCR', A.QCR, [
-    { type: T.READING_QC_REVIEW, key: oKey.qcReview(rQCR.id) },
-  ], [ic.books.FA.orgUnitId], { period: readPeriod }, { readingId: rQCR.id });
-
-  const rQCJ = await submitReading(A.QCJ, itemsRP, readPeriod);
-  await qc(rQCJ.id, 'reject');
-  entry('QCJ', A.QCJ, [
-    { type: T.READING_QC_REJECTED, key: oKey.qcRejected(rQCJ.id) },
-  ], [ic.books.FA.orgUnitId], { period: readPeriod }, { readingId: rQCJ.id });
+  await mapLimit(byKind('QCR'), opts.concurrency, async (p) => {
+    const r = await submitReading(acct(p), book(p.primaryBookIdx!), readPeriod);
+    await qc(r.id, 'review');
+    entry(p, [
+      { type: T.READING_QC_REVIEW, key: oKey.qcReview(r.id) },
+    ], [book(p.primaryBookIdx!).orgUnitId], { period: readPeriod }, { readingId: r.id });
+  });
+  await mapLimit(byKind('QCJ'), opts.concurrency, async (p) => {
+    const r = await submitReading(acct(p), book(p.primaryBookIdx!), readPeriod);
+    await qc(r.id, 'reject');
+    entry(p, [
+      { type: T.READING_QC_REJECTED, key: oKey.qcRejected(r.id) },
+    ], [book(p.primaryBookIdx!).orgUnitId], { period: readPeriod }, { readingId: r.id });
+  });
 
   // ---- ESTIMATE_STREAK: 2 consecutive estimated settlements ----
-  // usageQty override → still isEstimated (MANUAL method); threshold=2
-  // (no tenant param) so readPeriod+np suffice.
-  for (const period of [readPeriod, np]) {
-    await withTenantTx(h, 'SettlementService.generateTx', ctx.tenantId, async (tx) => {
-      const s = (await settleSvc.generateTx(tx, ctx, {
-        waterAccountId: A.EST.waterAccountId, period,
-        usageQty: new Dec(10),
-        estimateReason: 'PILOT: operator override — meter unread',
-      } as never)) as { id: string };
-      await settleSvc.finalizeTx(tx, ctx, s.id, REQ);
-    });
-  }
-  entry('EST', A.EST, [
-    { type: T.ESTIMATE_STREAK, key: oKey.wa(A.EST.waterAccountId, T.ESTIMATE_STREAK) },
-  ], [ic.books.FA.orgUnitId]);
+  await mapLimit(byKind('EST'), opts.concurrency, async (p) => {
+    await settleFinal(acct(p), readPeriod, true);
+    await settleFinal(acct(p), np, true);
+    entry(p, [
+      { type: T.ESTIMATE_STREAK, key: oKey.wa(acct(p).waterAccountId, T.ESTIMATE_STREAK) },
+    ], [book(p.primaryBookIdx!).orgUnitId]);
+  });
 
   // ---- remote infra for bound scenarios ----
   const source = (await withTenantTx(h, 'RemoteSourceService.createTx', ctx.tenantId, (tx) =>
@@ -407,9 +388,8 @@ export async function injectFaults(
     } as never),
   )) as { id: string };
 
-  let devSeq = 6910;
-  const bindDevice = async (a: GeneratedAccount) => {
-    const vkey = keys.deviceNo(seed, devSeq++);
+  const bindDevice = async (a: GeneratedAccount, deviceSeq: number) => {
+    const vkey = keys.deviceNo(seed, deviceSeq);
     const d = (await withTenantTx(h, 'RemoteDeviceService.createDeviceTx', ctx.tenantId, (tx) =>
       deviceSvc.createDeviceTx(tx, ctx, {
         remoteSourceId: source.id, vendorDeviceKey: vkey,
@@ -424,106 +404,152 @@ export async function injectFaults(
     );
     return { deviceId: d.id, vkey };
   };
-
-  // UNBOUND — unknown vendorDeviceKey (no account)
-  const unbEv = mkEvent(keys.deviceNo(seed, 6999), readPeriod, 69990, 50);
-  const unbOut = await ingest(source.id, [unbEv]);
-  ic.entries.push({
-    scenarioKey: keys.scenarioKey('REMOTE_EVENT_UNBOUND', 0),
-    injectionMethod: 'DOMAIN_FLOW',
-    reachableInNormalOperation: true,
-    businessKeys: { externalEventKey: unbEv.externalEventKey, vendorDeviceKey: unbEv.vendorDeviceKey },
-    entityIds: { eventId: unbOut[0].eventId!, remoteSourceId: source.id },
-    expected: {
-      anomalies: [{
-        type: T.REMOTE_EVENT_UNBOUND,
-        key: oKey.eventUnbound(unbOut[0].eventId!),
-        anchor: ANCHOR[T.REMOTE_EVENT_UNBOUND],
-        lifecycle: ['active'],
-      }],
-      orgOwnership: [],
-      financialEffect: null,
+  // devices for all bound kinds (UNBOUND gets a vendor key, no device)
+  const devBySeq = new Map<number, string>();
+  await mapLimit(
+    alloc.plans.filter((p) => p.deviceSeq !== null && p.kind !== 'UNBOUND'),
+    opts.concurrency,
+    async (p) => {
+      const d = await bindDevice(acct(p), p.deviceSeq!);
+      devBySeq.set(p.deviceSeq!, d.vkey);
     },
-  });
+  );
+
+  // UNBOUND — unknown vendorDeviceKey events (no account)
+  {
+    const ps = byKind('UNBOUND');
+    const out = await ingest(source.id, ps.map((p, i) =>
+      mkEvent(keys.deviceNo(seed, p.deviceSeq!), readPeriod, p.eventSeq!, 50 + i),
+    ));
+    ps.forEach((p, i) =>
+      ic.entries.push({
+        scenarioKey: p.scenarioKey,
+        injectionMethod: 'DOMAIN_FLOW',
+        reachableInNormalOperation: true,
+        businessKeys: {
+          externalEventKey: keys.externalEventKey(seed, p.eventSeq!),
+          vendorDeviceKey: keys.deviceNo(seed, p.deviceSeq!),
+        },
+        entityIds: { eventId: out[i].eventId!, remoteSourceId: source.id },
+        expected: {
+          anomalies: [{
+            type: T.REMOTE_EVENT_UNBOUND,
+            key: oKey.eventUnbound(out[i].eventId!),
+            anchor: ANCHOR[T.REMOTE_EVENT_UNBOUND],
+            lifecycle: ['active'],
+          }],
+          orgOwnership: [],
+          financialEffect: null,
+        },
+      }),
+    );
+  }
 
   // WAITING_PLAN — bound device, event period with no plan item
-  const wplDev = await bindDevice(A.WPL);
-  const wplEv = mkEvent(wplDev.vkey, np, 69991, 66);
-  const wplOut = await ingest(source.id, [wplEv]);
-  entry('WPL', A.WPL, [
-    { type: T.REMOTE_EVENT_WAITING_PLAN, key: oKey.eventWaitingPlan(wplOut[0].eventId!) },
-  ], [ic.books.FA.orgUnitId], { externalEventKey: wplEv.externalEventKey }, { eventId: wplOut[0].eventId! });
-
-  // FAILED — ambiguous plan items (FLD in FA+FB, both planned)
-  const fldDev = await bindDevice(A.FLD);
-  const fldEv = mkEvent(fldDev.vkey, readPeriod, 69992, 44);
-  const fldOut = await ingest(source.id, [fldEv]);
-  // FLD: isolated REMOTE_EVENT_FAILED — current BookMeter=1 (FB
-  // removed), 2 historical plan items remain → FAILED, no MULTI_BOOK.
-  entry('FLD', A.FLD, [
-    { type: T.REMOTE_EVENT_FAILED, key: oKey.eventFailed(fldOut[0].eventId!) },
-  ], [ic.books.FA.orgUnitId], { externalEventKey: fldEv.externalEventKey }, { eventId: fldOut[0].eventId! });
-
-  // CONFLICT — completed non-rejected reading + remote event same slot
-  const rCFL = await submitReading(A.CFL, itemsRP, readPeriod);
-  await qc(rCFL.id, 'pass');
-  const cflDev = await bindDevice(A.CFL);
-  const cflEv = mkEvent(cflDev.vkey, readPeriod, 69993, 55);
-  const cflOut = await ingest(source.id, [cflEv]);
-  entry('CFL', A.CFL, [
-    { type: T.REMOTE_EVENT_CONFLICT, key: oKey.eventConflict(cflOut[0].eventId!) },
-  ], [ic.books.FA.orgUnitId], { externalEventKey: cflEv.externalEventKey }, { eventId: cflOut[0].eventId! });
-
-  // KEY_CONFLICT — first event converts; re-ingest same key, new payload
-  const kcfDev = await bindDevice(A.KCF);
-  const kcfEv1 = mkEvent(kcfDev.vkey, readPeriod, 69994, 77);
-  await ingest(source.id, [kcfEv1]);
-  const kcfEv2 = mkEvent(kcfDev.vkey, readPeriod, 69994, 88);
-  const kcfOut2 = await ingest(source.id, [kcfEv2]);
-  const kcfEventId = kcfOut2[0].eventId!; // issue lands on the ORIGINAL row
-  entry('KCF', A.KCF, [
-    { type: T.REMOTE_EVENT_KEY_CONFLICT, key: oKey.eventKeyConflict(kcfEventId, 1) },
-  ], [ic.books.FA.orgUnitId], { externalEventKey: kcfEv1.externalEventKey }, { eventId: kcfEventId });
-
-  // KEY_CONFLICT_RECURRENCE — same key conflicts 3× → occurrences=3
-  const kcrDev = await bindDevice(A.KCR);
-  const kcrEv1 = mkEvent(kcrDev.vkey, readPeriod, 69995, 90);
-  await ingest(source.id, [kcrEv1]);
-  let kcrEventId = '';
-  for (const v of [91, 92, 93]) {
-    const o = await ingest(source.id, [mkEvent(kcrDev.vkey, readPeriod, 69995, v)]);
-    kcrEventId = o[0].eventId!;
+  {
+    const ps = byKind('WPL');
+    const out = await ingest(source.id, ps.map((p, i) =>
+      mkEvent(devBySeq.get(p.deviceSeq!)!, np, p.eventSeq!, 66 + i),
+    ));
+    ps.forEach((p, i) =>
+      entry(p, [
+        { type: T.REMOTE_EVENT_WAITING_PLAN, key: oKey.eventWaitingPlan(out[i].eventId!) },
+      ], [book(p.primaryBookIdx!).orgUnitId],
+        { externalEventKey: keys.externalEventKey(seed, p.eventSeq!) },
+        { eventId: out[i].eventId! }),
+    );
   }
-  entry('KCR', A.KCR, [
-    { type: T.REMOTE_EVENT_KEY_CONFLICT, key: oKey.eventKeyConflict(kcrEventId, 3) },
-  ], [ic.books.FA.orgUnitId], { externalEventKey: kcrEv1.externalEventKey }, { eventId: kcrEventId });
 
-  // ---- UNPAID_BILL_OVERDUE: real bill in faultPeriod, unpaid ----
-  const rOVD = await submitReading(A.OVD, itemsFP, faultPeriod);
-  await qc(rOVD.id, 'pass');
-  await settleFinal(A.OVD, faultPeriod);
-  const runId = await createBillingRun(h, ctx, faultPeriod);
-  const runStatus = await executeBillingRun(h, ctx, runId);
-  if (runStatus !== 'POSTED') throw new Error(`fault billing ${runId} ended ${runStatus}`);
-  const ovdBill = await h.tenantPrisma.runAsTenant(ctx.tenantId, async (tx) => {
-    const t2 = tx as { $queryRaw<T>(q: unknown): Promise<T> };
-    const rows = await t2.$queryRaw<{ id: string }[]>(
-      Pr.Prisma.sql`SELECT id::text FROM bill WHERE tenant_id=${ctx.tenantId}::uuid
-        AND water_account_id=${A.OVD.waterAccountId}::uuid AND period=${faultPeriod}
-        AND status='POSTED' LIMIT 1`);
-    return rows[0];
+  // FAILED — ambiguous plan items (2 historical items, 1 current book)
+  {
+    const ps = byKind('FLD');
+    const out = await ingest(source.id, ps.map((p, i) =>
+      mkEvent(devBySeq.get(p.deviceSeq!)!, readPeriod, p.eventSeq!, 44 + i),
+    ));
+    ps.forEach((p, i) =>
+      entry(p, [
+        { type: T.REMOTE_EVENT_FAILED, key: oKey.eventFailed(out[i].eventId!) },
+      ], [book(p.primaryBookIdx!).orgUnitId],
+        { externalEventKey: keys.externalEventKey(seed, p.eventSeq!) },
+        { eventId: out[i].eventId! }),
+    );
+  }
+
+  // CONFLICT — passed manual reading + remote event same slot
+  await mapLimit(byKind('CFL'), opts.concurrency, async (p) => {
+    const r = await submitReading(acct(p), book(p.primaryBookIdx!), readPeriod);
+    await qc(r.id, 'pass');
+    const out = await ingest(source.id, [
+      mkEvent(devBySeq.get(p.deviceSeq!)!, readPeriod, p.eventSeq!, 55),
+    ]);
+    entry(p, [
+      { type: T.REMOTE_EVENT_CONFLICT, key: oKey.eventConflict(out[0].eventId!) },
+    ], [book(p.primaryBookIdx!).orgUnitId],
+      { externalEventKey: keys.externalEventKey(seed, p.eventSeq!), period: readPeriod },
+      { eventId: out[0].eventId!, readingId: r.id });
   });
-  entry('OVD', A.OVD, [
-    { type: T.UNPAID_BILL_OVERDUE, key: oKey.bill(ovdBill.id) },
-  ], [ic.books.FA.orgUnitId], { period: faultPeriod }, { billId: ovdBill.id });
+
+  // KEY_CONFLICT — ev1 converts; same externalEventKey, new payload →
+  // occurrence N lands on the ORIGINAL event row.
+  for (const [kind, occur] of [['KCF', 1], ['KCR', 3]] as const) {
+    const ps = byKind(kind);
+    if (!ps.length) continue;
+    await ingest(source.id, ps.map((p, i) =>
+      mkEvent(devBySeq.get(p.deviceSeq!)!, readPeriod, p.eventSeq!, 77 + i),
+    ));
+    let eventIds: string[] = [];
+    for (let o = 0; o < occur; o++) {
+      const out = await ingest(source.id, ps.map((p, i) =>
+        mkEvent(devBySeq.get(p.deviceSeq!)!, readPeriod, p.eventSeq!, 100 + o * 10 + i),
+      ));
+      eventIds = out.map((x) => x.eventId!);
+    }
+    ps.forEach((p, i) =>
+      entry(p, [
+        { type: T.REMOTE_EVENT_KEY_CONFLICT, key: oKey.eventKeyConflict(eventIds[i], occur) },
+      ], [book(p.primaryBookIdx!).orgUnitId],
+        { externalEventKey: keys.externalEventKey(seed, p.eventSeq!) },
+        { eventId: eventIds[i] }),
+    );
+  }
+
+  // ---- UNPAID_BILL_OVERDUE: real bills in faultPeriod, unpaid ----
+  const ovdPlans = byKind('OVD');
+  await mapLimit(ovdPlans, opts.concurrency, async (p) => {
+    const r = await submitReading(acct(p), book(p.primaryBookIdx!), faultPeriod);
+    await qc(r.id, 'pass');
+    await settleFinal(acct(p), faultPeriod);
+  });
+  if (ovdPlans.length) {
+    const runId = await createBillingRun(h, ctx, faultPeriod);
+    const st = await executeBillingRun(h, ctx, runId);
+    if (st !== 'POSTED') throw new Error(`fault billing ${runId} ended ${st}`);
+    const waIds = ovdPlans.map((p) => acct(p).waterAccountId);
+    const bills = await h.tenantPrisma.runAsTenant(ctx.tenantId, (tx) =>
+      (tx as { $queryRaw<T>(q: unknown): Promise<T> }).$queryRaw<{ id: string; water_account_id: string }[]>(
+        Pr.Prisma.sql`SELECT id::text, water_account_id::text FROM bill
+          WHERE tenant_id=${ctx.tenantId}::uuid AND period=${faultPeriod}
+            AND water_account_id = ANY(${waIds}::uuid[]) AND status='POSTED'`),
+    );
+    const billByWa = new Map(bills.map((b) => [b.water_account_id, b.id]));
+    for (const p of ovdPlans) {
+      const billId = billByWa.get(acct(p).waterAccountId)!;
+      entry(p, [
+        { type: T.UNPAID_BILL_OVERDUE, key: oKey.bill(billId) },
+      ], [book(p.primaryBookIdx!).orgUnitId], { period: faultPeriod }, { billId });
+    }
+  }
 
   // ---- EST bills: post + pay cash so the tenant drawer stays clean ----
-  for (const period of [readPeriod, np]) {
-    const rid = await createBillingRun(h, ctx, period);
-    const st = await executeBillingRun(h, ctx, rid);
-    if (st !== 'POSTED') throw new Error(`est billing ${rid} ended ${st}`);
+  const estPlans = byKind('EST');
+  if (estPlans.length) {
+    for (const period of [readPeriod, np]) {
+      const rid = await createBillingRun(h, ctx, period);
+      const st = await executeBillingRun(h, ctx, rid);
+      if (st !== 'POSTED') throw new Error(`est billing ${rid} ended ${st}`);
+    }
+    await applyPayments(h, ctx, estPlans.map(acct), opts.concurrency);
   }
-  await applyPayments(h, ctx, [A.EST], 1);
 
   const expectedAnomalies: ExpectedAnomaly[] = ic.entries.flatMap((e) =>
     e.expected.anomalies.map((a) => ({
@@ -538,7 +564,8 @@ export async function injectFaults(
     expectedAnomalies,
     stats: {
       scenarioAccounts: ic.accounts.size,
-      faultBooks: 3,
+      scenarios: alloc.plans.length,
+      faultBooks: ic.books.length,
       remoteEvents: events,
       convertedRemote,
       groundTruthEntries: ic.entries.length,

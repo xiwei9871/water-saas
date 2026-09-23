@@ -33,6 +33,8 @@ import {
 } from './flow.ts';
 import { verifyBaseline, type ExpectedFact, type VerifyResult } from './verify.ts';
 import { injectFaults } from '../fault/inject.ts';
+import type { FaultProfile } from '../fault/plan.ts';
+import { allocateFaults } from '../fault/plan.ts';
 
 export interface BaselineResult {
   phases: PhaseRecord[];
@@ -93,11 +95,21 @@ export async function runBaseline(
   h: Harness,
   tenantCtx: TenantCtx,
   args: CliArgs,
-  opts?: { periods?: string[]; asOf?: string },
+  opts?: { periods?: string[]; asOf?: string; faultProfile?: FaultProfile },
 ): Promise<BaselineResult> {
   const sink = new PhaseSink();
   const seed = args.seed;
-  const alloc = { ...DEFAULT_ALLOCATION, accounts: args.accounts };
+  // full profiles own the account budget: clean = total - scenario accounts
+  const fp = opts?.faultProfile;
+  const alloc = {
+    ...DEFAULT_ALLOCATION,
+    accounts: fp
+      ? allocateFaults(fp, fp.branches).cleanAccounts ?? args.accounts
+      : args.accounts,
+    branches: fp?.branches ?? DEFAULT_ALLOCATION.branches,
+    booksPerBranch: fp?.booksPerBranch ?? DEFAULT_ALLOCATION.booksPerBranch,
+    remotePct: fp?.remoteRatio ?? DEFAULT_ALLOCATION.remotePct,
+  };
   const periods = opts?.periods ?? listPeriods(args.periodFrom, args.periodTo);
   const plans = allocateAccounts(alloc);
 
@@ -199,12 +211,14 @@ export async function runBaseline(
     return { rows: 1 };
   });
 
-  // --- G4 fault injection (opt-in) — AFTER clean baseline, BEFORE verify ---
+  // --- fault injection — AFTER clean baseline, BEFORE verify ---
+  // --faults → legacy 15-scenario matrix; non-default profile → its
+  // profile-driven scenario matrix (G6 full profile implies faults).
   let faultGt: GroundTruthEntry[] = [];
   let faultStats: Record<string, number> | undefined;
   let expectedAnomalies: ExpectedFact[] | undefined;
   let extraRemoteConverted = 0;
-  if (args.faults) {
+  if (args.faults || fp) {
     const fr = await sink.run('fault-inject', async () => {
       // faultPeriod: 3 months before asOf → its bill due date is already
       // past (periodEnd+45d < asOf) → real UNPAID_BILL_OVERDUE.
@@ -212,6 +226,7 @@ export async function runBaseline(
       const faultPeriod = shiftPeriod(asOfMonth, -3);
       const r = await injectFaults(
         h, ctx, seed, boot.branchIds, faultPeriod, periods[0],
+        { concurrency: args.concurrency, profile: fp },
       );
       return { rows: r.stats.groundTruthEntries, value: r };
     });

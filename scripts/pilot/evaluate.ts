@@ -25,7 +25,7 @@ import {
   type ExpectedAnomaly,
   type GroundTruthContext,
 } from './lib/evaluate/metrics.ts';
-import { evaluateEpisodes } from './lib/evaluate/episodes.ts';
+import { evaluateEpisodeScale, evaluateEpisodes } from './lib/evaluate/episodes.ts';
 import { writeJsonAtomic } from './lib/manifest.ts';
 
 const fatal = (e: unknown): never => {
@@ -167,7 +167,17 @@ async function main(): Promise<void> {
       // ---- B. episode lifecycle (mutates facts — detector metrics
       //    are already frozen in the artifact above) ----
       if (args.episodes) {
-        const ep = await evaluateEpisodes(h, ctx, run.seed, run.gt.entries);
+        // The deep lifecycle suite needs the legacy 15-fixture GT
+        // shape (:000000 single instances). Full profiles run the
+        // scale smoke instead — the state machine is already proven.
+        const lifecycleFixtures = run.gt.entries.some(
+          (e) => e.scenarioKey === 'NO_BOOK:000000',
+        );
+        const ep = lifecycleFixtures
+          ? await evaluateEpisodes(h, ctx, run.seed, run.gt.entries)
+          : await evaluateEpisodeScale(
+              h, ctx, anchored.map((f) => f.key),
+            );
         await writeJsonAtomic(
           join(args.runDir, 'episode-evaluation.json'),
           {
@@ -177,10 +187,14 @@ async function main(): Promise<void> {
             ...ep,
           },
         );
+        const scale = ep as { concurrentCreate?: { rejectedCalls: number; activeCount: number } };
         console.log(
-          `episodes: initial=${ep.initialOpen} idem=${ep.idempotentRefresh.created}/${ep.idempotentRefresh.resolved}/${ep.idempotentRefresh.cleared} ` +
-            `race=${ep.concurrentCreate.rejectedCalls}rej/${ep.concurrentCreate.activeCount}active ` +
-            `dup=${ep.duplicateActiveKeys} guard=${ep.activeResolveRejected} ` +
+          `episodes(${lifecycleFixtures ? 'lifecycle' : 'scale'}): ` +
+            `initial=${ep.initialOpen} idem=${ep.idempotentRefresh.created}/${ep.idempotentRefresh.resolved}/${ep.idempotentRefresh.cleared} ` +
+            (lifecycleFixtures
+              ? `race=${scale.concurrentCreate?.rejectedCalls}rej/${scale.concurrentCreate?.activeCount}active ` +
+                `dup=${ep.duplicateActiveKeys} guard=${(ep as { activeResolveRejected?: boolean }).activeResolveRejected} `
+              : `dup=${ep.duplicateActiveKeys} `) +
             `→ ${ep.pass ? 'PASS' : 'FAIL'}`,
         );
         for (const n of ep.notes) console.log(`  ${n}`);

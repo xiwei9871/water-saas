@@ -139,6 +139,11 @@ export function parseArgs(argv: string[]): GenerateArgs {
   if (a.seed === undefined || !Number.isInteger(a.seed) || a.seed < 0) {
     throw new CliError('--seed <non-negative int> is required');
   }
+  // a non-default profile owns the account budget — --accounts is the
+  // clean-baseline knob only (scale smoke / legacy runs).
+  if (a.profile !== undefined && a.profile !== 'default' && a.accounts !== undefined) {
+    throw new CliError('--accounts is profile-owned; remove it when using --profile');
+  }
   a.accounts ??= ACCOUNTS_DEFAULT;
   // Frozen cap: smoke=small, G5=200, full profile=3,000–5,000.
   if (!Number.isInteger(a.accounts) || a.accounts < 1 || a.accounts > 5000) {
@@ -185,7 +190,9 @@ export const USAGE = `generate.ts — Pilot Cycle 1A synthetic generator (G2 ske
   --accounts <int>       default ${ACCOUNTS_DEFAULT}
   --period-from YYYYMM   required
   --period-to YYYYMM     default = period-from + 1
-  --profile <name>       default 'default'
+  --profile <name>       default 'default'; 'full' loads
+                         scripts/pilot/profiles/full.json (G6: ~4000
+                         accounts, ~600 scenario instances)
   --as-of YYYY-MM-DD     default = database CURRENT_DATE
   --concurrency <1..8>   default ${CONCURRENCY_DEFAULT}, hard cap ${CONCURRENCY_MAX}
   --reset                delete tenant-scoped rows (needs --yes to execute)

@@ -8,7 +8,8 @@ export type PayProfile = 'A' | 'B' | 'C';
 
 export interface AccountPlan {
   seq: number;
-  tag: 'BG';
+  /** 'BG' for clean background; scenario kind tag (NBK/NAM/…) for faults. */
+  tag: string;
   branchIdx: number;
   bookIdx: number; // global book index
   remote: boolean;

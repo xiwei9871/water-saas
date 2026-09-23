@@ -1,0 +1,28 @@
+{
+  "name": "full",
+  "totalAccounts": 4000,
+  "branches": 3,
+  "booksPerBranch": 4,
+  "remoteRatio": 0.3,
+  "faultBooksPerBranch": 2,
+  "instanceSeqStart": 1,
+  "scenarioCounts": {
+    "NO_ACTIVE_METER": 40,
+    "MULTI_ACTIVE_METER": 40,
+    "NO_BOOK": 40,
+    "MULTI_BOOK": 40,
+    "READING_QC_REVIEW": 40,
+    "READING_QC_REJECTED": 40,
+    "ESTIMATE_STREAK": 40,
+    "REMOTE_EVENT_UNBOUND": 40,
+    "REMOTE_EVENT_WAITING_PLAN": 40,
+    "REMOTE_EVENT_FAILED": 40,
+    "REMOTE_EVENT_CONFLICT": 40,
+    "REMOTE_EVENT_KEY_CONFLICT": 40,
+    "UNPAID_BILL_OVERDUE": 40
+  },
+  "composites": {
+    "KEY_CONFLICT_RECURRENCE": 40,
+    "CROSS_BRANCH_MULTI_BOOK": 40
+  }
+}

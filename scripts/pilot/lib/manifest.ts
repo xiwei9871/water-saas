@@ -63,6 +63,8 @@ export interface GenerationSummary {
   databaseCurrentDate: string;
   generatedAt: string;
   clockDrift: boolean;
+  /** G6 perf evidence — wall time tenant-guard → manifest write. */
+  totalDurationMs?: number;
   database: { host: string; name: string };
   tenant: { id: string; code: string };
   phases: PhaseRecord[];

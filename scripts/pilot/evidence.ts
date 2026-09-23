@@ -4,31 +4,41 @@
  * formula: candidate values are printed side by side for comparison.
  *
  * Usage:
- *   pnpm --filter api exec tsx ../../scripts/pilot/evidence.ts <tenantId>
+ *   pnpm --filter api exec tsx ../../scripts/pilot/evidence.ts <tenantId> [--out <runDir>]
+ * --out writes artifacts/pilot/<run>/pilot-evidence.json alongside the
+ * console output (G6 Cycle-1A evidence artifact).
  * Env: DATABASE_URL (defaults to local dev DSN).
  */
-import pg from 'pg';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { apiRequire } from './lib/pg.ts';
+
+const pg = apiRequire('pg') as typeof import('pg');
 
 const tenantId = process.argv[2];
 if (!tenantId) {
-  console.error('usage: evidence.ts <tenantId>');
+  console.error('usage: evidence.ts <tenantId> [--out <runDir>]');
   process.exit(1);
 }
+const outIdx = process.argv.indexOf('--out');
+const outDir = outIdx >= 0 ? process.argv[outIdx + 1] : null;
 const db = new pg.Client({
   connectionString:
     process.env.DATABASE_URL ??
     'postgresql://ws_app:ws_app_pw@localhost:5432/watersaas',
 });
 
+const sections: { label: string; rows: unknown[] }[] = [];
 const q = async (label: string, sql: string, params: unknown[] = [tenantId]) => {
   const r = await db.query(sql, params);
   console.log(`\n=== ${label} ===`);
   console.table(r.rows);
+  sections.push({ label, rows: r.rows });
 };
 
 const main = async () => {
 await db.connect();
-await db.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId]);
+await db.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId]);
 
 // 1) Remote device event cadence → REMOTE_ONLINE_RATE window evidence
 await q(
@@ -136,6 +146,24 @@ await q(
 );
 } catch {
   console.log('\n=== work_item outcomes ===\n(table absent — E9 branch not deployed here)');
+}
+
+if (outDir) {
+  const file = join(outDir, 'pilot-evidence.json');
+  await writeFile(
+    file,
+    JSON.stringify(
+      {
+        tenantId,
+        collectedAt: new Date().toISOString(),
+        note: 'candidate semantics for E10-HOLD metrics — observation only, no formula chosen',
+        sections,
+      },
+      null,
+      1,
+    ),
+  );
+  console.log(`\nwrote ${file}`);
 }
 
 await db.end();

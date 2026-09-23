@@ -7,7 +7,12 @@
 import { apiImport } from '../api-import.ts';
 import { apiRequire } from '../pg.ts';
 import { keys } from '../keys.ts';
-import { withTenantTx, type Harness, type TenantCtx } from '../harness.ts';
+import {
+  withTenantTx,
+  withTenantTxTimeout,
+  type Harness,
+  type TenantCtx,
+} from '../harness.ts';
 import type { AccountPlan } from './allocate.ts';
 import { periodDay } from './allocate.ts';
 import type { GroundTruthEntry } from '../manifest.ts';
@@ -347,10 +352,15 @@ export async function createBillingRun(
   period: string,
 ): Promise<string> {
   const billing = await services.billingRun(h);
-  const run = (await withTenantTx(
+  // G6 scale: createTx does all DRAFT-bill generation in ONE interactive
+  // tx; Prisma's 5s default expires beyond ~800 settlements. The pilot
+  // harness widens the budget (identical set_config semantics) — the
+  // production timeout ceiling is recorded as a hardening finding.
+  const run = (await withTenantTxTimeout(
     h,
     'BillingRunService.createTx',
     ctx.tenantId,
+    10 * 60 * 1000,
     (tx) => billing.createTx(tx, ctx, { period } as never),
   )) as { id: string };
   return run.id;

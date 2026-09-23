@@ -1,14 +1,19 @@
 /**
- * G4 fault-injection unit tests — pure parts only: scenario coverage,
- * seq-space determinism, faultPeriod math, and the expected-keys
- * plumbing in verifyBaseline's option bag. No DB.
+ * G4+G6 fault-injection unit tests — pure parts only: scenario
+ * coverage, allocator namespaces, instance determinism, faultPeriod
+ * math. No DB.
  */
 import { describe, expect, it } from 'vitest';
+import { SCENARIO_TYPES } from '../../scripts/pilot/lib/fault/inject.ts';
 import {
-  SCENARIO_OF_TAG,
-  SCENARIO_TYPES,
-  TAG_SEQ,
-} from '../../scripts/pilot/lib/fault/inject.ts';
+  allocateFaults,
+  DEFAULT_FAULT_PROFILE,
+  FAULT_KINDS,
+  KIND_SCENARIO,
+  loadFaultProfile,
+  NS,
+  ProfileError,
+} from '../../scripts/pilot/lib/fault/plan.ts';
 import { ANCHOR, oKey, T } from '../../scripts/pilot/lib/fault/oracle.ts';
 import {
   A,
@@ -37,28 +42,103 @@ describe('G4 scenario matrix', () => {
     expect(scenarios).toContain('KEY_CONFLICT_RECURRENCE');
     expect(scenarios).toContain('CROSS_BRANCH_MULTI_BOOK');
     expect(scenarios.size).toBe(15);
-    // 14 tags with accounts + 1 account-less UNBOUND entry = 15 GT entries
-    expect(Object.keys(TAG_SEQ)).toHaveLength(14);
-    expect(Object.keys(SCENARIO_OF_TAG)).toHaveLength(14);
+    expect(FAULT_KINDS).toHaveLength(15); // 14 account-bearing + UNBOUND
   });
 
-  it('seq space is unique and beyond the --accounts hard cap', () => {
-    const seqs = Object.values(TAG_SEQ);
-    expect(new Set(seqs).size).toBe(seqs.length);
-    // baseline meter/customer keys use seq 0..accounts(≤5000) — scenario
-    // seqs must sit above the cap so business keys can never collide.
-    for (const s of seqs) {
-      expect(s).toBeGreaterThan(5000);
-      expect(s).toBeLessThan(100000); // S6 pad width
-    }
+  it('default profile → legacy single instances with :000000 keys', () => {
+    const { plans } = allocateFaults(DEFAULT_FAULT_PROFILE, 3);
+    expect(plans).toHaveLength(15);
+    for (const p of plans)
+      expect(p.scenarioKey).toBe(`${p.scenarioType}:000000`);
+    expect(plans.filter((p) => p.accountSeq !== null)).toHaveLength(14);
   });
 
-  it('scenario business keys are deterministic per (seed,tag,seq)', () => {
-    for (const [tag, seq] of Object.entries(TAG_SEQ)) {
-      expect(keys.accountNo(42, tag, seq)).toBe(`P0042-${tag}-${String(seq).padStart(6, '0')}`);
-      expect(keys.customerNo(42, tag, seq)).toContain(`C-${tag}-`);
+  it('scenario business keys are deterministic per (seed,kind,seq)', () => {
+    const { plans } = allocateFaults(DEFAULT_FAULT_PROFILE, 3);
+    for (const p of plans.filter((x) => x.accountSeq !== null)) {
+      expect(keys.accountNo(42, p.kind, p.accountSeq!)).toBe(
+        `P0042-${p.kind}-${String(p.accountSeq).padStart(6, '0')}`,
+      );
     }
     expect(keys.scenarioKey('NO_BOOK', 0)).toBe('NO_BOOK:000000');
+    expect(keys.scenarioKey('NO_BOOK', 40)).toBe('NO_BOOK:000040');
+  });
+});
+
+describe('G6 allocator namespaces', () => {
+  const full = loadFaultProfile('full');
+  const alloc = allocateFaults(full, 3);
+
+  it('full profile: 600 plans, 560 account-bearing, clean=3440', () => {
+    expect(alloc.plans).toHaveLength(600);
+    expect(alloc.accountBearing).toBe(560); // 600 - 40 UNBOUND
+    expect(alloc.cleanAccounts).toBe(3440);
+    expect(alloc.bookSeqs).toHaveLength(6); // 3 branches × 2
+  });
+
+  it('instance-scoped scenarioKeys: TYPE:000001..000040', () => {
+    const nbk = alloc.plans.filter((p) => p.kind === 'NBK');
+    expect(nbk).toHaveLength(40);
+    expect(nbk[0].scenarioKey).toBe('NO_BOOK:000001');
+    expect(nbk[39].scenarioKey).toBe('NO_BOOK:000040');
+    expect(new Set(alloc.plans.map((p) => p.scenarioKey)).size).toBe(600);
+  });
+
+  it('all business-key seqs are unique inside their namespace', () => {
+    const acctSeqs = alloc.plans.filter((p) => p.accountSeq !== null).map((p) => p.accountSeq!);
+    expect(new Set(acctSeqs).size).toBe(acctSeqs.length);
+    for (const s of acctSeqs) {
+      expect(s).toBeGreaterThanOrEqual(NS.ACCOUNT_BASE);
+      expect(s).toBeLessThan(NS.ACCOUNT_BASE + 1000);
+    }
+    // meterNo shares one keyspace: account seqs and extra-meter seqs
+    // must be disjoint
+    const extra = alloc.plans.filter((p) => p.extraMeterSeq !== null).map((p) => p.extraMeterSeq!);
+    for (const s of extra) expect(acctSeqs).not.toContain(s);
+    const dev = alloc.plans.filter((p) => p.deviceSeq !== null).map((p) => p.deviceSeq!);
+    expect(new Set(dev).size).toBe(dev.length);
+    for (const s of dev) expect(s).toBeGreaterThanOrEqual(NS.DEVICE_BASE);
+    const ev = alloc.plans.filter((p) => p.eventSeq !== null).map((p) => p.eventSeq!);
+    expect(new Set(ev).size).toBe(ev.length);
+    // baseline events use accountSeq*10+periodIdx ≤ 49999
+    for (const s of ev) expect(s).toBeGreaterThanOrEqual(NS.EVENT_BASE);
+    for (const s of alloc.bookSeqs) expect(s).toBeGreaterThanOrEqual(NS.BOOK_BASE);
+  });
+
+  it('same profile + branches → identical plans (determinism)', () => {
+    const a = allocateFaults(full, 3);
+    const b = allocateFaults(full, 3);
+    expect(a.plans).toEqual(b.plans);
+  });
+
+  it('book ownership: MBK/FLD same-branch, XBM cross-branch', () => {
+    const mbk = alloc.plans.find((p) => p.kind === 'MBK')!;
+    expect(Math.floor(mbk.primaryBookIdx! / 2)).toBe(Math.floor(mbk.secondaryBookIdx! / 2));
+    const xbm = alloc.plans.find((p) => p.kind === 'XBM')!;
+    expect(Math.floor(xbm.primaryBookIdx! / 2)).not.toBe(Math.floor(xbm.secondaryBookIdx! / 2));
+    const fld = alloc.plans.find((p) => p.kind === 'FLD')!;
+    expect(Math.floor(fld.primaryBookIdx! / 2)).toBe(Math.floor(fld.secondaryBookIdx! / 2));
+  });
+
+  it('conflict occurrences: KCF=1, KCR=3', () => {
+    expect(alloc.plans.find((p) => p.kind === 'KCF')!.conflictOccurrences).toBe(1);
+    expect(alloc.plans.find((p) => p.kind === 'KCR')!.conflictOccurrences).toBe(3);
+  });
+
+  it('UNBOUND: no account, device seq is a bare vendor key', () => {
+    const unb = alloc.plans.filter((p) => p.kind === 'UNBOUND');
+    expect(unb.every((p) => p.accountSeq === null)).toBe(true);
+    expect(unb.every((p) => p.deviceSeq !== null && p.eventSeq !== null)).toBe(true);
+  });
+
+  it('profile validation: unknown scenario type → reject', () => {
+    expect(() =>
+      allocateFaults(
+        { ...DEFAULT_FAULT_PROFILE, scenarioCounts: { NOT_A_TYPE: 1 } },
+        3,
+      ),
+    ).toThrow(ProfileError);
+    expect(() => loadFaultProfile('does-not-exist')).toThrow(ProfileError);
   });
 });
 
@@ -113,12 +193,12 @@ describe('frozen anchor contract (P1-3)', () => {
     // NAM → only NO_ACTIVE_METER (in FA, not bookless)
     // NBK → only NO_BOOK (bookless → TENANT anchor)
     // FLD → only REMOTE_EVENT_FAILED (FB membership removed post-plan)
-    expect(SCENARIO_OF_TAG.NAM).toBe('NO_ACTIVE_METER');
-    expect(SCENARIO_OF_TAG.NBK).toBe('NO_BOOK');
-    expect(SCENARIO_OF_TAG.FLD).toBe('REMOTE_EVENT_FAILED');
-    expect(ANCHOR[SCENARIO_OF_TAG.NAM]).toBe('ACCOUNT');
-    expect(ANCHOR[SCENARIO_OF_TAG.NBK]).toBe('TENANT');
-    expect(ANCHOR[SCENARIO_OF_TAG.FLD]).toBe('ACCOUNT');
+    expect(KIND_SCENARIO.NAM).toBe('NO_ACTIVE_METER');
+    expect(KIND_SCENARIO.NBK).toBe('NO_BOOK');
+    expect(KIND_SCENARIO.FLD).toBe('REMOTE_EVENT_FAILED');
+    expect(ANCHOR[KIND_SCENARIO.NAM]).toBe('ACCOUNT');
+    expect(ANCHOR[KIND_SCENARIO.NBK]).toBe('TENANT');
+    expect(ANCHOR[KIND_SCENARIO.FLD]).toBe('ACCOUNT');
   });
 });
 
