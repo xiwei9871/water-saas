@@ -19,9 +19,11 @@ import { apiImport } from './lib/api-import.ts';
 import { loadRun } from './lib/evaluate/artifacts.ts';
 import {
   computeDetection,
+  detectorGate,
   EvalError,
   type DetectedFact,
   type ExpectedAnomaly,
+  type GroundTruthContext,
 } from './lib/evaluate/metrics.ts';
 import { evaluateEpisodes } from './lib/evaluate/episodes.ts';
 import { writeJsonAtomic } from './lib/manifest.ts';
@@ -103,6 +105,9 @@ async function main(): Promise<void> {
         ),
       );
 
+      // Detector truth and attribution context stay separate: clean
+      // entries carry entityIds (for FP attribution) even though their
+      // expected.anomalies is empty.
       const expected: ExpectedAnomaly[] = run.gt.entries.flatMap((e) =>
         e.expected.anomalies.map((a) => ({
           key: a.key,
@@ -110,11 +115,15 @@ async function main(): Promise<void> {
           anchor: a.anchor,
           orgOwnership: e.expected.orgOwnership,
           scenarioKey: e.scenarioKey,
-          entityIds: e.entityIds,
         })),
       );
+      const contexts: GroundTruthContext[] = run.gt.entries.map((e) => ({
+        scenarioKey: e.scenarioKey,
+        entityIds: e.entityIds,
+      }));
 
-      const report = computeDetection(expected, anchored);
+      const report = computeDetection(expected, anchored, contexts);
+      const gate = detectorGate(report, run.gateEligible);
       const detectorArtifact = {
         runId: run.runId,
         tenantId: run.tenantId,
@@ -130,12 +139,7 @@ async function main(): Promise<void> {
         faultScenarioUnexpectedFP: report.faultScenarioUnexpectedFP,
         unattributedFP: report.unattributedFP,
         gateEligible: run.gateEligible,
-        pass:
-          run.gateEligible &&
-          report.overall.fp === 0 &&
-          report.overall.fn === 0 &&
-          report.anchorMismatches.length === 0 &&
-          report.ownershipMismatches.length === 0,
+        pass: gate.pass,
       };
       await writeJsonAtomic(
         join(args.runDir, 'detector-evaluation.json'),
@@ -147,8 +151,18 @@ async function main(): Promise<void> {
           `TP=${o.tp} FP=${o.fp} FN=${o.fn} ` +
           `precision=${o.precision ?? 'N/A'} recall=${o.recall ?? 'N/A'} ` +
           `anchorMM=${report.anchorMismatches.length} ownMM=${report.ownershipMismatches.length} ` +
-          `→ ${detectorArtifact.pass ? 'PASS' : run.gateEligible ? 'HOLD' : 'HARDENING-ONLY (clockDrift)'}`,
+          `→ ${gate.outcome}`,
       );
+      // Fail closed: detector correctness gates episode evaluation —
+      // on HOLD/HARDENING-ONLY the artifact is on disk and the command
+      // exits non-zero so automation cannot treat it as success.
+      if (!gate.pass)
+        throw new EvalError(
+          `detector gate ${gate.outcome}: fp=${o.fp} fn=${o.fn} ` +
+            `anchorMM=${report.anchorMismatches.length} ` +
+            `ownMM=${report.ownershipMismatches.length} ` +
+            `gateEligible=${run.gateEligible} — see detector-evaluation.json`,
+        );
 
       // ---- B. episode lifecycle (mutates facts — detector metrics
       //    are already frozen in the artifact above) ----
@@ -165,10 +179,15 @@ async function main(): Promise<void> {
         );
         console.log(
           `episodes: initial=${ep.initialOpen} idem=${ep.idempotentRefresh.created}/${ep.idempotentRefresh.resolved}/${ep.idempotentRefresh.cleared} ` +
+            `race=${ep.concurrentCreate.rejectedCalls}rej/${ep.concurrentCreate.activeCount}active ` +
             `dup=${ep.duplicateActiveKeys} guard=${ep.activeResolveRejected} ` +
             `→ ${ep.pass ? 'PASS' : 'FAIL'}`,
         );
         for (const n of ep.notes) console.log(`  ${n}`);
+        if (!ep.pass)
+          throw new EvalError(
+            `episode evaluation FAIL: ${ep.notes.join('; ') || 'see episode-evaluation.json'}`,
+          );
       }
     } finally {
       await h.close();

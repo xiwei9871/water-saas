@@ -30,6 +30,13 @@ export async function loadRun(runDir: string): Promise<LoadedRun> {
     throw new EvalError(`runId mismatch: gt=${gt.runId} summary=${summary.runId}`);
   if (gt.seed !== summary.seed)
     throw new EvalError(`seed mismatch: gt=${gt.seed} summary=${summary.seed}`);
+  // fail closed — a run the generator itself flagged with errors is
+  // never G5 gate evidence. warnings do not block; clockDrift keeps its
+  // own gateEligible=false path.
+  if (summary.errors.length > 0)
+    throw new EvalError(
+      `summary.errors non-empty (${summary.errors.length}): ${summary.errors[0]}`,
+    );
   return {
     runId: gt.runId,
     seed: gt.seed,

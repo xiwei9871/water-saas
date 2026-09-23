@@ -30,10 +30,47 @@ interface EpisodeRow {
   cleared_at: string | null;
 }
 
+export interface ConcurrentCreateResult {
+  oldEpisodeId: string;
+  newEpisodeId: string;
+  activeCount: number;
+  rejectedCalls: number;
+  pass: boolean;
+}
+
+/** Pure reducer for the concurrent-create race — exported so the
+ *  assertion math is unit-testable without a DB. Pass requires: the
+ *  fact was active going in, ZERO active episodes before the race,
+ *  neither refresh rejected, and exactly ONE new active episode with
+ *  an id distinct from the cleared old episode. */
+export function concurrentCreateResult(opts: {
+  oldEpisodeId: string;
+  factActive: boolean;
+  activeBefore: number;
+  rejectedCalls: number;
+  activeIds: string[];
+}): ConcurrentCreateResult {
+  const newId = opts.activeIds.find((id) => id !== opts.oldEpisodeId) ?? '';
+  return {
+    oldEpisodeId: opts.oldEpisodeId,
+    newEpisodeId: newId,
+    activeCount: opts.activeIds.length,
+    rejectedCalls: opts.rejectedCalls,
+    pass:
+      opts.factActive &&
+      opts.activeBefore === 0 &&
+      opts.rejectedCalls === 0 &&
+      opts.activeIds.length === 1 &&
+      newId !== '' &&
+      newId !== opts.oldEpisodeId,
+  };
+}
+
 export interface EpisodeReport {
   initialOpen: number;
   idempotentRefresh: { created: number; resolved: number; cleared: number };
   concurrentRefresh: { duplicates: number };
+  concurrentCreate: ConcurrentCreateResult;
   activeResolveRejected: boolean;
   manualResolve: {
     oldEpisodeId: string;
@@ -86,23 +123,30 @@ export async function evaluateEpisodes(
           AND anomaly_key = ANY(${ks}) ORDER BY created_at`,
     );
 
+  const det = await apiImport<{
+    detectAll(tx: Tx, tenantId: string): Promise<{ key: string }[]>;
+  }>('modules/exception/detectors');
+
   const scenarioKey = (type: string) =>
     entries.find((e) => e.scenarioKey === `${type}:000000`);
   const anomalyKey = (type: string) => scenarioKey(type)?.expected.anomalies[0]?.key;
   const NAM = anomalyKey('NO_ACTIVE_METER')!;
   const NBK = anomalyKey('NO_BOOK')!;
   const MBK = anomalyKey('MULTI_BOOK')!;
+  const XBM = anomalyKey('CROSS_BRANCH_MULTI_BOOK')!;
   const nbkWaId = scenarioKey('NO_BOOK')!.entityIds.waterAccountId;
   const mbkWaId = scenarioKey('MULTI_BOOK')!.entityIds.waterAccountId;
   const namWaId = scenarioKey('NO_ACTIVE_METER')!.entityIds.waterAccountId;
+  const xbmWaId = scenarioKey('CROSS_BRANCH_MULTI_BOOK')!.entityIds.waterAccountId;
 
   // fault book ids by business key
   const books = await q<{ id: string; book_no: string }[]>(
     Pr.Prisma.sql`SELECT id::text, book_no FROM reading_book
-      WHERE tenant_id=${ctx.tenantId}::uuid AND book_no IN (${keys.bookCode(seed, 900)}, ${keys.bookCode(seed, 901)})`,
+      WHERE tenant_id=${ctx.tenantId}::uuid AND book_no IN (${keys.bookCode(seed, 900)}, ${keys.bookCode(seed, 901)}, ${keys.bookCode(seed, 902)})`,
   );
   const FA = books.find((b) => b.book_no === keys.bookCode(seed, 900))!.id;
   const FB = books.find((b) => b.book_no === keys.bookCode(seed, 901))!.id;
+  const FC = books.find((b) => b.book_no === keys.bookCode(seed, 902))!.id;
 
   const refresh = () =>
     excSvc.refresh(ctx) as Promise<{
@@ -145,6 +189,37 @@ export async function evaluateEpisodes(
       GROUP BY anomaly_key HAVING count(*) > 1`,
   );
   if (dupRows.length) fail(notes, `concurrent duplicates: ${dupRows.length}`);
+
+  // ---- 3b. concurrent CREATE race — XBM: clear the episode first,
+  //      recur the fact WITHOUT refreshing, then two parallel refresh
+  //      calls must create exactly ONE new active episode (partial
+  //      unique + ON CONFLICT DO NOTHING under a real insert race). ----
+  const xbmOld = (await episodes([XBM])).find((e) => e.cleared_at === null);
+  await withTenantTx(h, 'ReadingBookService.removeMemberTx', ctx.tenantId, (tx) =>
+    bookSvc.removeMemberTx(tx, ctx, FC, xbmWaId, REQ),
+  );
+  await refresh(); // fact gone → old XBM episode cleared (RESOLVED/AUTO)
+  await withTenantTx(h, 'ReadingBookService.addMemberTx', ctx.tenantId, (tx) =>
+    bookSvc.addMemberTx(tx, ctx, FC, { waterAccountId: xbmWaId, seqNo: 902 } as never),
+  );
+  const factActive = await h.tenantPrisma
+    .runAsTenant(ctx.tenantId, (tx) => det.detectAll(tx as Tx, ctx.tenantId))
+    .then((fs) => fs.some((f) => f.key === XBM));
+  const activeBefore = (await episodes([XBM])).filter((e) => e.cleared_at === null).length;
+  const race = await Promise.allSettled([refresh(), refresh()]);
+  const rejectedCalls = race.filter((s) => s.status === 'rejected').length;
+  const xbmActiveIds = (await episodes([XBM]))
+    .filter((e) => e.cleared_at === null)
+    .map((e) => e.id);
+  const concurrentCreate = concurrentCreateResult({
+    oldEpisodeId: xbmOld?.id ?? '',
+    factActive,
+    activeBefore,
+    rejectedCalls,
+    activeIds: xbmActiveIds,
+  });
+  if (!concurrentCreate.pass)
+    fail(notes, `concurrent-create race failed: ${JSON.stringify(concurrentCreate)}`);
 
   // ---- 4. active manual-resolve guard ----
   let rejected = false;
@@ -237,6 +312,7 @@ export async function evaluateEpisodes(
     initialOpen: r1.created,
     idempotentRefresh: { created: r2.created, resolved: r2.resolved, cleared: r2.cleared },
     concurrentRefresh: { duplicates: dupRows.length },
+    concurrentCreate,
     activeResolveRejected: rejected,
     manualResolve: {
       oldEpisodeId: nbkBefore[0]?.id ?? '',
@@ -259,7 +335,7 @@ export async function evaluateEpisodes(
     pass:
       notes.length === 0 &&
       r2.created === 0 && r2.resolved === 0 && r2.cleared === 0 &&
-      dupRows.length === 0 && rejected &&
+      dupRows.length === 0 && concurrentCreate.pass && rejected &&
       !!nbkRecur && !!namRecur && !!mbkRecur && finalDup.length === 0,
     notes,
   };

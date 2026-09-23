@@ -11,7 +11,14 @@ export interface ExpectedAnomaly {
   anchor: string;
   orgOwnership: string[];
   scenarioKey: string;
-  /** entity ids of the owning GT entry — used for FP attribution. */
+}
+
+/** FP-attribution context — one per GT entry INCLUDING clean rows
+ *  whose expected.anomalies is empty. Detector truth (expected
+ *  anomalies) and attribution context are deliberately separate:
+ *  a clean account can still own a false-positive fact. */
+export interface GroundTruthContext {
+  scenarioKey: string;
   entityIds: Record<string, string>;
 }
 
@@ -55,23 +62,25 @@ const assertNoDup = (pairs: { key: string; type: string }[], side: string) => {
 const ratio = (num: number, den: number): number | null =>
   den === 0 ? null : num / den;
 
-/** FP attribution: match the fact's ids against every GT entry's
- *  entityIds. CLEAN_BACKGROUND hit → generator-noise FP; fault-scenario
- *  hit → unexpected co-anomaly; nothing → unattributed. */
+/** FP attribution: match the fact's ids against EVERY GT entry's
+ *  entityIds (clean rows included — they carry entityIds even though
+ *  expected.anomalies is empty). CLEAN_BACKGROUND hit → generator-noise
+ *  FP; fault-scenario hit → unexpected co-anomaly; nothing →
+ *  unattributed. */
 export function attributeFP(
   fact: DetectedFact,
-  expected: ExpectedAnomaly[],
+  contexts: GroundTruthContext[],
 ): Attribution {
   const ids = new Set(
     [fact.waterAccountId, fact.remoteSourceId, fact.anchorRef?.id].filter(
       (x): x is string => !!x,
     ),
   );
-  for (const e of expected) {
-    if (Object.values(e.entityIds).some((id) => ids.has(id))) {
+  for (const c of contexts) {
+    if (Object.values(c.entityIds).some((id) => ids.has(id))) {
       return {
-        scenarioKey: e.scenarioKey,
-        kind: e.scenarioKey.startsWith('CLEAN_BACKGROUND')
+        scenarioKey: c.scenarioKey,
+        kind: c.scenarioKey.startsWith('CLEAN_BACKGROUND')
           ? 'CLEAN_BACKGROUND'
           : 'FAULT',
       };
@@ -103,6 +112,7 @@ export interface DetectionReport {
 export function computeDetection(
   expected: ExpectedAnomaly[],
   detected: DetectedFact[],
+  contexts: GroundTruthContext[],
 ): DetectionReport {
   assertNoDup(expected, 'expected');
   assertNoDup(detected, 'detected');
@@ -115,7 +125,7 @@ export function computeDetection(
     .map((e) => ({ key: e.key, type: e.type, scenarioKey: e.scenarioKey }));
   const falsePositives = detected
     .filter((d) => !expPairs.has(`${d.key}|${d.type}`))
-    .map((d) => ({ key: d.key, type: d.type, attribution: attributeFP(d, expected) }));
+    .map((d) => ({ key: d.key, type: d.type, attribution: attributeFP(d, contexts) }));
 
   const anchorMismatches: DetectionReport['anchorMismatches'] = [];
   const ownershipMismatches: DetectionReport['ownershipMismatches'] = [];
@@ -172,5 +182,25 @@ export function computeDetection(
     cleanBackgroundFP: falsePositives.filter((x) => x.attribution.kind === 'CLEAN_BACKGROUND').length,
     faultScenarioUnexpectedFP: falsePositives.filter((x) => x.attribution.kind === 'FAULT').length,
     unattributedFP: falsePositives.filter((x) => x.attribution.kind === 'UNATTRIBUTED').length,
+  };
+}
+
+/** Frozen G5 synthetic detector gate. Fail-closed: gateEligible=false
+ *  (clockDrift) can never produce PASS — the outcome degrades to
+ *  HARDENING-ONLY. Callers must treat pass=false as a command-level
+ *  failure (non-zero exit), not a soft warning. */
+export function detectorGate(
+  report: DetectionReport,
+  gateEligible: boolean,
+): { pass: boolean; outcome: 'PASS' | 'HOLD' | 'HARDENING-ONLY' } {
+  const pass =
+    gateEligible &&
+    report.overall.fp === 0 &&
+    report.overall.fn === 0 &&
+    report.anchorMismatches.length === 0 &&
+    report.ownershipMismatches.length === 0;
+  return {
+    pass,
+    outcome: pass ? 'PASS' : gateEligible ? 'HOLD' : 'HARDENING-ONLY',
   };
 }
