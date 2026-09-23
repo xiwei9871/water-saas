@@ -42,12 +42,14 @@ describe('G4 scenario matrix', () => {
     expect(Object.keys(SCENARIO_OF_TAG)).toHaveLength(14);
   });
 
-  it('seq space is unique and disjoint from baseline books/devices', () => {
+  it('seq space is unique and beyond the --accounts hard cap', () => {
     const seqs = Object.values(TAG_SEQ);
     expect(new Set(seqs).size).toBe(seqs.length);
+    // baseline meter/customer keys use seq 0..accounts(≤5000) — scenario
+    // seqs must sit above the cap so business keys can never collide.
     for (const s of seqs) {
-      expect(s).toBeGreaterThanOrEqual(100);
-      expect(s).toBeLessThan(900); // fault books 900+, devices 910+
+      expect(s).toBeGreaterThan(5000);
+      expect(s).toBeLessThan(100000); // S6 pad width
     }
   });
 

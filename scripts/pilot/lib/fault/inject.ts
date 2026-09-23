@@ -38,12 +38,13 @@ type Svc = Record<string, (...a: unknown[]) => unknown>;
 // drift in the product surfaces as a smoke mismatch.
 import { ANCHOR, oKey, T } from './oracle.ts';
 
-// deterministic seq space per scenario tag — distinct from baseline
-// (0..accounts) and fault books (900+)/devices (910+).
+// deterministic seq space per scenario tag — seq ≥ 6000 is beyond the
+// --accounts hard cap (5000), so scenario account/customer/settle/meter
+// business keys can never collide with a baseline account's seq.
 export const TAG_SEQ: Record<string, number> = {
-  NBK: 100, NAM: 101, MAM: 102, MBK: 103, XBM: 104,
-  QCR: 105, QCJ: 106, EST: 107, WPL: 108, FLD: 109,
-  CFL: 110, KCF: 111, KCR: 112, OVD: 113,
+  NBK: 6000, NAM: 6001, MAM: 6002, MBK: 6003, XBM: 6004,
+  QCR: 6005, QCJ: 6006, EST: 6007, WPL: 6008, FLD: 6009,
+  CFL: 6010, KCF: 6011, KCR: 6012, OVD: 6013,
 };
 export const SCENARIO_OF_TAG: Record<string, string> = {
   NBK: 'NO_BOOK',
@@ -334,7 +335,7 @@ export async function injectFaults(
   ]);
 
   const m2 = (await withTenantTx(h, 'MeterService.createTx', ctx.tenantId, (tx) =>
-    meter.createTx(tx, ctx, { meterNo: keys.meterNo(seed, 950), caliber: 'DN15' } as never),
+    meter.createTx(tx, ctx, { meterNo: keys.meterNo(seed, 6950), caliber: 'DN15' } as never),
   )) as { id: string };
   const inst2 = (await withTenantTx(h, 'MeterInstallationService.installTx', ctx.tenantId, (tx) =>
     install.installTx(tx, ctx, {
@@ -406,7 +407,7 @@ export async function injectFaults(
     } as never),
   )) as { id: string };
 
-  let devSeq = 910;
+  let devSeq = 6910;
   const bindDevice = async (a: GeneratedAccount) => {
     const vkey = keys.deviceNo(seed, devSeq++);
     const d = (await withTenantTx(h, 'RemoteDeviceService.createDeviceTx', ctx.tenantId, (tx) =>
@@ -425,7 +426,7 @@ export async function injectFaults(
   };
 
   // UNBOUND — unknown vendorDeviceKey (no account)
-  const unbEv = mkEvent(keys.deviceNo(seed, 999), readPeriod, 990, 50);
+  const unbEv = mkEvent(keys.deviceNo(seed, 6999), readPeriod, 69990, 50);
   const unbOut = await ingest(source.id, [unbEv]);
   ic.entries.push({
     scenarioKey: keys.scenarioKey('REMOTE_EVENT_UNBOUND', 0),
@@ -447,7 +448,7 @@ export async function injectFaults(
 
   // WAITING_PLAN — bound device, event period with no plan item
   const wplDev = await bindDevice(A.WPL);
-  const wplEv = mkEvent(wplDev.vkey, np, 991, 66);
+  const wplEv = mkEvent(wplDev.vkey, np, 69991, 66);
   const wplOut = await ingest(source.id, [wplEv]);
   entry('WPL', A.WPL, [
     { type: T.REMOTE_EVENT_WAITING_PLAN, key: oKey.eventWaitingPlan(wplOut[0].eventId!) },
@@ -455,7 +456,7 @@ export async function injectFaults(
 
   // FAILED — ambiguous plan items (FLD in FA+FB, both planned)
   const fldDev = await bindDevice(A.FLD);
-  const fldEv = mkEvent(fldDev.vkey, readPeriod, 992, 44);
+  const fldEv = mkEvent(fldDev.vkey, readPeriod, 69992, 44);
   const fldOut = await ingest(source.id, [fldEv]);
   // FLD: isolated REMOTE_EVENT_FAILED — current BookMeter=1 (FB
   // removed), 2 historical plan items remain → FAILED, no MULTI_BOOK.
@@ -467,7 +468,7 @@ export async function injectFaults(
   const rCFL = await submitReading(A.CFL, itemsRP, readPeriod);
   await qc(rCFL.id, 'pass');
   const cflDev = await bindDevice(A.CFL);
-  const cflEv = mkEvent(cflDev.vkey, readPeriod, 993, 55);
+  const cflEv = mkEvent(cflDev.vkey, readPeriod, 69993, 55);
   const cflOut = await ingest(source.id, [cflEv]);
   entry('CFL', A.CFL, [
     { type: T.REMOTE_EVENT_CONFLICT, key: oKey.eventConflict(cflOut[0].eventId!) },
@@ -475,9 +476,9 @@ export async function injectFaults(
 
   // KEY_CONFLICT — first event converts; re-ingest same key, new payload
   const kcfDev = await bindDevice(A.KCF);
-  const kcfEv1 = mkEvent(kcfDev.vkey, readPeriod, 994, 77);
+  const kcfEv1 = mkEvent(kcfDev.vkey, readPeriod, 69994, 77);
   await ingest(source.id, [kcfEv1]);
-  const kcfEv2 = mkEvent(kcfDev.vkey, readPeriod, 994, 88);
+  const kcfEv2 = mkEvent(kcfDev.vkey, readPeriod, 69994, 88);
   const kcfOut2 = await ingest(source.id, [kcfEv2]);
   const kcfEventId = kcfOut2[0].eventId!; // issue lands on the ORIGINAL row
   entry('KCF', A.KCF, [
@@ -486,11 +487,11 @@ export async function injectFaults(
 
   // KEY_CONFLICT_RECURRENCE — same key conflicts 3× → occurrences=3
   const kcrDev = await bindDevice(A.KCR);
-  const kcrEv1 = mkEvent(kcrDev.vkey, readPeriod, 995, 90);
+  const kcrEv1 = mkEvent(kcrDev.vkey, readPeriod, 69995, 90);
   await ingest(source.id, [kcrEv1]);
   let kcrEventId = '';
   for (const v of [91, 92, 93]) {
-    const o = await ingest(source.id, [mkEvent(kcrDev.vkey, readPeriod, 995, v)]);
+    const o = await ingest(source.id, [mkEvent(kcrDev.vkey, readPeriod, 69995, v)]);
     kcrEventId = o[0].eventId!;
   }
   entry('KCR', A.KCR, [

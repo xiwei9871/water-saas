@@ -52,6 +52,14 @@ export const TX_REGISTRY: Readonly<Record<string, TxOwnership>> = {
   'RemoteEventService.ingestBatch': 'TX_SELF_MANAGED',
   'RemoteEventProcessorService.replayTx': 'TX_CALLER_MANAGED',
   'RemoteEventProcessorService.resolveConflictTx': 'TX_CALLER_MANAGED',
+  // E9 exception center — every public method opens its own
+  // runAsTenant; never wrap (G5 episode evaluation calls them directly).
+  'ExceptionService.refresh': 'TX_SELF_MANAGED',
+  'ExceptionService.ack': 'TX_SELF_MANAGED',
+  'ExceptionService.assign': 'TX_SELF_MANAGED',
+  'ExceptionService.ignore': 'TX_SELF_MANAGED',
+  'ExceptionService.unignore': 'TX_SELF_MANAGED',
+  'ExceptionService.resolve': 'TX_SELF_MANAGED',
 } as const;
 
 export class OwnershipError extends Error {}
