@@ -1,28 +1,17 @@
 # BillingRun createTx — Scalability Design (P1, post-G6 hardening)
 
-Status: **design for adjudication — no code changes yet**
+Status: **RC1 frozen decisions recorded — implementation gate HOLD,
+production coding NOT authorized until this spec is reviewed.**
 Source finding: G6 full-profile evidence (`docs/PILOT_CYCLE_1A_REPORT.md`)
 
 ## 1. Problem
 
 `BillingRunService.createTx` generates **all** DRAFT bills for a period
-in ONE Prisma interactive transaction:
+in ONE Prisma interactive transaction — ≈8 queries × N settlements,
+serial, bounded by Prisma's 5 s interactive-tx default
+(`runAsTenant` passes no options).
 
-```text
-findMany FINAL settlements (period)
-  → for each settlement, serially:
-      account-facts lookup
-      already-billed probe
-      pickPlan / loadFeeItems / ytdBeforeQty
-      lockPlanForUpdate (T8 freeze)
-      bill.create + feeItemIdMap + insertBillItems
-```
-
-≈ 8 queries × N settlements, serial, inside one interactive tx bounded
-by Prisma's 5 s default timeout (`TenantPrismaService.runAsTenant`
-passes no options).
-
-Observed (G6, local PG, watersaas_pilot):
+Observed (G6, local PG, `watersaas_pilot`):
 
 ```text
 500 settlements   PASS   (~2–4 s)
@@ -30,163 +19,303 @@ Observed (G6, local PG, watersaas_pilot):
 4000 profile      unreachable without harness timeout
 ```
 
-The pilot proved the business logic + data model are correct at 4000
-accounts under a widened budget — it did **not** prove the production
-transaction envelope supports it. A real tenant above ~800 settlements
-per period cannot create a billing run today.
+A real tenant above ~800 settlements/period cannot create a billing
+run today. The pilot proved logic + data model at 4000 under a widened
+budget; it did not prove the production transaction envelope.
 
 ## 2. Frozen contract to preserve
 
-Pinned by `billing.e2e-spec.ts` + class docblock; all must hold:
+Pinned by `billing.e2e-spec.ts` + class docblock:
 
-- `POST /billing-runs {period}` → **201 synchronous** response:
+- `POST /billing-runs {period}` → **201 synchronous**:
   `status='DRAFT'`, `totalCount`, `successCount` (already-billed count),
-  `failedSettlementIds[]` (stage 'generate' records), `bills[]`.
+  `failedSettlementIds[]`, `bills[]`.
 - Per-settlement failures are **records, never aborts**
   (`TARIFF_NOT_FOUND`, `FEE_ITEM_NOT_FOUND`, `WATER_ACCOUNT_NOT_FOUND`,
-  engine `DomainError`s); unexpected errors abort the request loudly.
-- `billable=false` (MONITORING) settlements: skipped, outside the
-  denominator entirely.
-- Already-billed (any run's NORMAL bill, any status): skipped as
-  success; `UNIQUE(tenant_id, source_type, source_id, bill_kind)` is the
-  idempotency backstop; a lost unique race = resolved, not a failure.
-- Two DRAFT runs over one period: accepted operator-serial edge.
-- `discard`: DRAFT-only teardown (run + DRAFT bills), period re-runnable.
+  engine `DomainError`s); unexpected errors abort loudly.
+- `billable=false` (MONITORING): skipped, outside the denominator.
+- Already-billed (any run's NORMAL bill): skipped as success;
+  `UNIQUE(tenant_id, source_type, source_id, bill_kind)` backstops the
+  race; a lost unique race = resolved, not a failure.
+- `discard`: DRAFT-only teardown; POSTED-side rows never deleted.
 - `post`/`retry` (execute): claim tx → per-failure retry tx →
-  per-bill post tx → finalize tx. Unchanged.
-- `createTx` stays TX_CALLER_MANAGED in the registry; callers wrap.
+  per-bill post tx → finalize tx. Unchanged by this fix.
+- Two DRAFT runs over one period: accepted operator-serial edge.
 
-## 3. Options
+## 3. Decision history
 
-### A — Raise the interactive-tx timeout (minimal, interim)
+- Options A (raise timeout) / B (bounded-batch multi-tx) / C (async)
+  evaluated in the pre-RC1 draft. **RC1 approved Option B**, with the
+  detailed frozen decisions below. A remains an interim stopgap only;
+  C stays deferred.
 
-Add an options param to `runAsTenant`/`$transaction` (e.g.
-`{ timeout: 60_000 }`), applied at the create call site.
+---
 
-- Pros: smallest diff; unblocks immediately.
-- Cons: does not fix the shape of the problem — one unbounded serial
-  loop inside one tx; every scale-up re-hits the wall; long tx holds
-  locks/snapshot longer; masks rather than bounds the work.
-- Verdict: acceptable **temporary** hardening; not the fix.
+# RC1 FROZEN DECISIONS — implementation spec
 
-### B — Bounded-batch multi-tx create (recommended)
+## A. Generation state — schema
 
-Mirror the `execute` pattern (claim → per-batch tx → finalize) instead
-of one unbounded tx. Synchronous in-request, same response shape.
+New enum + column (migration required — this IS an authorized schema
+change for this P1):
 
-```text
-TX0  claim/create:
-       insert billing_run {status:'DRAFT', totals:0, failures:[]}
-       snapshot FINAL settlement ids for period (ordered, in memory —
-       4000 uuids is trivial)
+```prisma
+enum BillingRunGenerationStatus {
+  GENERATING
+  READY
+}
 
-LOOP  batches of B settlements (default B=200, env-tunable):
-  TXk  per batch:
-       loadAccountFacts(batch)               — 1 query
-       for each settlement in batch:
-         billable=false            → skipped++
-         already-billed probe      → success (skip)
-         generateBillForSettlement → bill+items
-         RecordedFailure/DomainError → accumulate failure record
-         unique violation          → success (skip)
-         unexpected error          → abort request loudly
-       (each batch ≈ 8×200 queries — comfortably under any budget)
-
-TXN  finalize:
-       recompute from committed truth:
-         totalCount    = settlements − skipped
-         drafted       = count(bill where billingRunId=run)
-         successCount  = totalCount − failures − drafted   (unchanged formula)
-         failedCount   = failures.length
-       update run row
-       return withBills(run)
+model BillingRun {
+  ...
+  generationStatus BillingRunGenerationStatus @default(READY)
+                   @map("generation_status")
+}
 ```
 
-Cost model: 4000 settlements → ~20 small txs ≈ same total wall time as
-today (~60 s observed incl. post), each tx far below 5 s.
+Migration backfills existing rows as `READY` (all historical runs are
+fully generated by definition).
 
-### C — Async create (202 + worker / BullMQ)
+New run row (TX0): `status=DRAFT`, `generationStatus=GENERATING`,
+`totalCount=0`, `successCount=0`, `failedCount=0`,
+`failedSettlementIds=[]`.
 
-Returns run id immediately; generation progresses in background.
-Correct long-term shape for very large tenants, but changes the API
-contract, needs a worker the project deliberately doesn't have yet
-("MVP execution note" in class docblock), and expands blast radius.
-Deferred — do not conflate with this fix.
+Only finalize transitions `GENERATING → READY`. Posting claim
+(`execute`) adds `generationStatus='READY'` to its guard — otherwise
+`409 RUN_STILL_GENERATING`. `PROCESSING` remains reserved for the
+post/retry pipeline; never reused for generation.
 
-**Recommendation: B now; optionally A as a stopgap if B's review
-findings block.**
+`BILLING_RUN_SELECT` + list/get responses expose `generationStatus`.
+A GENERATING run is readable — its bills[] is an honest partial view.
 
-## 4. Option B — decisions needing adjudication
+## B. TX0 snapshot contract — `CreateSnapshot`
 
-### 4.1 Concurrent post during generation
+TX0 (`claimCreateTx`) captures, in one tx, everything today's single-tx
+create reads before its serial loop:
 
-Today atomic create makes this race impossible; multi-tx introduces a
-window where the run is DRAFT with partial bills and a concurrent
-`post` could claim it (DRAFT→PROCESSING) and finalize over an
-incomplete bill set — leaving post-generation inserts stranded as
-DRAFT under a finalized run.
+```ts
+interface CreateSnapshot {
+  runId: string;
+  period: string;
+  settlements: SettlementRow[];        // ordered FINAL rows
+  accountFacts: Map<string, AccountFacts>; // usageCategory|settleAccountId|billable
+  dueDays: number;
+  pricingFingerprint: string;          // sha256, see §H
+}
+```
 
-Options:
+- `accountFacts` is loaded once for all candidate `waterAccountId`s and
+  is the **authoritative frozen input** — batches never re-read mutable
+  account facts for pricing.
+- `dueDays` (`billDueDays`) frozen at snapshot.
+- Pricing inputs frozen per usageCategory: selected `tariffPlanId`,
+  effective window, tier/fee-item inputs → folded into
+  `pricingFingerprint`.
+- The snapshot lives **in the orchestrator's memory** for the request —
+  crash recovery is discard+recreate (§F), so durable snapshot storage
+  is not required.
+- The already-billed probe stays **live per batch** — sibling-run races
+  still collapse into success.
 
-- **(i) Documented operator-serial edge** — same carve-out already
-  accepted for two DRAFT runs over one period ("operator-serial in
-  practice; flagged rather than silently handled"). Cheapest; risk is
-  operator fires post while a create is still generating.
-- **(ii) Generation marker, no schema change** — stage a
-  `{stage:'generating'}` sentinel in `failedSettlementIds` at TX0,
-  post/retry claim refuses runs containing it (409
-  `RUN_STILL_GENERATING`), finalize removes it. Zero schema churn;
-  slightly abuses a failure column.
-- **(iii) Schema column** (`generationDoneAt` / `generateStatus`) —
-  cleanest, but schema change → needs explicit approval per pilot
-  rules.
+## C. Bounded batch — `generateBatchTx`
 
-Recommendation: (ii) if we want a real guard with zero schema churn;
-(i) is defensible for the current operator-serial model. Decide.
+`batchSize = 200` (const; env-tunable). Per batch, one `runAsTenant` tx:
 
-### 4.2 Crash mid-create
+```text
+SELECT … FROM billing_run WHERE id=$run FOR UPDATE
+assert status=DRAFT AND generationStatus=GENERATING
+  (missing row → run was discarded mid-generation → abort request)
+recompute pricing fingerprint from live config; assert == snapshot's
+for each settlement in the batch slice:
+  billable=false          → skipped++         (snapshot accountFacts)
+  already-billed probe    → success (skip)
+  generateBillForSettlement — SAME internals, pricing inputs taken
+                            from the frozen snapshot
+  RecordedFailure/DomainError → accumulate failure record (in memory)
+  unique violation            → success (skip)
+  unexpected                  → abort request loudly
+commit
+```
 
-Process dies between TX0 and TXN → DRAFT run with partial bills and
-stale totals. Recovery path already exists and needs no new machinery:
-`discard` (DRAFT teardown removes partial bills) → re-create →
-already-billed probe absorbs any leftovers. Document it like the
-PROCESSING-crash→retry rescue. To keep this airtight, finalize
-(TXN) is the only place counts become non-zero; a mid-create run
-shows `totalCount=0`, which is honest "still generating" state —
-paired with 4.1(ii), post can also refuse it.
+Failure records accumulate in the orchestrator and are written once, at
+finalization — not per batch.
 
-### 4.3 Batch size + boundary
+## D. Finalize — `finalizeCreateTx`
 
-Default `B=200`. Batches are pure slices of the TX0-snapshotted id
-list — no `WHERE id IN pending` recompute needed (already-billed probe
-keeps every batch idempotent anyway). Per-batch account-facts load
-replaces today's single loadAccountFacts call.
+One tx:
 
-### 4.4 Where the loop lives
+```text
+SELECT billing_run FOR UPDATE
+assert DRAFT + GENERATING
+re-verify pricing fingerprint
+recompute committed truth:
+  drafted      = count(bill where billingRunId=run)
+  failures     = accumulated records
+  skipped      = accumulated
+  totalCount   = settlements − skipped            (unchanged formula)
+  successCount = totalCount − failures − drafted  (unchanged formula)
+write totalCount/successCount/failedCount/failedSettlementIds
+generationStatus = READY
+idempotency completion (see §G) commits in THIS tx
+return withBills(run)
+```
 
-`POST /billing-runs` handler: claim TX0 via `runAsTenant`, loop batch
-txs via `runAsTenant` (each `createTx`-flavored private method taking
-`(tx, ctx, run, batch)`), finalize TXN. `createTx` is replaced by
-`create` orchestration + `generateBatch(tx, …)` — registry entries
-updated accordingly (caller-managed stays caller-managed).
+Only after this commit may `/post` claim the run.
 
-## 5. Same-class watch-list (not in scope)
+## E. Concurrent discard
 
-`ExceptionService.refresh` reconciles all facts in one self-managed tx.
-600 facts passed at G6; the ceiling is unprobed. Flag only — re-test at
-Cycle 1B scale; do not preemptively batch it.
+`discardTx` accepts `DRAFT` in **either** generation state
+(GENERATING or READY). Serialization is by row lock:
 
-## 6. Verification plan (required before "P1 closed")
+```text
+batch tx holds run row FOR UPDATE → commits → discard acquires the
+lock → deletes run + its DRAFT bills → next batch's assert
+(run missing) → request aborts.
+```
 
-1. `billing.e2e-spec.ts` passes **unmodified** — response contract,
-   counts, failure records, discard/post/retry all pinned.
-2. New e2e: create over >800 FINAL settlements **through the production
-   path** (plain `runAsTenant`, no harness timeout) → completes.
-3. Production-path regression at pilot scale: 1000- and 4000-account
-   `POST /billing-runs` equivalent — the harness `withTenantTxTimeout`
-   workaround must become unnecessary and be removed.
-4. Batch-boundary determinism: failure records identical regardless
-   of which batch a settlement lands in.
-5. Crash-rescue: abort mid-create → discard → re-create → identical
-   final bill set.
-6. If 4.1(ii): post during generation → 409 `RUN_STILL_GENERATING`.
+No generation batch may write after the run is discarded — the
+FOR UPDATE + assert pair enforces it.
+
+## F. Crash mid-create — recovery contract
+
+No auto-resume in this P1:
+
+```text
+crash/unexpected error
+  → DRAFT + GENERATING + partial DRAFT bills
+  → post/retry: 409 RUN_STILL_GENERATING
+  → discard: succeeds (also releases the key, §G)
+  → re-create: already-billed probe absorbs leftovers
+  → final bill set == clean uninterrupted create
+```
+
+Required test (§J): crash after batch N reproduces this exactly.
+
+## G. Idempotency — multi-transaction redesign
+
+Current `runWithKey` = key PROCESSING + all business writes + key
+COMPLETED in **one** tx — incompatible with multi-tx create. RC1
+requires an explicit durable `IdempotencyKey ↔ BillingRun`
+association. Design:
+
+**Schema**: `idempotency_key.billing_run_id uuid NULL` (+ index).
+The key row owns the link — it exists before the run does.
+
+**Protocol** (`create` orchestrator, key present):
+
+```text
+TX0 claimCreateTx — ONE tx:
+  findUnique key:
+    existing + hash/method/route mismatch → 409 KEY_REUSED_DIFF_REQUEST
+    existing + COMPLETED                  → replay stored responseRef
+    existing + PROCESSING                 → 409 IDEMPOTENCY_IN_PROGRESS
+  create idempotency_key {PROCESSING}     (unique race → re-read fresh tx)
+  create billing_run {DRAFT, GENERATING, totals=0}
+  write idempotency_key.billing_run_id = run.id
+  build + return CreateSnapshot
+
+TX1..k generateBatchTx   (unchanged by idempotency)
+
+TXN finalizeCreateTx — ONE tx:
+  …all finalize writes…
+  idempotency_key: PROCESSING → COMPLETED,
+                   responseRef = serialized run+bills response
+  (key COMPLETED and generationStatus=READY commit atomically —
+   a replay can never observe READY-run / stuck-key or vice versa)
+```
+
+**Crash matrix**:
+
+```text
+crash before TX0 commits   → tx rollback: no key, no run → retry safe
+crash between TX0..TXN     → key PROCESSING + run GENERATING, linked
+                           → retry same key: 409 IN_PROGRESS (correct —
+                             the original request's fate is unresolved)
+                           → discard: deletes run + partial bills AND
+                             deletes the linked PROCESSING key row
+                           → same key reusable → fresh create
+crash after TXN commit     → key COMPLETED + run READY → replay verbatim
+```
+
+`discardTx` extension: when deleting a run, also `deleteMany` any
+**PROCESSING** `idempotency_key` whose `billing_run_id` points at it —
+the "key stuck forever" hole is closed. A COMPLETED key survives
+discard (replays the original create response — correct: the response
+was real when made; the run's later discard is a separate fact).
+
+No-key requests: TX0 is just run-create + snapshot (no key row); crash
+recovery identical via discard.
+
+## H. Pricing consistency — fingerprint
+
+`pricingFingerprint` = sha256 over canonical JSON of:
+
+```text
+{ perUsageCategory: { tariffPlanId, effectiveFrom, effectiveTo,
+                      feeItems: [{feeItemId, itemType, unitPrice, …}],
+                      tierInputs },
+  dueDays }
+```
+
+Recomputed from live config at the top of every batch tx and at
+finalize; mismatch → request fails, run remains GENERATING →
+discard/re-create. Frozen account facts mean account-side drift simply
+doesn't apply (snapshot is authoritative); config-side drift aborts —
+a run never mixes tariff V1 + V2.
+
+Per-bill `lockPlanForUpdate` stays inside `generateBillForSettlement`
+(T8 freeze contract unchanged — it serializes generation against
+tariff-freeze writers at bill granularity).
+
+## I. Transaction ownership + controller
+
+```text
+public  create(ctx, body, key)          TX_SELF_MANAGED orchestration
+private claimCreateTx(tx, …)            TX_CALLER_MANAGED   (TX0)
+private generateBatchTx(tx, …)          TX_CALLER_MANAGED   (per batch)
+private finalizeCreateTx(tx, …)         TX_CALLER_MANAGED   (TXN)
+```
+
+- `createTx` is removed as the public entry (its internals move into
+  the private tx methods); pilot tx-registry entry
+  `BillingRunService.createTx` → replaced by `create` (SELF_MANAGED)
+  + the three private methods registered CALLER_MANAGED if the
+  registry tracks them (registry keys = public service methods; the
+  private tx bodies are invoked from orchestrator-managed txs only).
+- Controller `POST /billing-runs` no longer wraps the orchestrator in
+  the single-tx `withOptionalIdem` — the service's `create` does the
+  key claim/finalize itself (§G). `withOptionalIdem` stays unchanged
+  for the other endpoints still using it (payment etc.).
+- Pilot `flow.ts createBillingRun` calls `svc.create(ctx, {period})`
+  directly (no `withTenantTx` wrapper — self-managed), and
+  `withTenantTxTimeout` is removed once the regression proves the
+  production path needs no widened budget.
+
+## J. Verification additions
+
+On top of the existing billing suite (which must pass unmodified):
+
+```text
+scale:    >800-settlement create via production path
+          4000-account create via production path (pilot full profile —
+          harness timeout workaround removed)
+guards:   post while GENERATING → 409 RUN_STILL_GENERATING
+          retry while GENERATING → 409
+          discard between batches → run+partial bills gone, next batch aborts
+crash:    abort after batch N → GENERATING partial → discard →
+          re-create → identical final bill set
+idem:     same key concurrent → 409 IN_PROGRESS
+          same key replay after COMPLETED → verbatim response
+          same key + different body → 409 KEY_REUSED_DIFF_REQUEST
+          crash + discard → same key reusable (not stuck)
+drift:    account facts change between batches → frozen snapshot wins
+          tariff retire/new-version between batches → abort
+          effectiveTo shrink between batches → abort
+          every successful run = one consistent pricing snapshot
+```
+
+## K. Out of scope / watch-list
+
+- `ExceptionService.refresh` — same-class single-tx reconcile; 600
+  facts passed at G6, ceiling unprobed. Cycle 1B re-test; do not
+  preemptively batch.
+- Async create (202/worker) — deferred; do not conflate.
+- `runAsTenant` timeout options — only if B is blocked in review.
