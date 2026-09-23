@@ -168,6 +168,22 @@ diff-check:      clean
 production code/schema changes: NONE
 ```
 
+## Gate ledger (formal)
+
+```text
+G1 Planning                 PASS
+G2 Skeleton                 PASS
+G3 Baseline                 PASS
+G4 Fault Injection          PASS
+G5 Evaluation               PASS / CLOSED
+
+G6 Full Synthetic           PROVISIONAL PASS   (pending source review
+                            of fc3e747 once pushed)
+G6 Operator Pilot           NOT EXECUTED       (65-episode template
+                            staged; 0 human observations)
+Pilot Cycle 1A              HARDENING REQUIRED / INCOMPLETE
+```
+
 ## Pilot Cycle 1A verdict
 
 ```text
@@ -175,10 +191,20 @@ HARDENING REQUIRED (interim) — synthetic evidence complete and green;
 operator pilot staged but not yet executed by a human operator.
 ```
 
+Important interpretation boundary: the 4000-account runs prove the
+business logic and data model hold at scale **under a widened
+transaction budget** — they do NOT prove the production transaction
+envelope supports 4000-account billing today. `createTx` still runs
+under `runAsTenant`'s 5s interactive-tx default and fails beyond
+~800 settlements. That is the P1 above: prefer bounded batch
+claim/generate/finalize (mirroring `execute`'s per-bill tx design)
+over simply raising the timeout.
+
 Synthetic gates: PASS (generation stability, determinism, financial
 closure, detector 600/600 TP with FP=FN=0, exact anchors/ownership,
-episode scale, reset/regenerate). One P1 product limitation recorded
-(billing single-tx timeout). Final PASS requires completing the 65
-sampled operator episodes and a clean `operator-report.json`.
+episode scale, reset/regenerate). Final PASS requires completing the
+65 sampled operator episodes, a clean `operator-report.json`, and the
+BillingRun scalability P1 closed with a 1000/4000 production-path
+regression.
 
 **STOP — E11 not started.**
