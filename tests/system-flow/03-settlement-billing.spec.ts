@@ -127,7 +127,21 @@ test('J3 settlement + billing run (period 202607)', async ({ page }, info) => {
     runId: run!.id, total: run!.totalCount, success: run!.successCount, failed: run!.failedCount,
   });
 
-  // ---- bills: count + cents + tariff + dueDate ----
+  // ---- bills: exact cent-level truth recomputed from fixtures ----
+  // Independent due-date rule: last calendar day of the period + bill_due_days
+  // (tenant param, service default 15). 202607 + 15 → 2026-08-15.
+  const dueDays = await db(async (p) => {
+    const row = await p.tenantParam.findUnique({
+      where: { tenantId_key: { tenantId: s.tenantId, key: 'bill_due_days' } },
+      select: { value: true },
+    });
+    const v = row?.value;
+    return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 15;
+  });
+  const expectedDue = new Date(
+    Date.UTC(Number(P1.slice(0, 4)), Number(P1.slice(4)), 0) + dueDays * 86_400_000,
+  ).toISOString().slice(0, 10);
+  expect(expectedDue).toBe('2026-08-15'); // pins the formula for this period
   await db(async (p) => {
     const bills = await p.bill.findMany({
       where: { tenantId: s.tenantId, period: P1 },
@@ -135,16 +149,32 @@ test('J3 settlement + billing run (period 202607)', async ({ page }, info) => {
     });
     expect(bills.length).toBe(billable.length);
     for (const b of bills) {
+      const m = billable.find((x) => x.waterAccount.id === b.waterAccountId);
+      expect(m, `bill ${b.id} maps to a billable account`).toBeTruthy();
+      const st = await p.consumptionSettlement.findFirstOrThrow({
+        where: {
+          tenantId: s.tenantId, waterAccountId: b.waterAccountId,
+          period: P1, status: 'FINAL',
+        },
+      });
+      const t = s.tariffs[m!.waterAccount.usageCategory];
+      const expectedCents = BigInt(
+        Math.round(Number(st.totalUsageQty) * Number(t.unitPrice) * 100),
+      );
+      expect(b.totalAmount, `${m!.key} totalAmount`).toBe(expectedCents);
+      const itemSum = b.items.reduce((a: bigint, i: any) => a + BigInt(i.amount), 0n);
+      expect(itemSum, `${m!.key} Σ items`).toBe(b.totalAmount);
+      expect(b.tariffPlanId, `${m!.key} tariffPlanId`).toBe(t.id);
+      expect(b.dueDate!.toISOString().slice(0, 10), `${m!.key} dueDate`).toBe(expectedDue);
       // rerun-safe: J4/J5 may have moved some bills to PARTIAL_PAID/PAID
       expect(['POSTED', 'PARTIAL_PAID', 'PAID']).toContain(b.status);
-      expect(Number(b.totalAmount)).toBeGreaterThan(0);
-      expect(b.tariffPlanId).toBeTruthy();
-      expect(b.dueDate).toBeTruthy();
-      const itemSum = b.items.reduce((a: bigint, i: any) => a + BigInt(i.amountCents ?? i.amount ?? 0), 0n);
-      expect(itemSum === b.totalAmount || itemSum > 0n).toBeTruthy();
     }
+    // SF-A-008: NO_READ → FINAL estimated settlement, 15 m³ × ¥3 = 4500 cents.
     const estimated = bills.filter((b: any) => b.isEstimated);
     expect(estimated.length).toBe(1);
+    expect(estimated[0].waterAccountId)
+      .toBe(billable.find((x) => x.key === 'SF-A-008')!.waterAccount.id);
+    expect(estimated[0].totalAmount).toBe(4500n);
   });
   s.stages.j3 = true;
   save(s);

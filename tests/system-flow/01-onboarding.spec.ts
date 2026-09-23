@@ -7,8 +7,9 @@ import { row } from '../uat/helpers/ui';
 
 /**
  * J1 — customer → WaterAccount → meter → ACTIVE installation, all through
- * the real 立户向导 UI. ~20 accounts: normal residential across branches,
- * one shared-settlement pair, one non-res, one monitoring meter.
+ * the real 立户向导 UI. 21 accounts: normal residential across branches,
+ * one shared-settlement pair, one non-res, one monitoring meter
+ * (J6 later adds SF-D-001 → 22 total).
  * Read-only DB assertions: exactly one WaterAccount + one ACTIVE
  * installation per account, settle link correct.
  */

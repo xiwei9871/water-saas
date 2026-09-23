@@ -5,6 +5,7 @@ import { login } from './helpers/ui';
 import { loadAccount, allocInput, submitPay, topUp } from './helpers/cashier';
 import { generatePlan, startPlan, enterSingle, qcReading } from './helpers/reading';
 import { response, button, inputByLabel, selectPerson } from './helpers/ui';
+import { apiAs } from './helpers/api';
 
 /**
  * J4 — 收费台: full / partial / multi-bill cash payment + TOP_UP,
@@ -60,15 +61,74 @@ test('J4 payments + prepayment apply', async ({ page }, info) => {
     await evidence(page, info, 'j4-pay-full', res);
   }
 
-  // ---- case 2: partial payment on SF-A-002 (¥1.00 of a larger bill) ----
-  if (!s.payments.find((x: any) => x.tag === 'A2-partial')) {
+  // ---- case 2: partial payment on SF-A-002 — exact before/after reconciliation ----
+  // Independent ledger math: expectedRemaining = total - PAYMENT - PREPAYMENT,
+  // cross-checked against the production outstanding endpoint AND the cashier UI.
+  const a2Ledger = () => db(async (p) => {
+    const b = await p.bill.findFirstOrThrow({
+      where: { tenantId: s.tenantId, waterAccountId: A2.waterAccount.id, period: P1 },
+      include: { allocs: true },
+    });
+    const pay = b.allocs.filter((a: any) => a.source === 'PAYMENT')
+      .reduce((x: bigint, a: any) => x + a.amount, 0n);
+    const pre = b.allocs.filter((a: any) => a.source === 'PREPAYMENT')
+      .reduce((x: bigint, a: any) => x + a.amount, 0n);
+    return { total: b.totalAmount, pay, pre };
+  });
+  const adminApi = await apiAs('admin');
+  const outstandingOf = async () => {
+    const r = await adminApi.get(`/water-accounts/${A2.waterAccount.id}/outstanding`);
+    expect(r.status, `outstanding: ${JSON.stringify(r.body)}`).toBe(200);
+    return BigInt(r.body.totalOutstanding);
+  };
+  const counterShows = async (cents: bigint) => {
     await loadAccount(page, A2);
+    const stat = page.locator('.ant-statistic').filter({ hasText: '合计欠费' });
+    await expect(stat).toContainText((Number(cents) / 100).toFixed(2));
+  };
+  if (!s.payments.find((x: any) => x.tag === 'A2-partial')) {
+    const before = await a2Ledger();
+    expect(await outstandingOf()).toBe(before.total - before.pay - before.pre);
+    await counterShows(before.total - before.pay - before.pre);
     await allocInput(page, '2026-07').fill('1');
     const res = await submitPay(page);
     expect(Number(res.amount)).toBe(100);
     s.payments.push({ tag: 'A2-partial', id: res.id, amount: res.amount, cashier: cashier1.id });
     save(s);
     await evidence(page, info, 'j4-pay-partial', res);
+  }
+  {
+    const after = await a2Ledger();
+    const expectedRemaining = after.total - after.pay - after.pre;
+    const reported = await outstandingOf();
+    // bill total = PAYMENT allocs + PREPAYMENT allocs + reported remaining
+    expect(after.total).toBe(after.pay + after.pre + reported);
+    expect(reported).toBe(expectedRemaining);
+    // exactly the ¥1.00 partial — nothing else ever touches this bill
+    expect(after.pay).toBe(100n);
+    expect(after.pre).toBe(0n);
+    await counterShows(expectedRemaining);
+    // 360° mirrors the same production outstanding figure
+    await login(page);
+    await page.goto('/customer/water-accounts');
+    const search = page.getByPlaceholder('按户号精确查询');
+    await search.fill('SF-A-002');
+    await search.press('Enter');
+    const acctRow = page.getByRole('row').filter({ hasText: 'SF-A-002' });
+    await button(acctRow, '360°').click();
+    const drawer360 = page.locator('.ant-drawer-open');
+    // 欠费合计 lives in the lazy-loaded 缴费 tab
+    await drawer360.getByRole('tab', { name: '缴费' }).click();
+    await expect(
+      drawer360.getByRole('row').filter({ hasText: '欠费合计' }),
+    ).toContainText(`¥${(Number(expectedRemaining) / 100).toFixed(2)}`);
+    await evidence(page, info, 'j4-partial-recon', {
+      total: String(after.total), pay: String(after.pay), pre: String(after.pre),
+      reportedRemaining: String(reported),
+    });
+    await page.locator('.ant-drawer-open .ant-drawer-close').click();
+    await login(page, 'sf-cashier1');
+    await page.goto('/payment/counter');
   }
 
   // ---- case 3: multi-bill — SF-S-001/SF-S-002 share one settle account ----

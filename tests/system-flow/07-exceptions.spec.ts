@@ -5,6 +5,7 @@ import { login } from './helpers/ui';
 import { apiAs } from './helpers/api';
 import { button, response, choose, inputByLabel, selectPerson, formItem } from './helpers/ui';
 import { enterSingle, qcReading } from './helpers/reading';
+import { BrowserAudit } from '../uat/helpers/console';
 
 /**
  * J7 — Exception Center lifecycle.
@@ -14,8 +15,9 @@ import { enterSingle, qcReading } from './helpers/reading';
  *   READING_QC_REJECTED  SF-C-001 — P2 reading entered then rejected
  *   REMOTE_EVENT_UNBOUND source SF-REMOTE, unknown vendorDeviceKey (API ingest)
  *   UNPAID_BILL_OVERDUE  unpaid 202607 bills (due 2026-08-15 < today)
- * Lifecycle: ACK → ASSIGN → resolve-while-active 409 → IGNORE →
- * repair → AUTO RESOLVED / IGNORED-stays → recurrence → NEW OPEN episode.
+ * Lifecycle: ACK → ASSIGN → resolve-while-active 409 →
+ * repair-then-resolve MANUAL (READING_QC_REJECTED) → IGNORE →
+ * repair + refresh AUTO RESOLVED / IGNORED-stays → recurrence → NEW OPEN.
  */
 const P2 = '202608';
 
@@ -206,6 +208,78 @@ test('J7 exception center', async ({ page, audit }, info) => {
     await page.locator('.ant-drawer-open .ant-drawer-close').click();
   }
 
+  // ---------- READING_QC_REJECTED (SF-C-001): repair → MANUAL resolve ----------
+  // The product gate: episode detail GETs require the fact to still exist, so
+  // operator A must already have the drawer open while operator B repairs the
+  // reading in a separate session. NO exceptions refresh here — the fact
+  // clears via supersede, the episode stays open, and the queued resolve POST
+  // then succeeds as MANUAL (the same path a real operator hits).
+  const c1All = await db((p) => p.meterReading.findMany({
+    where: {
+      tenantId: s.tenantId, period: P2,
+      installation: { waterAccountId: C1.waterAccount.id },
+    },
+    select: { id: true, qcStatus: true, readingValue: true, supersedesReadingId: true },
+  }));
+  const c1Sup = new Set(c1All.map((r: any) => r.supersedesReadingId).filter(Boolean));
+  const c1LiveReading = c1All.find((r: any) => !c1Sup.has(r.id));
+  const c1Rejected = c1All.find((r: any) => r.qcStatus === 'REJECTED');
+  const qcKey = c1Rejected ? `reading:${c1Rejected.id}:QC_REJECTED` : null;
+  const qcEp = qcKey && await db((p) => p.workItem.findFirst({
+    where: { tenantId: s.tenantId, anomalyKey: qcKey, clearedAt: null } }));
+  if (qcEp && qcEp.status !== 'RESOLVED') {
+    // operator A opens the episode while the fact is still live
+    const { drawer, key: openKey } = await openDetailBySummary(page, '抄表驳回', 'SF-C-001');
+    expect(openKey).toBe(qcKey);
+    if (c1LiveReading?.qcStatus === 'REJECTED') {
+      // operator B repairs through the normal UI in its own session:
+      // supersede the rejected reading, then QC PASS — fact clears
+      const ctx2 = await page.context().browser()!.newContext();
+      const page2 = await ctx2.newPage();
+      const audit2 = new BrowserAudit(page2);
+      try {
+        // admin (ALL scope) — sf-reader is 城东-scoped and can't see 城南
+        await login(page2, 'admin');
+        await page2.goto('/metering/readings');
+        const s2 = page2.getByPlaceholder('搜索户号、客户或地址');
+        await s2.fill('SF-C-001');
+        await s2.press('Enter');
+        const rejRow = page2.getByRole('row').filter({ hasText: 'SF-C-001' })
+          .filter({ hasText: '质检驳回' });
+        await rejRow.getByRole('button', { name: '更正' }).click();
+        const supModal = page2.getByRole('dialog', { name: /更正读数/ });
+        await supModal.getByLabel('更正后表码读数')
+          .fill(String(Number(c1Rejected!.readingValue) + 1));
+        await response(page2, /\/meter-readings\/[0-9a-f-]+\/supersede/, () =>
+          button(supModal, '更正').click());
+        await login(page2, 'sf-reviewer');
+        await qcReading(page2, 'SF-C-001', '通过');
+      } finally {
+        await Promise.allSettled(audit2.pending);
+        audit.events.push(...audit2.events); // operator-B traffic is evidence too
+        await ctx2.close();
+      }
+    }
+    // fact gone, episode still open → UI resolve is MANUAL, not 409
+    audit.allow(`/api/exceptions/${encodeURIComponent(qcKey!)}`, 404, 'GET');
+    const resolved = page.waitForResponse((r) =>
+      r.url().includes('/resolve') && r.request().method() === 'POST');
+    await button(drawer, '标记已解决').click();
+    const modal = page.getByRole('dialog', { name: '标记已解决' });
+    await button(modal, '确 定').or(button(modal, '确定')).click();
+    const res = await resolved;
+    // NestJS POST default is 201 — assert 2xx success, not the 409 guard
+    expect([200, 201]).toContain(res.status());
+    const epAfter = await db((p) => p.workItem.findFirstOrThrow({
+      where: { tenantId: s.tenantId, anomalyKey: qcKey }, orderBy: { createdAt: 'desc' } }));
+    expect(epAfter.status).toBe('RESOLVED');
+    expect(epAfter.resolutionSource).toBe('MANUAL');
+    expect(epAfter.clearedAt).not.toBeNull();
+    await evidence(page, info, 'j7-manual-resolve', { key: qcKey, episode: epAfter.id });
+    await page.locator('.ant-drawer-open .ant-drawer-close').click();
+    await expect(page.locator('.ant-drawer-open')).toHaveCount(0);
+  }
+
   // ---------- IGNORE NO_ACTIVE_METER (SF-X-001) ----------
   const noMeterKey = `wa:${X1.waterAccount.id}:NO_ACTIVE_METER`;
   const noMeterEp = await db((p) => p.workItem.findFirst({
@@ -295,7 +369,8 @@ test('J7 exception center', async ({ page, audit }, info) => {
   const list = await api2.get('/exceptions?take=200');
   await api2.dispose();
   const types = (list.body?.items ?? list.body ?? []).map((f: any) => f.type);
-  expect(types).toContain('READING_QC_REJECTED');
+  // repaired + MANUAL-resolved — the fact no longer exists in the live queue
+  expect(types).not.toContain('READING_QC_REJECTED');
   expect(types).toContain('REMOTE_EVENT_UNBOUND');
   expect(types).toContain('UNPAID_BILL_OVERDUE');
   expect(types).toContain('NO_BOOK');

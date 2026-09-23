@@ -1,7 +1,7 @@
 import { test, expect, evidence } from './helpers/test';
 import { load, save } from './helpers/state';
 import { db } from './helpers/db';
-import { login, button } from './helpers/ui';
+import { login, button, date } from './helpers/ui';
 import { apiAs } from './helpers/api';
 
 /**
@@ -195,17 +195,24 @@ test('J8 360 / scope / reports', async ({ page, audit }, info) => {
   expect(String(cmBody.collected)).toBe(String(collected));
   await expect(page.getByText(cent(collected)).first()).toBeVisible();
 
-  // 收费日报（今日）：cashier1 row total == DB same-day sum
-  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  // 收费日报（今日）：cashier1 row total == DB same-day sum.
+  // The report keys on received_at::date in the DB session TZ — derive the
+  // operating date from the DB itself so the check is stable when local and
+  // DB dates straddle a boundary (00:00–08:00 CST runs).
+  const dbToday = await db(async (p) =>
+    (await p.$queryRaw<{ d: string }[]>`SELECT current_date::text AS d`)[0].d);
   const cashier1 = await db(async (p) => {
-    const rows = await p.payment.findMany({
-      where: { tenantId: s.tenantId, cashierId: s.roles['sf-cashier1'].id,
-        status: { in: ['RECEIVED', 'DAY_CLOSED'] },
-        receivedAt: { gte: new Date(`${today}T00:00:00`), lt: new Date(now.getTime() + 86400000) } },
-      select: { amount: true } });
-    return { count: rows.length, amount: rows.reduce((a: bigint, r: any) => a + r.amount, 0n) };
+    const rows = await p.$queryRaw<{ cnt: number; amount: bigint }[]>`
+      SELECT count(*)::int AS cnt, coalesce(sum(amount), 0)::bigint AS amount
+      FROM payment
+      WHERE tenant_id = ${s.tenantId}::uuid
+        AND cashier_id = ${s.roles['sf-cashier1'].id}::uuid
+        AND status IN ('RECEIVED', 'DAY_CLOSED')
+        AND received_at::date = current_date`;
+    return { count: rows[0].cnt, amount: rows[0].amount };
   });
   await page.goto('/report/cashier-daily');
+  await date(page.locator('.ant-picker').first().locator('input'), dbToday);
   const cdRes = page.waitForResponse((r) =>
     new URL(r.url()).pathname === '/api/reports/cashier-daily' && r.request().method() === 'GET');
   await button(page, '刷 新').or(button(page, '刷新')).click();
