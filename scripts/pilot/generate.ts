@@ -148,6 +148,11 @@ async function main(): Promise<void> {
     );
     console.log(
       `verify: checks ${v.checks.filter((c) => c.pass).length}/${v.checks.length} pass, ` +
+        `financial=${v.financial.pass ? 'PASS' : 'FAIL'} ` +
+        `(bill=${v.financial.billTotal} pay=${v.financial.paymentAllocTotal} ` +
+        `prepay=${v.financial.prepaymentAllocTotal} topUp=${v.financial.topUpLedgerTotal} ` +
+        `apply=${v.financial.applyLedgerTotal} net=${v.financial.ledgerNet} ` +
+        `open=${v.financial.openBills}) ` +
         `unexpected anomalies=${v.unexpectedAnomalies.length} → ${v.pass ? 'PASS' : 'HOLD'}`,
     );
     if (!v.pass) {

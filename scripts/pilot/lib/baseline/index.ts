@@ -22,7 +22,9 @@ import {
   generateBooks,
   generatePlans,
   ingestRemotePeriod,
-  runBilling,
+  createBillingRun,
+  executeBillingRun,
+  preFundCAccounts,
   settleAccounts,
   setupRemoteInfra,
   submitManualReadings,
@@ -118,6 +120,13 @@ export async function runBaseline(
     const members = await addMemberships(
       h, ctx, bs, accounts, args.concurrency,
     );
+    // carry branch/book identity onto accounts for GT orgOwnership
+    for (const a of accounts) {
+      const bk = bs[a.plan.bookIdx];
+      a.bookId = bk.id;
+      a.bookNo = bk.bookNo;
+      a.branchId = bk.orgUnitId;
+    }
     return { rows: bs.length + members, value: bs };
   });
 
@@ -157,12 +166,18 @@ export async function runBaseline(
     }));
 
     await sink.run('billing', async () => {
-      const run = await runBilling(h, ctx, period);
-      // run lifecycle ends at POSTED (all billed) — PARTIAL/FAILED abort
-      if (run.status !== 'POSTED')
-        throw new Error(`billing run ${run.runId} ended ${run.status}`);
+      const runId = await createBillingRun(h, ctx, period);
+      // C: TOP_UP lot while bills are still DRAFT (not payable debt),
+      // then execute posts + applyForPostedDebtTx writes APPLY rows
+      const cTopUps = await preFundCAccounts(
+        h, ctx, accounts, period, args.concurrency,
+      );
+      topUps += cTopUps;
+      const status = await executeBillingRun(h, ctx, runId);
+      if (status !== 'POSTED')
+        throw new Error(`billing run ${runId} ended ${status}`);
       billsPosted += accounts.length;
-      return { rows: accounts.length };
+      return { rows: accounts.length + cTopUps };
     });
 
     const pay = await sink.run('payment', async () => {
@@ -184,9 +199,7 @@ export async function runBaseline(
     value: await verifyBaseline(h, ctx, accounts, periods),
   }));
 
-  const groundTruth = accounts.map((a) =>
-    cleanEntry(a, seed, `BK-${String(a.plan.bookIdx).padStart(3, '0')}`),
-  );
+  const groundTruth = accounts.map((a) => cleanEntry(a, seed));
 
   return {
     phases: sink.records(),

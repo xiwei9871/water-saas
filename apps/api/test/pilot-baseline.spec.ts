@@ -104,12 +104,24 @@ describe('G3 clean GT shape', () => {
       scenarioKey: 'CLEAN_BACKGROUND:000007',
       injectionMethod: 'DOMAIN_FLOW' as const,
       reachableInNormalOperation: true,
-      businessKeys: { accountNo: keys.accountNo(42, 'BG', 7) },
+      businessKeys: {
+        accountNo: keys.accountNo(42, 'BG', 7),
+        // P2-1: real reading_book.book_no key, not a placeholder
+        bookNo: keys.bookCode(42, 5),
+      },
       entityIds: { waterAccountId: 'uuid-this-run' },
-      expected: { anomalies: [], orgOwnership: [], financialEffect: null },
+      // P2-2: orgOwnership carries the actual branchId (uuid varies per run)
+      expected: {
+        anomalies: [],
+        orgOwnership: ['branch-uuid-this-run'],
+        financialEffect: null,
+      },
     };
     expect(entry.expected.anomalies).toEqual([]);
     expect(entry.injectionMethod).toBe('DOMAIN_FLOW');
     expect(entry.businessKeys.accountNo).toMatch(/^P0042-BG-/);
+    expect(entry.businessKeys.bookNo).toBe('P0042-BK-000005');
+    expect(entry.businessKeys.bookNo).toBe(keys.bookCode(42, 5));
+    expect(entry.expected.orgOwnership).toHaveLength(1);
   });
 });

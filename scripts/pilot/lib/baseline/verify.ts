@@ -16,9 +16,14 @@ export interface VerifyResult {
   checks: { name: string; expected: number; actual: number; pass: boolean }[];
   financial: {
     billTotal: string;
-    paidTotal: string;
-    prepayApplied: string;
+    paymentAllocTotal: string;
+    prepaymentAllocTotal: string;
+    topUpLedgerTotal: string;
+    applyLedgerTotal: string;
     ledgerNet: string;
+    openBills: number;
+    overAllocatedBills: number;
+    orphanAllocs: number;
     pass: boolean;
   };
   unexpectedAnomalies: { type: string; key: string }[];
@@ -77,14 +82,16 @@ export async function verifyBaseline(
       Pr.Prisma.sql`SELECT count(*) c FROM raw_remote_event
         WHERE tenant_id=${tenantId}::uuid AND processing_status='CONVERTED'`).then(r => Number(r[0].c)));
 
-  // --- financial reconciliation ---
+  // --- financial reconciliation (P1-2 strict) ---
   const fin = await q<{
     bill_total: unknown;
-    paid_alloc: unknown;
-    prepay_alloc: unknown;
-    prepay_applied: unknown;
-    ledger_net: unknown;
-    bills_open: unknown;
+    payment_alloc: unknown;
+    prepayment_alloc: unknown;
+    topup_ledger: unknown;
+    apply_ledger: unknown;
+    open_bills: unknown;
+    over_alloc: unknown;
+    orphan_alloc: unknown;
   }[]>(
     Pr.Prisma.sql`SELECT
       (SELECT sum(total_amount) FROM bill
@@ -92,33 +99,66 @@ export async function verifyBaseline(
       (SELECT sum(pa.amount) FROM payment_alloc pa
         JOIN bill b ON b.id=pa.bill_id AND b.tenant_id=pa.tenant_id
         WHERE pa.tenant_id=${tenantId}::uuid AND b.water_account_id=ANY(${waIds}::uuid[])
-          AND pa.source='PAYMENT') paid_alloc,
+          AND pa.source='PAYMENT') payment_alloc,
       (SELECT sum(pa.amount) FROM payment_alloc pa
         JOIN bill b ON b.id=pa.bill_id AND b.tenant_id=pa.tenant_id
         WHERE pa.tenant_id=${tenantId}::uuid AND b.water_account_id=ANY(${waIds}::uuid[])
-          AND pa.source='PREPAYMENT') prepay_alloc,
+          AND pa.source='PREPAYMENT') prepayment_alloc,
       (SELECT sum(amount) FROM prepayment_ledger_entry
-        WHERE tenant_id=${tenantId}::uuid AND type='APPLY') prepay_applied,
-      (SELECT sum(CASE type WHEN 'TOP_UP' THEN amount WHEN 'APPLY' THEN -amount
-            ELSE 0 END) FROM prepayment_ledger_entry
-        WHERE tenant_id=${tenantId}::uuid) ledger_net,
+        WHERE tenant_id=${tenantId}::uuid AND type='TOP_UP') topup_ledger,
+      (SELECT sum(amount) FROM prepayment_ledger_entry
+        WHERE tenant_id=${tenantId}::uuid AND type='APPLY') apply_ledger,
       (SELECT count(*) FROM bill
         WHERE tenant_id=${tenantId}::uuid AND water_account_id=ANY(${waIds}::uuid[])
-          AND status IN ('POSTED','PARTIAL_PAID')) bills_open`,
+          AND status IN ('POSTED','PARTIAL_PAID')) open_bills,
+      (SELECT count(*) FROM (
+          SELECT b.id FROM bill b
+          JOIN payment_alloc pa ON pa.bill_id=b.id AND pa.tenant_id=b.tenant_id
+          WHERE b.tenant_id=${tenantId}::uuid AND b.water_account_id=ANY(${waIds}::uuid[])
+          GROUP BY b.id, b.total_amount
+          HAVING sum(pa.amount) > b.total_amount) t) over_alloc,
+      (SELECT count(*) FROM payment_alloc pa
+        WHERE pa.tenant_id=${tenantId}::uuid
+          AND (NOT EXISTS (SELECT 1 FROM bill b
+                WHERE b.tenant_id=pa.tenant_id AND b.id=pa.bill_id)
+            OR (pa.source='PAYMENT' AND NOT EXISTS (SELECT 1 FROM payment p
+                WHERE p.tenant_id=pa.tenant_id AND p.id=pa.payment_id))
+            OR (pa.source='PREPAYMENT' AND NOT EXISTS (SELECT 1 FROM prepayment_ledger_entry le
+                WHERE le.tenant_id=pa.tenant_id AND le.id=pa.prepayment_entry_id)))) orphan_alloc`,
   );
   const f = fin[0];
   // sum() comes back numeric → Prisma Decimal; normalize to bigint cents
   const bi = (v: unknown) => BigInt(String(v ?? 0));
   const billTotal = bi(f.bill_total);
-  const paidTotal = bi(f.paid_alloc) + bi(f.prepay_alloc);
-  const ledgerNet = bi(f.ledger_net);
+  const paymentAllocTotal = bi(f.payment_alloc);
+  const prepaymentAllocTotal = bi(f.prepayment_alloc);
+  const topUpLedgerTotal = bi(f.topup_ledger);
+  const applyLedgerTotal = bi(f.apply_ledger); // stored signed (<0)
+  const ledgerNet = topUpLedgerTotal + applyLedgerTotal;
+  const openBills = Number(f.open_bills ?? 0);
+  const overAllocatedBills = Number(f.over_alloc ?? 0);
+  const orphanAllocs = Number(f.orphan_alloc ?? 0);
   const financial = {
     billTotal: String(billTotal),
-    paidTotal: String(paidTotal),
-    prepayApplied: String(f.prepay_alloc ?? 0),
+    paymentAllocTotal: String(paymentAllocTotal),
+    prepaymentAllocTotal: String(prepaymentAllocTotal),
+    topUpLedgerTotal: String(topUpLedgerTotal),
+    applyLedgerTotal: String(applyLedgerTotal),
     ledgerNet: String(ledgerNet),
-    // every alloc reduces a bill exactly once; no orphan/dangling rows
-    pass: paidTotal <= billTotal && ledgerNet >= 0n,
+    openBills,
+    overAllocatedBills,
+    orphanAllocs,
+    // frozen clean-baseline invariants
+    pass:
+      openBills === 0 &&
+      billTotal === paymentAllocTotal + prepaymentAllocTotal &&
+      prepaymentAllocTotal === -applyLedgerTotal &&
+      topUpLedgerTotal > 0n &&
+      applyLedgerTotal < 0n &&
+      prepaymentAllocTotal > 0n &&
+      ledgerNet === 0n &&
+      overAllocatedBills === 0 &&
+      orphanAllocs === 0,
   };
 
   // --- E9 detector smoke: detectAll directly, steady state ---

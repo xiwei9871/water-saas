@@ -87,6 +87,10 @@ export interface GeneratedAccount {
   meterId: string;
   installationId: string;
   installedAt: Date;
+  /** filled after books exist — drives GT book key + orgOwnership */
+  branchId?: string;
+  bookId?: string;
+  bookNo?: string;
 }
 
 export async function generateAccounts(
@@ -156,6 +160,8 @@ export interface GeneratedBook {
   id: string;
   branchIdx: number;
   seq: number;
+  bookNo: string;
+  orgUnitId: string;
 }
 
 export async function generateBooks(
@@ -183,7 +189,13 @@ export async function generateBooks(
             meterChannel: 'MECHANICAL',
           } as never),
       )) as { id: string };
-      out.push({ id: r.id, branchIdx: b, seq });
+      out.push({
+        id: r.id,
+        branchIdx: b,
+        seq,
+        bookNo: keys.bookCode(seed, seq),
+        orgUnitId: branchIds[b],
+      });
     }
   }
   return out;
@@ -329,11 +341,11 @@ export async function settleAccounts(
 // billing — createTx (CALLER) + execute (SELF-MANAGED, never wrapped)
 // ---------------------------------------------------------------------------
 
-export async function runBilling(
+export async function createBillingRun(
   h: Harness,
   ctx: TenantCtx,
   period: string,
-): Promise<{ runId: string; status: string }> {
+): Promise<string> {
   const billing = await services.billingRun(h);
   const run = (await withTenantTx(
     h,
@@ -341,14 +353,71 @@ export async function runBilling(
     ctx.tenantId,
     (tx) => billing.createTx(tx, ctx, { period } as never),
   )) as { id: string };
+  return run.id;
+}
+
+/**
+ * P1-1 — real TOP_UP→APPLY evidence. After createTx produced DRAFT
+ * bills but BEFORE execute posts them, C-profile accounts top up
+ * exactly their period bill total. DRAFT bills are not payable debt,
+ * so topUpTx records a pure TOP_UP ledger lot; execute() then posts
+ * and applyForPostedDebtTx writes APPLY + PREPAYMENT payment_alloc.
+ */
+export async function preFundCAccounts(
+  h: Harness,
+  ctx: TenantCtx,
+  accounts: GeneratedAccount[],
+  period: string,
+  concurrency: number,
+): Promise<number> {
+  const cAccounts = accounts.filter((a) => a.plan.payProfile === 'C');
+  if (!cAccounts.length) return 0;
+  const prepay = await services.prepayment(h);
+  // this period's DRAFT bill totals per C account
+  const rows = await h.tenantPrisma.runAsTenant(ctx.tenantId, async (tx) => {
+    const t = tx as { $queryRaw<T>(q: unknown, ...a: unknown[]): Promise<T> };
+    return t.$queryRaw<{ water_account_id: string; total: unknown }[]>(
+      Pr.Prisma.sql`SELECT water_account_id, sum(total_amount) total
+        FROM bill
+        WHERE tenant_id=${ctx.tenantId}::uuid AND period=${period}
+          AND status='DRAFT'
+          AND water_account_id=ANY(${cAccounts.map((a) => a.waterAccountId)}::uuid[])
+        GROUP BY water_account_id`,
+    );
+  });
+  const totalByAccount = new Map(
+    rows.map((r) => [r.water_account_id, BigInt(String(r.total ?? 0))]),
+  );
+  let n = 0;
+  await mapLimit(cAccounts, concurrency, async (a) => {
+    const amount = totalByAccount.get(a.waterAccountId) ?? 0n;
+    if (amount <= 0n) return;
+    await withTenantTx(h, 'PrepaymentService.topUpTx', ctx.tenantId, (tx) =>
+      prepay.topUpTx(tx, ctx, {
+        settleAccountId: a.settleAccountId,
+        channel: 'CASH',
+        amount,
+      } as never),
+    );
+    n++;
+  });
+  return n;
+}
+
+export async function executeBillingRun(
+  h: Harness,
+  ctx: TenantCtx,
+  runId: string,
+): Promise<string> {
+  const billing = await services.billingRun(h);
   // TX_SELF_MANAGED — direct call, per D4
   const done = (await billing.execute(
     ctx,
-    run.id,
+    runId,
     ['DRAFT', 'PARTIAL'],
     REQ,
   )) as { status: string };
-  return { runId: run.id, status: done.status };
+  return done.status;
 }
 
 // ---------------------------------------------------------------------------
@@ -420,24 +489,9 @@ export async function applyPayments(
       (b) => b.outstanding > 0n,
     );
     if (!owed.length) return;
-    if (a.plan.payProfile === 'C') {
-      // TOP_UP first (no debt at top-up time → pure lot), billing APPLY
-      // already ran at post — so top up exactly the remaining debt here.
-      const total = owed.reduce((s, b) => s + b.outstanding, 0n);
-      await withTenantTx(
-        h,
-        'PrepaymentService.topUpTx',
-        ctx.tenantId,
-        (tx) =>
-          prepay.topUpTx(tx, ctx, {
-            settleAccountId: a.settleAccountId,
-            channel: 'CASH',
-            amount: total,
-          } as never),
-      );
-      topUps++;
-      return;
-    }
+    // C: funded pre-post via TOP_UP lot — APPLY at bill post already
+    // settled its debt; nothing further here (RC1 P1-1).
+    if (a.plan.payProfile === 'C') return;
     if (a.plan.payProfile === 'B') {
       // partial cash on the oldest bill…
       const first = owed[0];
@@ -638,7 +692,6 @@ export async function ingestRemotePeriod(
 export const cleanEntry = (
   a: GeneratedAccount,
   seed: number,
-  bookCode: string,
 ): GroundTruthEntry => ({
   scenarioKey: `CLEAN_BACKGROUND:${String(a.plan.seq).padStart(6, '0')}`,
   injectionMethod: 'DOMAIN_FLOW',
@@ -648,7 +701,8 @@ export const cleanEntry = (
     customerNo: keys.customerNo(seed, a.plan.tag, a.plan.seq),
     settleNo: keys.settleNo(seed, a.plan.tag, a.plan.seq),
     meterNo: keys.meterNo(seed, a.plan.seq),
-    bookCode,
+    // real reading_book.book_no — joins GT to the DB row
+    bookNo: a.bookNo ?? '',
     remote: String(a.plan.remote),
     payProfile: a.plan.payProfile,
   },
@@ -658,6 +712,12 @@ export const cleanEntry = (
     waterAccountId: a.waterAccountId,
     meterId: a.meterId,
     installationId: a.installationId,
+    ...(a.branchId ? { branchId: a.branchId } : {}),
+    ...(a.bookId ? { bookId: a.bookId } : {}),
   },
-  expected: { anomalies: [], orgOwnership: [], financialEffect: null },
+  expected: {
+    anomalies: [],
+    orgOwnership: a.branchId ? [a.branchId] : [],
+    financialEffect: null,
+  },
 });

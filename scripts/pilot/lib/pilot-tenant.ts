@@ -89,10 +89,11 @@ export const TENANT_TABLE_DELETE_ORDER: readonly string[] = [
   'remote_device_binding',
   'remote_device',
   'remote_source',
-  'prepayment_ledger_entry',
   'cashier_day_close',
   'receipt',
+  // payment_alloc.prepayment_entry_id FKs the ledger — alloc first
   'payment_alloc',
+  'prepayment_ledger_entry',
   'payment',
   'idempotency_key',
   'bill_item',
