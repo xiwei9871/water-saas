@@ -5,8 +5,9 @@
  * TenantPrisma handle to prove the ownership plumbing.
  */
 
-import { apiRequire } from './pg.js';
-import { assertCallerManaged } from './tx-registry.js';
+import { apiImport } from './api-import.ts';
+import { apiRequire } from './pg.ts';
+import { assertCallerManaged } from './tx-registry.ts';
 
 export interface TenantCtx {
   tenantId: string;
@@ -47,15 +48,18 @@ export async function bootHarness(): Promise<Harness> {
       }>;
     };
   };
-  const { AppModule } = await import(
-    '../../../apps/api/src/app.module.js'
+  const { AppModule } = await apiImport<{ AppModule: unknown }>(
+    'app.module',
   );
   const app = await NestFactory.createApplicationContext(AppModule, {
-    logger: false,
+    logger: ['error'],
+    // default abortOnError silently process.exit(1)s on DI failure —
+    // we want the thrown error instead.
+    abortOnError: false,
   });
-  const { TenantPrismaService } = await import(
-    '../../../apps/api/src/common/tenant-prisma.js'
-  );
+  const { TenantPrismaService } = await apiImport<{
+    TenantPrismaService: unknown;
+  }>('common/tenant-prisma');
   const tenantPrisma = app.get(TenantPrismaService, {
     strict: false,
   }) as Harness['tenantPrisma'];

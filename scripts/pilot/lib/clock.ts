@@ -3,7 +3,7 @@
  * production detector behavior (CURRENT_DATE stays the DB's).
  */
 
-import type { Client } from './pg.js';
+import type { Client } from './pg.ts';
 
 export interface PilotClock {
   /** Logical date all generated timestamps are relative to. */

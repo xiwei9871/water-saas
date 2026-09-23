@@ -84,7 +84,10 @@ export async function writeJsonAtomic(
 }
 
 export class ManifestWriter {
-  constructor(public readonly runDir: string) {}
+  readonly runDir: string;
+  constructor(runDir: string) {
+    this.runDir = runDir;
+  }
 
   async init(): Promise<void> {
     await mkdir(this.runDir, { recursive: true });

@@ -4,8 +4,8 @@
  * host/name guard has passed. Never "adopts" an unmarked tenant.
  */
 
-import type { Client } from './pg.js';
-import { keys } from './keys.js';
+import type { Client } from './pg.ts';
+import { keys } from './keys.ts';
 
 export class TenantGuardError extends Error {}
 
@@ -80,6 +80,11 @@ export async function createPilotTenant(
 export const TENANT_TABLE_DELETE_ORDER: readonly string[] = [
   'work_item',
   'remote_event_process_log',
+  // consumption/meter_reading precede raw_remote_event: readings FK it via
+  // source_event_id (remote-converted readings).
+  'consumption_component',
+  'consumption_settlement',
+  'meter_reading',
   'raw_remote_event',
   'remote_device_binding',
   'remote_device',
@@ -98,9 +103,6 @@ export const TENANT_TABLE_DELETE_ORDER: readonly string[] = [
   'fee_item',
   'estimate_rule',
   'reconciliation',
-  'consumption_component',
-  'consumption_settlement',
-  'meter_reading',
   'reading_plan_item',
   'reading_plan',
   'book_meter',

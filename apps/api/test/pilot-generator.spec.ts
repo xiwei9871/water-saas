@@ -11,23 +11,23 @@ import {
   CliError,
   isResetDryRun,
   parseArgs,
-} from '../../../scripts/pilot/lib/cli.js';
+} from '../../../scripts/pilot/lib/cli.ts';
 import {
   assertPilotDatabase,
   assertPilotEnvironment,
   DbGuardError,
-} from '../../../scripts/pilot/lib/db-guard.js';
-import { keys } from '../../../scripts/pilot/lib/keys.js';
+} from '../../../scripts/pilot/lib/db-guard.ts';
+import { keys } from '../../../scripts/pilot/lib/keys.ts';
 import {
   assertCallerManaged,
   OwnershipError,
   TX_REGISTRY,
-} from '../../../scripts/pilot/lib/tx-registry.js';
-import { withTenantTx, type Harness } from '../../../scripts/pilot/lib/harness.js';
+} from '../../../scripts/pilot/lib/tx-registry.ts';
+import { withTenantTx, type Harness } from '../../../scripts/pilot/lib/harness.ts';
 import {
   ManifestWriter,
   writeJsonAtomic,
-} from '../../../scripts/pilot/lib/manifest.js';
+} from '../../../scripts/pilot/lib/manifest.ts';
 
 const BASE = [
   '--tenant', '11111111-2222-3333-4444-555555555555',

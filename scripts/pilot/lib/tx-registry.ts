@@ -18,14 +18,40 @@ export const TX_REGISTRY: Readonly<Record<string, TxOwnership>> = {
   'WaterAccountService.onboardTx': 'TX_CALLER_MANAGED',
   'WaterAccountService.createTx': 'TX_CALLER_MANAGED',
   'WaterAccountService.updateTx': 'TX_CALLER_MANAGED',
+  'CustomerService.createTx': 'TX_CALLER_MANAGED',
+  'SettleAccountService.createTx': 'TX_CALLER_MANAGED',
+  'MeterService.createTx': 'TX_CALLER_MANAGED',
   'MeterInstallationService.installTx': 'TX_CALLER_MANAGED',
   'MeterInstallationService.removeTx': 'TX_CALLER_MANAGED',
+  'ReadingBookService.createTx': 'TX_CALLER_MANAGED',
   'ReadingBookService.addMemberTx': 'TX_CALLER_MANAGED',
   'ReadingBookService.removeMemberTx': 'TX_CALLER_MANAGED',
-  // remote ingest manages one transaction PER EVENT internally
+  'ReadingPlanService.generateTx': 'TX_CALLER_MANAGED',
+  'ReadingPlanService.startTx': 'TX_CALLER_MANAGED',
+  'MeterReadingService.createBatchTx': 'TX_CALLER_MANAGED',
+  'MeterReadingService.qcTx': 'TX_CALLER_MANAGED',
+  'SettlementService.generateTx': 'TX_CALLER_MANAGED',
+  'SettlementService.finalizeTx': 'TX_CALLER_MANAGED',
+  // billing config + runs
+  'FeeItemService.createTx': 'TX_CALLER_MANAGED',
+  'TariffPlanService.createTx': 'TX_CALLER_MANAGED',
+  'TariffPlanService.activateTx': 'TX_CALLER_MANAGED',
+  'BillingRunService.createTx': 'TX_CALLER_MANAGED',
+  // execute() opens its own claim/per-bill/finalize txs — never wrap
+  'BillingRunService.execute': 'TX_SELF_MANAGED',
+  // money
+  'PaymentService.createTx': 'TX_CALLER_MANAGED',
+  'DayCloseService.closeTx': 'TX_CALLER_MANAGED',
+  'PrepaymentService.topUpTx': 'TX_CALLER_MANAGED',
+  'PrepaymentService.applyForPostedDebtTx': 'TX_CALLER_MANAGED',
+  // remote chain — ingest manages one transaction PER EVENT internally
+  'RemoteSourceService.createTx': 'TX_CALLER_MANAGED',
+  'RemoteDeviceService.createDeviceTx': 'TX_CALLER_MANAGED',
+  'RemoteDeviceService.createBindingTx': 'TX_CALLER_MANAGED',
   'RemoteEventService.ingestOne': 'TX_SELF_MANAGED',
   'RemoteEventService.ingestBatch': 'TX_SELF_MANAGED',
-  'RemoteEventService.replay': 'TX_SELF_MANAGED',
+  'RemoteEventProcessorService.replayTx': 'TX_CALLER_MANAGED',
+  'RemoteEventProcessorService.resolveConflictTx': 'TX_CALLER_MANAGED',
 } as const;
 
 export class OwnershipError extends Error {}

@@ -1,40 +1,45 @@
 /**
- * Pilot Cycle 1A — synthetic generator. G2 SKELETON ONLY:
- * CLI + DB/tenant guards + reset + Nest harness + key factory +
- * PilotClock + manifest writers. Baseline flows (G3), fault injection
- * (G4) and evaluation (G5) are NOT implemented here.
+ * Pilot Cycle 1A — synthetic generator. G2 infrastructure + G3
+ * clean-background baseline domain flows. Fault injection (G4) and
+ * evaluation (G5) are NOT implemented here.
  *
- * Usage (must run from apps/api so tsconfig + node_modules resolve):
- *   pnpm --filter api exec tsx ../../scripts/pilot/generate.ts \
+ * Usage — runs under plain `node` (type-stripping) against the COMPILED
+ * api (apps/api/dist): tsx/esbuild does not emit design:paramtypes, so
+ * Nest DI only works on the tsc build. Run `pnpm --filter api build`
+ * first; cwd must be apps/api so node_modules resolves:
+ *   cd apps/api && node ../../scripts/pilot/generate.ts \
  *     --create-tenant --seed 42 --period-from 202607 [--reset --yes]
  */
 
 import { join } from 'node:path';
-import { CliError, isResetDryRun, parseArgs, USAGE } from './lib/cli.js';
-import { assertPilotEnvironment, DbGuardError } from './lib/db-guard.js';
-import { connect } from './lib/pg.js';
+import { CliError, isResetDryRun, parseArgs, USAGE } from './lib/cli.ts';
+import { assertPilotEnvironment, DbGuardError } from './lib/db-guard.ts';
+import { connect } from './lib/pg.ts';
 import {
   createPilotTenant,
   executeReset,
   planReset,
   requireMarkedTenant,
   TenantGuardError,
-} from './lib/pilot-tenant.js';
-import { loadPilotClock } from './lib/clock.js';
-import { bootHarness } from './lib/harness.js';
+} from './lib/pilot-tenant.ts';
+import { loadPilotClock } from './lib/clock.ts';
+import { bootHarness, pilotCtx } from './lib/harness.ts';
+import { runBaseline, type BaselineResult } from './lib/baseline/index.ts';
 import {
   gitSha,
   ManifestWriter,
   newRunId,
   type GenerationSummary,
   type PhaseRecord,
-} from './lib/manifest.js';
+} from './lib/manifest.ts';
 
 const fatal = (e: unknown): never => {
   const msg =
     e instanceof CliError || e instanceof DbGuardError || e instanceof TenantGuardError
       ? e.message
-      : String(e);
+      : e instanceof Error
+        ? (e.stack ?? e.message)
+        : String(e);
   console.error(`ABORT: ${msg}`);
   process.exit(1);
 };
@@ -79,6 +84,7 @@ async function main(): Promise<void> {
   });
   let tenant: Awaited<ReturnType<typeof requireMarkedTenant>>;
   let clock: Awaited<ReturnType<typeof loadPilotClock>>;
+  let baseline: BaselineResult | undefined;
   try {
     tenant = await phase(phases, 'tenant-guard', () =>
       args.createTenant
@@ -125,12 +131,33 @@ async function main(): Promise<void> {
       );
     }
 
-    // Nest harness smoke — boots without HTTP listener, always closes.
-    await phase(phases, 'harness', async () => {
-      const h = await bootHarness();
+    // Nest harness → G3 baseline domain flows → close. No HTTP listener.
+    const h = await phase(phases, 'harness', () => bootHarness());
+    try {
+      baseline = await runBaseline(h, pilotCtx(tenant.id, ''), args);
+      phases.push(...baseline.phases);
+    } finally {
       await h.close();
-    });
-    console.log('harness: application context booted and closed');
+    }
+    const v = baseline.verify;
+    console.log(
+      `baseline: ${baseline.stats.accountsGenerated} accts, ` +
+        `${baseline.stats.actualReadings} actual + ${baseline.stats.remoteConverted} remote readings, ` +
+        `${baseline.stats.settlements} settlements, ${baseline.stats.billsPosted} bills, ` +
+        `${baseline.stats.payments} payments + ${baseline.stats.topUps} top-ups`,
+    );
+    console.log(
+      `verify: checks ${v.checks.filter((c) => c.pass).length}/${v.checks.length} pass, ` +
+        `unexpected anomalies=${v.unexpectedAnomalies.length} → ${v.pass ? 'PASS' : 'HOLD'}`,
+    );
+    if (!v.pass) {
+      errors.push(
+        `baseline-verify failed: ${v.checks
+          .filter((c) => !c.pass)
+          .map((c) => `${c.name} ${c.actual}!=${c.expected}`)
+          .join('; ')} | anomalies=${v.unexpectedAnomalies.length}`,
+      );
+    }
   } finally {
     await owner.end();
   }
@@ -140,7 +167,7 @@ async function main(): Promise<void> {
   await writer.writeGroundTruth({
     runId,
     seed: args.seed,
-    entries: [], // G2 skeleton — scenarios land in G4
+    entries: baseline?.groundTruth ?? [],
   });
   const summary: GenerationSummary = {
     runId,
@@ -162,7 +189,12 @@ async function main(): Promise<void> {
     errors,
   };
   await writer.writeSummary(summary);
-  console.log('NOTE: G2 skeleton — no baseline/fault data generated');
+  if (baseline) {
+    console.log(
+      `unexpected E9 anomalies: ${baseline.verify.unexpectedAnomalies.length} — ` +
+        `G3 ${baseline.verify.pass ? 'PASS' : 'HOLD'}`,
+    );
+  }
   console.log(`manifest dir: ${writer.runDir}`);
 }
 
