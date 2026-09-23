@@ -260,27 +260,45 @@ BillingRunService.
 ### G.1 Schema — `IdempotencyKey ↔ BillingRun`
 
 ```prisma
+model BillingRun {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  createIdempotencyKeys IdempotencyKey[]
+
+  @@unique([tenantId, id])
+}
+
 model IdempotencyKey {
   ...
-  billingRunId String?     @map("billing_run_id") @db.Uuid
-  billingRun   BillingRun? @relation(
+  tenantId     String  @map("tenant_id") @db.Uuid
+  billingRunId String? @map("billing_run_id") @db.Uuid
+
+  billingRun BillingRun? @relation(
     fields: [tenantId, billingRunId],
     references: [tenantId, id],
-    onDelete: SetNull)
+    onDelete: Restrict)
+
+  @@unique([tenantId, key])
+  // one BillingRun ↔ at most one create idempotency key;
+  // PostgreSQL allows multiple rows where billing_run_id IS NULL
+  @@unique([tenantId, billingRunId])
   @@index([tenantId, billingRunId])
 }
 ```
 
-Tenant-safe nullable composite FK → `billing_run(tenant_id, id)` —
-requires the `@@unique([tenantId, id])` added in §A.
-`ON DELETE SET NULL`: a discarded run leaves its COMPLETED key intact
-(replay still verbatim — the create response was real when made);
-PROCESSING keys are deleted explicitly (§G.4) — the key must never
-stay stuck.
+Invariants enforced by the composite relation — **no `SetNull`**:
 
-One BillingRun ↔ at most one create key (the key is claimed before the
-run exists; the link is unique by construction — a second create with a
-new key makes a second run, never re-links).
+```text
+billingRunId != null
+  → linked BillingRun belongs to the same tenant (composite FK)
+one BillingRun
+  → at most one create IdempotencyKey (@@unique)
+```
+
+`ON DELETE RESTRICT` is defense-in-depth: discard unlinks/deletes keys
+**explicitly** (§G.4) — an auditable domain action, not implicit
+database behavior. A missed link blocks the run delete loudly.
 
 ### G.2 Service primitives (IdempotencyService)
 
@@ -348,13 +366,38 @@ No-key path: TX0 = run create + snapshot only; identical crash recovery.
 ### G.4 Discard lifecycle (frozen order)
 
 ```text
-lock billing_run FOR UPDATE; assert DRAFT
-releaseProcessingTx: DELETE idempotency_key
-  WHERE billing_run_id=run AND status='PROCESSING'
-delete billing_run          → COMPLETED key survives,
-                              billingRunId → NULL (ON DELETE SET NULL)
-delete DRAFT bill_items + DRAFT bills of the run
-commit
+BEGIN
+
+1. SELECT billing_run FOR UPDATE
+   assert status = DRAFT
+
+2. DELETE linked PROCESSING idempotency key
+   DELETE FROM idempotency_key
+    WHERE tenant_id=? AND billing_run_id=? AND status='PROCESSING'
+
+3. Explicitly unlink COMPLETED key
+   UPDATE idempotency_key SET billing_run_id=NULL
+    WHERE tenant_id=? AND billing_run_id=? AND status='COMPLETED'
+
+4. DELETE billing_run
+   composite FK now clear; RESTRICT is defense-in-depth —
+   an unexpected still-linked key/state fails closed
+
+5. DELETE the run's DRAFT bill_items / DRAFT bills
+   (existing discard contract, DRAFT-only predicate unchanged)
+
+COMMIT
+```
+
+Result:
+
+```text
+PROCESSING key  → deleted → same key reusable
+COMPLETED key   → survives, billingRunId=NULL
+                  responseRef/status/hash/method/route unchanged
+                  → same request still replays verbatim
+unexpected linked key/state → BillingRun delete blocked by FK
+                  → fail closed
 ```
 
 ## H. Pricing consistency — fingerprint
@@ -433,6 +476,17 @@ idem:     same key concurrent → 409 IN_PROGRESS
           crashed PROCESSING key → discard → key absent → reusable
           COMPLETED key → discard run → key remains, billingRunId NULL,
           same request still verbatim replay
+migration/schema checks:
+          existing idempotency rows → billing_run_id NULL
+          existing billing runs → generation_status READY
+          cross-tenant link → rejected by composite FK
+          two keys on same BillingRun → rejected by @@unique
+          multiple keys with billing_run_id NULL → allowed
+discard:
+          GENERATING + PROCESSING key → run+key deleted → key reusable
+          READY + COMPLETED key → run deleted, key survives
+          (billingRunId NULL, verbatim replay intact)
+          unexpected still-linked key → run delete fails closed
 drift:    account facts change between batches → frozen snapshot wins
           tariff retire/new-version between batches → abort
           effectiveTo shrink between batches → abort
