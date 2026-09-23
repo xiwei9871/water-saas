@@ -544,22 +544,29 @@ describe('tariff plan create + tier ladder validation', () => {
   });
 
   it('list filters by usageCategory/status; ghost detail → 404', async () => {
-    const list = (
-      await request(app.getHttpServer())
-        .get(`/tariff-plans?usageCategory=${UC}&status=DRAFT&take=200`)
-        .set(auth(adminToken))
-        .expect(200)
-    ).body;
-    expect(list.length).toBeGreaterThanOrEqual(2);
-    expect(list.some((p: { id: string }) => p.id === plan['main'])).toBe(true);
+    const drafts: { id: string }[] = [];
+    for (let skip = 0; skip < 2000; skip += 200) {
+      const page = (
+        await request(app.getHttpServer())
+          .get(`/tariff-plans?usageCategory=${UC}&status=DRAFT&take=200&skip=${skip}`)
+          .set(auth(adminToken))
+          .expect(200)
+      ).body;
+      drafts.push(...page);
+      if (page.length < 200) break;
+    }
+    expect(drafts.length).toBeGreaterThanOrEqual(2);
+    expect(drafts.some((p) => p.id === plan['main'])).toBe(true);
 
+    // status filter must exclude DRAFT plans — but prior runs may have left
+    // ACTIVE plans behind, so assert exclusion of this run's plan, not empty.
     const actives = (
       await request(app.getHttpServer())
-        .get(`/tariff-plans?usageCategory=${UC}&status=ACTIVE`)
+        .get(`/tariff-plans?usageCategory=${UC}&status=ACTIVE&take=200`)
         .set(auth(adminToken))
         .expect(200)
     ).body;
-    expect(actives).toEqual([]);
+    expect(actives.some((p: { id: string }) => p.id === plan['main'])).toBe(false);
 
     await request(app.getHttpServer())
       .get('/tariff-plans?status=WRONG')

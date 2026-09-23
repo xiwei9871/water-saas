@@ -10,6 +10,7 @@ import { PermissionsGuard } from './common/permissions.guard.js';
 import { TenantInterceptor } from './common/tenant.interceptor.js';
 import { BillingModule } from './modules/billing/billing.module.js';
 import { CustomerModule } from './modules/customer/customer.module.js';
+import { DashboardModule } from './modules/dashboard/dashboard.module.js';
 import { IamModule } from './modules/iam/iam.module.js';
 import { IntegrationModule } from './modules/integration/integration.module.js';
 import { MeteringModule } from './modules/metering/metering.module.js';
@@ -31,6 +32,7 @@ import { ExceptionModule } from './modules/exception/exception.module.js';
     PaymentModule,
     ReportModule,
     ExceptionModule,
+    DashboardModule,
     IntegrationModule,
   ],
   controllers: [AppController],
