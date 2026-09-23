@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { PayChannel, Prisma } from '@prisma/client';
 import {
   aggregationScopeAccountIds,
@@ -63,20 +63,25 @@ const monthWindow = (period: string): { gte: Date; lt: Date } => {
  *    reversal payments are RECEIVED rows with negative amounts so
  *    refunds net naturally. PaymentStatus.REVERSED is vestigial (T12
  *    append-only semantics) and would be excluded if it ever appeared.
- *  - allocated （销账） = Σ payment_alloc.amount joined to its payment's
- *    received_at month. allocated ≡ collected by construction: every
- *    payment's Σ allocs equals its amount (createTx rejects residue)
- *    and a reversal mirrors negative allocs in the same received month
- *    — allocs can never span months because they are rows OF the same
- *    payment. The report returns both sides so drift is visible, not
- *    assumed.
+ *  - allocated （销账） = Σ PAYMENT-source payment_alloc.amount joined to
+ *    its payment's received_at month and to the allocated bill. Since
+ *    E6, collected and allocated are DISTINCT measures: a payment's
+ *    TOP_UP leg lands in prepayment_ledger_entry, not payment_alloc, so
+ *    allocated ≤ collected and a divergence is expected, not an error.
+ *    The two columns also anchor differently under scope — collected
+ *    follows payment.org_unit_id (the counter), allocated follows the
+ *    bill's water account (AGG_OWN territory) — so they are reported
+ *    side by side and must never be asserted equal.
  *
- * Org scope: only meter-daily is scope-filtered (a scoped caller sees
- * books whose org_unit_id is inside ctx.orgScope — book.orgUnitId is a
- * natural org anchor). cashier-daily and the monthly reports are
- * tenant-wide aggregates — the same permissive-read convention as the
- * module list endpoints (payment list, bill list are not row-filtered
- * either; orgInScope guards live on write paths).
+ * Org scope (scoped callers, ctx.scope ≠ ALL):
+ *  - meter-daily: books whose org_unit_id ∈ ctx.orgScope.
+ *  - cashier-daily: payments whose org_unit_id ∈ ctx.orgScope (counter
+ *    anchor).
+ *  - ar-monthly: bills whose water account passes AGG_OWN.
+ *  - collected-monthly: collected side scoped by payment.org_unit_id;
+ *    allocated side scoped by AGG_OWN on the bill's account.
+ *  - recovery-rate: TENANT-ONLY — 403 REPORT_SCOPE_UNDEFINED for scoped
+ *    callers (the ratio's two sides anchor to different populations).
  */
 @Injectable()
 export class ReportService {
@@ -387,17 +392,19 @@ export class ReportService {
    * collected received before the first day of month T+1 (Σ ≤ T on both
    * sides). rate = collected / billed as a Decimal string at 4dp;
    * billed = 0 → rate null (undefined ratio, not a fake 0 or ∞).
+   *
+   * Scope: TENANT-ONLY. The two sides of the ratio anchor differently —
+   * billed follows the bill's water account (AGG_OWN), collected follows
+   * the cashier counter (payment.org_unit_id) — so a scoped ratio would
+   * divide different populations and is meaningless. Scoped callers get
+   * 403 REPORT_SCOPE_UNDEFINED rather than a misleading number. A proper
+   * scoped recovery definition is an E10 IMPLEMENTATION-HOLD decision.
    */
   async recoveryRate(ctx: TenantCtx, q: { period: string; through?: string }) {
+    if (ctx.scope !== 'ALL') {
+      throw new ForbiddenException({ code: 'REPORT_SCOPE_UNDEFINED' });
+    }
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      const orgIn =
-        ctx.scope === 'ALL'
-          ? Prisma.empty
-          : Prisma.sql`AND p.org_unit_id = ANY(${ctx.orgScope}::uuid[])`;
-      const wa = aggOwnPredicate(
-        await aggregationScopeAccountIds(tx, ctx),
-        Prisma.sql`b.water_account_id`,
-      );
       let billed: bigint;
       let collected: bigint;
       if (q.through === undefined) {
@@ -407,8 +414,7 @@ export class ReportService {
           WHERE b.tenant_id = ${ctx.tenantId}::uuid
             AND b.period = ${q.period}
             AND b.bill_kind <> 'REVERSAL'
-            AND b.status IN ('POSTED', 'PARTIAL_PAID', 'PAID')
-            ${wa}`;
+            AND b.status IN ('POSTED', 'PARTIAL_PAID', 'PAID')`;
         billed = billRows[0]?.amount ?? 0n;
         const window = monthWindow(q.period);
         const payRows = await tx.$queryRaw<{ amount: bigint | null }[]>`
@@ -417,8 +423,7 @@ export class ReportService {
           WHERE p.tenant_id = ${ctx.tenantId}::uuid
             AND p.status IN ('RECEIVED', 'DAY_CLOSED')
             AND p.received_at >= ${window.gte}
-            AND p.received_at < ${window.lt}
-            ${orgIn}`;
+            AND p.received_at < ${window.lt}`;
         collected = payRows[0]?.amount ?? 0n;
       } else {
         const billRows = await tx.$queryRaw<{ amount: bigint | null }[]>`
@@ -427,8 +432,7 @@ export class ReportService {
           WHERE b.tenant_id = ${ctx.tenantId}::uuid
             AND b.period <= ${q.through}
             AND b.bill_kind <> 'REVERSAL'
-            AND b.status IN ('POSTED', 'PARTIAL_PAID', 'PAID')
-            ${wa}`;
+            AND b.status IN ('POSTED', 'PARTIAL_PAID', 'PAID')`;
         billed = billRows[0]?.amount ?? 0n;
         const window = monthWindow(q.through);
         const payRows = await tx.$queryRaw<{ amount: bigint | null }[]>`
@@ -436,8 +440,7 @@ export class ReportService {
           FROM payment p
           WHERE p.tenant_id = ${ctx.tenantId}::uuid
             AND p.status IN ('RECEIVED', 'DAY_CLOSED')
-            AND p.received_at < ${window.lt}
-            ${orgIn}`;
+            AND p.received_at < ${window.lt}`;
         collected = payRows[0]?.amount ?? 0n;
       }
       const rate =

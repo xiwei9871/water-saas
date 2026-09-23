@@ -12,7 +12,7 @@ E6（prepayment）兼容性 / signed-money 正确性 / 可否复用 / 所需整�
 | cashier-daily | payment + cashier_day_close | received_at::date | —（缺失） | ❌ tenant 全量 | ✅ signed Σ | **已修**：补 `p.org_unit_id ∈ scope` |
 | ar-monthly | bill | bill.period | —（缺失） | ❌ tenant 全量 | n/a | **已修**：补 AGG_OWN（= D26 BILLED predicate） |
 | collected-monthly | payment + payment_alloc | received_at ∈ 月窗 | —（缺失） | ❌ tenant 全量 | ⚠️ stale 假设 | **已修**：双侧 anchor + 文档假设更正 |
-| recovery-rate | bill + payment | period / cumulative ≤T | —（缺失） | ❌ tenant 全量 | ⚠️ 分子语义未定 | **已修 scope**；公式仍 HOLD |
+| recovery-rate | bill + payment | period / cumulative ≤T | —（tenant-only） | ❌ tenant 全量 | ⚠️ 分子语义未定 | **RC1 改为 tenant-only**：scoped → 403 REPORT_SCOPE_UNDEFINED；公式仍 HOLD |
 
 ## 逐项
 
@@ -59,10 +59,15 @@ E6（prepayment）兼容性 / signed-money 正确性 / 可否复用 / 所需整�
 - E10 HOLD：分子语义未拍板（cash recovery vs debt extinguishment
   含 PREPAYMENT APPLY）。**现有端点保留其原公式但不作为 dashboard
   RECOVERY_RATE 的依据**——dashboard 不暴露该指标。
-- scope 修复：billed → AGG_OWN；collected → `p.org_unit_id`。
+- RC1 修正：两侧 anchor 不同（billed → bill 账户 AGG_OWN；collected
+  → 柜台 payment.org_unit_id），scoped ratio = 不同人口相除，无意义。
+  现 fail-closed：`ctx.scope ≠ ALL` → 403 `REPORT_SCOPE_UNDEFINED`；
+  ALL scope 保留 legacy 公式。
 
 ## 修复后回归面
 
-`report*.e2e-spec.ts` 现有断言均基于 ALL-scope admin 或 tenant 级调用，
-scope 过滤对 ALL 为 no-op；scoped 行为由
+`report.e2e-spec.ts` RC1 追加「E10-RC1 scoped reports (B2)」块直接覆盖
+四端点 scoped 行为：cashier-daily 柜台过滤、ar-monthly AGG_OWN +
+off-book 排除、collected-monthly 双 anchor 分离（collected=900 /
+allocated=0）、recovery-rate scoped 403。scoped dashboard 行为另由
 `test/dashboard-metrics.e2e-spec.ts` 的 AGG_OWN/anchor 用例覆盖。

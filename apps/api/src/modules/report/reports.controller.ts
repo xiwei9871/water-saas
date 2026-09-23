@@ -101,8 +101,10 @@ export class ReportsController {
 
   /**
    * GET /reports/collected-monthly?period=YYYYMM — 实收月报： collections
-   * received inside the month split by channel, plus the alloc-side Σ
-   * for the same month (allocated ≡ collected — see service docblock).
+   * received inside the month split by channel, plus the PAYMENT-source
+   * alloc-side Σ for the same month. collected and allocated are
+   * distinct measures post-E6 (TOP_UP legs bypass payment_alloc) and
+   * anchor differently under scope — never assert they are equal.
    */
   @Get('collected-monthly')
   @Permissions('report:read')
@@ -116,6 +118,7 @@ export class ReportsController {
    * GET /reports/recovery-rate?period=YYYYMM[&through=YYYYMM] — 回收率：
    * collected/billed. Single-month window by default; `through` (must
    * be ≥ period) switches to the cumulative Σ ≤ through variant.
+   * Tenant-scope only — scoped callers get 403 REPORT_SCOPE_UNDEFINED.
    */
   @Get('recovery-rate')
   @Permissions('report:read')

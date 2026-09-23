@@ -14,7 +14,7 @@
  *     (non-REVERSAL, POSTED|PARTIAL_PAID|PAID) split by usage_category;
  *     DRAFT / REVERSED / REVERSAL-kind / other-period rows excluded
  *  4. GET /reports/collected-monthly — Σ payment.amount in the month
- *     split by channel + the alloc-side Σ (allocated ≡ collected)
+ *     split by channel + the alloc-side Σ (distinct measures post-E6)
  *  5. GET /reports/recovery-rate — single-month rate at 4dp, the
  *     cumulative `through` variant, billed=0 → rate null
  *  6. a scoped report:read holder sees only own-subtree books in
@@ -700,13 +700,12 @@ describe('validation + permission + tenant isolation', () => {
     expect(badUuid.status).toBe(400);
   });
 
-  it('report:read holder reads all five endpoints; billing:write-only holder → 403', async () => {
+  it('report:read holder reads the endpoints; billing:write-only holder → 403', async () => {
     for (const path of [
       '/reports/meter-daily?date=2026-10-05',
       '/reports/cashier-daily?date=2026-10-06',
       '/reports/ar-monthly?period=202610',
       '/reports/collected-monthly?period=202610',
-      '/reports/recovery-rate?period=202610',
     ]) {
       const ok = await request(app.getHttpServer()).get(path).set(auth(readerToken));
       expect(ok.status).toBe(200);
@@ -714,6 +713,14 @@ describe('validation + permission + tenant isolation', () => {
       expect(denied.status).toBe(403);
       expect(denied.body).toMatchObject({ code: 'PERMISSION_DENIED' });
     }
+    // recovery-rate is tenant-scope-only: a scoped report:read holder
+    // fails closed, a billing:write-only holder is still 403 (permission
+    // check precedes the scope check).
+    const recDenied = await request(app.getHttpServer())
+      .get('/reports/recovery-rate?period=202610')
+      .set(auth(billerToken));
+    expect(recDenied.status).toBe(403);
+    expect(recDenied.body).toMatchObject({ code: 'PERMISSION_DENIED' });
   });
 
   it('tenant B sees nothing on any report', async () => {
@@ -727,5 +734,90 @@ describe('validation + permission + tenant isolation', () => {
     expect(col).toMatchObject({ collected: '0', allocated: '0' });
     const rec = (await get('/reports/recovery-rate?period=202610', tenantBToken)).body;
     expect(rec).toMatchObject({ billed: '0', collected: '0', rate: null });
+  });
+});
+
+/**
+ * E10-RC1 B2 — scoped report coverage. scopedToken is a report:read
+ * holder bound to ORG_A2 (ORG_SUBTREE); readerToken sits on ORG_A.
+ * Fixtures here are seeded AFTER the earlier describes ran so existing
+ * assertions stay untouched; assertions use the post-seed totals.
+ */
+describe('E10-RC1 scoped reports (B2)', () => {
+  it('fixtures: ORG_A2-territory bill + cross-counter November payment', async () => {
+    // billB1 on acct B1 — covered only by book2 (ORG_A2).
+    await seedBill('billB1', acct['B1'], settleAcct['B1'], '202610', {
+      status: 'POSTED',
+      totalAmount: 7000,
+      sourceId: crypto.randomUUID(),
+    });
+    // pB: cashier2 collects at the ORG_A2 counter but allocates to
+    // billNov — an A1 bill whose account is covered by book1 (ORG_A).
+    // collected follows the counter org; allocated follows AGG_OWN —
+    // the two anchors intentionally diverge for a scoped caller.
+    await seedPayment('pB', 8, {
+      cashierId: STAFF_CASHIER2_A,
+      orgUnitId: ORG_A2,
+      settleAccountId: settleAcct['A1'],
+      billId: bill['billNov'],
+      channel: 'CASH',
+      amount: 900,
+      receivedAt: '2026-11-05T09:00:00Z',
+    });
+  });
+
+  it('cashier-daily: scoped caller sees only own-counter rows', async () => {
+    const res = (await get('/reports/cashier-daily?date=2026-10-06', scopedToken)).body;
+    expect(res).toHaveLength(1);
+    expect(res[0]).toMatchObject({
+      cashierId: STAFF_CASHIER2_A,
+      name: 'T13 Cashier2',
+      closed: false,
+    });
+    expect(res[0].total).toEqual({ count: 1, amount: '800' });
+  });
+
+  it('ar-monthly: scoped sees only AGG_OWN-covered bills; off-book excluded; tenant sees all', async () => {
+    // scoped ORG_A2: only billB1 (B1 via book2). A1/A2/A3 are covered by
+    // book1 (ORG_A — out of subtree) and C1 is off-book → both excluded.
+    const scoped = (await get('/reports/ar-monthly?period=202610', scopedToken)).body;
+    expect(scoped.billed).toBe('7000');
+    expect(scoped.byCategory).toEqual({
+      RES_METERED: { count: 1, amount: '7000' },
+    });
+    // tenant: everything — ORG_A book bills + ORG_A2 bill + off-book C1.
+    const all = (await get('/reports/ar-monthly?period=202610')).body;
+    expect(all.billed).toBe('27000'); // 20000 + 7000
+    expect(all.byCategory.RES_METERED).toEqual({ count: 3, amount: '21000' });
+    expect(all.byCategory.NON_RES).toEqual({ count: 1, amount: '6000' });
+  });
+
+  it('collected-monthly: collected anchors to counter org, allocated to bill AGG_OWN — allowed to diverge', async () => {
+    const scoped = (await get('/reports/collected-monthly?period=202611', scopedToken)).body;
+    // pB received at the ORG_A2 counter → in-scope collected.
+    expect(scoped.collected).toBe('900');
+    // …but its alloc lands on billNov whose account A1 is covered by
+    // book1 (ORG_A) → out-of-scope allocated. p7 (ORG_A counter) is
+    // invisible on the collected side, and its billNov alloc is also
+    // out-of-scope → allocated stays 0.
+    expect(scoped.allocated).toBe('0');
+    const all = (await get('/reports/collected-monthly?period=202611')).body;
+    expect(all.collected).toBe('2900'); // p7 2000 + pB 900
+    expect(all.allocated).toBe('2900');
+  });
+
+  it('recovery-rate: tenant scope works; scoped caller fails closed 403', async () => {
+    const all = await request(app.getHttpServer())
+      .get('/reports/recovery-rate?period=202610')
+      .set(auth(adminToken))
+      .expect(200);
+    expect(all.body.rate).toBe('0.3704'); // 10000 / 27000
+    for (const t of [scopedToken, readerToken]) {
+      const res = await request(app.getHttpServer())
+        .get('/reports/recovery-rate?period=202610')
+        .set(auth(t));
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({ code: 'REPORT_SCOPE_UNDEFINED' });
+    }
   });
 });
