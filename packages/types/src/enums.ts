@@ -52,6 +52,11 @@ export type RunType = (typeof RUN_TYPES)[number];
 export const RUN_STATUSES = ['DRAFT', 'PROCESSING', 'PARTIAL', 'POSTED', 'FAILED'] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
+// RC1: orthogonal lifecycle for multi-tx bill generation — a run is
+// postable only once generation finalized (GENERATING → READY).
+export const RUN_GENERATION_STATUSES = ['GENERATING', 'READY'] as const;
+export type RunGenerationStatus = (typeof RUN_GENERATION_STATUSES)[number];
+
 export const BILL_KINDS = ['NORMAL', 'ADJUSTMENT', 'REVERSAL', 'REPLACEMENT'] as const;
 export type BillKind = (typeof BILL_KINDS)[number];
 

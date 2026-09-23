@@ -1216,4 +1216,151 @@ describe('RC1: bulk YTD equivalence + pricing drift', () => {
     const r = await post(`/billing-runs/${snapshot.runId}/discard`, {});
     expect(r.status).toBe(201);
   });
+
+  it('P2-B: TX0 + batch1 committed → crash before batch2 leaves DRAFT+GENERATING partials; discard + re-create == uninterrupted', async () => {
+    // Fresh period with two billable settlements — one commits in batch 1,
+    // the second is the never-ran remainder.
+    await seedSettlement('A1-04', acct['A1'], '202604', 8);
+    await seedSettlement('A2-04', acct['A2'], '202604', 12);
+
+    const svc = app.get(BillingRunService);
+    const tp = app.get(TenantPrismaService);
+    type PrivateSvc = {
+      claimCreateTx(
+        tx: unknown,
+        ctx: TenantCtx,
+        body: { period: string },
+        key: string | null,
+      ): Promise<{ runId: string; settlements: { id: string }[] }>;
+      generateBatchTx(
+        tx: unknown,
+        ctx: TenantCtx,
+        snapshot: unknown,
+        slice: unknown[],
+      ): Promise<unknown>;
+    };
+    const priv = svc as unknown as PrivateSvc;
+
+    // TX0: claim + snapshot. TX1: batch 1 only — then "crash": no more
+    // batches, no finalize.
+    const snapshot = await tp.runAsTenant(T10A, (tx) =>
+      priv.claimCreateTx(tx, T10_CTX, { period: '202604' }, null),
+    );
+    expect(snapshot.settlements).toHaveLength(2);
+    await tp.runAsTenant(T10A, (tx) =>
+      priv.generateBatchTx(tx, T10_CTX, snapshot, [snapshot.settlements[0]]),
+    );
+    // crash — orchestrator dies here.
+
+    const stuck = await owner.query(
+      `SELECT status, generation_status AS "generationStatus" FROM billing_run WHERE id = $1`,
+      [snapshot.runId],
+    );
+    expect(stuck.rows[0]).toEqual({
+      status: 'DRAFT',
+      generationStatus: 'GENERATING',
+    });
+    const partialBills = await owner.query(
+      `SELECT count(*)::int AS n FROM bill WHERE tenant_id = $1 AND billing_run_id = $2 AND status = 'DRAFT'`,
+      [T10A, snapshot.runId],
+    );
+    expect(partialBills.rows[0].n).toBe(1);
+
+    for (const verb of ['post', 'retry']) {
+      const r = await post(`/billing-runs/${snapshot.runId}/${verb}`, {});
+      expect(r.status).toBe(409);
+      expect(r.body).toMatchObject({ code: 'RUN_STILL_GENERATING' });
+    }
+
+    await post(`/billing-runs/${snapshot.runId}/discard`, {}).expect(201);
+    const after = await owner.query(
+      `SELECT count(*)::int AS n FROM bill WHERE tenant_id = $1 AND billing_run_id = $2`,
+      [T10A, snapshot.runId],
+    );
+    expect(after.rows[0].n).toBe(0);
+
+    const clean = await post('/billing-runs', { period: '202604' }).expect(201);
+    expect(clean.body).toMatchObject({
+      status: 'DRAFT',
+      generationStatus: 'READY',
+      totalCount: 2,
+      successCount: 0,
+      failedCount: 0,
+    });
+    expect(
+      clean.body.bills
+        .map((b: { sourceId: string }) => b.sourceId)
+        .sort(),
+    ).toEqual([settle['A1-04'], settle['A2-04']].sort());
+    await post(`/billing-runs/${clean.body.id}/discard`, {}).expect(201);
+  });
+
+  it('P2-A: bulk YTD ≡ per-account with NORMAL + REPLACEMENT + two RECONCILIATION versions (latest wins)', async () => {
+    // Fresh account so the seeded history can't disturb other anchors.
+    const a = await onboard('A6', 'RES_METERED');
+    await seedSettlement('A6-06', a.waterAccount.id, '202606', 100);
+    // Posted NORMAL bill on the 202606 settlement (base usage 100).
+    const normalBillId = await seedPostedBill(
+      a.waterAccount.id,
+      a.settleAccount.id,
+      '202606',
+      settle['A6-06'],
+      planRes,
+      31000,
+    );
+    // Posted REPLACEMENT bill (period 202607) with PER_QTY item qty 40.
+    const repl = (
+      await owner.query(
+        `INSERT INTO bill (id, tenant_id, settle_account_id, water_account_id, period,
+                           bill_kind, source_type, source_id, tariff_plan_id, status,
+                           total_amount, issued_at, due_date, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, '202607', 'REPLACEMENT', 'ORIGINAL_BILL',
+                 $4, $5, 'POSTED', 12000, now(), '2026-07-15', now(), now())
+         RETURNING id::text AS id`,
+        [T10A, a.settleAccount.id, a.waterAccount.id, normalBillId, planRes],
+      )
+    ).rows[0];
+    await owner.query(
+      `INSERT INTO bill_item (id, tenant_id, bill_id, fee_item_id, item_type,
+                              description, qty, unit_price, amount, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 'NORMAL', 'replacement usage',
+               40, '3', 12000, now(), now())`,
+      [T10A, repl.id, waterItem],
+    );
+    // Two RECONCILIATION corrections for the SAME source period 202606 —
+    // +10 then −30; the later one must win (usage 100 → 70).
+    const adj = async (period: string, qty: number, minutesAgo: number) => {
+      const b = (
+        await owner.query(
+          `INSERT INTO bill (id, tenant_id, settle_account_id, water_account_id, period,
+                             bill_kind, source_type, source_id, tariff_plan_id, status,
+                             total_amount, issued_at, due_date, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, 'ADJUSTMENT', 'RECONCILIATION',
+                   gen_random_uuid(), $5, 'POSTED', 0, now(), '2026-08-15',
+                   now() - ($6 || ' minutes')::interval,
+                   now() - ($6 || ' minutes')::interval)
+           RETURNING id::text AS id`,
+          [T10A, a.settleAccount.id, a.waterAccount.id, period, planRes, minutesAgo],
+        )
+      ).rows[0];
+      await owner.query(
+        `INSERT INTO bill_item (id, tenant_id, bill_id, item_type, description,
+                                qty, amount, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, 'ADJUSTMENT', $3, $4, 0, now(), now())`,
+        [T10A, b.id, 'reconcile 202606', qty],
+      );
+    };
+    await adj('202608', 10, 60); // older correction — must NOT win
+    await adj('202609', -30, 30); // latest — wins
+
+    const tp = app.get(TenantPrismaService);
+    const { map, single } = await tp.runAsTenant(T10A, async (tx) => {
+      const m = await loadYtdBeforeQtyMap(tx, T10_CTX, [a.waterAccount.id], '202612');
+      const s = await ytdBeforeQty(tx, T10_CTX, a.waterAccount.id, '202612');
+      return { map: m, single: s };
+    });
+    expect(map.get(a.waterAccount.id)?.toString()).toBe(single.toString());
+    // latest correction wins: 100 − 30 (not 100 + 10 − 30 nor +10) + repl 40
+    expect(single.toString()).toBe('110');
+  });
 });
