@@ -438,7 +438,7 @@ describe('remote read scope — Branch A / Branch B / tenant-wide (release fix)'
 
   it('branch viewer list: only own-org sources; tenant-wide + other-branch invisible', async () => {
     const list = await request(app.getHttpServer())
-      .get('/remote-sources')
+      .get(`/remote-sources?q=${RUN}`)
       .set(auth(branchViewerToken))
       .expect(200);
     const ids = list.body.map((s: { id: string }) => s.id);

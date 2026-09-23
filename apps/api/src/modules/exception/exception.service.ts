@@ -11,7 +11,7 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { detectAll, evaluateKey } from './detectors.js';
 import { ExceptionReconciler } from './reconciler.js';
-import { anchoredVisible, filterVisible, resolveAnchors, factVisibleTo, objectAnchorTx, type AnchoredFact } from './scope.js';
+import { anchoredVisible, filterVisible, resolveAnchors, factVisibleTo, objectAnchorTx, objectAnchorsBatchTx, type AnchoredFact } from './scope.js';
 import { parseKey, type AnomalyFact } from './types.js';
 
 const badKey = () => new BadRequestException({ code: 'ANOMALY_KEY_INVALID' });
@@ -36,12 +36,29 @@ export class ExceptionService {
 
   async list(
     ctx: TenantCtx,
-    q: { type?: string; severity?: string; status?: string; page: number; take: number },
+    q: {
+      type?: string; severity?: string; status?: string;
+      /** A1: 仅匹配 fact.period；无 period 的 anomaly 在 period 过滤下不返回 */
+      period?: string;
+      /** A1: org/book 过滤作用于已解析 anchor —— 只能收窄已可见集合，
+       *  off-book TENANT / 未解析对象永远不匹配 org/book 过滤 */
+      orgUnitId?: string; bookId?: string;
+      page: number; take: number;
+    },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       let facts = await filterVisible(tx, ctx, await detectAll(tx, ctx.tenantId));
       if (q.type) facts = facts.filter((f) => f.type === q.type);
       if (q.severity) facts = facts.filter((f) => f.severity === q.severity);
+      if (q.period) facts = facts.filter((f) => f.period === q.period);
+      if (q.orgUnitId) {
+        facts = facts.filter((f) => f.coveringOrgs?.includes(q.orgUnitId!) === true);
+      }
+      if (q.bookId) {
+        facts = facts.filter(
+          (f) => f.anchor === 'ACCOUNT' && (f.coveringBookIds ?? []).includes(q.bookId!),
+        );
+      }
 
       const episodes = await tx.workItem.findMany({
         where: {
@@ -91,7 +108,48 @@ export class ExceptionService {
         else if (s === 'ACK') ack++;
         else if (s === 'IGNORED') suppressed++;
       }
-      return { open, acknowledged: ack, suppressedIgnored: suppressed, activeFacts: facts.length, asOf: new Date().toISOString() };
+
+      // A2 — todayAdded / todayCleared: episode timestamps in today's UTC
+      // operating window, scope re-derived from the anomaly key's underlying
+      // object (cleared facts no longer exist — objectAnchorTx applies the
+      // same D21 anchor rules without widening scope).
+      const dayStart = new Date();
+      dayStart.setUTCHours(0, 0, 0, 0);
+      const dayEnd = new Date(dayStart);
+      dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+      const todays = await tx.workItem.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          OR: [
+            { createdAt: { gte: dayStart, lt: dayEnd } },
+            { clearedAt: { gte: dayStart, lt: dayEnd } },
+          ],
+        },
+        select: { anomalyKey: true, createdAt: true, clearedAt: true },
+      });
+      let todayAdded = 0, todayCleared = 0;
+      if (todays.length) {
+        // batch object-anchor resolution — one query per object kind, not N+1.
+        // Unparseable keys are dropped here and treated as invisible below.
+        const valid = todays
+          .map((w, i) => ({ w, i, parsed: parseKey(w.anomalyKey) }))
+          .filter((x): x is typeof x & { parsed: NonNullable<typeof x.parsed> } => x.parsed !== null);
+        const anchors = await objectAnchorsBatchTx(tx, ctx.tenantId, valid.map((x) => x.parsed));
+        for (let vi = 0; vi < valid.length; vi++) {
+          const { w } = valid[vi];
+          const anchor = anchors.get(vi) ?? null;
+          // unresolvable object → TENANT-level: visible to ALL scope only
+          const visible = anchor ? anchoredVisible(anchor, ctx) : ctx.scope === 'ALL';
+          if (!visible) continue;
+          if (w.createdAt >= dayStart && w.createdAt < dayEnd) todayAdded++;
+          if (w.clearedAt && w.clearedAt >= dayStart && w.clearedAt < dayEnd) todayCleared++;
+        }
+      }
+      return {
+        open, acknowledged: ack, suppressedIgnored: suppressed,
+        activeFacts: facts.length, todayAdded, todayCleared,
+        asOf: new Date().toISOString(),
+      };
     });
   }
 

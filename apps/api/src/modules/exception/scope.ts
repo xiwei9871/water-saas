@@ -22,6 +22,10 @@ export interface AnchoredFact extends AnomalyFact {
   /** covering org units for ACCOUNT anchor; [orgUnitId] or [] for
    *  REMOTE_SOURCE (empty = tenant-wide source); null for TENANT */
   coveringOrgs: string[] | null;
+  /** current covering BookMeter book ids — ACCOUNT anchor only, else null.
+   *  Used by the bookId list filter (A1): never widens visibility, only
+   *  narrows an already-visible ACCOUNT anomaly. */
+  coveringBookIds: string[] | null;
 }
 
 /** One batch resolution: BookMeter counts + covering orgs + source orgs. */
@@ -38,9 +42,10 @@ export async function resolveAnchors(
   // out-of-scope book would otherwise hide the anomaly from its true owner.
   const bookCounts = new Map<string, number>();
   const covering = new Map<string, Set<string>>();
+  const coveringBooks = new Map<string, Set<string>>();
   if (accountIds.length) {
-    const bm = await tx.$queryRaw<{ water_account_id: string; org_unit_id: string }[]>`
-      SELECT bm.water_account_id::text, rb.org_unit_id::text
+    const bm = await tx.$queryRaw<{ water_account_id: string; org_unit_id: string; book_id: string }[]>`
+      SELECT bm.water_account_id::text, rb.org_unit_id::text, bm.book_id::text
       FROM book_meter bm
       JOIN reading_book rb ON rb.tenant_id = bm.tenant_id AND rb.id = bm.book_id
       WHERE bm.tenant_id = ${tenantId}::uuid
@@ -50,6 +55,9 @@ export async function resolveAnchors(
       let s = covering.get(r.water_account_id);
       if (!s) covering.set(r.water_account_id, (s = new Set()));
       s.add(r.org_unit_id);
+      let b = coveringBooks.get(r.water_account_id);
+      if (!b) coveringBooks.set(r.water_account_id, (b = new Set()));
+      b.add(r.book_id);
     }
   }
 
@@ -69,6 +77,7 @@ export async function resolveAnchors(
         ...f,
         anchor: count === 0 ? 'TENANT' : 'ACCOUNT',
         coveringOrgs: count === 0 ? null : [...(covering.get(f.waterAccountId) ?? [])],
+        coveringBookIds: count === 0 ? null : [...(coveringBooks.get(f.waterAccountId) ?? [])],
       } satisfies AnchoredFact;
     }
     if (f.remoteSourceId) {
@@ -77,9 +86,10 @@ export async function resolveAnchors(
         ...f,
         anchor: 'REMOTE_SOURCE',
         coveringOrgs: org ? [org] : [],
+        coveringBookIds: null,
       } satisfies AnchoredFact;
     }
-    return { ...f, anchor: 'TENANT', coveringOrgs: null } satisfies AnchoredFact;
+    return { ...f, anchor: 'TENANT', coveringOrgs: null, coveringBookIds: null } satisfies AnchoredFact;
   });
 }
 
@@ -184,4 +194,99 @@ export async function objectAnchorTx(
   if (!fact) return null;
   const [anchored] = await resolveAnchors(tx, tenantId, [fact]);
   return anchored ?? null;
+}
+
+/**
+ * Batch variant of objectAnchorTx — one query per object kind, then a single
+ * resolveAnchors over the collected minimal facts. Used by summary() where
+ * per-key resolution would N+1 under a busy day of episodes.
+ * Keys whose object can't be resolved map to `null` (caller treats as
+ * TENANT-level → ALL scope only).
+ */
+export async function objectAnchorsBatchTx(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  keys: { kind: string; id: string; type?: string }[],
+): Promise<Map<number, AnchoredFact | null>> {
+  const facts: (AnomalyFact | null)[] = Array.from({ length: keys.length }, () => null);
+  const idxBy = (kind: string) =>
+    keys.map((k, i) => ({ k, i })).filter(({ k }) => k.kind === kind);
+
+  // wa:{accountId}:* — direct account anchor
+  for (const { i } of idxBy('wa')) {
+    facts[i] = {
+      key: '', type: '', severity: 'WARNING', waterAccountId: keys[i].id,
+      anchorRef: { kind: 'water-account', id: keys[i].id }, summary: '',
+    };
+  }
+
+  const billIdx = idxBy('bill');
+  if (billIdx.length) {
+    const rows = await tx.bill.findMany({
+      where: { tenantId, id: { in: billIdx.map(({ k }) => k.id) } },
+      select: { id: true, waterAccountId: true },
+    });
+    const m = new Map(rows.map((r) => [r.id, r.waterAccountId]));
+    for (const { k, i } of billIdx) {
+      const wa = m.get(k.id);
+      if (wa) {
+        facts[i] = {
+          key: '', type: '', severity: 'WARNING', waterAccountId: wa,
+          anchorRef: { kind: 'bill', id: k.id }, summary: '',
+        };
+      }
+    }
+  }
+
+  const readingIdx = idxBy('reading');
+  if (readingIdx.length) {
+    const rows = await tx.meterReading.findMany({
+      where: { tenantId, id: { in: readingIdx.map(({ k }) => k.id) } },
+      select: { id: true, installation: { select: { waterAccountId: true } } },
+    });
+    const m = new Map(rows.map((r) => [r.id, r.installation.waterAccountId]));
+    for (const { k, i } of readingIdx) {
+      const wa = m.get(k.id);
+      if (wa) {
+        facts[i] = {
+          key: '', type: '', severity: 'WARNING', waterAccountId: wa,
+          anchorRef: { kind: 'reading', id: k.id }, summary: '',
+        };
+      }
+    }
+  }
+
+  const eventIdx = idxBy('event');
+  if (eventIdx.length) {
+    const rows = await tx.rawRemoteEvent.findMany({
+      where: { tenantId, id: { in: eventIdx.map(({ k }) => k.id) } },
+      select: {
+        id: true, remoteSourceId: true,
+        resolvedBinding: { select: { installation: { select: { waterAccountId: true } } } },
+      },
+    });
+    const m = new Map(rows.map((r) => [r.id, r]));
+    for (const { k, i } of eventIdx) {
+      const e = m.get(k.id);
+      if (!e) continue;
+      const wa = e.resolvedBinding?.installation.waterAccountId;
+      // D21: REMOTE_SOURCE only for UNBOUND / KEY_CONFLICT keys
+      const sourceAnchored =
+        k.type === 'REMOTE_EVENT_UNBOUND' || k.type === 'REMOTE_EVENT_KEY_CONFLICT';
+      facts[i] = wa
+        ? { key: '', type: '', severity: 'WARNING', waterAccountId: wa, anchorRef: { kind: 'remote-event', id: k.id }, summary: '' }
+        : sourceAnchored
+          ? { key: '', type: '', severity: 'WARNING', remoteSourceId: e.remoteSourceId, anchorRef: { kind: 'remote-event', id: k.id }, summary: '' }
+          : { key: '', type: '', severity: 'WARNING', anchorRef: { kind: 'remote-event', id: k.id }, summary: '' };
+    }
+  }
+
+  const live = facts.filter((f): f is AnomalyFact => f !== null);
+  const anchored = await resolveAnchors(tx, tenantId, live);
+  const out = new Map<number, AnchoredFact | null>();
+  let j = 0;
+  facts.forEach((f, i) => {
+    out.set(i, f === null ? null : (anchored[j++] ?? null));
+  });
+  return out;
 }

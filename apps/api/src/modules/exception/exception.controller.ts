@@ -18,6 +18,18 @@ const int = (v: string | undefined, def: number, max: number): number => {
   return Math.min(n, max);
 };
 
+/** YYYYMM + month range — same contract as /reports period params. */
+const assertPeriod = (v: string): string => {
+  if (!/^\d{6}$/.test(v)) {
+    throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'period' });
+  }
+  const m = parseInt(v.slice(4), 10);
+  if (m < 1 || m > 12) {
+    throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'period' });
+  }
+  return v;
+};
+
 /**
  * /exceptions — E9 operational work queue. Read endpoints are PURE reads
  * (detector + episode join; never write — D1). Episode writes re-evaluate
@@ -34,6 +46,9 @@ export class ExceptionController {
     @Query('type') type?: string,
     @Query('severity') severity?: string,
     @Query('status') status?: string,
+    @Query('period') period?: string,
+    @Query('orgUnitId') orgUnitId?: string,
+    @Query('bookId') bookId?: string,
     @Query('page') page?: string,
     @Query('take') take?: string,
   ) {
@@ -41,6 +56,9 @@ export class ExceptionController {
       type,
       severity,
       status,
+      period: period !== undefined && period !== '' ? assertPeriod(period) : undefined,
+      orgUnitId: orgUnitId ? assertUuid(orgUnitId, 'orgUnitId') : undefined,
+      bookId: bookId ? assertUuid(bookId, 'bookId') : undefined,
       page: int(page, 1, 1000000),
       take: int(take, 50, 200),
     });

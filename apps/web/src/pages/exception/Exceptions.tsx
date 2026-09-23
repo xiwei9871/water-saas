@@ -103,6 +103,11 @@ export default function Exceptions() {
   const [type, setType] = useState<string | undefined>();
   const [severity, setSeverity] = useState<string | undefined>();
   const [status, setStatus] = useState<string | undefined>();
+  const [period, setPeriod] = useState<string>('');
+  const [orgUnitId, setOrgUnitId] = useState<string | undefined>();
+  const [bookId, setBookId] = useState<string | undefined>();
+  const [orgs, setOrgs] = useState<{ id: string; name: string }[]>([]);
+  const [books, setBooks] = useState<{ id: string; name: string }[]>([]);
 
   const [detail, setDetail] = useState<ExceptionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -126,6 +131,9 @@ export default function Exceptions() {
           ...(type ? { type } : {}),
           ...(severity ? { severity } : {}),
           ...(status ? { status } : {}),
+          ...(period.trim() ? { period: period.trim() } : {}),
+          ...(orgUnitId ? { orgUnitId } : {}),
+          ...(bookId ? { bookId } : {}),
         },
       });
       setItems(res.data.items);
@@ -135,7 +143,7 @@ export default function Exceptions() {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, type, severity, status, message]);
+  }, [page, pageSize, type, severity, status, period, orgUnitId, bookId, message]);
 
   const loadSummary = useCallback(async () => {
     try {
@@ -160,6 +168,27 @@ export default function Exceptions() {
       .then((r) => setStaff(r.data.map((s) => ({ id: s.id, name: s.name }))))
       .catch(() => setStaff([]));
   }, [canManage]);
+
+  useEffect(() => {
+    if (hasPerm('iam:read')) {
+      api
+        .get<{ id: string; name: string }[]>('/iam/orgs')
+        .then((r) => setOrgs(r.data.map((o) => ({ id: o.id, name: o.name }))))
+        .catch(() => setOrgs([]));
+    }
+    if (hasPerm('metering:read')) {
+      api
+        .get<{ items: { id: string; name: string }[] } | { id: string; name: string }[]>(
+          '/reading-books',
+          { params: { take: 200 } },
+        )
+        .then((r) => {
+          const raw = Array.isArray(r.data) ? r.data : r.data.items;
+          setBooks((raw ?? []).map((b) => ({ id: b.id, name: b.name })));
+        })
+        .catch(() => setBooks([]));
+    }
+  }, [hasPerm]);
 
   const openDetail = async (key: string) => {
     setDetailLoading(true);
@@ -272,6 +301,8 @@ export default function Exceptions() {
         <Space size="large" wrap>
           <Statistic title="待处理" value={summary?.open ?? '—'} valueStyle={{ color: '#cf1322' }} />
           <Statistic title="已确认" value={summary?.acknowledged ?? '—'} />
+          <Statistic title="今日新增" value={summary?.todayAdded ?? '—'} />
+          <Statistic title="今日清除" value={summary?.todayCleared ?? '—'} />
           <Statistic title="已忽略(活跃)" value={summary?.suppressedIgnored ?? '—'} />
           <Statistic title="活跃异常" value={summary?.activeFacts ?? '—'} />
           {canManage && (
@@ -325,6 +356,46 @@ export default function Exceptions() {
               }}
               options={Object.entries(STATUS_LABELS).map(([v, l]) => ({ value: v, label: l }))}
             />
+            <Input
+              allowClear
+              placeholder="期间 YYYYMM"
+              style={{ width: 120 }}
+              value={period}
+              onChange={(e) => {
+                setPeriod(e.target.value);
+                setPage(1);
+              }}
+            />
+            {orgs.length > 0 && (
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder="营业所"
+                style={{ width: 150 }}
+                value={orgUnitId}
+                onChange={(v) => {
+                  setOrgUnitId(v);
+                  setPage(1);
+                }}
+                options={orgs.map((o) => ({ value: o.id, label: o.name }))}
+              />
+            )}
+            {books.length > 0 && (
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder="抄表册"
+                style={{ width: 150 }}
+                value={bookId}
+                onChange={(v) => {
+                  setBookId(v);
+                  setPage(1);
+                }}
+                options={books.map((b) => ({ value: b.id, label: b.name }))}
+              />
+            )}
           </Space>
         }
       >

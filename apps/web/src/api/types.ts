@@ -1254,5 +1254,8 @@ export type ExceptionSummary = {
   acknowledged: number;
   suppressedIgnored: number;
   activeFacts: number;
+  /** RC1: caller-scope 内今日新建 / 今日清除的 episode 数（UTC 日窗）。 */
+  todayAdded: number;
+  todayCleared: number;
   asOf: string;
 };

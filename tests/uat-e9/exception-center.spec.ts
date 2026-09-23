@@ -13,6 +13,8 @@
  *  S6 CONFLICT 与 EVENT_KEY_CONFLICT 并存；T2 冲突产生新 episode
  *  S7 RBAC：exception:read 无 billing:read → 可见逾期账单异常、drill 403
  *  S8 MULTI_BOOK：户挂两册 → WARNING 入队
+ *  S9 RC1 过滤器：期间 / 营业所 过滤只匹配已解析 anchor，无 period 异常不误配
+ *  S10 RC1 统计卡：今日新增/今日清除 随 reconcile 变化
  */
 import { test, expect, type Page } from '../uat/helpers/console';
 import { login, ready } from '../uat/helpers/auth';
@@ -270,14 +272,24 @@ const workItem = (key: string) =>
     }),
   );
 
-/** 打开异常中心并对某 key 的行点详情。 */
+/** 打开异常中心并对某 key 的行点详情（自动翻页，队列随运行累积）。 */
 async function openQueueRow(page: Page, keyFragment: string) {
   await page.goto('/exceptions');
   await ready(page);
-  const row = main(page).getByRole('row').filter({ hasText: keyFragment }).first();
-  await expect(row).toBeVisible();
-  await button(row, '详情').click();
-  await expect(page.locator('.ant-drawer:visible').last()).toBeVisible();
+  for (let i = 0; i < 20; i++) {
+    const row = main(page).getByRole('row').filter({ hasText: keyFragment }).first();
+    if (await row.count()) {
+      await expect(row).toBeVisible();
+      await button(row, '详情').click();
+      await expect(page.locator('.ant-drawer:visible').last()).toBeVisible();
+      return;
+    }
+    const next = page.locator('.ant-pagination-next:not(.ant-pagination-disabled) button');
+    if (!(await next.count())) break;
+    await next.click();
+    await page.waitForLoadState('networkidle');
+  }
+  throw new Error(`queue row not found: ${keyFragment}`);
 }
 
 test.beforeAll(async ({ browser }) => {
@@ -508,4 +520,71 @@ test('S8: MULTI_BOOK 入队 + UI 操作（忽略需备注）', async ({ page }, 
   const r = await api(page, 'POST', `/exceptions/${encodeURIComponent(key)}/ignore`, {});
   expect(r.status).toBe(400);
   await evidence(page, info, 's8-multibook', { key });
+});
+test('S9: RC1 — 期间/营业所过滤器', async ({ page }, info) => {
+  const a = await onboard(page, 's9');
+  const org = await db(async (p) => {
+    const o = await p.orgUnit.create({
+      data: { tenantId, parentId: companyOrgId, name: `E9 S9 营业所 ${stamp}`, type: 'BRANCH' },
+    });
+    return o.id as string;
+  });
+  await seedBookCoverage(a.waterAccount.id, org, 's9');
+  const bill = await seedOverdueBill(a.waterAccount.id, a.waterAccount.settleAccountId, '202604');
+  await refresh(page);
+  const bKey = `bill:${bill}:OVERDUE`;
+
+  // API 层：period 命中/不命中；orgUnitId 命中/不命中
+  const hit = await apiOk(page, 'GET', '/exceptions?period=202604&take=200');
+  expect(keys(hit.items)).toContain(bKey);
+  const miss = await apiOk(page, 'GET', '/exceptions?period=202605&take=200');
+  expect(keys(miss.items)).not.toContain(bKey);
+  const inOrg = await apiOk(page, 'GET', `/exceptions?orgUnitId=${org}&take=200`);
+  expect(keys(inOrg.items)).toContain(bKey);
+  const outOrg = await apiOk(page, 'GET', `/exceptions?orgUnitId=${companyOrgId}&take=200`);
+  expect(keys(outOrg.items)).not.toContain(bKey); // bill anchor = S9 branch, not company
+
+  // UI：期间输入框过滤 → 行出现；换成无匹配期间 → 消失
+  await login(page);
+  await page.goto('/exceptions');
+  await ready(page);
+  const periodInput = main(page).getByPlaceholder('期间 YYYYMM');
+  const billRow = () => main(page).locator(`tr[data-row-key="${bKey}"]`);
+  await periodInput.fill('202604');
+  await expect(billRow()).toBeVisible();
+  await periodInput.fill('202605');
+  await expect(billRow()).toHaveCount(0);
+
+  // UI：营业所下拉（admin 有 iam:read → 下拉出现）
+  await periodInput.fill('');
+  const orgSelect = main(page).locator('.ant-select').filter({ hasText: '营业所' }).first();
+  if (await orgSelect.count()) {
+    await orgSelect.click();
+    await page.getByText(`E9 S9 营业所 ${stamp}`, { exact: false }).last().click();
+    await expect(billRow()).toBeVisible();
+  }
+  await evidence(page, info, 's9-filters', { bill, org });
+});
+
+test('S10: RC1 — 今日新增/今日清除统计卡', async ({ page }, info) => {
+  const bare = await seedBareAccount('s10');
+  const s0 = await apiOk(page, 'GET', '/exceptions/summary');
+  await refresh(page); // creates NO_BOOK + NO_ACTIVE_METER episodes today
+  const s1 = await apiOk(page, 'GET', '/exceptions/summary');
+  expect(s1.todayAdded).toBeGreaterThan(s0.todayAdded);
+  expect(s1).toHaveProperty('todayCleared');
+
+  // UI：统计卡存在且有值
+  await login(page);
+  await page.goto('/exceptions');
+  await ready(page);
+  await expect(main(page)).toContainText('今日新增');
+  await expect(main(page)).toContainText('今日清除');
+
+  // 清除 fact（入册）→ reconcile → todayCleared 增加
+  await seedBookCoverage(bare.accId, companyOrgId, 's10');
+  await refresh(page);
+  const s2 = await apiOk(page, 'GET', '/exceptions/summary');
+  expect(s2.todayCleared).toBeGreaterThan(s1.todayCleared);
+  await evidence(page, info, 's10-today-cards', { bare: bare.accId });
 });

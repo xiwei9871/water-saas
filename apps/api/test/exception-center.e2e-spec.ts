@@ -706,3 +706,148 @@ describe('RBAC + write ops', () => {
     await get(`/exceptions/wa:${'aa19aa19-9999-4999-8999-999999999999'}:NO_BOOK`).expect(404);
   });
 });
+
+describe('RC1 — filters + today counters (A1/A2)', () => {
+  it('period filter: only facts whose fact.period matches; periodless anomalies excluded', async () => {
+    const { accId, settleId } = await seedAccount('pf');
+    await coverAccount(ORG_A, accId, 'pf');
+    const bill = await seedOverdueBill(accId, settleId, '202604');
+    const bare = await seedAccount('pf-bare'); // NO_BOOK — no period
+    await post('/exceptions/refresh').expect(201);
+
+    const hit = await get('/exceptions?period=202604&take=200', adminToken).expect(200);
+    expect(keys(hit.body.items)).toContain(`bill:${bill}:OVERDUE`);
+    // a no-period anomaly is never returned under a period filter
+    expect(keys(hit.body.items)).not.toContain(`wa:${bare.accId}:NO_BOOK`);
+    const miss = await get('/exceptions?period=202605&take=200', adminToken).expect(200);
+    expect(keys(miss.body.items)).not.toContain(`bill:${bill}:OVERDUE`);
+    // invalid period rejected, never guessed
+    await get('/exceptions?period=202613').expect(400);
+    await get('/exceptions?period=abc').expect(400);
+  });
+
+  it('orgUnitId/bookId filters narrow on resolved anchor — never widen (off-book TENANT stays hidden)', async () => {
+    const { accId, settleId } = await seedAccount('of');
+    const { bookId } = await coverAccount(ORG_A, accId, 'of');
+    const bill = await seedOverdueBill(accId, settleId, '202604');
+    const bare = await seedAccount('of-bare'); // TENANT-anchored NO_BOOK
+    await post('/exceptions/refresh').expect(201);
+    const bKey = `bill:${bill}:OVERDUE`;
+    const wKey = `wa:${bare.accId}:NO_BOOK`;
+
+    const inOrg = await get(`/exceptions?orgUnitId=${ORG_A}&take=200`, adminToken).expect(200);
+    expect(keys(inOrg.body.items)).toContain(bKey);
+    expect(keys(inOrg.body.items)).not.toContain(wKey); // TENANT anchor never matches org filter
+    const outOrg = await get(`/exceptions?orgUnitId=${ORG_B}&take=200`, adminToken).expect(200);
+    expect(keys(outOrg.body.items)).not.toContain(bKey);
+
+    const inBook = await get(`/exceptions?bookId=${bookId}&take=200`, adminToken).expect(200);
+    expect(keys(inBook.body.items)).toContain(bKey);
+    const { bookId: otherBook } = await coverAccount(ORG_B, accId, 'of-x'); // second book elsewhere
+    const outBook = await get(`/exceptions?bookId=${otherBook}&take=200`, adminToken).expect(200);
+    // account is now covered by A+B books — still matches the B book too
+    expect(keys(outBook.body.items)).toContain(bKey);
+    await get('/exceptions?bookId=not-a-uuid').expect(400);
+    await get(`/exceptions?orgUnitId=not-a-uuid`).expect(400);
+
+    // branch caller + org/book filter: off-book TENANT anomaly must not leak
+    const br = await get(`/exceptions?orgUnitId=${ORG_A}&take=200`, branchToken).expect(200);
+    expect(keys(br.body.items)).not.toContain(wKey);
+    // and the now-split-covered account (A+B) is NOT visible to branch A at all
+    // (fail closed: one covering book out of scope) — filter can't resurrect it
+    expect(keys(br.body.items)).not.toContain(bKey);
+  });
+
+  it('summary todayAdded/todayCleared — scoped via object anchor, no cross-branch leak', async () => {
+    const s0 = (await get('/exceptions/summary', adminToken)).body;
+    const b0 = (await get('/exceptions/summary', branchToken)).body;
+    const epsBefore = await workItems();
+    const keysBefore = new Set(epsBefore.map((e) => e.anomaly_key));
+
+    // todayAdded: new episodes created by this reconcile — count the actual
+    // work_item diff (other latent facts may also materialize on refresh)
+    const { accId, settleId } = await seedAccount('td');
+    await coverAccount(ORG_A, accId, 'td');
+    const bill = await seedOverdueBill(accId, settleId, '202604');
+    await post('/exceptions/refresh').expect(201);
+    const eps1 = await workItems();
+    const newKeys = eps1
+      .filter((e) => !keysBefore.has(e.anomaly_key))
+      .map((e) => e.anomaly_key);
+    const branchList = await get('/exceptions?take=500', branchToken).expect(200);
+    const branchVisible = new Set(keys(branchList.body.items));
+    const branchNew = newKeys.filter((k) => branchVisible.has(k));
+
+    const s1 = (await get('/exceptions/summary', adminToken)).body;
+    const b1 = (await get('/exceptions/summary', branchToken)).body;
+    expect(s1.todayAdded).toBe(s0.todayAdded + newKeys.length);
+    expect(b1.todayAdded).toBe(b0.todayAdded + branchNew.length);
+    // sanity: our account's episodes are A-covered → branch sees them
+    expect(branchNew).toContain(`bill:${bill}:OVERDUE`);
+    expect(branchNew).toContain(`wa:${accId}:NO_ACTIVE_METER`);
+
+    // todayCleared: remove the OVERDUE fact (bill PAID) → reconcile clears
+    const clearedBefore = new Set(
+      eps1.filter((e) => e.cleared).map((e) => e.anomaly_key),
+    );
+    await owner.query(
+      `UPDATE bill SET status='PAID' WHERE tenant_id=$1 AND id=$2`,
+      [T19, bill],
+    );
+    await post('/exceptions/refresh').expect(201);
+    const eps2 = await workItems();
+    const newCleared = eps2
+      .filter((e) => e.cleared && !clearedBefore.has(e.anomaly_key))
+      .map((e) => e.anomaly_key);
+    // our cleared key's object anchor = A-covered account → visible to branch
+    const ourCleared = newCleared.filter((k) => k === `bill:${bill}:OVERDUE`);
+
+    const s2 = (await get('/exceptions/summary', adminToken)).body;
+    const b2 = (await get('/exceptions/summary', branchToken)).body;
+    expect(s2.todayCleared).toBe(s1.todayCleared + newCleared.length);
+    expect(b2.todayCleared).toBe(b1.todayCleared + ourCleared.length);
+    expect(ourCleared.length).toBe(1);
+
+    // scoped no-leak: anomaly on an ORG_B-covered account — branch A must
+    // never count its added/cleared episodes
+    const { accId: accB, settleId: settleB } = await seedAccount('td-b');
+    await coverAccount(ORG_B, accB, 'td-b');
+    const billB = await seedOverdueBill(accB, settleB, '202604');
+    const clearedBefore2 = new Set(
+      (await workItems()).filter((e) => e.cleared).map((e) => e.anomaly_key),
+    );
+    const keysBefore2 = new Set((await workItems()).map((e) => e.anomaly_key));
+    await post('/exceptions/refresh').expect(201);
+    const eps3 = await workItems();
+    const newKeysB = eps3.filter((e) => !keysBefore2.has(e.anomaly_key)).map((e) => e.anomaly_key);
+    const branchList3 = await get('/exceptions?take=500', branchToken).expect(200);
+    const branchVisible3 = new Set(keys(branchList3.body.items));
+    const branchNewB = newKeysB.filter((k) => branchVisible3.has(k));
+
+    const s3 = (await get('/exceptions/summary', adminToken)).body;
+    const b3 = (await get('/exceptions/summary', branchToken)).body;
+    expect(s3.todayAdded).toBe(s2.todayAdded + newKeysB.length);
+    expect(b3.todayAdded).toBe(b2.todayAdded + branchNewB.length);
+    expect(branchNewB).not.toContain(`bill:${billB}:OVERDUE`); // B-only account
+
+    await owner.query(
+      `UPDATE bill SET status='PAID' WHERE tenant_id=$1 AND id=$2`,
+      [T19, billB],
+    );
+    await post('/exceptions/refresh').expect(201);
+    const eps4 = await workItems();
+    const newClearedB = eps4
+      .filter((e) => e.cleared && !clearedBefore2.has(e.anomaly_key))
+      .map((e) => e.anomaly_key);
+    // branch-visible cleared = keys that were in branch's list while active
+    const branchClearedB = newClearedB.filter((k) => branchVisible3.has(k));
+
+    const s4 = (await get('/exceptions/summary', adminToken)).body;
+    const b4 = (await get('/exceptions/summary', branchToken)).body;
+    expect(s4.todayCleared).toBe(s3.todayCleared + newClearedB.length);
+    // our B-anchored cleared item must NOT be counted for branch A
+    expect(newClearedB).toContain(`bill:${billB}:OVERDUE`);
+    expect(branchClearedB).not.toContain(`bill:${billB}:OVERDUE`);
+    expect(b4.todayCleared).toBe(b3.todayCleared + branchClearedB.length);
+  });
+});
