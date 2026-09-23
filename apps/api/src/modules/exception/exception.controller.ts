@@ -78,6 +78,27 @@ export class ExceptionController {
     return this.svc.refresh(currentTenant());
   }
 
+  /** Minimal picklist projections — the Exception Center must render its
+   *  filters/assign dropdown without iam:read or metering:read. Scoped
+   *  callers only see options inside their own orgScope. */
+  @Get('options/orgs')
+  @Permissions('exception:read')
+  optionOrgs() {
+    return this.svc.optionOrgs(currentTenant());
+  }
+
+  @Get('options/books')
+  @Permissions('exception:read')
+  optionBooks() {
+    return this.svc.optionBooks(currentTenant());
+  }
+
+  @Get('options/assignees')
+  @Permissions('exception:manage')
+  optionAssignees() {
+    return this.svc.optionAssignees(currentTenant());
+  }
+
   @Get(':key')
   @Permissions('exception:read')
   detail(@Param('key') key: string) {

@@ -182,6 +182,52 @@ export class ExceptionService {
   }
 
   // ------------------------------------------------------------------
+  // options projections — minimal picklists so the UI never needs
+  // iam:read / metering:read to render its own filters (RC2 P1).
+  // Scoped callers only see options inside their own orgScope.
+  // ------------------------------------------------------------------
+
+  async optionOrgs(ctx: TenantCtx) {
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      tx.orgUnit.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          ...(ctx.scope === 'ALL' ? {} : { id: { in: ctx.orgScope } }),
+        },
+        select: { id: true, name: true, type: true, parentId: true },
+        orderBy: { name: 'asc' },
+      }),
+    );
+  }
+
+  async optionBooks(ctx: TenantCtx) {
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      tx.readingBook.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          ...(ctx.scope === 'ALL' ? {} : { orgUnitId: { in: ctx.orgScope } }),
+        },
+        select: { id: true, name: true, bookNo: true, orgUnitId: true },
+        orderBy: { bookNo: 'asc' },
+      }),
+    );
+  }
+
+  async optionAssignees(ctx: TenantCtx) {
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      tx.staff.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          status: 'ACTIVE',
+          ...(ctx.scope === 'ALL' ? {} : { orgUnitId: { in: ctx.orgScope } }),
+        },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+    );
+  }
+
+  // ------------------------------------------------------------------
   // episode writes — every path re-evaluates the fact first (D3/D7)
   // ------------------------------------------------------------------
 

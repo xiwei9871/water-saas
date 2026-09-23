@@ -164,31 +164,22 @@ export default function Exceptions() {
   useEffect(() => {
     if (!canManage) return;
     api
-      .get<{ id: string; name: string }[]>('/iam/staff', { params: { take: 200 } })
+      .get<{ id: string; name: string }[]>('/exceptions/options/assignees')
       .then((r) => setStaff(r.data.map((s) => ({ id: s.id, name: s.name }))))
       .catch(() => setStaff([]));
   }, [canManage]);
 
   useEffect(() => {
-    if (hasPerm('iam:read')) {
-      api
-        .get<{ id: string; name: string }[]>('/iam/orgs')
-        .then((r) => setOrgs(r.data.map((o) => ({ id: o.id, name: o.name }))))
-        .catch(() => setOrgs([]));
-    }
-    if (hasPerm('metering:read')) {
-      api
-        .get<{ items: { id: string; name: string }[] } | { id: string; name: string }[]>(
-          '/reading-books',
-          { params: { take: 200 } },
-        )
-        .then((r) => {
-          const raw = Array.isArray(r.data) ? r.data : r.data.items;
-          setBooks((raw ?? []).map((b) => ({ id: b.id, name: b.name })));
-        })
-        .catch(() => setBooks([]));
-    }
-  }, [hasPerm]);
+    // exception:read-gated projections — no iam/metering permission needed.
+    api
+      .get<{ id: string; name: string }[]>('/exceptions/options/orgs')
+      .then((r) => setOrgs(r.data.map((o) => ({ id: o.id, name: o.name }))))
+      .catch(() => setOrgs([]));
+    api
+      .get<{ id: string; name: string }[]>('/exceptions/options/books')
+      .then((r) => setBooks(r.data.map((b) => ({ id: b.id, name: b.name }))))
+      .catch(() => setBooks([]));
+  }, []);
 
   const openDetail = async (key: string) => {
     setDetailLoading(true);

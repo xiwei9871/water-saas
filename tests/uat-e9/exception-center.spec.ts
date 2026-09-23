@@ -276,18 +276,40 @@ const workItem = (key: string) =>
 async function openQueueRow(page: Page, keyFragment: string) {
   await page.goto('/exceptions');
   await ready(page);
+  const rowOf = () =>
+    main(page).getByRole('row').filter({ hasText: keyFragment }).first();
+  const nextPage = page.locator(
+    '.ant-pagination-next:not(.ant-pagination-disabled) button',
+  );
   for (let i = 0; i < 20; i++) {
-    const row = main(page).getByRole('row').filter({ hasText: keyFragment }).first();
+    const row = rowOf();
     if (await row.count()) {
       await expect(row).toBeVisible();
-      await button(row, '详情').click();
+      // 队列页有多路并行请求（list/summary/options），行可能因数据落地
+      // 重渲染而短暂 detach —— 允许重试点击而不是把整段场景判死。
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await button(rowOf(), '详情').click({ timeout: 5000 });
+          break;
+        } catch (e) {
+          if (attempt === 2) throw e;
+        }
+      }
       await expect(page.locator('.ant-drawer:visible').last()).toBeVisible();
       return;
     }
-    const next = page.locator('.ant-pagination-next:not(.ant-pagination-disabled) button');
-    if (!(await next.count())) break;
-    await next.click();
-    await page.waitForLoadState('networkidle');
+    if (!(await nextPage.count())) break;
+    // 等「本次翻页」的响应真正回来 —— networkidle 在请求尚未发出时会
+    // 立即返回，导致在旧页面上误判行不存在而翻过头。
+    await Promise.all([
+      page
+        .waitForResponse(
+          (r) => r.url().includes('/exceptions?') && r.status() === 200,
+          { timeout: 10000 },
+        )
+        .catch(() => null),
+      nextPage.click(),
+    ]);
   }
   throw new Error(`queue row not found: ${keyFragment}`);
 }

@@ -171,16 +171,18 @@ export async function objectAnchorTx(
         },
       });
       if (e) {
-        const wa = e.resolvedBinding?.installation.waterAccountId;
-        // D21: REMOTE_SOURCE only for UNBOUND / KEY_CONFLICT keys; resolved-
-        // account anomaly types fall to TENANT when the account is gone.
+        // D21 — anchor by anomaly TYPE first: UNBOUND / KEY_CONFLICT
+        // episodes belong to the remote source forever, even if the
+        // event later gains a resolvedBinding. Other remote types
+        // anchor to the resolved account; unresolved → TENANT.
         const sourceAnchored =
           parsed.type === 'REMOTE_EVENT_UNBOUND' ||
           parsed.type === 'REMOTE_EVENT_KEY_CONFLICT';
-        fact = wa
-          ? { key: '', type: '', severity: 'WARNING', waterAccountId: wa, anchorRef: { kind: 'remote-event', id: parsed.id }, summary: '' }
-          : sourceAnchored
-            ? { key: '', type: '', severity: 'WARNING', remoteSourceId: e.remoteSourceId, anchorRef: { kind: 'remote-event', id: parsed.id }, summary: '' }
+        const wa = e.resolvedBinding?.installation.waterAccountId;
+        fact = sourceAnchored
+          ? { key: '', type: '', severity: 'WARNING', remoteSourceId: e.remoteSourceId, anchorRef: { kind: 'remote-event', id: parsed.id }, summary: '' }
+          : wa
+            ? { key: '', type: '', severity: 'WARNING', waterAccountId: wa, anchorRef: { kind: 'remote-event', id: parsed.id }, summary: '' }
             : { key: '', type: '', severity: 'WARNING', anchorRef: { kind: 'remote-event', id: parsed.id }, summary: '' };
       }
       break;
@@ -269,14 +271,17 @@ export async function objectAnchorsBatchTx(
     for (const { k, i } of eventIdx) {
       const e = m.get(k.id);
       if (!e) continue;
-      const wa = e.resolvedBinding?.installation.waterAccountId;
-      // D21: REMOTE_SOURCE only for UNBOUND / KEY_CONFLICT keys
+      // D21 — anchor by anomaly TYPE first (see objectAnchorTx):
+      // UNBOUND / KEY_CONFLICT stay REMOTE_SOURCE even after the event
+      // gains a resolvedBinding; other types use the resolved account,
+      // unresolved → TENANT.
       const sourceAnchored =
         k.type === 'REMOTE_EVENT_UNBOUND' || k.type === 'REMOTE_EVENT_KEY_CONFLICT';
-      facts[i] = wa
-        ? { key: '', type: '', severity: 'WARNING', waterAccountId: wa, anchorRef: { kind: 'remote-event', id: k.id }, summary: '' }
-        : sourceAnchored
-          ? { key: '', type: '', severity: 'WARNING', remoteSourceId: e.remoteSourceId, anchorRef: { kind: 'remote-event', id: k.id }, summary: '' }
+      const wa = e.resolvedBinding?.installation.waterAccountId;
+      facts[i] = sourceAnchored
+        ? { key: '', type: '', severity: 'WARNING', remoteSourceId: e.remoteSourceId, anchorRef: { kind: 'remote-event', id: k.id }, summary: '' }
+        : wa
+          ? { key: '', type: '', severity: 'WARNING', waterAccountId: wa, anchorRef: { kind: 'remote-event', id: k.id }, summary: '' }
           : { key: '', type: '', severity: 'WARNING', anchorRef: { kind: 'remote-event', id: k.id }, summary: '' };
     }
   }

@@ -306,7 +306,7 @@ describe('fee items', () => {
   it('list filters + detail; ghost id → 404', async () => {
     const list = (
       await request(app.getHttpServer())
-        .get(`/fee-items?calcType=PER_QTY`)
+        .get(`/fee-items?calcType=PER_QTY&take=200`)
         .set(auth(adminToken))
         .expect(200)
     ).body;
