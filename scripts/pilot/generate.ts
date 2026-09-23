@@ -134,7 +134,9 @@ async function main(): Promise<void> {
     // Nest harness → G3 baseline domain flows → close. No HTTP listener.
     const h = await phase(phases, 'harness', () => bootHarness());
     try {
-      baseline = await runBaseline(h, pilotCtx(tenant.id, ''), args);
+      baseline = await runBaseline(h, pilotCtx(tenant.id, ''), args, {
+        asOf: clock.asOf,
+      });
       phases.push(...baseline.phases);
     } finally {
       await h.close();

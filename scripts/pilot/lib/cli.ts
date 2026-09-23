@@ -15,6 +15,8 @@ export interface GenerateArgs {
   concurrency: number;
   reset: boolean;
   yes: boolean;
+  /** G4 fault injection on top of the clean baseline. */
+  faults: boolean;
   outputDir: string;
   help: boolean;
 }
@@ -67,6 +69,7 @@ export function parseArgs(argv: string[]): GenerateArgs {
     createTenant: false,
     reset: false,
     yes: false,
+    faults: false,
     help: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -104,6 +107,9 @@ export function parseArgs(argv: string[]): GenerateArgs {
         break;
       case '--yes':
         a.yes = true;
+        break;
+      case '--faults':
+        a.faults = true;
         break;
       case '--output':
         a.outputDir = takeValue(argv, i++, f);
@@ -184,5 +190,7 @@ export const USAGE = `generate.ts — Pilot Cycle 1A synthetic generator (G2 ske
   --concurrency <1..8>   default ${CONCURRENCY_DEFAULT}, hard cap ${CONCURRENCY_MAX}
   --reset                delete tenant-scoped rows (needs --yes to execute)
   --yes                  confirm destructive ops
+  --faults               G4: inject the 15-scenario anomaly matrix on top
+                         of the clean baseline (construction + GT only)
   --output <dir>         default artifacts/pilot
 `;

@@ -12,6 +12,7 @@ import {
   DEFAULT_ALLOCATION,
   listPeriods,
   periodStart,
+  shiftPeriod,
 } from './allocate.ts';
 import { bootstrapTenant, type BootstrapResult } from './bootstrap.ts';
 import {
@@ -31,6 +32,7 @@ import {
   applyPayments,
 } from './flow.ts';
 import { verifyBaseline, type VerifyResult } from './verify.ts';
+import { injectFaults } from '../fault/inject.ts';
 
 export interface BaselineResult {
   phases: PhaseRecord[];
@@ -38,7 +40,10 @@ export interface BaselineResult {
   verify: VerifyResult;
   bootstrap: BootstrapResult;
   stats: Record<string, number>;
+  faultStats?: Record<string, number>;
 }
+
+
 
 /** accumulate per-period work into the frozen phase names. */
 class PhaseSink {
@@ -88,12 +93,12 @@ export async function runBaseline(
   h: Harness,
   tenantCtx: TenantCtx,
   args: CliArgs,
-  periodsArg?: string[],
+  opts?: { periods?: string[]; asOf?: string },
 ): Promise<BaselineResult> {
   const sink = new PhaseSink();
   const seed = args.seed;
   const alloc = { ...DEFAULT_ALLOCATION, accounts: args.accounts };
-  const periods = periodsArg ?? listPeriods(args.periodFrom, args.periodTo);
+  const periods = opts?.periods ?? listPeriods(args.periodFrom, args.periodTo);
   const plans = allocateAccounts(alloc);
 
   // --- bootstrap (INFRA_BOOTSTRAP + tariff domain flow) ---
@@ -194,12 +199,40 @@ export async function runBaseline(
     return { rows: 1 };
   });
 
-  // --- baseline verification (read-only) ---
+  // --- G4 fault injection (opt-in) — AFTER clean baseline, BEFORE verify ---
+  let faultGt: GroundTruthEntry[] = [];
+  let faultStats: Record<string, number> | undefined;
+  let expectedAnomalyKeys: Set<string> | undefined;
+  let extraRemoteConverted = 0;
+  if (args.faults) {
+    const fr = await sink.run('fault-inject', async () => {
+      // faultPeriod: 3 months before asOf → its bill due date is already
+      // past (periodEnd+45d < asOf) → real UNPAID_BILL_OVERDUE.
+      const asOfMonth = (opts?.asOf ?? args.periodFrom).slice(0, 7).replace('-', '');
+      const faultPeriod = shiftPeriod(asOfMonth, -3);
+      const r = await injectFaults(
+        h, ctx, seed, boot.branchIds, faultPeriod, periods[0],
+      );
+      return { rows: r.stats.groundTruthEntries, value: r };
+    });
+    faultGt = fr.groundTruth;
+    faultStats = fr.stats;
+    expectedAnomalyKeys = fr.expectedKeys;
+    extraRemoteConverted = fr.stats.convertedRemote ?? 0;
+  }
+
+  // --- verification (read-only): baseline + expected-anomaly smoke ---
   const verify = await sink.run('baseline-verify', async () => ({
-    value: await verifyBaseline(h, ctx, accounts, periods),
+    value: await verifyBaseline(h, ctx, accounts, periods, {
+      expectedAnomalyKeys,
+      extraRemoteConverted,
+    }),
   }));
 
-  const groundTruth = accounts.map((a) => cleanEntry(a, seed));
+  const groundTruth = [
+    ...accounts.map((a) => cleanEntry(a, seed)),
+    ...faultGt,
+  ];
 
   return {
     phases: sink.records(),
@@ -220,5 +253,6 @@ export async function runBaseline(
       payments,
       topUps,
     },
+    faultStats,
   };
 }

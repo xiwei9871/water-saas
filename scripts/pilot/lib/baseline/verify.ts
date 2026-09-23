@@ -27,16 +27,26 @@ export interface VerifyResult {
     pass: boolean;
   };
   unexpectedAnomalies: { type: string; key: string }[];
+  /** G4 construction smoke — expected keys injected but NOT produced. */
+  missingExpectedAnomalies: { type: string; key: string }[];
   pass: boolean;
 }
 
 type Tx = { $queryRaw<T>(q: unknown, ...a: unknown[]): Promise<T> };
+
+export interface VerifyOpts {
+  /** G4 expected anomaly keys — facts matching these are not "unexpected". */
+  expectedAnomalyKeys?: Set<string>;
+  /** G4 extra CONVERTED remote events beyond the baseline remote accounts. */
+  extraRemoteConverted?: number;
+}
 
 export async function verifyBaseline(
   h: Harness,
   ctx: TenantCtx,
   accounts: GeneratedAccount[],
   periods: string[],
+  opts: VerifyOpts = {},
 ): Promise<VerifyResult> {
   const tenantId = ctx.tenantId;
   const waIds = accounts.map((a) => a.waterAccountId);
@@ -77,7 +87,9 @@ export async function verifyBaseline(
     Pr.Prisma.sql`SELECT count(*) c FROM bill
       WHERE tenant_id=${tenantId}::uuid AND water_account_id=ANY(${waIds}::uuid[])
         AND status IN ('POSTED','PARTIAL_PAID','PAID')`).then(r => Number(r[0].c)));
-  add('remote_converted', accounts.filter((a) => a.plan.remote).length * nPeriods,
+  add('remote_converted',
+    accounts.filter((a) => a.plan.remote).length * nPeriods
+      + (opts.extraRemoteConverted ?? 0),
     await q<{ c: bigint }[]>(
       Pr.Prisma.sql`SELECT count(*) c FROM raw_remote_event
         WHERE tenant_id=${tenantId}::uuid AND processing_status='CONVERTED'`).then(r => Number(r[0].c)));
@@ -169,11 +181,25 @@ export async function verifyBaseline(
     det.detectAll(tx as Tx, tenantId),
   );
 
-  const unexpectedAnomalies = facts.map((x) => ({ type: x.type, key: x.key }));
-  if (unexpectedAnomalies.length) {
-    for (const a of unexpectedAnomalies)
-      console.log(`  UNEXPECTED ANOMALY ${a.type} ${a.key}`);
-  }
-  const pass = checks.every((c) => c.pass) && financial.pass && !unexpectedAnomalies.length;
-  return { checks, financial, unexpectedAnomalies, pass };
+  const expected = opts.expectedAnomalyKeys ?? new Set<string>();
+  const unexpectedAnomalies = facts
+    .filter((x) => !expected.has(x.key))
+    .map((x) => ({ type: x.type, key: x.key }));
+  const found = new Set(facts.map((x) => x.key));
+  const missingExpectedAnomalies = [...expected]
+    .filter((k) => !found.has(k))
+    .map((key) => {
+      const f = facts.find((x) => x.key === key);
+      return { type: f?.type ?? key.split(':').pop() ?? key, key };
+    });
+  for (const a of unexpectedAnomalies)
+    console.log(`  UNEXPECTED ANOMALY ${a.type} ${a.key}`);
+  for (const a of missingExpectedAnomalies)
+    console.log(`  MISSING EXPECTED   ${a.type} ${a.key}`);
+  const pass =
+    checks.every((c) => c.pass) &&
+    financial.pass &&
+    !unexpectedAnomalies.length &&
+    !missingExpectedAnomalies.length;
+  return { checks, financial, unexpectedAnomalies, missingExpectedAnomalies, pass };
 }

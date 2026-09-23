@@ -79,6 +79,12 @@ export const periodEnd = (period: string): Date =>
 export const periodDay = (period: string, day: number): Date =>
   new Date(Date.UTC(+period.slice(0, 4), +period.slice(4) - 1, day));
 
+/** month-shift on YYYYMM — negative delta walks back. */
+export const shiftPeriod = (period: string, delta: number): string => {
+  const y = +period.slice(0, 4), m = +period.slice(4) - 1 + delta;
+  return `${y + Math.floor(m / 12)}${String(((m % 12) + 12) % 12 + 1).padStart(2, '0')}`;
+};
+
 export const listPeriods = (from: string, to: string): string[] => {
   const out: string[] = [];
   let p = from;
