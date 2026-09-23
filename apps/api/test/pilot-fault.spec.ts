@@ -9,6 +9,15 @@ import {
   SCENARIO_TYPES,
   TAG_SEQ,
 } from '../../scripts/pilot/lib/fault/inject.ts';
+import { ANCHOR, oKey, T } from '../../scripts/pilot/lib/fault/oracle.ts';
+import {
+  A,
+  billKey,
+  eventIssueKey,
+  eventKey,
+  readingKey,
+  waKey,
+} from '../src/modules/exception/types.js';
 import { shiftPeriod } from '../../scripts/pilot/lib/baseline/allocate.ts';
 import { keys } from '../../scripts/pilot/lib/keys.ts';
 import { parseArgs } from '../../scripts/pilot/lib/cli.ts';
@@ -48,6 +57,66 @@ describe('G4 scenario matrix', () => {
       expect(keys.customerNo(42, tag, seq)).toContain(`C-${tag}-`);
     }
     expect(keys.scenarioKey('NO_BOOK', 0)).toBe('NO_BOOK:000000');
+  });
+});
+
+describe('independent oracle (P1-4)', () => {
+  const id = 'aaaaaaaa-0000-4000-8000-000000000001';
+  it('frozen key formats', () => {
+    expect(oKey.wa(id, T.NO_BOOK)).toBe(`wa:${id}:NO_BOOK`);
+    expect(oKey.qcReview(id)).toBe(`reading:${id}:QC_REVIEW`);
+    expect(oKey.qcRejected(id)).toBe(`reading:${id}:QC_REJECTED`);
+    expect(oKey.eventUnbound(id)).toBe(`event:${id}:UNBOUND`);
+    expect(oKey.eventWaitingPlan(id)).toBe(`event:${id}:WAITING_PLAN`);
+    expect(oKey.eventFailed(id)).toBe(`event:${id}:FAILED`);
+    expect(oKey.eventConflict(id)).toBe(`event:${id}:CONFLICT`);
+    expect(oKey.eventKeyConflict(id, 3)).toBe(`event:${id}:EVENT_KEY_CONFLICT:3`);
+    expect(oKey.bill(id)).toBe(`bill:${id}:OVERDUE`);
+  });
+
+  it('oracle format == current production format (regression only)', () => {
+    // GT generation must NOT use production helpers — this test only
+    // proves the frozen contract still matches the product encoding.
+    expect(oKey.wa(id, T.ESTIMATE_STREAK)).toBe(waKey(id, A.ESTIMATE_STREAK));
+    expect(oKey.qcReview(id)).toBe(readingKey(id, A.READING_QC_REVIEW));
+    expect(oKey.qcRejected(id)).toBe(readingKey(id, A.READING_QC_REJECTED));
+    expect(oKey.eventUnbound(id)).toBe(eventKey(id, A.REMOTE_EVENT_UNBOUND));
+    expect(oKey.eventWaitingPlan(id)).toBe(eventKey(id, A.REMOTE_EVENT_WAITING_PLAN));
+    expect(oKey.eventFailed(id)).toBe(eventKey(id, A.REMOTE_EVENT_FAILED));
+    expect(oKey.eventConflict(id)).toBe(eventKey(id, A.REMOTE_EVENT_CONFLICT));
+    expect(oKey.eventKeyConflict(id, 3)).toBe(eventIssueKey(id, '3'));
+    expect(oKey.bill(id)).toBe(billKey(id));
+    for (const t of A_TYPES) expect(Object.values(T)).toContain(t);
+  });
+});
+
+describe('frozen anchor contract (P1-3)', () => {
+  it('per-type anchors', () => {
+    expect(ANCHOR[T.NO_ACTIVE_METER]).toBe('ACCOUNT');
+    expect(ANCHOR[T.MULTI_ACTIVE_METER]).toBe('ACCOUNT');
+    expect(ANCHOR[T.NO_BOOK]).toBe('TENANT');
+    expect(ANCHOR[T.MULTI_BOOK]).toBe('ACCOUNT');
+    expect(ANCHOR[T.READING_QC_REVIEW]).toBe('ACCOUNT');
+    expect(ANCHOR[T.READING_QC_REJECTED]).toBe('ACCOUNT');
+    expect(ANCHOR[T.ESTIMATE_STREAK]).toBe('ACCOUNT');
+    expect(ANCHOR[T.REMOTE_EVENT_UNBOUND]).toBe('REMOTE_SOURCE');
+    expect(ANCHOR[T.REMOTE_EVENT_WAITING_PLAN]).toBe('ACCOUNT');
+    expect(ANCHOR[T.REMOTE_EVENT_FAILED]).toBe('ACCOUNT');
+    expect(ANCHOR[T.REMOTE_EVENT_CONFLICT]).toBe('ACCOUNT');
+    expect(ANCHOR[T.REMOTE_EVENT_KEY_CONFLICT]).toBe('REMOTE_SOURCE');
+    expect(ANCHOR[T.UNPAID_BILL_OVERDUE]).toBe('ACCOUNT');
+  });
+
+  it('primary-isolated scenario expectations', () => {
+    // NAM → only NO_ACTIVE_METER (in FA, not bookless)
+    // NBK → only NO_BOOK (bookless → TENANT anchor)
+    // FLD → only REMOTE_EVENT_FAILED (FB membership removed post-plan)
+    expect(SCENARIO_OF_TAG.NAM).toBe('NO_ACTIVE_METER');
+    expect(SCENARIO_OF_TAG.NBK).toBe('NO_BOOK');
+    expect(SCENARIO_OF_TAG.FLD).toBe('REMOTE_EVENT_FAILED');
+    expect(ANCHOR[SCENARIO_OF_TAG.NAM]).toBe('ACCOUNT');
+    expect(ANCHOR[SCENARIO_OF_TAG.NBK]).toBe('TENANT');
+    expect(ANCHOR[SCENARIO_OF_TAG.FLD]).toBe('ACCOUNT');
   });
 });
 

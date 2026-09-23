@@ -31,7 +31,7 @@ import {
   submitManualReadings,
   applyPayments,
 } from './flow.ts';
-import { verifyBaseline, type VerifyResult } from './verify.ts';
+import { verifyBaseline, type ExpectedFact, type VerifyResult } from './verify.ts';
 import { injectFaults } from '../fault/inject.ts';
 
 export interface BaselineResult {
@@ -202,7 +202,7 @@ export async function runBaseline(
   // --- G4 fault injection (opt-in) — AFTER clean baseline, BEFORE verify ---
   let faultGt: GroundTruthEntry[] = [];
   let faultStats: Record<string, number> | undefined;
-  let expectedAnomalyKeys: Set<string> | undefined;
+  let expectedAnomalies: ExpectedFact[] | undefined;
   let extraRemoteConverted = 0;
   if (args.faults) {
     const fr = await sink.run('fault-inject', async () => {
@@ -217,14 +217,14 @@ export async function runBaseline(
     });
     faultGt = fr.groundTruth;
     faultStats = fr.stats;
-    expectedAnomalyKeys = fr.expectedKeys;
+    expectedAnomalies = fr.expectedAnomalies;
     extraRemoteConverted = fr.stats.convertedRemote ?? 0;
   }
 
   // --- verification (read-only): baseline + expected-anomaly smoke ---
   const verify = await sink.run('baseline-verify', async () => ({
     value: await verifyBaseline(h, ctx, accounts, periods, {
-      expectedAnomalyKeys,
+      expectedAnomalies,
       extraRemoteConverted,
     }),
   }));

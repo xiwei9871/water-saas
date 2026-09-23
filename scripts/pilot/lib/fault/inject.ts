@@ -33,16 +33,10 @@ const Dec = Pr.Prisma.Decimal;
 const REQ = { user: { perms: ['*'] } };
 type Svc = Record<string, (...a: unknown[]) => unknown>;
 
-// anomaly-key helpers from the detector module — GT keys must match
-// the detector's own encoding exactly.
-const exc = apiImport<{
-  A: Record<string, string>;
-  waKey(id: string, type: string): string;
-  billKey(id: string): string;
-  readingKey(id: string, type: string): string;
-  eventKey(id: string, type: string): string;
-  eventIssueKey(id: string, occurrence: string): string;
-}>('modules/exception/types');
+// Ground Truth keys come from the INDEPENDENT oracle (frozen product
+// contract literals) — never from production key helpers, so a format
+// drift in the product surfaces as a smoke mismatch.
+import { ANCHOR, oKey, T } from './oracle.ts';
 
 // deterministic seq space per scenario tag — distinct from baseline
 // (0..accounts) and fault books (900+)/devices (910+).
@@ -86,9 +80,16 @@ interface InjectCtx {
   seqNoByBook: Map<string, number>;
 }
 
+export interface ExpectedAnomaly {
+  type: string;
+  key: string;
+  anchor: Anchor;
+  orgOwnership: string[];
+}
+
 interface InjectResult {
   groundTruth: GroundTruthEntry[];
-  expectedKeys: Set<string>;
+  expectedAnomalies: ExpectedAnomaly[];
   stats: Record<string, number>;
 }
 
@@ -100,7 +101,6 @@ export async function injectFaults(
   faultPeriod: string, // historical; due_date already past
   readPeriod: string,  // baseline period for reading scenarios
 ): Promise<InjectResult> {
-  const t = await exc;
   const ic: InjectCtx = {
     h, ctx, seed,
     books: {} as InjectCtx['books'],
@@ -194,7 +194,7 @@ export async function injectFaults(
   const entry = (
     tag: string,
     a: GeneratedAccount | null,
-    anomalies: { type: string; key: string; anchor: Anchor }[],
+    anomalies: { type: string; key: string }[],
     orgOwnership: string[] = [],
     extraBiz: Record<string, string> = {},
     extraIds: Record<string, string> = {},
@@ -227,7 +227,12 @@ export async function injectFaults(
         ...extraIds,
       },
       expected: {
-        anomalies: anomalies.map((x) => ({ ...x, lifecycle: ['active'] as const })),
+        anomalies: anomalies.map((x) => ({
+          type: x.type,
+          key: x.key,
+          anchor: ANCHOR[x.type] ?? 'ACCOUNT',
+          lifecycle: ['active'] as const,
+        })),
         orgOwnership,
         financialEffect: null,
       },
@@ -301,7 +306,9 @@ export async function injectFaults(
     OVD: await onboard('OVD', installedOvd),
   };
 
-  // memberships (NBK/NAM stay bookless)
+  // memberships (only NBK stays bookless; NAM joins FA so the
+  // NO_ACTIVE_METER anomaly is primary-isolated, no NO_BOOK co-hit)
+  await member(ic.books.FA, A.NAM);
   await member(ic.books.FA, A.MAM);
   await member(ic.books.FA, A.MBK); await member(ic.books.FB, A.MBK);
   await member(ic.books.FA, A.XBM); await member(ic.books.FC, A.XBM);
@@ -311,17 +318,19 @@ export async function injectFaults(
   await member(ic.books.FB, A.FLD); // 2nd book → ambiguous plan items
 
   // ---- structural anomalies ----
+  // NAM: in FA (BookMeter=1) + remove the only ACTIVE installation →
+  // isolated NO_ACTIVE_METER, anchor ACCOUNT, owner = FA's org.
   await withTenantTx(h, 'MeterInstallationService.removeTx', ctx.tenantId, (tx) =>
     install.removeTx(tx, ctx, A.NAM.installationId, {
       finalReading: new Dec(0), removedAt: periodDay(readPeriod, 2),
     }, REQ),
   );
   entry('NAM', A.NAM, [
-    { type: t.A.NO_ACTIVE_METER, key: t.waKey(A.NAM.waterAccountId, t.A.NO_ACTIVE_METER), anchor: 'ACCOUNT' },
-    { type: t.A.NO_BOOK, key: t.waKey(A.NAM.waterAccountId, t.A.NO_BOOK), anchor: 'ACCOUNT' },
-  ]);
+    { type: T.NO_ACTIVE_METER, key: oKey.wa(A.NAM.waterAccountId, T.NO_ACTIVE_METER) },
+  ], [ic.books.FA.orgUnitId]);
+  // NBK: bookless → NO_BOOK only, TENANT-anchored (no determinable owner)
   entry('NBK', A.NBK, [
-    { type: t.A.NO_BOOK, key: t.waKey(A.NBK.waterAccountId, t.A.NO_BOOK), anchor: 'ACCOUNT' },
+    { type: T.NO_BOOK, key: oKey.wa(A.NBK.waterAccountId, T.NO_BOOK) },
   ]);
 
   const m2 = (await withTenantTx(h, 'MeterService.createTx', ctx.tenantId, (tx) =>
@@ -334,14 +343,16 @@ export async function injectFaults(
     } as never),
   )) as { id: string };
   entry('MAM', A.MAM, [
-    { type: t.A.MULTI_ACTIVE_METER, key: t.waKey(A.MAM.waterAccountId, t.A.MULTI_ACTIVE_METER), anchor: 'ACCOUNT' },
+    { type: T.MULTI_ACTIVE_METER, key: oKey.wa(A.MAM.waterAccountId, T.MULTI_ACTIVE_METER) },
   ], [ic.books.FA.orgUnitId], {}, { extraInstallationId: inst2.id });
 
+  // coveringOrgs is a Set of book orgs — FA and FB share branch0 so
+  // MBK's covering set dedupes to a single org.
   entry('MBK', A.MBK, [
-    { type: t.A.MULTI_BOOK, key: t.waKey(A.MBK.waterAccountId, t.A.MULTI_BOOK), anchor: 'ACCOUNT' },
+    { type: T.MULTI_BOOK, key: oKey.wa(A.MBK.waterAccountId, T.MULTI_BOOK) },
   ], [ic.books.FA.orgUnitId]);
   entry('XBM', A.XBM, [
-    { type: t.A.MULTI_BOOK, key: t.waKey(A.XBM.waterAccountId, t.A.MULTI_BOOK), anchor: 'ACCOUNT' },
+    { type: T.MULTI_BOOK, key: oKey.wa(A.XBM.waterAccountId, T.MULTI_BOOK) },
   ], [ic.books.FA.orgUnitId, ic.books.FC.orgUnitId]);
 
   // ---- fault-book plans ----
@@ -349,17 +360,25 @@ export async function injectFaults(
   await genPlan(ic.books.FB, readPeriod);
   const itemsFP = await genPlan(ic.books.FA, faultPeriod);
 
+  // FLD: 2 historical plan items exist (FA+FB both generated) — now
+  // remove the FB membership so CURRENT BookMeter=1 while matching
+  // plan items stay 2 → the bound event fails PLAN_ITEM_AMBIGUOUS
+  // WITHOUT a MULTI_BOOK co-anomaly.
+  await withTenantTx(h, 'ReadingBookService.removeMemberTx', ctx.tenantId, (tx) =>
+    bookSvc.removeMemberTx(tx, ctx, ic.books.FB.id, A.FLD.waterAccountId, REQ),
+  );
+
   // ---- QC anomalies ----
   const rQCR = await submitReading(A.QCR, itemsRP, readPeriod);
   await qc(rQCR.id, 'review');
   entry('QCR', A.QCR, [
-    { type: t.A.READING_QC_REVIEW, key: t.readingKey(rQCR.id, t.A.READING_QC_REVIEW), anchor: 'ACCOUNT' },
+    { type: T.READING_QC_REVIEW, key: oKey.qcReview(rQCR.id) },
   ], [ic.books.FA.orgUnitId], { period: readPeriod }, { readingId: rQCR.id });
 
   const rQCJ = await submitReading(A.QCJ, itemsRP, readPeriod);
   await qc(rQCJ.id, 'reject');
   entry('QCJ', A.QCJ, [
-    { type: t.A.READING_QC_REJECTED, key: t.readingKey(rQCJ.id, t.A.READING_QC_REJECTED), anchor: 'ACCOUNT' },
+    { type: T.READING_QC_REJECTED, key: oKey.qcRejected(rQCJ.id) },
   ], [ic.books.FA.orgUnitId], { period: readPeriod }, { readingId: rQCJ.id });
 
   // ---- ESTIMATE_STREAK: 2 consecutive estimated settlements ----
@@ -376,7 +395,7 @@ export async function injectFaults(
     });
   }
   entry('EST', A.EST, [
-    { type: t.A.ESTIMATE_STREAK, key: t.waKey(A.EST.waterAccountId, t.A.ESTIMATE_STREAK), anchor: 'ACCOUNT' },
+    { type: T.ESTIMATE_STREAK, key: oKey.wa(A.EST.waterAccountId, T.ESTIMATE_STREAK) },
   ], [ic.books.FA.orgUnitId]);
 
   // ---- remote infra for bound scenarios ----
@@ -416,9 +435,9 @@ export async function injectFaults(
     entityIds: { eventId: unbOut[0].eventId!, remoteSourceId: source.id },
     expected: {
       anomalies: [{
-        type: t.A.REMOTE_EVENT_UNBOUND,
-        key: t.eventKey(unbOut[0].eventId!, t.A.REMOTE_EVENT_UNBOUND),
-        anchor: 'REMOTE_SOURCE',
+        type: T.REMOTE_EVENT_UNBOUND,
+        key: oKey.eventUnbound(unbOut[0].eventId!),
+        anchor: ANCHOR[T.REMOTE_EVENT_UNBOUND],
         lifecycle: ['active'],
       }],
       orgOwnership: [],
@@ -431,17 +450,18 @@ export async function injectFaults(
   const wplEv = mkEvent(wplDev.vkey, np, 991, 66);
   const wplOut = await ingest(source.id, [wplEv]);
   entry('WPL', A.WPL, [
-    { type: t.A.REMOTE_EVENT_WAITING_PLAN, key: t.eventKey(wplOut[0].eventId!, t.A.REMOTE_EVENT_WAITING_PLAN), anchor: 'ACCOUNT' },
+    { type: T.REMOTE_EVENT_WAITING_PLAN, key: oKey.eventWaitingPlan(wplOut[0].eventId!) },
   ], [ic.books.FA.orgUnitId], { externalEventKey: wplEv.externalEventKey }, { eventId: wplOut[0].eventId! });
 
   // FAILED — ambiguous plan items (FLD in FA+FB, both planned)
   const fldDev = await bindDevice(A.FLD);
   const fldEv = mkEvent(fldDev.vkey, readPeriod, 992, 44);
   const fldOut = await ingest(source.id, [fldEv]);
+  // FLD: isolated REMOTE_EVENT_FAILED — current BookMeter=1 (FB
+  // removed), 2 historical plan items remain → FAILED, no MULTI_BOOK.
   entry('FLD', A.FLD, [
-    { type: t.A.REMOTE_EVENT_FAILED, key: t.eventKey(fldOut[0].eventId!, t.A.REMOTE_EVENT_FAILED), anchor: 'ACCOUNT' },
-    { type: t.A.MULTI_BOOK, key: t.waKey(A.FLD.waterAccountId, t.A.MULTI_BOOK), anchor: 'ACCOUNT' },
-  ], [ic.books.FA.orgUnitId, ic.books.FB.orgUnitId], { externalEventKey: fldEv.externalEventKey }, { eventId: fldOut[0].eventId! });
+    { type: T.REMOTE_EVENT_FAILED, key: oKey.eventFailed(fldOut[0].eventId!) },
+  ], [ic.books.FA.orgUnitId], { externalEventKey: fldEv.externalEventKey }, { eventId: fldOut[0].eventId! });
 
   // CONFLICT — completed non-rejected reading + remote event same slot
   const rCFL = await submitReading(A.CFL, itemsRP, readPeriod);
@@ -450,7 +470,7 @@ export async function injectFaults(
   const cflEv = mkEvent(cflDev.vkey, readPeriod, 993, 55);
   const cflOut = await ingest(source.id, [cflEv]);
   entry('CFL', A.CFL, [
-    { type: t.A.REMOTE_EVENT_CONFLICT, key: t.eventKey(cflOut[0].eventId!, t.A.REMOTE_EVENT_CONFLICT), anchor: 'ACCOUNT' },
+    { type: T.REMOTE_EVENT_CONFLICT, key: oKey.eventConflict(cflOut[0].eventId!) },
   ], [ic.books.FA.orgUnitId], { externalEventKey: cflEv.externalEventKey }, { eventId: cflOut[0].eventId! });
 
   // KEY_CONFLICT — first event converts; re-ingest same key, new payload
@@ -461,7 +481,7 @@ export async function injectFaults(
   const kcfOut2 = await ingest(source.id, [kcfEv2]);
   const kcfEventId = kcfOut2[0].eventId!; // issue lands on the ORIGINAL row
   entry('KCF', A.KCF, [
-    { type: t.A.REMOTE_EVENT_KEY_CONFLICT, key: t.eventIssueKey(kcfEventId, '1'), anchor: 'REMOTE_SOURCE' },
+    { type: T.REMOTE_EVENT_KEY_CONFLICT, key: oKey.eventKeyConflict(kcfEventId, 1) },
   ], [ic.books.FA.orgUnitId], { externalEventKey: kcfEv1.externalEventKey }, { eventId: kcfEventId });
 
   // KEY_CONFLICT_RECURRENCE — same key conflicts 3× → occurrences=3
@@ -474,7 +494,7 @@ export async function injectFaults(
     kcrEventId = o[0].eventId!;
   }
   entry('KCR', A.KCR, [
-    { type: t.A.REMOTE_EVENT_KEY_CONFLICT, key: t.eventIssueKey(kcrEventId, '3'), anchor: 'REMOTE_SOURCE' },
+    { type: T.REMOTE_EVENT_KEY_CONFLICT, key: oKey.eventKeyConflict(kcrEventId, 3) },
   ], [ic.books.FA.orgUnitId], { externalEventKey: kcrEv1.externalEventKey }, { eventId: kcrEventId });
 
   // ---- UNPAID_BILL_OVERDUE: real bill in faultPeriod, unpaid ----
@@ -493,7 +513,7 @@ export async function injectFaults(
     return rows[0];
   });
   entry('OVD', A.OVD, [
-    { type: t.A.UNPAID_BILL_OVERDUE, key: t.billKey(ovdBill.id), anchor: 'ACCOUNT' },
+    { type: T.UNPAID_BILL_OVERDUE, key: oKey.bill(ovdBill.id) },
   ], [ic.books.FA.orgUnitId], { period: faultPeriod }, { billId: ovdBill.id });
 
   // ---- EST bills: post + pay cash so the tenant drawer stays clean ----
@@ -504,11 +524,17 @@ export async function injectFaults(
   }
   await applyPayments(h, ctx, [A.EST], 1);
 
+  const expectedAnomalies: ExpectedAnomaly[] = ic.entries.flatMap((e) =>
+    e.expected.anomalies.map((a) => ({
+      type: a.type,
+      key: a.key,
+      anchor: a.anchor,
+      orgOwnership: e.expected.orgOwnership,
+    })),
+  );
   return {
     groundTruth: ic.entries,
-    expectedKeys: new Set(
-      ic.entries.flatMap((e) => e.expected.anomalies.map((a) => a.key)),
-    ),
+    expectedAnomalies,
     stats: {
       scenarioAccounts: ic.accounts.size,
       faultBooks: 3,

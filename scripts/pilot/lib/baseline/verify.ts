@@ -29,14 +29,26 @@ export interface VerifyResult {
   unexpectedAnomalies: { type: string; key: string }[];
   /** G4 construction smoke — expected keys injected but NOT produced. */
   missingExpectedAnomalies: { type: string; key: string }[];
+  /** G4 RC1 — expected anchor != resolved anchor. */
+  anchorMismatches: { key: string; expected: string; actual: string }[];
+  /** G4 RC1 — ACCOUNT coveringOrgs != GT orgOwnership. */
+  ownershipMismatches: { key: string; expected: string[]; actual: string[] }[];
   pass: boolean;
 }
 
 type Tx = { $queryRaw<T>(q: unknown, ...a: unknown[]): Promise<T> };
 
+export interface ExpectedFact {
+  type: string;
+  key: string;
+  anchor: string;
+  orgOwnership: string[];
+}
+
 export interface VerifyOpts {
-  /** G4 expected anomaly keys — facts matching these are not "unexpected". */
-  expectedAnomalyKeys?: Set<string>;
+  /** G4 expected anomalies — facts matching these keys are not
+   *  "unexpected"; anchor + coveringOrgs are cross-checked. */
+  expectedAnomalies?: ExpectedFact[];
   /** G4 extra CONVERTED remote events beyond the baseline remote accounts. */
   extraRemoteConverted?: number;
 }
@@ -173,33 +185,69 @@ export async function verifyBaseline(
       orphanAllocs === 0,
   };
 
-  // --- E9 detector smoke: detectAll directly, steady state ---
+  // --- E9 detector smoke: detectAll + resolveAnchors, steady state ---
   const det = await apiImport<{
     detectAll(tx: Tx, tenantId: string): Promise<{ type: string; key: string }[]>;
   }>('modules/exception/detectors');
-  const facts = await h.tenantPrisma.runAsTenant(tenantId, (tx) =>
-    det.detectAll(tx as Tx, tenantId),
-  );
+  const scope = await apiImport<{
+    resolveAnchors(
+      tx: Tx, tenantId: string,
+      facts: { type: string; key: string }[],
+    ): Promise<
+      { key: string; type: string; anchor: string; coveringOrgs: string[] | null }[]
+    >;
+  }>('modules/exception/scope');
+  const anchored = await h.tenantPrisma.runAsTenant(tenantId, async (tx) => {
+    const facts = await det.detectAll(tx as Tx, tenantId);
+    return scope.resolveAnchors(tx as Tx, tenantId, facts);
+  });
 
-  const expected = opts.expectedAnomalyKeys ?? new Set<string>();
-  const unexpectedAnomalies = facts
+  const expectedList = opts.expectedAnomalies ?? [];
+  const expected = new Set(expectedList.map((x) => x.key));
+  const unexpectedAnomalies = anchored
     .filter((x) => !expected.has(x.key))
     .map((x) => ({ type: x.type, key: x.key }));
-  const found = new Set(facts.map((x) => x.key));
-  const missingExpectedAnomalies = [...expected]
-    .filter((k) => !found.has(k))
-    .map((key) => {
-      const f = facts.find((x) => x.key === key);
-      return { type: f?.type ?? key.split(':').pop() ?? key, key };
-    });
+  const found = new Map(anchored.map((x) => [x.key, x]));
+  const missingExpectedAnomalies: VerifyResult['missingExpectedAnomalies'] = [];
+  const anchorMismatches: VerifyResult['anchorMismatches'] = [];
+  const ownershipMismatches: VerifyResult['ownershipMismatches'] = [];
+  const sorted = (a: string[]) => [...a].sort();
+  for (const e of expectedList) {
+    const f = found.get(e.key);
+    if (!f) {
+      missingExpectedAnomalies.push({ type: e.type, key: e.key });
+      continue;
+    }
+    if (f.type !== e.type)
+      anchorMismatches.push({ key: e.key, expected: `type:${e.type}`, actual: `type:${f.type}` });
+    if (f.anchor !== e.anchor)
+      anchorMismatches.push({ key: e.key, expected: e.anchor, actual: f.anchor });
+    // ownership comparison only where a covering set is defined:
+    // ACCOUNT anchor → coveringOrgs must equal GT orgOwnership.
+    if (e.anchor === 'ACCOUNT' && f.anchor === 'ACCOUNT') {
+      const exp = sorted(e.orgOwnership);
+      const act = sorted(f.coveringOrgs ?? []);
+      if (exp.join(',') !== act.join(','))
+        ownershipMismatches.push({ key: e.key, expected: exp, actual: act });
+    }
+  }
   for (const a of unexpectedAnomalies)
     console.log(`  UNEXPECTED ANOMALY ${a.type} ${a.key}`);
   for (const a of missingExpectedAnomalies)
     console.log(`  MISSING EXPECTED   ${a.type} ${a.key}`);
+  for (const a of anchorMismatches)
+    console.log(`  ANCHOR MISMATCH    ${a.key} expected=${a.expected} actual=${a.actual}`);
+  for (const a of ownershipMismatches)
+    console.log(`  OWNERSHIP MISMATCH ${a.key} expected=[${a.expected.join(',')}] actual=[${a.actual.join(',')}]`);
   const pass =
     checks.every((c) => c.pass) &&
     financial.pass &&
     !unexpectedAnomalies.length &&
-    !missingExpectedAnomalies.length;
-  return { checks, financial, unexpectedAnomalies, missingExpectedAnomalies, pass };
+    !missingExpectedAnomalies.length &&
+    !anchorMismatches.length &&
+    !ownershipMismatches.length;
+  return {
+    checks, financial, unexpectedAnomalies, missingExpectedAnomalies,
+    anchorMismatches, ownershipMismatches, pass,
+  };
 }
