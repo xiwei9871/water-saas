@@ -68,6 +68,8 @@ async function seedTenant({ code, name }: TenantSeed) {
     'iam:read',
     'iam:write',
     'report:read',
+    'exception:read',
+    'exception:manage',
   ];
   const perms: Record<string, string> = {};
   for (const code of permCodes) {
@@ -80,9 +82,9 @@ async function seedTenant({ code, name }: TenantSeed) {
   }
   // Sensible starter bindings for the seeded roles (admin has '*' implicitly).
   const rolePermBindings: Record<string, string[]> = {
-    reader: ['customer:read', 'metering:read', 'metering:write'],
-    cashier: ['customer:read', 'billing:read', 'payment:read', 'payment:write'],
-    reviewer: ['metering:qc', 'metering:read', 'billing:read', 'report:read'],
+    reader: ['customer:read', 'metering:read', 'metering:write', 'exception:read'],
+    cashier: ['customer:read', 'billing:read', 'payment:read', 'payment:write', 'exception:read'],
+    reviewer: ['metering:qc', 'metering:read', 'billing:read', 'report:read', 'exception:read', 'exception:manage'],
   };
   for (const [roleCode, codes] of Object.entries(rolePermBindings)) {
     for (const code of codes) {

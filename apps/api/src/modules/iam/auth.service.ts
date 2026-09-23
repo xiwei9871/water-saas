@@ -7,6 +7,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
 import bcrypt from 'bcrypt';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { computeOrgScopeTx, widestScope } from '../../common/org-scope.js';
 import type { JwtUser } from '../../common/auth.guard.js';
 
 const INVALID_CREDENTIALS = () =>
@@ -57,9 +58,7 @@ export class AuthService {
 
   /** Widest scope wins when a staff holds multiple roles. */
   private widestScope(roles: { dataScope: string }[]): 'ALL' | 'ORG_SUBTREE' | 'SELF' {
-    if (roles.some((r) => r.dataScope === 'ALL')) return 'ALL';
-    if (roles.some((r) => r.dataScope === 'ORG_SUBTREE')) return 'ORG_SUBTREE';
-    return 'SELF';
+    return widestScope(roles);
   }
 
   private async computeOrgScope(
@@ -68,23 +67,9 @@ export class AuthService {
     orgUnitId: string,
     scope: 'ALL' | 'ORG_SUBTREE' | 'SELF',
   ): Promise<string[]> {
-    if (scope === 'SELF') return [orgUnitId];
-    if (scope === 'ALL') {
-      const rows = await tx.$queryRaw<{ id: string }[]>`
-        SELECT id::text AS id FROM org_unit WHERE tenant_id = ${tenantId}::uuid`;
-      return rows.map((r) => r.id);
-    }
     // ORG_SUBTREE — staff's own org plus all descendants. UNION (dedupe)
     // instead of UNION ALL so a cycle in the org tree can never loop forever.
-    const rows = await tx.$queryRaw<{ id: string }[]>`
-      WITH RECURSIVE sub AS (
-        SELECT id FROM org_unit WHERE tenant_id = ${tenantId}::uuid AND id = ${orgUnitId}::uuid
-        UNION
-        SELECT o.id FROM org_unit o
-        JOIN sub s ON o.parent_id = s.id AND o.tenant_id = ${tenantId}::uuid
-      )
-      SELECT id::text AS id FROM sub`;
-    return rows.map((r) => r.id);
+    return computeOrgScopeTx(tx, tenantId, orgUnitId, scope);
   }
 
   /** staff + roles + perms + orgScope — the login payload's source of truth. */

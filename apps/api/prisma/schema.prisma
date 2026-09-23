@@ -772,6 +772,8 @@ model MeterReading {
   @@index([tenantId, installationId, period])
   @@index([tenantId, planItemId])
   @@index([tenantId, qcStatus])
+  // E9 D23: QC detectors anti-join on child.supersedes_reading_id
+  @@index([tenantId, supersedesReadingId])
   @@map("meter_reading")
 }
 
@@ -1380,4 +1382,55 @@ model RemoteEventProcessLog {
 
   @@index([tenantId, remoteEventId])
   @@map("remote_event_process_log")
+}
+
+// ---------------------------------------------------------------------------
+// E9 exception center — work_item = anomaly EPISODE handling state only.
+// Anomaly existence is always derived from domain SoT by detectors; this table
+// never decides whether an anomaly exists. See
+// docs/product-map/E9_EXCEPTION_CENTER_DOMAIN_DESIGN.md (D1/D2/D3).
+// ---------------------------------------------------------------------------
+/// One handling episode of a derived anomaly fact. anomalyKey is the
+/// deterministic fact identity (e.g. wa:{id}:NO_BOOK, event:{id}:UNBOUND);
+/// the same key may recur over time — each occurrence is a new episode row.
+/// DB enforces at most one ACTIVE episode per (tenant_id, anomaly_key) via a
+/// partial unique index `... WHERE cleared_at IS NULL` — expressed in the
+/// hand-written migration, Prisma cannot declare partial indexes.
+model WorkItem {
+  id               String            @id @default(uuid()) @db.Uuid
+  tenantId         String            @map("tenant_id") @db.Uuid
+  anomalyKey       String            @map("anomaly_key")
+  // Deliberately String, not enum: adding an anomaly type must not require a
+  // migration. Deterministic per detector.
+  anomalyType      String            @map("anomaly_type")
+  status           WorkItemStatus    @default(OPEN)
+  // AUTO = reconciler observed the fact disappear; MANUAL = operator resolve
+  // after detector re-evaluation confirmed the fact is gone.
+  resolutionSource ResolutionSource? @map("resolution_source")
+  assigneeId       String?           @map("assignee_id") @db.Uuid
+  // Required when status=IGNORED; optional elsewhere.
+  note             String?
+  acknowledgedAt   DateTime?         @map("acknowledged_at")
+  resolvedAt       DateTime?         @map("resolved_at")
+  // Episode terminator: set when the underlying fact disappears (any status).
+  // NULL = active episode — the partial unique index key.
+  clearedAt        DateTime?         @map("cleared_at")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  createdBy        String?           @map("created_by") @db.Uuid
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+  updatedBy        String?           @map("updated_by") @db.Uuid
+  @@index([tenantId, anomalyType, status])
+  @@index([tenantId, assigneeId, status])
+  @@index([tenantId, clearedAt])
+  @@map("work_item")
+}
+enum WorkItemStatus {
+  OPEN
+  ACK
+  IGNORED
+  RESOLVED
+}
+enum ResolutionSource {
+  AUTO
+  MANUAL
 }
