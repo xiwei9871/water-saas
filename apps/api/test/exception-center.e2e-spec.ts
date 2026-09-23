@@ -78,6 +78,22 @@ const visibleTo = async (token: string, ks: string[]) => {
   return out;
 };
 
+/** Paginate the queue to collect ALL items for a filter — single-page
+ *  `toContain` assertions go stale once the accumulated queue outgrows
+ *  a page. `params` must start with '&' when non-empty. */
+const listAll = async (token: string, params = '') => {
+  const items: { key: string }[] = [];
+  for (let page = 1; page <= 50; page++) {
+    const res = await get(
+      `/exceptions?take=200&page=${page}${params}`,
+      token,
+    ).expect(200);
+    items.push(...res.body.items);
+    if (res.body.items.length < 200) break;
+  }
+  return items;
+};
+
 const workItems = async (key?: string) =>
   (
     await owner.query(
@@ -499,9 +515,9 @@ describe('detectors + scope', () => {
       ),
     );
     await post('/exceptions/refresh').expect(201);
-    const res = await get('/exceptions?type=UNPAID_BILL_OVERDUE', adminToken).expect(200);
-    expect(keys(res.body.items)).toContain(`bill:${overdue}:OVERDUE`);
-    expect(keys(res.body.items)).not.toContain(`bill:${paid}:OVERDUE`);
+    const res = await listAll(adminToken, '&type=UNPAID_BILL_OVERDUE');
+    expect(keys(res)).toContain(`bill:${overdue}:OVERDUE`);
+    expect(keys(res)).not.toContain(`bill:${paid}:OVERDUE`);
   });
 });
 
@@ -512,11 +528,11 @@ describe('remote anomalies (D10/D11/D21/D22)', () => {
     const evA = await seedRemoteEvent(srcA, 'a', 'UNBOUND');
     const evT = await seedRemoteEvent(srcTenant, 't', 'UNBOUND');
     await post('/exceptions/refresh').expect(201);
-    const branch = await get('/exceptions?type=REMOTE_EVENT_UNBOUND', branchToken).expect(200);
-    expect(keys(branch.body.items)).toContain(`event:${evA}:UNBOUND`);
-    expect(keys(branch.body.items)).not.toContain(`event:${evT}:UNBOUND`); // null org → tenant only
-    const admin = await get('/exceptions?type=REMOTE_EVENT_UNBOUND', adminToken).expect(200);
-    expect(keys(admin.body.items)).toContain(`event:${evT}:UNBOUND`);
+    const branch = await listAll(branchToken, '&type=REMOTE_EVENT_UNBOUND');
+    expect(keys(branch)).toContain(`event:${evA}:UNBOUND`);
+    expect(keys(branch)).not.toContain(`event:${evT}:UNBOUND`); // null org → tenant only
+    const admin = await listAll(adminToken, '&type=REMOTE_EVENT_UNBOUND');
+    expect(keys(admin)).toContain(`event:${evT}:UNBOUND`);
   });
 
   it('WAITING_PLAN anchors resolved ACCOUNT (off-book → TENANT, branch cannot see)', async () => {
@@ -689,8 +705,12 @@ describe('RBAC + write ops', () => {
     await coverAccount(ORG_A, a.waterAccount.id, 'rbac');
     const billId = await seedOverdueBill(a.waterAccount.id, a.waterAccount.settleAccountId, '202604');
     await post('/exceptions/refresh').expect(201);
-    const res = await get('/exceptions?type=UNPAID_BILL_OVERDUE', branchToken).expect(200);
-    expect(keys(res.body.items)).toContain(`bill:${billId}:OVERDUE`);
+    // visible to branch via exception:read (detail by key — the overdue
+    // queue exceeds the default page under accumulated runs)
+    await get(
+      `/exceptions/${encodeURIComponent(`bill:${billId}:OVERDUE`)}`,
+      branchToken,
+    ).expect(200);
     await get(`/bills/${billId}`, branchToken).expect(403); // domain permission intact
   });
 
@@ -745,19 +765,19 @@ describe('RC1 — filters + today counters (A1/A2)', () => {
     const bare = await seedAccount('pf-bare'); // NO_BOOK — no period
     await post('/exceptions/refresh').expect(201);
 
-    const hit = await get(
-      '/exceptions?type=UNPAID_BILL_OVERDUE&period=202604&take=200',
+    const hit = await listAll(
       adminToken,
-    ).expect(200);
-    expect(keys(hit.body.items)).toContain(`bill:${bill}:OVERDUE`);
+      '&type=UNPAID_BILL_OVERDUE&period=202604',
+    );
+    expect(keys(hit)).toContain(`bill:${bill}:OVERDUE`);
     // a no-period anomaly is never returned under a period filter
-    const hitAll = await get('/exceptions?period=202604&take=200', adminToken).expect(200);
-    expect(keys(hitAll.body.items)).not.toContain(`wa:${bare.accId}:NO_BOOK`);
-    const miss = await get(
-      '/exceptions?type=UNPAID_BILL_OVERDUE&period=202605&take=200',
+    const hitAll = await listAll(adminToken, '&period=202604');
+    expect(keys(hitAll)).not.toContain(`wa:${bare.accId}:NO_BOOK`);
+    const miss = await listAll(
       adminToken,
-    ).expect(200);
-    expect(keys(miss.body.items)).not.toContain(`bill:${bill}:OVERDUE`);
+      '&type=UNPAID_BILL_OVERDUE&period=202605',
+    );
+    expect(keys(miss)).not.toContain(`bill:${bill}:OVERDUE`);
     // invalid period rejected, never guessed
     await get('/exceptions?period=202613').expect(400);
     await get('/exceptions?period=abc').expect(400);
@@ -772,25 +792,25 @@ describe('RC1 — filters + today counters (A1/A2)', () => {
     const bKey = `bill:${bill}:OVERDUE`;
     const wKey = `wa:${bare.accId}:NO_BOOK`;
 
-    const inOrg = await get(
-      `/exceptions?type=UNPAID_BILL_OVERDUE&orgUnitId=${ORG_A}&take=200`,
+    const inOrg = await listAll(
       adminToken,
-    ).expect(200);
-    expect(keys(inOrg.body.items)).toContain(bKey);
-    const inOrgAll = await get(`/exceptions?orgUnitId=${ORG_A}&take=200`, adminToken).expect(200);
-    expect(keys(inOrgAll.body.items)).not.toContain(wKey); // TENANT anchor never matches org filter
-    const outOrg = await get(
-      `/exceptions?type=UNPAID_BILL_OVERDUE&orgUnitId=${ORG_B}&take=200`,
+      `&type=UNPAID_BILL_OVERDUE&orgUnitId=${ORG_A}`,
+    );
+    expect(keys(inOrg)).toContain(bKey);
+    const inOrgAll = await listAll(adminToken, `&orgUnitId=${ORG_A}`);
+    expect(keys(inOrgAll)).not.toContain(wKey); // TENANT anchor never matches org filter
+    const outOrg = await listAll(
       adminToken,
-    ).expect(200);
-    expect(keys(outOrg.body.items)).not.toContain(bKey);
+      `&type=UNPAID_BILL_OVERDUE&orgUnitId=${ORG_B}`,
+    );
+    expect(keys(outOrg)).not.toContain(bKey);
 
-    const inBook = await get(`/exceptions?bookId=${bookId}&take=200`, adminToken).expect(200);
-    expect(keys(inBook.body.items)).toContain(bKey);
+    const inBook = await listAll(adminToken, `&bookId=${bookId}`);
+    expect(keys(inBook)).toContain(bKey);
     const { bookId: otherBook } = await coverAccount(ORG_B, accId, 'of-x'); // second book elsewhere
-    const outBook = await get(`/exceptions?bookId=${otherBook}&take=200`, adminToken).expect(200);
+    const outBook = await listAll(adminToken, `&bookId=${otherBook}`);
     // account is now covered by A+B books — still matches the B book too
-    expect(keys(outBook.body.items)).toContain(bKey);
+    expect(keys(outBook)).toContain(bKey);
     await get('/exceptions?bookId=not-a-uuid').expect(400);
     await get(`/exceptions?orgUnitId=not-a-uuid`).expect(400);
 

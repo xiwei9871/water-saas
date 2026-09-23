@@ -582,6 +582,9 @@ test('S9: RC1 — 期间/营业所过滤器', async ({ page }, info) => {
   const orgSelect = main(page).locator('.ant-select').filter({ hasText: '营业所' }).first();
   if (await orgSelect.count()) {
     await orgSelect.click();
+    // rc-select virtualizes long option lists — type to filter instead of
+    // relying on the option being rendered.
+    await page.keyboard.type(`E9 S9 营业所 ${stamp}`);
     await page.getByText(`E9 S9 营业所 ${stamp}`, { exact: false }).last().click();
     await expect(billRow()).toBeVisible();
   }
