@@ -1,8 +1,9 @@
 # Pilot Generator — Implementation Plan
 
-状态：Implementation Gate **DRAFT**（等评审后才写 `generate.ts`）。
+状态：Implementation Gate **CLOSED — FINAL**（D4 + Q1–Q4 裁决已并入，
+见 §8；未写 `generate.ts`）。
 上游：`PILOT_CYCLE_1.md`（Planning Gate PASS @ eb451cd）。
-本计划强制落实 D1 / D2 / D3 三个约束。
+本计划强制落实 D1 / D2 / D3 / D4 四个约束。
 
 ---
 
@@ -25,12 +26,43 @@
 - ctx 手工构造：`{ tenantId, staffId: pilotStaff, scope: 'ALL',
   orgScope: [] }`——等价 admin
 
-性能：5,000 户 × ~7 个域事务（立户/装表/入册/2 期抄表/结算/出账/收款）
-≈ 35k tx。实测单 tx 5–20ms，顺序约 6–12 min；并发 4–8 控制在
-2–5 min。**不允许高并发**——e2e 已观察到并行压测下 Prisma
-engine-empty flake，generator 用固定 `concurrency=6`（可配但封顶 8）。
+### D4 — Transaction ownership（冻结）
 
-工期估算写进 generation-summary（目标 < 15 min；超时即工程问题）。
+每个被调 service 按事务归属分两类，G2 实现时逐 service 标注：
+
+```text
+TX_CALLER_MANAGED
+  service.*Tx(tx, ctx, dto) — 事务由调用方持有
+  → generator 用 TenantPrisma.runAsTenant 包一层
+
+TX_SELF_MANAGED
+  service 内部自己 runAsTenant / 自己拆事务
+  （例：RemoteEventService.ingestBatch —— 每事件独立事务）
+  → generator 直接调用，外层禁止再包 runAsTenant
+```
+
+冻结规则：**never nested `TenantPrisma.runAsTenant`。** 嵌套意味着
+内层 `set_config` 覆盖外层事务边界，RLS/提交语义失真。
+
+### 并发（Q1 FINAL）
+
+```text
+--concurrency   可配，hard cap = 8，initial default = 2
+```
+
+并发仅用于彼此独立的 entity generation。**dependency-sensitive
+phase 一律串行**：
+
+```text
+shared settle / billing runs / plan generation /
+same-account lifecycle / reversal / KEY_CONFLICT recurrence /
+remote replay
+```
+
+升级路径：G5 200-account smoke 连续 clean runs（无
+engine-empty / socket / transaction flake）后才允许默认 profile
+提到 `concurrency = 6`。**`<15 min` 性能目标不得优先于
+evidence reliability**——flake 即降并发，不硬撑。
 
 ---
 
@@ -120,8 +152,7 @@ ground-truth.json 结构：
 ### 复跑幂等
 
 `generate.ts --reset`：按 FK 序删 `tenant_id = pilot` 的所有域行
-（脚本内维护显式表清单，含 `tenant_param`/`work_item`/`audit_log`
-等全部 tenant 列），随后可选重新生成。同 seed 重跑 → 相同
+（reset 安全断言见 §4），随后可选重新生成。同 seed 重跑 → 相同
 businessKeys/scenarioKeys，新 UUID。
 
 ---
@@ -147,28 +178,45 @@ orgs (3 所) / books (12 册) / staff / tariff plan (ACTIVE)
 service guard 拦截的 → 落 CONTROLLED_DB_MUTATION 并在 ground truth
 如实标注。
 
-### Fault injection 矩阵（初判，实现时校准）
+### Fault injection 矩阵（Q2/Q3 FINAL）
 
-| scenario | 初判 method | 理由 |
+| scenario | method | 依据 |
 |---|---|---|
 | NO_BOOK | DOMAIN_FLOW | 立户不入册即可 |
 | NO_ACTIVE_METER | DOMAIN_FLOW | 立户不装表即可 |
-| MULTI_BOOK | DOMAIN_FLOW ⍰ | 若入册 API 允许第二册；否则 DB mutation 插第二行 book_meter |
-| MULTI_ACTIVE_METER | DOMAIN_FLOW ⍰ | installation service 注释提到「一户多表 phase-2」可能允许；若 guard 拦截 → mutation 插第二 ACTIVE |
+| MULTI_BOOK | DOMAIN_FLOW | `addMemberTx` 向不同 books 加同一 account |
+| MULTI_ACTIVE_METER | DOMAIN_FLOW | `installTx` + distinct AVAILABLE meters——domain 明确允许 multiple ACTIVE/account |
 | READING_QC_REVIEW | DOMAIN_FLOW | 提交触发 QC 阈值的读数（突增/负用量） |
 | READING_QC_REJECTED | DOMAIN_FLOW | review 后走 QC reject 操作 |
 | ESTIMATE_STREAK | DOMAIN_FLOW | 连续 ≥threshold 期走 estimate 接口 |
-| UNPAID_BILL_OVERDUE | DOMAIN_FLOW ⍰ | 若 due_date 由 period/租户参数推出且可选历史 period；否则唯一允许的 mutation = `UPDATE bill SET due_date` |
+| UNPAID_BILL_OVERDUE | DOMAIN_FLOW | `tenant_param.bill_due_days` + historical billing period + BillingRun → POSTED/PARTIAL_PAID + remaining>0 + dueDate < DB CURRENT_DATE |
 | REMOTE_EVENT_UNBOUND | DOMAIN_FLOW | ingest 未知 vendorDeviceKey |
-| REMOTE_EVENT_WAITING_PLAN | DOMAIN_FLOW | 已绑定设备但 account 无 plan 期 |
-| REMOTE_EVENT_FAILED | DOMAIN_FLOW ⍰ | 需构造处理失败的事件；不可达则 mutation 置 processing_status |
-| REMOTE_EVENT_CONFLICT | DOMAIN_FLOW ⍰ | ingest 与既有读数冲突的事件 |
-| REMOTE_EVENT_KEY_CONFLICT | DOMAIN_FLOW | 同 event key + 不同 payload hash 重复 ingest（含 recurrence：同事件 N 次 → N 条 process_log → episode token=N） |
-| 跨所 MULTI_BOOK | DOMAIN_FLOW ⍰ | 同 MULTI_BOOK，覆盖册分属两所 |
+| REMOTE_EVENT_WAITING_PLAN | DOMAIN_FLOW | bound event + 无匹配 plan item |
+| REMOTE_EVENT_FAILED | DOMAIN_FLOW | ambiguous matching plan items |
+| REMOTE_EVENT_CONFLICT | DOMAIN_FLOW | completed non-REJECTED reading + remote event |
+| REMOTE_EVENT_KEY_CONFLICT | DOMAIN_FLOW | 同 event key + 不同 payload hash 重复 ingest（recurrence：同事件 N 次 → N 条 process_log → episode token=N） |
+| 跨所 MULTI_BOOK | DOMAIN_FLOW | 同 MULTI_BOOK，覆盖册分属两所 |
 | shared settle 跨所 | DOMAIN_FLOW | settle account 挂两所 water account |
 | reversal / TOP_UP / APPLY | DOMAIN_FLOW | payment reverse / prepayment 接口 |
 | remote 时间间隔证据 | CONTROLLED_DB_MUTATION | receivedAt 回放窗口（cadence 证据需要精确 gap 分布） |
-| 历史 episode 已清除态 | CONTROLLED_DB_MUTATION | 构造 fact 先存后消的 lifecycle（或直接驱动 reconcile 两次，前者优先） |
+| 历史 episode 已清除态 | 优先驱动 reconcile 两次 | fact 先存后消走自然生命周期；不可行再 mutation |
+
+全部正式可达场景 `reachableInNormalOperation = true`。G4 仍需验证
+实际 fixture construction；**禁止降级为 DB mutation**，除非发现与
+主干代码事实冲突——若发生必须回 Gate。
+
+### 财务事实伪造禁令（Q3 FINAL）
+
+Cycle 1A Gate 样本**禁止直接修改**以下字段伪造正式可达财务事实：
+
+```text
+bill.total_amount / bill.status / bill.due_date
+payment_alloc / prepayment ledger
+```
+
+未来若专测 corrupted/pathological DB state：标
+`CONTROLLED_DB_MUTATION` + `reachableInNormalOperation=false` +
+**hardening-only**，不进入正常 detector Gate recall。
 
 规则：**controlled mutation 只允许写「域路径造不出的状态」，
 每处必须在 ground truth 标 `injectionMethod` +
@@ -178,40 +226,70 @@ service guard 拦截的 → 落 CONTROLLED_DB_MUTATION 并在 ground truth
 
 ---
 
-## 4. 生产 tenant 保护（fail closed）
+## 4. 生产保护（fail closed，FINAL）
 
-三道闸，全部不过则拒绝执行：
+执行条件**全部**满足才允许运行，任一不过即 abort：
 
 ```text
-1. --tenant 必填；tenant 必须带生成器自置标记
-   tenant.params.pilot = {"generatedBy":"pilot-generator","seed":N}
-   —— 由 generate.ts --create-tenant 创建时写入
-   —— 对任何无标记 tenant（含所有真实/测试 tenant）直接 abort
-2. DATABASE_URL host 白名单：localhost / 127.0.0.1
-   （Cycle 1A 只跑本地；远程库一律 abort）
-3. --reset 二次确认：要求显式 --yes 且回显将删除的行数
+DATABASE host ∈ {localhost, 127.0.0.1}
+AND database name ∈ pilot allowlist（watersaas_pilot 或 *_pilot）
+AND tenant.params.pilot.generatedBy == "pilot-generator"
+```
+
+- `--create-tenant` **也必须先通过 DB host/name guard**
+- 对任何无标记 tenant（含所有真实/测试 tenant）直接 abort
+
+`--reset`：
+
+```text
+1. 要求 --yes，先打印各表待删除行数
+2. 删除后扫描 information_schema 中全部含 tenant_id 的应用表
+3. assert pilot tenant residual rows == 0
+4. 若发现 reset 清单遗漏任何 tenant table → abort，
+   不带残留数据继续生成
 ```
 
 ---
 
-## 5. Ground truth ↔ DB 对账
+## 5. Ground truth ↔ DB 对账（Q4 FINAL）
 
-evaluation（`scripts/pilot/evaluate.ts`，本计划只定接口）：
+`scripts/pilot/evaluate.ts` 与 G5 同步实现。两层正确性分开评：
+
+**Detector correctness**——直接调 `detectAll(tx, tenantId)`：
 
 ```text
-input : ground-truth.json + 活库
-步骤  : POST /exceptions/refresh → detectAll 结果按 key 建索引
-输出  : evaluation-report.json
-        expected/detected/missed/unexpected
-        precision/recall by type
-        anchor mismatch（detected.anchor ≠ expected.anchor）
-        lifecycle mismatch
-        clockDrift flag
+ground-truth.json
+      ↓
+detectAll(tx, tenantId)          ← 不经过 WorkItem
+      ↓
+expected vs detected（key 精确比对）
+      ↓
+precision / recall / anchor mismatch / missed / unexpected
 ```
 
-key 级比对而非 WorkItem 自证：`expected.anomalies[].key` 与
-detected fact key 精确字符串相等；WorkItem 层面只校验 episode
-生命周期（active/cleared 轨迹）不校验存在性本身。
+禁止从 WorkItem 反推 detector correctness。
+
+**Episode correctness**——单独验证 reconciler：
+
+```text
+detectAll
+→ ExceptionReconciler.reconcileTx
+→ work_item
+→ active / cleared / recurrence / resolutionSource validation
+```
+
+`POST /exceptions/refresh` 可做 API smoke，但**不得作为 detector
+truth 的唯一数据入口**。
+
+输出 `evaluation-report.json`：
+
+```text
+expected / detected / missed / unexpected
+precision·recall by type
+anchor mismatch（detected.anchor ≠ expected.anchor）
+lifecycle mismatch（episode 层）
+clockDrift flag
+```
 
 ---
 
@@ -235,12 +313,17 @@ books:           12（每所 4）
 ## 7. 交付切分
 
 ```text
-G1  本计划评审（本 Gate）
-G2  scripts/pilot/generate.ts 骨架：tenant guard + reset + ctx/service
-    harness + deterministic key scheme + ground-truth writer
+G1  本计划评审（本 Gate）—— PASS
+G2  scripts/pilot/generate.ts 骨架：tenant/DB guard + reset（含残留
+    断言）+ ctx/service harness（逐 service 标 D4 事务归属）+
+    deterministic key scheme + ground-truth writer
 G3  baseline flows（§3 上表全部 DOMAIN_FLOW 链路）
-G4  fault injection（§3 矩阵逐场景，⍰ 项实现时定 method 并回写本表）
-G5  evaluate.ts + 冒烟（小规模 200 户先跑通全链路）
+G4  fault injection（§3 矩阵全 DOMAIN_FLOW；fixture construction
+    实测，与主干冲突则回 Gate，不得自行降级 mutation）
+G5  evaluate.ts + 200 户冒烟：detector correctness（detectAll 直评）+
+    episode correctness（reconcileTx→work_item）；
+    连续 clean runs 无 engine-empty/socket/transaction flake 后
+    默认 profile 方可提 concurrency=6
 G6  全量生成 + evaluation + 人工 operator pilot → Gate 判据
 ```
 
@@ -248,19 +331,22 @@ G2–G4 每步完成跑一次小规模 verify，不到 G6 不碰 5,000 户全量
 
 ---
 
-## 8. 未决项（本 Gate 需评审裁决）
+## 8. Gate 裁决记录（FINAL）
 
 ```text
-Q1  并发上限：6 固定 or 可配(≤8)？         建议：可配默认 6
-Q2  MULTI_BOOK / MULTI_ACTIVE_METER /
-    WAITING_PLAN / FAILED / CONFLICT 的
-    method 初判 ⍰ 项，G4 时实测 service
-    guard 后回写——允许带⍰ 过 Gate？      建议：允许，但回写是硬要求
-Q3  due_date 若必须 mutation：是否接受    建议：接受——这是「时间构造」
-    「UPDATE bill.due_date」作为唯一        而非「状态伪造」，仍标
-    允许的财务表 mutation？                reachableInNormalOperation=true
-Q4  evaluate.ts 是否随 G5 一并实现？      建议：是，否则 ground truth
-                                          写完没人读
+Q1  concurrency：可配，hard cap=8，initial default=2；
+    dependency-sensitive phase 串行；G5 clean smoke 后默认 profile
+    可提 6；性能目标让位 evidence reliability          —— FINAL
+Q2  scenario method：MULTI_BOOK / MULTI_ACTIVE_METER /
+    WAITING_PLAN / FAILED / CONFLICT 全部 DOMAIN_FLOW，
+    reachableInNormalOperation=true；G4 实测冲突须回 Gate —— FINAL
+Q3  UNPAID_BILL_OVERDUE：DOMAIN_FLOW（tenant_param.bill_due_days
+    + historical period + BillingRun）；Gate 样本禁止 mutation
+    bill/payment_alloc/prepayment ledger                  —— FINAL
+Q4  evaluate.ts：G5 同实现；detector 正确性直调 detectAll，
+    episode 正确性走 reconcileTx→work_item；refresh 仅 smoke —— FINAL
+D4  transaction ownership：TX_CALLER_MANAGED 外层包 runAsTenant；
+    TX_SELF_MANAGED 直调禁嵌套；never nested runAsTenant —— 冻结
 ```
 
 ---
