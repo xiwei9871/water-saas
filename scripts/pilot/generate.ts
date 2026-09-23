@@ -10,7 +10,7 @@
  */
 
 import { join } from 'node:path';
-import { CliError, parseArgs, USAGE } from './lib/cli.js';
+import { CliError, isResetDryRun, parseArgs, USAGE } from './lib/cli.js';
 import { assertPilotEnvironment, DbGuardError } from './lib/db-guard.js';
 import { connect } from './lib/pg.js';
 import {
@@ -108,16 +108,21 @@ async function main(): Promise<void> {
             ? ` (${plan.tableCounts.map((t) => `${t.table}=${t.rows}`).join(', ')})`
             : ''),
       );
-      if (!args.yes) {
-        console.log('reset: --yes not given — plan printed, nothing deleted');
-      } else {
-        const r = await phase(phases, 'reset-exec', () =>
-          executeReset(owner, tenant.id),
-        );
+      if (isResetDryRun(args)) {
+        // P1-2: unconfirmed reset → print plan, exit successfully.
+        // Invariant for G3+: no generation after an unconfirmed reset.
+        // Owner conn still closes via `finally`; nothing else runs.
         console.log(
-          `reset: deleted ${r.deletedRows} rows, residual scan = 0 rows`,
+          'reset: --yes not given — plan printed, nothing deleted. EXITING.',
         );
+        return;
       }
+      const r = await phase(phases, 'reset-exec', () =>
+        executeReset(owner, tenant.id),
+      );
+      console.log(
+        `reset: deleted ${r.deletedRows} rows, residual scan = 0 rows`,
+      );
     }
 
     // Nest harness smoke — boots without HTTP listener, always closes.

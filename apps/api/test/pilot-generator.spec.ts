@@ -7,7 +7,11 @@ import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { CliError, parseArgs } from '../../../scripts/pilot/lib/cli.js';
+import {
+  CliError,
+  isResetDryRun,
+  parseArgs,
+} from '../../../scripts/pilot/lib/cli.js';
 import {
   assertPilotDatabase,
   assertPilotEnvironment,
@@ -60,6 +64,31 @@ describe('CLI parse', () => {
     expect(() => parseArgs([...BASE, '--bogus'])).toThrow(CliError);
   });
 
+  it('calendar validation: real dates only', () => {
+    for (const bad of ['2026-02-30', '2026-13-01', '2026-00-10', '2026-04-31']) {
+      expect(() => parseArgs([...BASE, '--as-of', bad])).toThrow(CliError);
+    }
+    for (const good of ['2028-02-29', '2026-02-28', '2026-12-31']) {
+      expect(parseArgs([...BASE, '--as-of', good]).asOf).toBe(good);
+    }
+  });
+
+  it('accounts cap: 1..5000 frozen', () => {
+    expect(() => parseArgs([...BASE, '--accounts', '0'])).toThrow(CliError);
+    expect(() => parseArgs([...BASE, '--accounts', '5001'])).toThrow(CliError);
+    expect(() => parseArgs([...BASE, '--accounts', '100000'])).toThrow(CliError);
+    expect(parseArgs([...BASE, '--accounts', '5000']).accounts).toBe(5000);
+    expect(parseArgs([...BASE, '--accounts', '1']).accounts).toBe(1);
+  });
+
+  it('P1-2: --reset without --yes is a plan-only early exit', () => {
+    expect(isResetDryRun({ reset: true, yes: false })).toBe(true);
+    expect(isResetDryRun({ reset: true, yes: true })).toBe(false);
+    expect(isResetDryRun({ reset: false, yes: false })).toBe(false);
+    expect(parseArgs([...BASE, '--reset']).reset).toBe(true);
+    expect(parseArgs([...BASE, '--reset']).yes).toBe(false);
+  });
+
   it('period rollover: 202612 → 202701', () => {
     const a = parseArgs([
       '--tenant', BASE[1], '--seed', '1', '--period-from', '202612',
@@ -72,10 +101,58 @@ describe('DB guard (P0)', () => {
   it('pass: localhost + watersaas_pilot / *_pilot', () => {
     expect(
       assertPilotDatabase('postgresql://u:p@localhost:5432/watersaas_pilot'),
-    ).toEqual({ host: 'localhost', name: 'watersaas_pilot' });
+    ).toEqual({
+      host: 'localhost',
+      canonicalHost: 'LOOPBACK',
+      port: 5432,
+      name: 'watersaas_pilot',
+    });
     expect(
       assertPilotDatabase('postgresql://u:p@127.0.0.1:5432/x_pilot'),
-    ).toEqual({ host: '127.0.0.1', name: 'x_pilot' });
+    ).toEqual({
+      host: '127.0.0.1',
+      canonicalHost: 'LOOPBACK',
+      port: 5432,
+      name: 'x_pilot',
+    });
+  });
+
+  it('P1-1: runtime/migration must target the same database', () => {
+    const rt = 'postgresql://u:p@localhost:5432/watersaas_pilot';
+    // different database name → reject
+    expect(() =>
+      assertPilotEnvironment({
+        DATABASE_URL: rt,
+        MIGRATION_DATABASE_URL: 'postgresql://x:y@localhost:5432/other_pilot',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(DbGuardError);
+    // different port → reject
+    expect(() =>
+      assertPilotEnvironment({
+        DATABASE_URL: rt,
+        MIGRATION_DATABASE_URL: 'postgresql://x:y@localhost:5433/watersaas_pilot',
+      } as NodeJS.ProcessEnv),
+    ).toThrow(DbGuardError);
+    // localhost vs 127.0.0.1 + different creds → pass (same target)
+    expect(
+      assertPilotEnvironment({
+        DATABASE_URL: rt,
+        MIGRATION_DATABASE_URL: 'postgresql://x:y@127.0.0.1:5432/watersaas_pilot',
+      } as NodeJS.ProcessEnv),
+    ).toEqual({
+      runtime: {
+        host: 'localhost',
+        canonicalHost: 'LOOPBACK',
+        port: 5432,
+        name: 'watersaas_pilot',
+      },
+      migration: {
+        host: '127.0.0.1',
+        canonicalHost: 'LOOPBACK',
+        port: 5432,
+        name: 'watersaas_pilot',
+      },
+    });
   });
 
   it('abort: remote host / tunnel alias / non-pilot db name', () => {

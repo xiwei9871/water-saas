@@ -44,6 +44,18 @@ const validPeriod = (p: string) => {
   return m >= 1 && m <= 12;
 };
 
+/** Real calendar validation — rejects 2026-02-30, accepts 2028-02-29. */
+const validDate = (s: string): boolean => {
+  if (!DATE_RE.test(s)) return false;
+  const y = parseInt(s.slice(0, 4), 10);
+  const m = parseInt(s.slice(5, 7), 10);
+  const d = parseInt(s.slice(8, 10), 10);
+  if (m < 1 || m > 12 || d < 1) return false;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const dim = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return d <= dim[m - 1];
+};
+
 const nextPeriod = (p: string): string => {
   const y = parseInt(p.slice(0, 4), 10);
   const m = parseInt(p.slice(4), 10);
@@ -122,8 +134,9 @@ export function parseArgs(argv: string[]): GenerateArgs {
     throw new CliError('--seed <non-negative int> is required');
   }
   a.accounts ??= ACCOUNTS_DEFAULT;
-  if (!Number.isInteger(a.accounts) || a.accounts < 1 || a.accounts > 100000) {
-    throw new CliError(`--accounts out of range: ${a.accounts}`);
+  // Frozen cap: smoke=small, G5=200, full profile=3,000–5,000.
+  if (!Number.isInteger(a.accounts) || a.accounts < 1 || a.accounts > 5000) {
+    throw new CliError(`--accounts must be 1..5000, got: ${a.accounts}`);
   }
   if (!a.periodFrom || !validPeriod(a.periodFrom)) {
     throw new CliError('--period-from YYYYMM (valid month) is required');
@@ -133,8 +146,8 @@ export function parseArgs(argv: string[]): GenerateArgs {
     throw new CliError(`--period-to must be a valid period >= period-from`);
   }
   a.profile ??= 'default';
-  if (a.asOf !== undefined && !DATE_RE.test(a.asOf)) {
-    throw new CliError(`--as-of must be YYYY-MM-DD, got: ${a.asOf}`);
+  if (a.asOf !== undefined && !validDate(a.asOf)) {
+    throw new CliError(`--as-of must be a real YYYY-MM-DD date, got: ${a.asOf}`);
   }
   a.concurrency ??= CONCURRENCY_DEFAULT;
   if (
@@ -149,6 +162,14 @@ export function parseArgs(argv: string[]): GenerateArgs {
   a.outputDir ??= 'artifacts/pilot';
   return a as GenerateArgs;
 }
+
+/**
+ * P1-2: `--reset` without `--yes` is a plan-only early exit — nothing
+ * after it may run (no harness, no generation, no manifests).
+ */
+export const isResetDryRun = (
+  a: Pick<GenerateArgs, 'reset' | 'yes'>,
+): boolean => a.reset && !a.yes;
 
 export const USAGE = `generate.ts — Pilot Cycle 1A synthetic generator (G2 skeleton)
 
