@@ -13,9 +13,10 @@
 
 `generate.ts` = tsx 脚本，`NestFactory.createApplicationContext(AppModule)`
 起应用上下文，直接 resolve 各模块 service，调用与 controller 完全相同的
-`*Tx(tx, ctx, dto)` 方法（`water-account.service.onboardTx`、
-`meter-installation.service`、`remote-event.service.ingestBatch` 等），
-每个域操作包在 `TenantPrisma.runAsTenant(pilotTenantId, tx => …)` 里。
+方法（`water-account.service.onboardTx`、
+`meter-installation.service`、`remote-event.service.ingestBatch` 等）。
+所有 service 调用先按 D4 判断 transaction ownership——不存在
+「每个域操作都包 `runAsTenant`」的 blanket rule。
 
 这满足 D2 的「正式 domain path」定义：
 
@@ -37,9 +38,11 @@ TX_CALLER_MANAGED
 
 TX_SELF_MANAGED
   service 内部自己 runAsTenant / 自己拆事务
-  （例：RemoteEventService.ingestBatch —— 每事件独立事务）
   → generator 直接调用，外层禁止再包 runAsTenant
 ```
+
+特别注明：`RemoteEventService.ingestBatch` = **TX_SELF_MANAGED**
+（每事件独立事务）。
 
 冻结规则：**never nested `TenantPrisma.runAsTenant`。** 嵌套意味着
 内层 `set_config` 覆盖外层事务边界，RLS/提交语义失真。
@@ -77,7 +80,11 @@ evidence reliability**——flake 即降并发，不硬撑。
 所有生成时间戳相对 `asOf` 构造：
 
 ```text
-bill.due_date (逾期场景)   = asOf − 15d
+UNPAID_BILL_OVERDUE 时间构造:
+  historical period + tenant_param.bill_due_days
+  → BillingRun domain flow 自然产生 dueDate
+  → 确保 dueDate < databaseCurrentDate
+  generator 禁止直接写 bill.due_date
 reading.reading_date      = 各自 period 内固定日
 payment.received_at       = period 窗口内
 remote_event.received_at  = asOf 相对偏移
@@ -174,9 +181,10 @@ orgs (3 所) / books (12 册) / staff / tariff plan (ACTIVE)
 → remote source + device + binding + ingestBatch + plan + process
 ```
 
-域服务实际可达性在实现时逐条验证（§5 标记 ⍰）；凡域路径被
-service guard 拦截的 → 落 CONTROLLED_DB_MUTATION 并在 ground truth
-如实标注。
+域服务实际可达性在实现时逐条验证。**任何已冻结为 DOMAIN_FLOW +
+`reachableInNormalOperation=true` 的 Gate scenario，若实现时无法
+通过现有 domain service 构造：STOP → 回 Implementation Gate →
+不得由实现者自行降级为 DB mutation。**
 
 ### Fault injection 矩阵（Q2/Q3 FINAL）
 
@@ -293,10 +301,10 @@ clockDrift flag
 
 ---
 
-## 6. 规模与配比（默认 profile，可调）
+## 6. 规模与配比（full configured profile）
 
 ```text
-accounts:        4,000
+accounts:        4,000  (default; configurable 3,000–5,000)
   clean background         ~3,400
   injected scenario 户      ~600
     13 类 × ~40 独立样本     ≈ 520
@@ -327,7 +335,8 @@ G5  evaluate.ts + 200 户冒烟：detector correctness（detectAll 直评）+
 G6  全量生成 + evaluation + 人工 operator pilot → Gate 判据
 ```
 
-G2–G4 每步完成跑一次小规模 verify，不到 G6 不碰 5,000 户全量。
+G2–G4 每步完成跑一次小规模 verify，不到 G6 不碰 full configured
+profile（default 4,000；configurable 3,000–5,000）。
 
 ---
 
