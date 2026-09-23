@@ -26,11 +26,19 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import bcrypt from 'bcrypt';
+import { createHash } from 'node:crypto';
 import pg from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module.js';
+import { TenantPrismaService } from '../src/common/tenant-prisma.js';
+import type { TenantCtx } from '../src/common/tenant-context.js';
+import { BillingRunService } from '../src/modules/billing/billing-run.service.js';
+import {
+  loadYtdBeforeQtyMap,
+  ytdBeforeQty,
+} from '../src/modules/billing/pricing.js';
 
 // Point the app's runtime client at the TEST database before Nest builds it.
 process.env.DATABASE_URL =
@@ -235,6 +243,8 @@ beforeAll(async () => {
   // run counters. Wipe tenant A's business tables (FK-safe order); iam
   // fixtures above are idempotent and stay.
   for (const table of [
+    // idempotency_key.billing_run_id RESTRICTs run deletes — keys first.
+    'idempotency_key',
     'bill_item',
     'bill',
     'billing_run',
@@ -930,5 +940,280 @@ describe('v0.2: monitoring skip + household-scaled pricing', () => {
       )
     ).rows[0];
     expect(bill4.t).toBe('71800');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RC1 — multi-tx billing-run create: generation status, guards, idempotency
+// lifecycle, schema invariants, bulk-YTD equivalence, pricing drift.
+// ---------------------------------------------------------------------------
+const T10_CTX: TenantCtx = {
+  tenantId: T10A,
+  staffId: STAFF_ADMIN_A,
+  scope: 'ALL',
+  orgScope: [],
+};
+
+const setGenerating = (id: string) =>
+  owner.query(
+    `UPDATE billing_run SET generation_status = 'GENERATING' WHERE id = $1`,
+    [id],
+  );
+
+const keyRow = (key: string) =>
+  owner.query(
+    `SELECT id::text, status, billing_run_id::text AS "billingRunId",
+            response_status AS "responseStatus", response_ref AS "responseRef"
+     FROM idempotency_key WHERE tenant_id = $1 AND key = $2`,
+    [T10A, key],
+  );
+
+const insertKey = (opts: {
+  tenantId?: string;
+  key: string;
+  hash?: string;
+  status?: string;
+  runId?: string | null;
+}) =>
+  owner.query(
+    `INSERT INTO idempotency_key
+       (id, tenant_id, key, method, route, request_hash, status,
+        billing_run_id, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, 'POST', '/billing-runs', $3, $4, $5,
+             now(), now())`,
+    [
+      opts.tenantId ?? T10A,
+      opts.key,
+      opts.hash ?? 'x',
+      opts.status ?? 'PROCESSING',
+      opts.runId ?? null,
+    ],
+  );
+
+const postKeyed = (key: string, body: unknown) =>
+  request(app.getHttpServer())
+    .post('/billing-runs')
+    .set(auth(adminToken))
+    .set('Idempotency-Key', key)
+    .send(body);
+
+describe('RC1: GENERATING guards + crash → discard → re-create', () => {
+  it('exposes generationStatus=READY on create; a GENERATING run rejects post/retry, discards cleanly, re-creates identically', async () => {
+    // A1-13 settlement (202611, 5m³) is still unbilled — rE was discarded.
+    const res = await post('/billing-runs', { period: '202611' }).expect(201);
+    const runId = res.body.id as string;
+    expect(res.body.generationStatus).toBe('READY');
+    expect(res.body.bills).toHaveLength(1);
+    const sourceIds = res.body.bills.map((b: { sourceId: string }) => b.sourceId);
+
+    // Simulate a crash mid-create: run stays DRAFT+GENERATING with its
+    // partial DRAFT bills — the frozen recovery path applies.
+    await setGenerating(runId);
+    for (const verb of ['post', 'retry']) {
+      const r = await post(`/billing-runs/${runId}/${verb}`, {});
+      expect(r.status).toBe(409);
+      expect(r.body).toMatchObject({ code: 'RUN_STILL_GENERATING' });
+    }
+
+    await post(`/billing-runs/${runId}/discard`, {}).expect(201);
+    const bills = await owner.query(
+      `SELECT count(*)::int AS n FROM bill WHERE tenant_id = $1 AND billing_run_id = $2`,
+      [T10A, runId],
+    );
+    expect(bills.rows[0].n).toBe(0);
+
+    const redo = await post('/billing-runs', { period: '202611' }).expect(201);
+    expect(redo.body.status).toBe('DRAFT');
+    expect(redo.body.generationStatus).toBe('READY');
+    expect(redo.body.bills.map((b: { sourceId: string }) => b.sourceId)).toEqual(
+      sourceIds,
+    );
+    run['r202611'] = redo.body.id;
+  });
+});
+
+describe('RC1: idempotency-key ↔ billing-run lifecycle', () => {
+  it('GENERATING + linked PROCESSING key → discard deletes the key → same key reusable', async () => {
+    const res = await post('/billing-runs', { period: '202702' }).expect(201);
+    const runId = res.body.id as string;
+    await setGenerating(runId);
+    const key = `t10-proc-${RUN}`;
+    await insertKey({ key, runId });
+
+    await post(`/billing-runs/${runId}/discard`, {}).expect(201);
+    expect((await keyRow(key)).rows).toHaveLength(0);
+
+    const reuse = await postKeyed(key, { period: '202703' }).expect(201);
+    expect(reuse.body.period).toBe('202703');
+    run['r202703'] = reuse.body.id;
+  });
+
+  it('READY + COMPLETED key → discard unlinks (key survives, billingRunId NULL) → same request replays verbatim', async () => {
+    const key = `t10-comp-${RUN}`;
+    const first = await postKeyed(key, { period: '202704' }).expect(201);
+    const runId = first.body.id as string;
+    const before = (await keyRow(key)).rows[0];
+    expect(before.status).toBe('COMPLETED');
+    expect(before.billingRunId).toBe(runId);
+
+    // Fail-closed: while ANY link remains, the composite FK blocks the
+    // run delete outright (RESTRICT as defense-in-depth).
+    await expect(
+      owner.query(`DELETE FROM billing_run WHERE id = $1`, [runId]),
+    ).rejects.toThrow();
+
+    await post(`/billing-runs/${runId}/discard`, {}).expect(201);
+    const after = (await keyRow(key)).rows[0];
+    expect(after.status).toBe('COMPLETED');
+    expect(after.billingRunId).toBeNull();
+    expect(after.responseRef).toBe(before.responseRef);
+
+    const replay = await postKeyed(key, { period: '202704' }).expect(201);
+    expect(replay.body).toEqual(first.body);
+  });
+
+  it('PROCESSING key → 409 IDEMPOTENCY_IN_PROGRESS; same key + different body → 409', async () => {
+    const key = `t10-inprog-${RUN}`;
+    const body = { period: '202705' };
+    await insertKey({
+      key,
+      hash: createHash('sha256').update(JSON.stringify(body)).digest('hex'),
+    });
+    const r = await postKeyed(key, body);
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ code: 'IDEMPOTENCY_IN_PROGRESS' });
+    await owner.query(
+      `DELETE FROM idempotency_key WHERE tenant_id = $1 AND key = $2`,
+      [T10A, key],
+    );
+    // reuse freed key with the same request → fresh claim
+    await postKeyed(key, body).expect(201);
+    run['r202705'] = (
+      await get('/billing-runs?period=202705')
+    ).body[0].id;
+  });
+
+  it('two concurrent creates under one key → one wins, the other replays or 409s IN_PROGRESS — never double-generates', async () => {
+    const key = `t10-conc-${RUN}`;
+    const [a, b] = await Promise.all([
+      postKeyed(key, { period: '202706' }),
+      postKeyed(key, { period: '202706' }),
+    ]);
+    for (const r of [a, b]) {
+      if (r.status === 409) {
+        expect(r.body).toMatchObject({ code: 'IDEMPOTENCY_IN_PROGRESS' });
+      } else {
+        expect(r.status).toBe(201);
+      }
+    }
+    if (a.status === 201 && b.status === 201) {
+      expect(b.body.id).toBe(a.body.id);
+    }
+    const runs = (await get('/billing-runs?period=202706')).body;
+    expect(runs).toHaveLength(1);
+    run['r202706'] = runs[0].id;
+  });
+});
+
+describe('RC1: schema invariants', () => {
+  it('billing_run.generation_status defaults to READY (legacy rows stay postable)', async () => {
+    const d = await owner.query(
+      `SELECT column_default FROM information_schema.columns
+       WHERE table_name = 'billing_run' AND column_name = 'generation_status'`,
+    );
+    expect(d.rows[0].column_default).toContain('READY');
+  });
+
+  it('cross-tenant key↔run link is rejected by the composite FK; a second key on one run is rejected by UNIQUE', async () => {
+    const runId = run['r202611']; // created without a key — link slot free
+    // tenant B key pointing at tenant A's run — composite FK violation
+    await expect(
+      insertKey({ tenantId: T10B, key: `t10-x-${RUN}`, runId }),
+    ).rejects.toThrow();
+    // second key on the same run — unique(tenant_id, billing_run_id)
+    const key1 = `t10-l1-${RUN}`;
+    await insertKey({ key: key1, runId });
+    await expect(
+      insertKey({ key: `t10-l2-${RUN}`, runId }),
+    ).rejects.toThrow();
+    // multiple NULL billing_run_id rows coexist fine
+    await insertKey({ key: `t10-n1-${RUN}` });
+    await insertKey({ key: `t10-n2-${RUN}` });
+    await owner.query(
+      `DELETE FROM idempotency_key WHERE tenant_id = $1 AND key = ANY($2)`,
+      [T10A, [key1, `t10-n1-${RUN}`, `t10-n2-${RUN}`]],
+    );
+  });
+});
+
+describe('RC1: bulk YTD equivalence + pricing drift', () => {
+  it('loadYtdBeforeQtyMap ≡ ytdBeforeQty per account (NORMAL + posted-side windows)', async () => {
+    const tp = app.get(TenantPrismaService);
+    await tp.runAsTenant(T10A, async (tx) => {
+      const ids = [acct['A1'], acct['A2']];
+      for (const period of ['202607', '202612', '202701']) {
+        const map = await loadYtdBeforeQtyMap(tx, T10_CTX, ids, period);
+        for (const id of ids) {
+          const single = await ytdBeforeQty(tx, T10_CTX, id, period);
+          expect(map.get(id)?.toString() ?? '0').toBe(single.toString());
+        }
+      }
+    });
+    // A1 @202612: only the POSTED 202606 bill counts (100) — the 202607
+    // bill was REVERSED upstream and drops off the ladder. Anchors the
+    // cursor on real posted history, not 0≡0.
+    const v = await tp.runAsTenant(T10A, (tx) =>
+      loadYtdBeforeQtyMap(tx, T10_CTX, [acct['A1']], '202612'),
+    );
+    expect(v.get(acct['A1'])?.toString()).toBe('100');
+  });
+
+  it('a tariff change between TX0 and a generation batch aborts with PRICING_SNAPSHOT_DRIFT', async () => {
+    const svc = app.get(BillingRunService);
+    const tp = app.get(TenantPrismaService);
+    type PrivateSvc = {
+      claimCreateTx(
+        tx: unknown,
+        ctx: TenantCtx,
+        body: { period: string },
+        key: string | null,
+      ): Promise<{ runId: string; settlements: { id: string }[] }>;
+      generateBatchTx(
+        tx: unknown,
+        ctx: TenantCtx,
+        snapshot: unknown,
+        slice: unknown[],
+      ): Promise<unknown>;
+    };
+    const priv = svc as unknown as PrivateSvc;
+    // 202611 has a FINAL settlement → its category's pricing enters the
+    // fingerprint, so the plan mutation below is observable as drift.
+    const snapshot = await tp.runAsTenant(T10A, (tx) =>
+      priv.claimCreateTx(tx, T10_CTX, { period: '202611' }, null),
+    );
+
+    // Shrink the plan window so it no longer covers the period —
+    // live fingerprint diverges from the TX0 snapshot.
+    await owner.query(
+      `UPDATE tariff_plan SET effective_to = '2026-06-30' WHERE id = $1`,
+      [planRes],
+    );
+    try {
+      await expect(
+        tp.runAsTenant(T10A, (tx) =>
+          priv.generateBatchTx(tx, T10_CTX, snapshot, snapshot.settlements),
+        ),
+      ).rejects.toMatchObject({
+        response: { code: 'PRICING_SNAPSHOT_DRIFT' },
+      });
+    } finally {
+      await owner.query(
+        `UPDATE tariff_plan SET effective_to = NULL WHERE id = $1`,
+        [planRes],
+      );
+    }
+    // Aborted run stays DRAFT+GENERATING — discard recovers it.
+    const r = await post(`/billing-runs/${snapshot.runId}/discard`, {});
+    expect(r.status).toBe(201);
   });
 });

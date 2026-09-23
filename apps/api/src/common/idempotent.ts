@@ -13,6 +13,11 @@ import { TenantPrismaService } from './tenant-prisma.js';
  * `route` is part of the stored key scope — pass the concrete request path
  * (`req.path`) so a key can't be replayed against a different target.
  */
+/** Raw request-body sha256 — the requestHash canon shared by
+ *  withOptionalIdem and multi-tx idempotent creates (BillingRun RC1). */
+export const idemRequestHash = (body: unknown): string =>
+  createHash('sha256').update(JSON.stringify(body)).digest('hex');
+
 export const withOptionalIdem = async <T>(
   prisma: TenantPrismaService,
   idem: IdempotencyService,
@@ -29,9 +34,7 @@ export const withOptionalIdem = async <T>(
   if (!meta.key) {
     return prisma.runAsTenant(ctx.tenantId, fn);
   }
-  const requestHash = createHash('sha256')
-    .update(JSON.stringify(meta.body))
-    .digest('hex');
+  const requestHash = idemRequestHash(meta.body);
   const result = await idem.runWithKey(
     ctx.tenantId,
     {

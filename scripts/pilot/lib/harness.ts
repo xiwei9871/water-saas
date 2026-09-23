@@ -9,10 +9,6 @@ import { apiImport } from './api-import.ts';
 import { apiRequire } from './pg.ts';
 import { assertCallerManaged } from './tx-registry.ts';
 
-const { Prisma } = apiRequire('@prisma/client') as {
-  Prisma: { sql(strings: TemplateStringsArray, ...v: unknown[]): unknown };
-};
-
 export interface TenantCtx {
   tenantId: string;
   staffId: string;
@@ -35,10 +31,7 @@ export interface Harness {
       tenantId: string,
       fn: (tx: unknown) => Promise<T>,
     ): Promise<T>;
-    /** raw PrismaClient — for timeout-aware interactive transactions
-     *  (G6: BillingRunService.createTx exceeds Prisma's 5s interactive
-     *  default beyond ~800 settlements; identical semantics, longer
-     *  budget). */
+    /** raw PrismaClient — escape hatch for harness-level reads. */
     raw: {
       $transaction<T>(
         fn: (tx: unknown) => Promise<T>,
@@ -99,30 +92,4 @@ export async function withTenantTx<T>(
 ): Promise<T> {
   assertCallerManaged(serviceMethod);
   return h.tenantPrisma.runAsTenant(tenantId, fn);
-}
-
-/**
- * Same interactive-tx semantics as runAsTenant (transaction-local
- * set_config('app.tenant_id')) but with an explicit Prisma timeout —
- * pilot-harness only, for the one frozen domain call whose single-tx
- * work scales with account count (BillingRunService.createTx).
- * RECORDED AS HARDENING FINDING: production runAsTenant has no timeout
- * knob, so a real >~800-settlement billing run cannot be created.
- */
-export async function withTenantTxTimeout<T>(
-  h: Harness,
-  serviceMethod: string,
-  tenantId: string,
-  timeoutMs: number,
-  fn: (tx: unknown) => Promise<T>,
-): Promise<T> {
-  assertCallerManaged(serviceMethod);
-  const setConfig = Prisma.sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-  return h.tenantPrisma.raw.$transaction(
-    async (tx) => {
-      await (tx as { $executeRaw(q: unknown): Promise<unknown> }).$executeRaw(setConfig);
-      return fn(tx);
-    },
-    { timeout: timeoutMs, maxWait: 30000 },
-  );
 }

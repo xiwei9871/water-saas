@@ -36,7 +36,9 @@ export const TX_REGISTRY: Readonly<Record<string, TxOwnership>> = {
   'FeeItemService.createTx': 'TX_CALLER_MANAGED',
   'TariffPlanService.createTx': 'TX_CALLER_MANAGED',
   'TariffPlanService.activateTx': 'TX_CALLER_MANAGED',
-  'BillingRunService.createTx': 'TX_CALLER_MANAGED',
+  // create() is the multi-tx orchestrator (RC1): its own TX0 claim +
+  // per-batch txs + finalize — never wrap.
+  'BillingRunService.create': 'TX_SELF_MANAGED',
   // execute() opens its own claim/per-bill/finalize txs — never wrap
   'BillingRunService.execute': 'TX_SELF_MANAGED',
   // money

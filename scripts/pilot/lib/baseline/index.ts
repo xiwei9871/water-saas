@@ -183,7 +183,15 @@ export async function runBaseline(
     }));
 
     await sink.run('billing', async () => {
-      const runId = await createBillingRun(h, ctx, period);
+      // RC1 scale evidence: the create carries a real Idempotency-Key so
+      // 4000-account claim→batch→finalize→COMPLETED+responseRef runs on
+      // the production path (scripts/pilot/billing-idem-check.ts replays).
+      const runId = await createBillingRun(
+        h,
+        ctx,
+        period,
+        `pilot-br-${ctx.tenantId.slice(0, 8)}-${period}`,
+      );
       // C: TOP_UP lot while bills are still DRAFT (not payable debt),
       // then execute posts + applyForPostedDebtTx writes APPLY rows
       const cTopUps = await preFundCAccounts(

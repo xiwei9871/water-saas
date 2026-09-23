@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { computeBill, type FeeItemInput } from '@ws/billing-core';
@@ -254,6 +255,160 @@ export const ytdBeforeQty = async (
 };
 
 /**
+ * loadYtdBeforeQtyMap — set-based equivalent of `ytdBeforeQty` for
+ * BillingRun's multi-tx create (RC1/RC2): one bulk pass over accountIds
+ * instead of ~7 queries per account. Semantics are identical — posted-side
+ * NORMAL settlement usage + REPLACEMENT item qty + latest RECONCILIATION
+ * correction per source period, same year window and lte/gte boundaries.
+ * Accounts with no posted-side history map to Decimal(0).
+ */
+export const loadYtdBeforeQtyMap = async (
+  tx: Prisma.TransactionClient,
+  ctx: TenantCtx,
+  waterAccountIds: string[],
+  period: string,
+): Promise<Map<string, Prisma.Decimal>> => {
+  const out = new Map<string, Prisma.Decimal>();
+  const usageByAccount = new Map<string, Map<string, Prisma.Decimal>>();
+  const usageFor = (accountId: string) => {
+    let m = usageByAccount.get(accountId);
+    if (!m) usageByAccount.set(accountId, (m = new Map()));
+    return m;
+  };
+  if (waterAccountIds.length === 0) return out;
+
+  const yearStart = `${period.slice(0, 4)}01`;
+  const posted = ['POSTED', 'PARTIAL_PAID', 'PAID'] as const;
+
+  // 1. NORMAL settlement-sourced posted bills → settlement usage by period.
+  const normalBills = await tx.bill.findMany({
+    where: {
+      tenantId: ctx.tenantId,
+      waterAccountId: { in: waterAccountIds },
+      billKind: 'NORMAL',
+      sourceType: 'SETTLEMENT',
+      status: { in: [...posted] },
+      period: { gte: yearStart, lt: period },
+    },
+    select: { sourceId: true, waterAccountId: true },
+  });
+  const normalSettlements = normalBills.length
+    ? await tx.consumptionSettlement.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          id: { in: normalBills.map((b) => b.sourceId) },
+        },
+        select: { id: true, period: true, totalUsageQty: true },
+      })
+    : [];
+  const settlementById = new Map(normalSettlements.map((s) => [s.id, s]));
+  for (const b of normalBills) {
+    const s = settlementById.get(b.sourceId);
+    if (!s) continue;
+    usageFor(b.waterAccountId).set(s.period, s.totalUsageQty);
+  }
+
+  // 2. REPLACEMENT bills — corrected usage recovered from item qty,
+  //    attributed to the bill's period (PER_QTY-only is inherent).
+  const replacements = await tx.bill.findMany({
+    where: {
+      tenantId: ctx.tenantId,
+      waterAccountId: { in: waterAccountIds },
+      billKind: 'REPLACEMENT',
+      status: { in: [...posted] },
+      period: { gte: yearStart, lt: period },
+    },
+    select: { id: true, period: true, waterAccountId: true },
+  });
+  const repItems = replacements.length
+    ? await tx.billItem.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          billId: { in: replacements.map((b) => b.id) },
+          qty: { not: null },
+        },
+        select: { billId: true, qty: true },
+      })
+    : [];
+  const replacementById = new Map(replacements.map((b) => [b.id, b]));
+  for (const item of repItems) {
+    const b = replacementById.get(item.billId)!;
+    const usage = usageFor(b.waterAccountId);
+    usage.set(b.period, (usage.get(b.period) ?? new Prisma.Decimal(0)).plus(item.qty ?? 0));
+  }
+
+  // 3. RECONCILIATION adjustments — LATEST correction per source period
+  //    replaces effective usage (desc order → first hit wins).
+  const adjustments = await tx.bill.findMany({
+    where: {
+      tenantId: ctx.tenantId,
+      waterAccountId: { in: waterAccountIds },
+      billKind: 'ADJUSTMENT',
+      sourceType: 'RECONCILIATION',
+      status: { in: [...posted] },
+      period: { lte: period },
+    },
+    select: { id: true, waterAccountId: true },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  });
+  if (adjustments.length) {
+    const corrections = await tx.billItem.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        billId: { in: adjustments.map((b) => b.id) },
+        itemType: 'ADJUSTMENT',
+      },
+      select: { billId: true, description: true, qty: true },
+    });
+    const correctionsByBill = new Map<string, typeof corrections>();
+    for (const c of corrections) {
+      const arr = correctionsByBill.get(c.billId) ?? [];
+      arr.push(c);
+      correctionsByBill.set(c.billId, arr);
+    }
+    const frozen = await tx.consumptionSettlement.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        waterAccountId: { in: waterAccountIds },
+        period: { gte: yearStart, lt: period },
+      },
+      select: { waterAccountId: true, period: true, totalUsageQty: true },
+    });
+    const frozenByAccount = new Map<string, Map<string, Prisma.Decimal>>();
+    for (const s of frozen) {
+      let m = frozenByAccount.get(s.waterAccountId);
+      if (!m) frozenByAccount.set(s.waterAccountId, (m = new Map()));
+      m.set(s.period, s.totalUsageQty);
+    }
+    const correctedByAccount = new Map<string, Set<string>>();
+    for (const bill of adjustments) {
+      // Global desc order restricted to one account stays desc — the
+      // first correction seen for a source period is the latest.
+      for (const item of correctionsByBill.get(bill.id) ?? []) {
+        const sourcePeriod = /^reconcile (\d{6})$/.exec(item.description ?? '')?.[1];
+        if (!sourcePeriod || sourcePeriod < yearStart || sourcePeriod >= period) continue;
+        let corrected = correctedByAccount.get(bill.waterAccountId);
+        if (!corrected) correctedByAccount.set(bill.waterAccountId, (corrected = new Set()));
+        if (corrected.has(sourcePeriod)) continue;
+        const original = frozenByAccount.get(bill.waterAccountId)?.get(sourcePeriod);
+        const usage = usageByAccount.get(bill.waterAccountId);
+        if (original === undefined || item.qty === null || !usage?.has(sourcePeriod)) continue;
+        usage.set(sourcePeriod, original.plus(item.qty));
+        corrected.add(sourcePeriod);
+      }
+    }
+  }
+
+  for (const accountId of waterAccountIds) {
+    const usage = usageByAccount.get(accountId);
+    let sum = new Prisma.Decimal(0);
+    if (usage) for (const qty of usage.values()) sum = sum.plus(qty);
+    out.set(accountId, sum);
+  }
+  return out;
+};
+
+/**
  * Tenant-param `bill_due_days` (jsonb int, default 15): the due date is
  * the period's last calendar day + the configured offset. A non-integer /
  * missing value falls back to the default rather than billing without a
@@ -320,3 +475,127 @@ export const feeItemIdMap = async (
  * in one module — callers get the engine's typed result verbatim. */
 export { computeBill };
 export type { FeeItemInput };
+
+// ---------------------------------------------------------------------------
+// BillingRun multi-tx create (RC1/RC2) — frozen pricing snapshot + fingerprint
+// ---------------------------------------------------------------------------
+
+/**
+ * Typed per-usageCategory pricing resolution frozen at TX0. A missing
+ * tariff or broken fee-item config is DATA (kind:'FAILURE') — the batch
+ * turns it into the same per-settlement RunFailure the old single-tx
+ * loop recorded — never an abort of the whole run.
+ */
+export type PricingSnapshot =
+  | {
+      kind: 'READY';
+      planId: string;
+      effectiveFrom: Date;
+      effectiveTo: Date | null;
+      baseHousehold: number | null;
+      perPersonQty: Prisma.Decimal | null;
+      feeItems: FeeItemInput[];
+      feeItemIdByCode: Map<string, string>;
+    }
+  | {
+      kind: 'FAILURE';
+      code: 'TARIFF_NOT_FOUND' | 'FEE_ITEM_NOT_FOUND';
+      message?: string;
+    };
+
+/**
+ * Resolve pricing once per usageCategory (TX0, and again per batch only
+ * to re-derive the drift fingerprint — the frozen snapshot stays the
+ * authoritative input for bill math).
+ */
+export const loadPricingSnapshots = async (
+  tx: Prisma.TransactionClient,
+  ctx: TenantCtx,
+  usageCategories: string[],
+  period: string,
+): Promise<Map<string, PricingSnapshot>> => {
+  const out = new Map<string, PricingSnapshot>();
+  for (const category of [...new Set(usageCategories)].sort()) {
+    const plan = await pickPlan(tx, ctx, category, period);
+    if (!plan) {
+      out.set(category, {
+        kind: 'FAILURE',
+        code: 'TARIFF_NOT_FOUND',
+        message: `no ACTIVE tariff for usageCategory ${category} covering ${period}`,
+      });
+      continue;
+    }
+    try {
+      const feeItems = await loadFeeItems(tx, ctx, plan);
+      const idMap = await feeItemIdMap(
+        tx,
+        ctx,
+        feeItems.map((f) => f.code),
+      );
+      out.set(category, {
+        kind: 'READY',
+        planId: plan.id,
+        effectiveFrom: plan.effectiveFrom,
+        effectiveTo: plan.effectiveTo,
+        baseHousehold: plan.baseHousehold,
+        perPersonQty: plan.perPersonQty,
+        feeItems,
+        feeItemIdByCode: idMap,
+      });
+    } catch (err) {
+      if (err instanceof BadRequestException) {
+        out.set(category, {
+          kind: 'FAILURE',
+          code: 'FEE_ITEM_NOT_FOUND',
+          message: err.message,
+        });
+        continue;
+      }
+      throw err;
+    }
+  }
+  return out;
+};
+
+/**
+ * Deterministic fingerprint over the exact pricing inputs — canonical
+ * serialization: object keys in the fixed literal order below, arrays
+ * in frozen order (categories sorted, feeItems by code, tiers by
+ * tierNo), Decimal → string, Date → ISO, null preserved, FAILURE kept
+ * as a sentinel entry. sha256 hex of the canonical JSON.
+ */
+export const pricingFingerprint = (
+  snapshots: Map<string, PricingSnapshot>,
+  dueDays: number,
+): string => {
+  const categories = [...snapshots.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([usageCategory, s]) =>
+      s.kind === 'FAILURE'
+        ? { usageCategory, failure: s.code }
+        : {
+            usageCategory,
+            tariffPlanId: s.planId,
+            effectiveFrom: s.effectiveFrom.toISOString(),
+            effectiveTo: s.effectiveTo ? s.effectiveTo.toISOString() : null,
+            baseHousehold: s.baseHousehold,
+            perPersonQty: s.perPersonQty === null ? null : s.perPersonQty.toString(),
+            feeItems: [...s.feeItems]
+              .sort((a, b) => a.code.localeCompare(b.code))
+              .map((f) => ({
+                id: s.feeItemIdByCode.get(f.code) ?? null,
+                code: f.code,
+                calcType: f.calcType,
+                tiers: f.tiers.map((t) => ({
+                  tierNo: t.tierNo,
+                  fromQty: t.fromQty.toString(),
+                  toQty: t.toQty === null ? null : t.toQty.toString(),
+                  unitPrice: t.unitPrice.toString(),
+                })),
+              })),
+          },
+    );
+  return createHash('sha256')
+    .update(JSON.stringify({ dueDays, categories }))
+    .digest('hex');
+};

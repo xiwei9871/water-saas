@@ -23,7 +23,12 @@ export interface IdemResult<T> {
 }
 
 /** Sentinel: the PROCESSING insert hit a concurrent/finished key holder. */
-class IdemKeyRace extends Error {}
+export class IdemKeyRace extends Error {}
+
+/** claimTx discriminated result — REPLAY carries the stored response. */
+export type IdemClaim =
+  | { kind: 'NEW' }
+  | { kind: 'REPLAY'; status: number; body: unknown };
 
 /**
  * A stored key may only be replayed for the exact same request shape:
@@ -59,6 +64,122 @@ const mismatch = (
 export class IdempotencyService {
   constructor(private readonly prisma: TenantPrismaService) {}
 
+  /**
+   * Multi-tx primitive (BillingRun RC1): find-or-claim the key inside a
+   * CALLER-OWNED transaction. Returns NEW when the PROCESSING row was
+   * inserted by this tx, REPLAY with the stored response when the key is
+   * COMPLETED. Throws 409 on request mismatch / in-flight holder; the
+   * insert unique race surfaces as IdemKeyRace — the caller must re-read
+   * the committed row in a FRESH tx (replayOrConflict), since the aborted
+   * tx is unusable.
+   */
+  async claimTx(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    meta: IdemMeta,
+  ): Promise<IdemClaim> {
+    const { key } = meta;
+    const existing = await tx.idempotencyKey.findUnique({
+      where: { tenantId_key: { tenantId, key } },
+    });
+    if (existing) {
+      if (mismatch(existing, meta)) {
+        throw new ConflictException({
+          code: 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST',
+        });
+      }
+      if (existing.status === 'COMPLETED') {
+        return {
+          kind: 'REPLAY',
+          status: existing.responseStatus ?? 200,
+          body: existing.responseRef ? JSON.parse(existing.responseRef) : null,
+        };
+      }
+      throw new ConflictException({ code: 'IDEMPOTENCY_IN_PROGRESS' });
+    }
+    try {
+      await tx.idempotencyKey.create({
+        data: {
+          tenantId,
+          key,
+          method: meta.method,
+          route: meta.route,
+          requestHash: meta.requestHash,
+          status: 'PROCESSING',
+        },
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new IdemKeyRace();
+      throw err;
+    }
+    return { kind: 'NEW' };
+  }
+
+  /** Link the claimed PROCESSING key to the BillingRun it created (TX0). */
+  async linkRunTx(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    key: string,
+    billingRunId: string,
+  ): Promise<void> {
+    await tx.idempotencyKey.update({
+      where: { tenantId_key: { tenantId, key } },
+      data: { billingRunId },
+    });
+  }
+
+  /**
+   * Finalize-stage completion: PROCESSING → COMPLETED with the verbatim
+   * response — commits atomically with the business finalization.
+   */
+  async completeTx(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    meta: IdemMeta,
+    body: unknown,
+  ): Promise<void> {
+    await tx.idempotencyKey.update({
+      where: { tenantId_key: { tenantId, key: meta.key } },
+      data: {
+        status: 'COMPLETED',
+        responseRef: JSON.stringify(toJsonSafe(body)),
+        responseStatus: meta.responseStatus ?? 200,
+      },
+    });
+  }
+
+  /**
+   * Discard lifecycle step 2 — delete PROCESSING keys linked to the run
+   * so a crashed create's key never stays stuck.
+   */
+  async releaseProcessingForRunTx(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    billingRunId: string,
+  ): Promise<number> {
+    const r = await tx.idempotencyKey.deleteMany({
+      where: { tenantId, billingRunId, status: 'PROCESSING' },
+    });
+    return r.count;
+  }
+
+  /**
+   * Discard lifecycle step 3 — explicitly unlink COMPLETED keys: the key
+   * row survives (verbatim replay intact) with billingRunId → NULL.
+   * Explicit domain action rather than a referential action.
+   */
+  async unlinkCompletedForRunTx(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    billingRunId: string,
+  ): Promise<number> {
+    const r = await tx.idempotencyKey.updateMany({
+      where: { tenantId, billingRunId, status: 'COMPLETED' },
+      data: { billingRunId: null },
+    });
+    return r.count;
+  }
+
   async runWithKey<T>(
     tenantId: string,
     meta: IdemMeta,
@@ -77,7 +198,11 @@ export class IdempotencyService {
     }
   }
 
-  private async replayOrConflict<T>(
+  /**
+   * Public for multi-tx orchestrators: after an IdemKeyRace, re-read the
+   * committed key row in a FRESH transaction (the aborted tx is unusable).
+   */
+  async replayOrConflict<T>(
     tx: Prisma.TransactionClient,
     tenantId: string,
     meta: IdemMeta,

@@ -4,15 +4,11 @@
  * entities. Deterministic: all values derive from seq/period.
  */
 
+import { createHash } from 'node:crypto';
 import { apiImport } from '../api-import.ts';
 import { apiRequire } from '../pg.ts';
 import { keys } from '../keys.ts';
-import {
-  withTenantTx,
-  withTenantTxTimeout,
-  type Harness,
-  type TenantCtx,
-} from '../harness.ts';
+import { withTenantTx, type Harness, type TenantCtx } from '../harness.ts';
 import type { AccountPlan } from './allocate.ts';
 import { periodDay } from './allocate.ts';
 import type { GroundTruthEntry } from '../manifest.ts';
@@ -350,20 +346,26 @@ export async function createBillingRun(
   h: Harness,
   ctx: TenantCtx,
   period: string,
+  idemKey?: string,
 ): Promise<string> {
   const billing = await services.billingRun(h);
-  // G6 scale: createTx does all DRAFT-bill generation in ONE interactive
-  // tx; Prisma's 5s default expires beyond ~800 settlements. The pilot
-  // harness widens the budget (identical set_config semantics) — the
-  // production timeout ceiling is recorded as a hardening finding.
-  const run = (await withTenantTxTimeout(
-    h,
-    'BillingRunService.createTx',
-    ctx.tenantId,
-    10 * 60 * 1000,
-    (tx) => billing.createTx(tx, ctx, { period } as never),
-  )) as { id: string };
-  return run.id;
+  // RC1: create is TX_SELF_MANAGED (multi-tx orchestration) — call
+  // directly, no wrapper; bounded batches need no widened tx budget.
+  const meta = idemKey
+    ? {
+        key: idemKey,
+        method: 'POST',
+        route: '/billing-runs',
+        requestHash: createHash('sha256')
+          .update(JSON.stringify({ period }))
+          .digest('hex'),
+        responseStatus: 201,
+      }
+    : undefined;
+  const res = (await billing.create(ctx, { period }, meta)) as {
+    body: { id: string };
+  };
+  return res.body.id;
 }
 
 /**

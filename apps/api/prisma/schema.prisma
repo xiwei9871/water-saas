@@ -180,6 +180,11 @@ enum RunStatus {
   FAILED
 }
 
+enum BillingRunGenerationStatus {
+  GENERATING
+  READY
+}
+
 enum BillKind {
   NORMAL
   ADJUSTMENT
@@ -951,6 +956,9 @@ model BillingRun {
   period              String    @db.Char(6)
   runType             RunType   @map("run_type")
   status              RunStatus @default(DRAFT)
+  // Billing-run draft generation is multi-transaction (RC1): the run is
+  // claimable for post/retry only after finalize flips this to READY.
+  generationStatus    BillingRunGenerationStatus @default(READY) @map("generation_status")
   postedAt            DateTime? @map("posted_at")
   totalCount          Int       @default(0) @map("total_count")
   successCount        Int       @default(0) @map("success_count")
@@ -961,6 +969,9 @@ model BillingRun {
   updatedAt           DateTime  @updatedAt @map("updated_at")
   updatedBy           String?   @map("updated_by") @db.Uuid
 
+  createIdempotencyKey IdempotencyKey?
+
+  @@unique([tenantId, id])
   @@index([tenantId, period, status])
   @@map("billing_run")
 }
@@ -1034,12 +1045,21 @@ model IdempotencyKey {
   responseStatus Int?       @map("response_status")
   responseRef    String?    @map("response_ref")
   status         IdemStatus @default(PROCESSING)
+  // Multi-tx create link (BillingRun RC1): the claiming key row points at
+  // the run it created. RESTRICT + explicit discard unlink — no implicit
+  // referential action (fail-closed if a link was missed).
+  billingRunId   String?    @map("billing_run_id") @db.Uuid
+  billingRun     BillingRun? @relation(fields: [tenantId, billingRunId], references: [tenantId, id], onDelete: Restrict)
   createdAt      DateTime   @default(now()) @map("created_at")
   createdBy      String?    @map("created_by") @db.Uuid
   updatedAt      DateTime   @updatedAt @map("updated_at")
   updatedBy      String?    @map("updated_by") @db.Uuid
 
   @@unique([tenantId, key])
+  // one BillingRun ↔ at most one create idempotency key;
+  // PostgreSQL allows multiple rows where billing_run_id IS NULL
+  @@unique([tenantId, billingRunId])
+  @@index([tenantId, billingRunId])
   @@map("idempotency_key")
 }
 
