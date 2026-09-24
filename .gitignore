@@ -24,4 +24,7 @@ artifacts/pilot/
 artifacts/uat-v02/
 artifacts/uat-e5/
 artifacts/uat-e6/
+artifacts/uat-e8/
+artifacts/uat-e9/
 artifacts/system-flow/
+artifacts/*.tar.gz

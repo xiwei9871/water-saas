@@ -77,7 +77,7 @@ interface MeterFormValues {
 }
 
 interface InstallFormValues {
-  customerId?: string; // 仅用于级联过滤水表户，不提交
+  customerId?: string; // 仅用于级联过滤用水户，不提交
   waterAccountId: string;
   meterId: string;
   initialReading: string;
@@ -106,7 +106,7 @@ const REPLACE_REASON_OPTIONS = (
   ['REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
 ).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }));
 
-/** 水表档案：设备台账（含受限状态流转）+ 装拆记录（装表/拆表）。 */
+/** 水表管理：设备台账（含受限状态流转）+ 装拆记录（装表/拆表）。 */
 export default function Meters() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
@@ -463,7 +463,7 @@ export default function Meters() {
 
   const instColumns: ColumnsType<MeterInstallation> = [
     {
-      title: '水表户',
+      title: '用水户',
       key: 'account',
       width: 150,
       render: (_: unknown, r: MeterInstallation) => r.waterAccount.accountNo,
@@ -560,7 +560,7 @@ export default function Meters() {
   return (
     <>
       <Card
-        title="水表档案"
+        title="水表管理"
         extra={
           <Space wrap>
             <Select
@@ -658,7 +658,7 @@ export default function Meters() {
                     setInstAccountId(v);
                     setInstPage(1);
                   }}
-                  placeholder="按水表户过滤"
+                  placeholder="按用水户过滤"
                 />
               </span>
               <Button
@@ -781,13 +781,13 @@ export default function Meters() {
             }
           }}
         >
-          <Form.Item name="customerId" label="客户（用于筛选水表户）">
+          <Form.Item name="customerId" label="客户（用于筛选用水户）">
             <CustomerSelect />
           </Form.Item>
           <Form.Item
             name="waterAccountId"
-            label="水表户"
-            rules={[{ required: true, message: '请选择水表户' }]}
+            label="用水户"
+            rules={[{ required: true, message: '请选择用水户' }]}
           >
             <WaterAccountSelect customerId={installCustomerId} />
           </Form.Item>
@@ -856,7 +856,7 @@ export default function Meters() {
         open={replaceTarget !== null}
         title={
           replaceTarget
-            ? `换表 — ${replaceTarget.meter.meterNo}（水表户 ${replaceTarget.waterAccount.accountNo}）`
+            ? `换表 — ${replaceTarget.meter.meterNo}（用水户 ${replaceTarget.waterAccount.accountNo}）`
             : ''
         }
         okText="确认换表"
@@ -955,7 +955,7 @@ export default function Meters() {
                 pagination={false}
                 columns={[
                   {
-                    title: '水表户',
+                    title: '用水户',
                     key: 'acct',
                     render: (_: unknown, r: MeterDetail['installations'][number]) =>
                       r.waterAccount.accountNo,

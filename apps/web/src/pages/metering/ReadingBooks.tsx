@@ -26,7 +26,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { api, apiErrorText, errorCode, toApiError } from '../../api/client';
 import type {
   BookCadence,
   BookMember,
@@ -73,9 +73,8 @@ const CHANNEL_LABELS: Record<MeterChannel, string> = {
 };
 
 interface MemberFormValues {
-  customerId?: string; // 仅用于级联过滤水表户，不提交
+  customerId?: string; // 仅用于级联过滤用水户，不提交
   waterAccountId: string;
-  seqNo?: number | null;
 }
 
 const UUID_RE =
@@ -87,12 +86,12 @@ type ModalState =
   | null;
 
 /**
- * 抄表册：册列表 + 新建/编辑 + 册内水表户管理（抽屉）+ 删除。
+ * 抄表册：册列表 + 新建/编辑 + 册内用水户管理（抽屉）+ 删除。
  * 组织/抄表员选择需要 iam:read；没有该权限时组织默认取当前用户
  * 所属组织、抄表员字段隐藏（服务端readerId可空，生成计划时再指定）。
  */
 export default function ReadingBooks() {
-  const { message } = AntdApp.useApp();
+  const { message, modal: antdModal } = AntdApp.useApp();
   const { user, hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
   const canIamRead = hasPerm('iam:read');
@@ -314,11 +313,11 @@ export default function ReadingBooks() {
     if (!membersBook) return;
     setMemberSaving(true);
     try {
+      // 顺序号由服务端按 max+1 分配（RC1-2 / F9），前端不再提交。
       await api.post(
         `/reading-books/${membersBook.id}/meters`,
         cleanBody({
           waterAccountId: values.waterAccountId,
-          seqNo: values.seqNo ?? undefined,
         }),
         { headers: { 'Idempotency-Key': memberIdemKey } },
       );
@@ -327,7 +326,34 @@ export default function ReadingBooks() {
       memberForm.resetFields();
       await reloadMembers();
     } catch (err) {
-      message.error(apiErrorText(err));
+      // RC1-2 / F10: 该户已在其他册 → 显式转移确认，绝不静默双册。
+      if (errorCode(err) === 'ACCOUNT_IN_OTHER_BOOK') {
+        const body = toApiError(err).body as
+          | { bookNo?: string | null; bookName?: string | null }
+          | undefined;
+        const where = body?.bookNo
+          ? `${body.bookName ?? ''}（${body.bookNo}）`
+          : '另一抄表册';
+        antdModal.confirm({
+          title: '该用水户已在其他抄表册',
+          content: `该用水户当前已属于：${where}。是否转移到本册「${membersBook.name}」？`,
+          okText: '转移到本册',
+          cancelText: '取消',
+          onOk: async () => {
+            await api.post(
+              `/reading-books/${membersBook.id}/meters/transfer`,
+              { waterAccountId: values.waterAccountId },
+              { headers: { 'Idempotency-Key': newIdemKey() } },
+            );
+            message.success('已转移到本册');
+            setMemberIdemKey(newIdemKey());
+            memberForm.resetFields();
+            await reloadMembers();
+          },
+        });
+      } else {
+        message.error(apiErrorText(err));
+      }
     } finally {
       setMemberSaving(false);
     }
@@ -462,7 +488,7 @@ export default function ReadingBooks() {
             width: 90,
             render: (_: unknown, m: BookMember) => (
               <Popconfirm
-                title="移出该水表户？"
+                title="移出该用水户？"
                 description="已生成的计划明细不受影响。"
                 okText="移出"
                 okButtonProps={{ danger: true }}
@@ -672,12 +698,12 @@ export default function ReadingBooks() {
                       {({ getFieldValue }) => (
                         <Form.Item
                           name="waterAccountId"
-                          rules={[{ required: true, message: '请选择水表户' }]}
+                          rules={[{ required: true, message: '请选择用水户' }]}
                           style={{ minWidth: 220 }}
                         >
                           <WaterAccountSelect
                             customerId={getFieldValue('customerId')}
-                            placeholder="选择水表户"
+                            placeholder="选择用水户"
                           />
                         </Form.Item>
                       )}
@@ -688,17 +714,14 @@ export default function ReadingBooks() {
                   <Form.Item
                     name="waterAccountId"
                     rules={[
-                      { required: true, message: '请输入水表户 ID' },
+                      { required: true, message: '请输入用水户 ID' },
                       { pattern: UUID_RE, message: 'ID 格式不正确' },
                     ]}
                     style={{ minWidth: 300 }}
                   >
-                    <Input placeholder="水表户 uuid" />
+                    <Input placeholder="用水户 uuid" />
                   </Form.Item>
                 )}
-                <Form.Item name="seqNo" style={{ width: 110 }}>
-                  <InputNumber min={1} precision={0} placeholder="顺序(可空)" style={{ width: '100%' }} />
-                </Form.Item>
                 <Form.Item>
                   <Button
                     type="primary"
@@ -717,7 +740,7 @@ export default function ReadingBooks() {
               columns={memberColumns}
               dataSource={membersBook.members}
               pagination={false}
-              locale={{ emptyText: '册内暂无水表户' }}
+              locale={{ emptyText: '册内暂无用水户' }}
             />
             <div style={{ marginTop: 8 }}>
               <Tag color="blue">共 {membersBook.members.length} 户</Tag>

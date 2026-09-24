@@ -119,12 +119,15 @@ export async function injectFaults(
   const acct = (p: FaultScenarioPlan) => ic.accounts.get(p.accountSeq!)!;
   const book = (idx: number) => ic.books[idx];
 
-  const member = (b: GeneratedBook, a: GeneratedAccount) => {
+  // RC1-2: addMemberTx rejects a second-book add unless the internal
+  // allowMultiBook escape hatch is set — fault injection (MBK/XBM) opts in
+  // explicitly; primary membership goes through the normal guarded path.
+  const member = (b: GeneratedBook, a: GeneratedAccount, allowMultiBook = false) => {
     const seqNo = (ic.seqNoByBook.get(b.id) ?? 0) + 1;
     ic.seqNoByBook.set(b.id, seqNo);
     return withTenantTx(h, 'ReadingBookService.addMemberTx', ctx.tenantId, (tx) =>
       bookSvc.addMemberTx(tx, ctx, b.id, {
-        waterAccountId: a.waterAccountId, seqNo,
+        waterAccountId: a.waterAccountId, seqNo, allowMultiBook,
       } as never),
     );
   };
@@ -285,7 +288,7 @@ export async function injectFaults(
   // ---- memberships (before plans so items exist) ----
   await mapLimit(accountPlans, opts.concurrency, async (p) => {
     if (p.primaryBookIdx !== null) await member(book(p.primaryBookIdx), acct(p));
-    if (p.secondaryBookIdx !== null) await member(book(p.secondaryBookIdx), acct(p));
+    if (p.secondaryBookIdx !== null) await member(book(p.secondaryBookIdx), acct(p), true);
   });
 
   // ---- reading plans: every NON-EMPTY fault book × readPeriod;

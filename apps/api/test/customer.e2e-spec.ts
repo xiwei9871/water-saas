@@ -760,3 +760,99 @@ describe('v0.2: monitoring meter onboard （监控表）', () => {
     expect(recon.body).toMatchObject({ code: 'ACCOUNT_NOT_BILLABLE' });
   });
 });
+
+/**
+ * RC1-4/5 (Human Pilot F1/F3): unified `?q=` water-account search —
+ * 户号/客户名/客户号/电话/地址/在装表号 all resolve through one box —
+ * plus newest-first ordering so a just-created record lands on page one.
+ */
+describe('RC1-4/5 unified search + newest-first', () => {
+  const phone = `139${String(Date.now()).slice(-8)}`;
+  let c1: { id: string; customerNo: string };
+  let wa1: { id: string; accountNo: string };
+  let wa2: { id: string; accountNo: string };
+  let meterNo1 = '';
+
+  it('one q hits every field family', async () => {
+    const uniq = `qfind-${RUN}`;
+    const o1 = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `${uniq}张三`, custType: 'PERSONAL', phone },
+        account: { usageCategory: 'RES_METERED', addr: `${uniq}路12号` },
+        meter: { brand: 't4-brand', caliber: 'DN15' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+    wa1 = o1.body.waterAccount;
+    c1 = o1.body.customer;
+    meterNo1 = o1.body.meter.meterNo;
+
+    const o2 = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `${uniq}李四`, custType: 'PERSONAL' },
+        account: { usageCategory: 'NON_RES', addr: `${uniq}路34号` },
+        meter: { brand: 't4-brand', caliber: 'DN20' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+    wa2 = o2.body.waterAccount;
+
+    const hits = async (q: string) =>
+      (
+        await request(app.getHttpServer())
+          .get('/water-accounts')
+          .query({ q, take: 50 })
+          .set(auth(adminToken))
+          .expect(200)
+      ).body.map((r: { id: string }) => r.id) as string[];
+
+    // 户号 / 客户名 / 客户号 / 电话 / 地址 / 当前表号
+    expect(await hits(wa1.accountNo)).toContain(wa1.id);
+    expect(await hits(`${uniq}张三`)).toContain(wa1.id);
+    expect(await hits(c1.customerNo)).toContain(wa1.id);
+    expect(await hits(phone)).toContain(wa1.id);
+    expect(await hits(`${uniq}路12号`)).toContain(wa1.id);
+    expect(await hits(meterNo1)).toContain(wa1.id);
+    // list row carries the current meter for display
+    const row = (
+      await request(app.getHttpServer())
+        .get('/water-accounts')
+        .query({ accountNo: wa1.accountNo })
+        .set(auth(adminToken))
+        .expect(200)
+    ).body[0];
+    expect(row.currentMeterNo).toBe(meterNo1);
+  });
+
+  it('createdAt desc ordering: newest account first within a customer', async () => {
+    // wa2 was onboarded after wa1 — under one customer the newest rows
+    // must come first (RC1-5 discoverability).
+    const accounts = (
+      await request(app.getHttpServer())
+        .get('/water-accounts')
+        .query({ q: `qfind-${RUN}`, take: 50 })
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    const idx1 = accounts.findIndex((r: { id: string }) => r.id === wa1.id);
+    const idx2 = accounts.findIndex((r: { id: string }) => r.id === wa2.id);
+    expect(idx1).toBeGreaterThanOrEqual(0);
+    expect(idx2).toBeGreaterThanOrEqual(0);
+    expect(idx2).toBeLessThan(idx1);
+
+    const customers = (
+      await request(app.getHttpServer())
+        .get('/customers')
+        .query({ name: `qfind-${RUN}`, take: 50 })
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    expect(customers.length).toBe(2);
+    // 李四's customer was created after 张三's → appears first.
+    expect(customers[0].name).toContain('李四');
+  });
+});

@@ -1132,3 +1132,217 @@ describe('v0.2: household profile → settlement snapshot', () => {
     expect(s.body.householdSizeSnapshot).toBeNull();
   });
 });
+
+/**
+ * RC1-3 (Human Pilot F11): server-side batch settlement generation.
+ * 20 accounts on a dedicated book, 203603 batch period:
+ *  - BA1..BA8  PASSED ACTUAL in-period          → GENERATED
+ *  - BE1..BE6  READING history (203602), no in-period read → GENERATED_ESTIMATED
+ *  - BX1..BX4  no history at all                → FAILED(ESTIMATE_USAGE_REQUIRED)
+ *  - BD1, BD2  already settled for 203603       → SKIPPED_EXISTS
+ * Preview must classify identically while writing nothing; re-execution is
+ * idempotent (everything lands SKIPPED_EXISTS, zero new rows).
+ */
+describe('RC1-3 batch settlement generation', () => {
+  const B_PERIOD = '203603';
+  const H_PERIOD = '203602';
+  let batchBookId = '';
+
+  const genPlanOn = async (book: string, key: string, period: string) => {
+    const res = await request(app.getHttpServer())
+      .post('/reading-plans/generate')
+      .set(auth(adminToken))
+      .send({ bookId: book, period, planDate: `${period.slice(0, 4)}-${period.slice(4)}-05` })
+      .expect(201);
+    plans[key] = { id: res.body.id, items: res.body.items };
+  };
+
+  const batch = (body: Record<string, unknown>, token = adminToken) =>
+    request(app.getHttpServer())
+      .post('/consumption-settlements/batch')
+      .set(auth(token))
+      .send(body);
+
+  const batchPreview = (body: Record<string, unknown>, token = adminToken) =>
+    request(app.getHttpServer())
+      .post('/consumption-settlements/batch/preview')
+      .set(auth(token))
+      .send(body);
+
+  // The test DB keeps rows between runs — count settlements only among
+  // THIS run's batch accounts, not the whole tenant period.
+  const batchLabels = [
+    ...Array.from({ length: 8 }, (_, i) => `BA${i + 1}`),
+    ...Array.from({ length: 6 }, (_, i) => `BE${i + 1}`),
+    ...Array.from({ length: 4 }, (_, i) => `BX${i + 1}`),
+    'BD1',
+    'BD2',
+  ];
+  const settlementCount = async (period: string) => {
+    let n = 0;
+    for (const label of batchLabels) {
+      if (!acct[label]) continue;
+      const rows = (
+        await request(app.getHttpServer())
+          .get(`/consumption-settlements?waterAccountId=${acct[label]}&period=${period}`)
+          .set(auth(adminToken))
+          .expect(200)
+      ).body;
+      n += rows.length;
+    }
+    return n;
+  };
+
+  it('fixtures: 20 accounts on a dedicated book, mixed readiness', async () => {
+    const book = await request(app.getHttpServer())
+      .post('/reading-books')
+      .set(auth(adminToken))
+      .send({ name: `T7 Batch ${RUN}`, orgUnitId: ORG_A })
+      .expect(201);
+    batchBookId = book.body.id;
+
+    const labels = batchLabels;
+    expect(labels).toHaveLength(20);
+    for (const label of labels) {
+      const a = await onboard(label, '2036-01-01', 0);
+      acct[label] = a.waterAccount.id;
+      inst[label] = a.installation.id;
+      await request(app.getHttpServer())
+        .post(`/reading-books/${batchBookId}/meters`)
+        .set(auth(adminToken))
+        .send({ waterAccountId: a.waterAccount.id })
+        .expect(201);
+    }
+
+    // History period: BE accounts get a real READING-settled usage of 10.
+    await genPlanOn(batchBookId, 'bp602', H_PERIOD);
+    for (let i = 1; i <= 6; i++) {
+      const label = `BE${i}`;
+      await passActual('bp602', label, 10, '2036-02-05');
+      const s = await request(app.getHttpServer())
+        .post('/consumption-settlements')
+        .set(auth(adminToken))
+        .send({ waterAccountId: acct[label], period: H_PERIOD })
+        .expect(201);
+      expect(s.body.isEstimated).toBe(false);
+    }
+
+    // Batch period: BA accounts get PASSED ACTUALs; BD accounts pre-settled.
+    await genPlanOn(batchBookId, 'bp603', B_PERIOD);
+    for (let i = 1; i <= 8; i++) {
+      await passActual('bp603', `BA${i}`, 20, '2036-03-05');
+    }
+    for (const label of ['BD1', 'BD2']) {
+      await request(app.getHttpServer())
+        .post('/consumption-settlements')
+        .set(auth(adminToken))
+        .send({
+          waterAccountId: acct[label],
+          period: B_PERIOD,
+          usageQty: 5,
+          estimateReason: 'pre-settled',
+        })
+        .expect(201);
+    }
+  });
+
+  it('wire validation: missing period / bad ids → 400', async () => {
+    for (const body of [
+      {},
+      { period: '20363' },
+      { period: '203613' },
+      { period: B_PERIOD, bookId: 'not-a-uuid' },
+      { period: B_PERIOD, orgUnitId: 'not-a-uuid' },
+    ]) {
+      const res = await batch(body);
+      expect(res.status).toBe(400);
+    }
+    const ghost = await batch({ period: B_PERIOD, bookId: '99999999-9999-4999-8999-999999999999' });
+    expect(ghost.status).toBe(400);
+    expect(ghost.body).toMatchObject({ code: 'BOOK_NOT_FOUND' });
+  });
+
+  it('preview classifies all 20 without persisting anything', async () => {
+    const before = await settlementCount(B_PERIOD);
+
+    // Without a batch estimateReason the six estimate-path accounts fail.
+    const noReason = await batchPreview({ period: B_PERIOD, bookId: batchBookId }).expect(200);
+    expect(noReason.body.total).toBe(20);
+    expect(noReason.body.counts).toMatchObject({
+      ready: 8,
+      readyEstimated: 0,
+      skippedExists: 2,
+      failed: 10,
+    });
+    const estFailed = noReason.body.items.filter(
+      (i: { errorCode?: string }) => i.errorCode === 'ESTIMATE_REASON_REQUIRED',
+    );
+    expect(estFailed).toHaveLength(6);
+
+    const res = await batchPreview({
+      period: B_PERIOD,
+      bookId: batchBookId,
+      estimateReason: 'batch no-read',
+    }).expect(200);
+    expect(res.body.total).toBe(20);
+    expect(res.body.counts).toMatchObject({
+      ready: 8,
+      readyEstimated: 6,
+      skippedExists: 2,
+      failed: 4,
+    });
+    // Deterministic order: items are accountNo-asc.
+    const nos = res.body.items.map((i: { accountNo: string }) => i.accountNo);
+    expect(nos).toEqual([...nos].sort((a, b) => a.localeCompare(b)));
+    // Preview is a pure simulation — settlement count unchanged.
+    expect(await settlementCount(B_PERIOD)).toBe(before);
+  });
+
+  it('execute: per-account isolation, aggregate counts, then idempotent rerun', async () => {
+    const res = await batch({
+      period: B_PERIOD,
+      bookId: batchBookId,
+      estimateReason: 'batch no-read',
+    }).expect(201);
+    expect(res.body.total).toBe(20);
+    expect(res.body.counts).toMatchObject({
+      generated: 8,
+      generatedEstimated: 6,
+      skippedExists: 2,
+      failed: 4,
+    });
+    // Failures carry the domain code; successes carry the settlement id.
+    for (const item of res.body.items) {
+      if (item.status === 'FAILED') expect(item.errorCode).toBe('ESTIMATE_USAGE_REQUIRED');
+      if (item.status === 'GENERATED' || item.status === 'GENERATED_ESTIMATED') {
+        expect(item.settlementId).toBeTruthy();
+      }
+    }
+    expect(await settlementCount(B_PERIOD)).toBe(16);
+
+    // Rerun: the 16 created/existing rows all report SKIPPED_EXISTS —
+    // deterministic retry with zero duplicate settlements.
+    const again = await batch({
+      period: B_PERIOD,
+      bookId: batchBookId,
+      estimateReason: 'batch no-read',
+    }).expect(201);
+    expect(again.body.counts).toMatchObject({
+      generated: 0,
+      generatedEstimated: 0,
+      skippedExists: 16,
+      failed: 4,
+    });
+    expect(await settlementCount(B_PERIOD)).toBe(16);
+  });
+
+  it('scoped writer and tenant B are both walled off', async () => {
+    const scoped = await batch({ period: B_PERIOD, bookId: batchBookId }, writerToken);
+    expect(scoped.status).toBe(403);
+    expect(scoped.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+
+    const cross = await batch({ period: B_PERIOD, bookId: batchBookId }, tenantBToken);
+    expect(cross.status).toBe(400);
+    expect(cross.body).toMatchObject({ code: 'BOOK_NOT_FOUND' });
+  });
+});

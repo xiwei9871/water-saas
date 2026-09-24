@@ -21,11 +21,12 @@ import {
   INSTALLATION_STATUS_LABELS,
   METER_STATUS_COLORS,
   METER_STATUS_LABELS,
+  USAGE_CATEGORY_LABELS,
 } from './common';
 
 /**
  * uuid 选择器约定：绝不让用户手填 uuid —— 客户/结算户走后端模糊搜索
- * （?name= 子串匹配），水表/水表户取一页数据后由 Select 本地过滤。
+ * （?name= 子串匹配），水表/用水户取一页数据后由 Select 本地过滤。
  */
 
 interface PickerProps {
@@ -281,8 +282,14 @@ interface WaterAccountSelectProps extends PickerProps {
 }
 
 /**
- * 水表户选择：户号过滤是精确匹配，不适合远程搜索 —— 改为级联：先选客户，
- * 再拉取其名下全部水表户（?customerId=）本地过滤。
+ * 用水户选择：户号过滤是精确匹配，不适合远程搜索 —— 改为级联：先选客户，
+ * 再拉取其名下全部用水户（?customerId=）本地过滤。
+ *
+ * RC1-7 (Human Pilot F12)：选客户后 —
+ *   0 户 → "无可用用水户"；1 户 → 自动选中，不需第二次点击；
+ *   N 户 → 选项展示 户号/地址/当前表号（RC1-4）。
+ * 客户切换后旧值若不在新选项内 → 清空，避免残留他户。
+ * RC1-6: 选项里的用水类别走中文标签，不透内部枚举码。
  */
 export function WaterAccountSelect({
   value,
@@ -295,6 +302,14 @@ export function WaterAccountSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  // Refs mirror the controlled value/handler so the fetch callback reads the
+  // current selection without re-subscribing the effect on every change.
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    valueRef.current = value;
+    onChangeRef.current = onChange;
+  }, [value, onChange]);
 
   useEffect(() => {
     if (!customerId) {
@@ -309,12 +324,25 @@ export function WaterAccountSelect({
       })
       .then((res) => {
         if (cancelled) return;
-        setOptions(
-          res.data.map((a) => ({
-            value: a.id,
-            label: `${a.accountNo} · ${a.usageCategory} · ${a.addr}`,
-          })),
-        );
+        const opts = res.data.map((a) => ({
+          value: a.id,
+          label: [
+            a.accountNo,
+            a.addr,
+            a.currentMeterNo ? `表 ${a.currentMeterNo}` : '无在装表',
+            USAGE_CATEGORY_LABELS[a.usageCategory] ?? a.usageCategory,
+          ].join(' · '),
+        }));
+        setOptions(opts);
+        // Stale selection from a previous customer → clear it; exactly one
+        // account → auto-select it (RC1-7).
+        const cur = valueRef.current;
+        if (cur && !opts.some((o) => o.value === cur)) {
+          onChangeRef.current?.(undefined);
+        } else if (opts.length === 1 && cur !== opts[0].value) {
+          labelCache.set(opts[0].value, opts[0].label);
+          onChangeRef.current?.(opts[0].value);
+        }
       })
       .catch((err) => {
         if (!cancelled) message.error(apiErrorText(err));
@@ -325,7 +353,7 @@ export function WaterAccountSelect({
     return () => {
       cancelled = true;
     };
-  }, [customerId, message]);
+  }, [customerId, message, labelCache]);
 
   return (
     <Select
@@ -333,7 +361,7 @@ export function WaterAccountSelect({
       allowClear
       optionFilterProp="label"
       placeholder={
-        customerId ? (placeholder ?? '选择水表户') : '请先选择客户'
+        customerId ? (placeholder ?? '选择用水户') : '请先选择客户'
       }
       disabled={disabled || !customerId}
       loading={fetching}
@@ -346,7 +374,87 @@ export function WaterAccountSelect({
         }
         onChange?.(v);
       }}
-      notFoundContent={fetching ? '加载中…' : '该客户暂无水表户'}
+      notFoundContent={fetching ? '加载中…' : '无可用用水户'}
+    />
+  );
+}
+
+interface WaterAccountSearchSelectProps extends PickerProps {
+  /** Selected account row is handed back so callers can read
+   * settleAccountId / customerId without a second fetch. */
+  onSelect?: (account: WaterAccount | undefined) => void;
+}
+
+/**
+ * 用水户远程搜索（RC1-4）：?q= 统一匹配 户号/客户名称/客户号/电话/地址/
+ * 当前表号 —— 与级联版 WaterAccountSelect 互补：不知道客户时直接用。
+ */
+export function WaterAccountSearchSelect({
+  value,
+  onChange,
+  onSelect,
+  placeholder,
+  disabled,
+}: WaterAccountSearchSelectProps) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+  const rowsRef = useRef<Map<string, WaterAccount>>(new Map());
+
+  const fetch = useCallback(
+    async (kw: string) => {
+      setFetching(true);
+      try {
+        const res = await api.get<WaterAccount[]>('/water-accounts', {
+          params: { take: 50, ...(kw.trim() ? { q: kw.trim() } : {}) },
+        });
+        rowsRef.current = new Map(res.data.map((a) => [a.id, a]));
+        setOptions(
+          res.data.map((a) => ({
+            value: a.id,
+            label: [
+              a.accountNo,
+              a.customer.name,
+              a.addr,
+              a.currentMeterNo ? `表 ${a.currentMeterNo}` : '无在装表',
+            ].join(' · '),
+          })),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setFetching(false);
+      }
+    },
+    [message],
+  );
+
+  useEffect(() => {
+    queueMicrotask(() => void fetch(''));
+  }, [fetch]);
+  const onSearch = useDebounced((kw) => void fetch(kw));
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      filterOption={false}
+      placeholder={placeholder ?? '户号 / 客户 / 地址 / 表号'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+        onSelect?.(v ? rowsRef.current.get(v) : undefined);
+      }}
+      onSearch={onSearch}
+      notFoundContent={fetching ? '加载中…' : '无匹配用水户'}
     />
   );
 }

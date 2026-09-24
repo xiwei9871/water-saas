@@ -7,15 +7,15 @@ test('C02 empty customer, usage/address and invalid initial reading are blocked 
   let writes = 0;
   const countWrites = (r: any) => { if (r.method() === 'POST' && r.url().includes('/water-accounts/onboard')) writes++; };
   page.on('request', countWrites);
+  // 用水类别是向导顶层字段（决定监控表分支），先选类别再逐步校验
+  await select(page, page.getByLabel('用水类别', { exact: true }), '居民户表');
   await page.getByRole('button', { name: '下一步' }).click();
   await expect(page.getByText('请输入客户名称', { exact: true })).toBeVisible();
   await page.getByLabel('客户名称', { exact: true }).fill('UAT必填校验不提交');
   await page.getByRole('button', { name: '下一步' }).click();
   await page.getByRole('button', { name: '下一步' }).click();
   await page.getByRole('button', { name: '下一步' }).click();
-  await expect(page.getByText('请输入用水类别', { exact: true })).toBeVisible();
   await expect(page.getByText('请输入用水地址', { exact: true })).toBeVisible();
-  await page.getByLabel('用水类别', { exact: true }).fill('UAT_VALIDATION');
   await page.getByLabel('用水地址', { exact: true }).fill('UAT测试地址');
   await page.getByRole('button', { name: '下一步' }).click();
   await page.getByRole('button', { name: '提交立户' }).click();
@@ -38,7 +38,7 @@ test('D06 NO_READ reason required; LOCKED saves as 未抄见', async ({ page }, 
       return r.json();
     }
     const name = 'UAT未抄见-' + Date.now();
-    const onboard = await api('/water-accounts/onboard', { customer: { name, custType: 'PERSONAL' }, account: { usageCategory: 'UAT_NO_READ', addr: 'UAT测试地址' }, meter: {}, installation: { initialReading: '0', reason: 'NEW' } });
+    const onboard = await api('/water-accounts/onboard', { customer: { name, custType: 'PERSONAL' }, account: { usageCategory: 'RES_METERED', addr: 'UAT测试地址' }, meter: {}, installation: { initialReading: '0', reason: 'NEW' } });
     const orgs = await api('/iam/orgs');
     const book = await api('/reading-books', { name, orgUnitId: orgs.find((x: any) => x.type === 'COMPANY').id });
     await api(`/reading-books/${book.id}/meters`, { waterAccountId: onboard.waterAccount.id });

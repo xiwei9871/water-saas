@@ -1,7 +1,7 @@
 export const routes = [
   ['B01', '/', '工作台'],
   ['B02', '/customer/onboard', '立户向导'], ['B02', '/customer/customers', '客户列表'],
-  ['B02', '/customer/water-accounts', '水表户'], ['B02', '/customer/settle-accounts', '结算户'], ['B02', '/customer/meters', '水表档案'],
+  ['B02', '/customer/water-accounts', '用水户'], ['B02', '/customer/settle-accounts', '结算户'], ['B02', '/customer/meters', '水表管理'],
   ['B03', '/metering/books', '抄表册'], ['B03', '/metering/plans', '抄表计划'], ['B03', '/metering/readings', '抄表记录 / 质检'],
   ['B04', '/settlement/list', '结算水量'], ['B04', '/settlement/reconciliations', '补差管理'],
   ['B05', '/billing/tariffs', '资费计划'], ['B05', '/billing/fee-items', '费用项'], ['B05', '/billing/runs', '开账批次'], ['B05', '/billing/bills', '账单'],

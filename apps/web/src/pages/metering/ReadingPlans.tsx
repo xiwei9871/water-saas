@@ -620,7 +620,7 @@ export default function ReadingPlans() {
   const itemColumns: ColumnsType<ReadingPlanItem> = [
     { title: '顺序', dataIndex: 'seqNo', key: 'seqNo', width: 60 },
     {
-      title: '水表户',
+      title: '用水户',
       key: 'waterAccount',
       ellipsis: true,
       render: (_: unknown, item: ReadingPlanItem) => accountLabel(item),
@@ -959,7 +959,7 @@ export default function ReadingPlans() {
           columns={[
             { title: '顺序', dataIndex: 'seqNo', width: 60 },
             {
-              title: '水表户',
+              title: '用水户',
               key: 'wa',
               ellipsis: true,
               render: (_: unknown, item: ReadingPlanItem) => accountLabel(item),

@@ -205,7 +205,7 @@ export default function Reconciliations() {
 
   const columns: ColumnsType<Reconciliation> = [
     {
-      title: '水表户',
+      title: '用水户',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
@@ -323,14 +323,14 @@ export default function Reconciliations() {
                     setWaterAccountId(v);
                     setPage(1);
                   }}
-                  placeholder="按水表户过滤"
+                  placeholder="按用水户过滤"
                 />
               </span>
             </>
           ) : (
             <Input.Search
               allowClear
-              placeholder="按水表户 ID 过滤"
+              placeholder="按用水户 ID 过滤"
               style={{ width: 260 }}
               value={accountIdInput}
               onChange={(e) => setAccountIdInput(e.target.value)}
@@ -418,15 +418,15 @@ export default function Reconciliations() {
         <Form form={createForm} layout="vertical">
           {canCustomerRead ? (
             <>
-              <Form.Item name="customerId" label="客户（仅用于过滤水表户）">
+              <Form.Item name="customerId" label="客户（仅用于过滤用水户）">
                 <CustomerSelect />
               </Form.Item>
               <Form.Item noStyle shouldUpdate={(a, b) => a.customerId !== b.customerId}>
                 {({ getFieldValue }) => (
                   <Form.Item
                     name="waterAccountId"
-                    label="水表户"
-                    rules={[{ required: true, message: '请选择水表户' }]}
+                    label="用水户"
+                    rules={[{ required: true, message: '请选择用水户' }]}
                   >
                     <WaterAccountSelect customerId={getFieldValue('customerId')} />
                   </Form.Item>
@@ -436,14 +436,14 @@ export default function Reconciliations() {
           ) : (
             <Form.Item
               name="waterAccountId"
-              label="水表户 ID"
+              label="用水户 ID"
               rules={[
-                { required: true, message: '请输入水表户 ID' },
+                { required: true, message: '请输入用水户 ID' },
                 { pattern: UUID_RE, message: 'ID 格式不正确' },
               ]}
-              extra="无客户查询权限，需直接填写水表户 ID"
+              extra="无客户查询权限，需直接填写用水户 ID"
             >
-              <Input placeholder="水表户 uuid" />
+              <Input placeholder="用水户 uuid" />
             </Form.Item>
           )}
           <Form.Item
@@ -478,7 +478,7 @@ export default function Reconciliations() {
             items={[
               {
                 key: 'wa',
-                label: '水表户',
+                label: '用水户',
                 children: accountLabel(detail.waterAccountId),
               },
               {

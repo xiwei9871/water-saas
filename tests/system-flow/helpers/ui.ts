@@ -31,8 +31,8 @@ export async function login(page: Page, account = 'admin', password = STAFF_PASS
 }
 
 /** antd Select: click the wrapping .ant-select, optionally search, pick the
- *  exact visible option text. */
-export async function choose(page: Page, control: Locator, label: string, search?: string) {
+ *  exact visible option text (or a RegExp matched against it). */
+export async function choose(page: Page, control: Locator, label: string | RegExp, search?: string) {
   const container = control.locator('xpath=ancestor-or-self::*[contains(concat(" ", normalize-space(@class), " "), " ant-select ")][1]');
   const dropdown = page.locator('.ant-select-dropdown:visible');
   await container.click();
@@ -43,7 +43,10 @@ export async function choose(page: Page, control: Locator, label: string, search
   }
   await expect(dropdown).toBeVisible();
   if (search) await container.getByRole('combobox').fill(search);
-  const option = dropdown.getByText(label, { exact: true });
+  const option =
+    typeof label === 'string'
+      ? dropdown.getByText(label, { exact: true })
+      : dropdown.getByText(label);
   await expect(option).toBeVisible();
   // dispatch the DOM click directly: a real click scrolls the option into
   // view first, and antd closes the dropdown on that scroll — the element
@@ -72,11 +75,14 @@ export function inputByLabel(scope: Locator, label: string) {
 
 export const month = (p: string) => `${p.slice(0, 4)}-${p.slice(4)}`;
 export const personLabel = (p: any) => `${p.customer.name}（${p.customer.customerNo}）`;
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** RC1-4/6/7 选项格式为 `户号 · 地址 · 表 表号 · 中文类别` —— 表号/类别在
+ *  fixture 外无法预知，按 户号+地址 前缀匹配即可（户号唯一）。 */
 export const accountLabel = (p: any) =>
-  `${p.waterAccount.accountNo} · ${p.waterAccount.usageCategory} · ${p.waterAccount.addr}`;
+  new RegExp(`^${esc(p.waterAccount.accountNo)} · ${esc(p.waterAccount.addr)}`);
 
 /** cashier/settlement pickers: customer select then water-account select. */
-export async function selectPerson(page: Page, scope: Locator, p: any, customerPlaceholder = '搜索客户名称', accountPlaceholder = '选择水表户') {
+export async function selectPerson(page: Page, scope: Locator, p: any, customerPlaceholder = '搜索客户名称', accountPlaceholder = '选择用水户') {
   await choose(page, scope.getByText(customerPlaceholder, { exact: true }), personLabel(p), p.customer.name);
   await choose(page, scope.getByText(accountPlaceholder, { exact: true }), accountLabel(p));
 }

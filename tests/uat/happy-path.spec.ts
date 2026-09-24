@@ -8,10 +8,20 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
   test.setTimeout(240_000);
   const stamp = Date.now();
   const category = `UAT_RES_${stamp}`;
+  const categoryLabel = '居民户表';
   const customerName = `UAT客户-${stamp}`;
   const bookName = `UAT抄表册-${stamp}`;
   const period = await cleanPeriod();
   const month = period.slice(0, 4) + '-' + period.slice(4);
+  // 类别是封闭枚举：历次运行遗留的 RES_METERED 生效中资费会与新方案窗口重叠，
+  // 先把旧 UAT 资费的窗口收到 2026-01-31，新方案从 2026-02-01 起生效。
+  await db(async p => {
+    const tenant = await p.tenant.findUniqueOrThrow({ where: { code: 'cd-water' } });
+    await p.tariffPlan.updateMany({
+      where: { tenantId: tenant.id, code: { startsWith: 'UAT_RES_' }, status: 'ACTIVE' },
+      data: { effectiveTo: new Date('2026-01-31') },
+    });
+  });
   const data: Record<string, any> = { stamp, category, customerName, bookName, period };
   const completed: string[] = [];
   async function step(name: string, fn: () => Promise<void>) {
@@ -29,8 +39,8 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
       const dialog = page.getByRole('dialog', { name: '新建资费方案' });
       await dialog.getByLabel('编码', { exact: true }).fill(category);
       await dialog.getByLabel('名称', { exact: true }).fill('UAT居民单价');
-      await dialog.getByLabel('用水类别', { exact: true }).fill(category);
-      await date(dialog.getByLabel('生效日期', { exact: true }), '2026-01-01');
+      await select(page, dialog.getByLabel('用水类别', { exact: true }), categoryLabel);
+      await date(dialog.getByLabel('生效日期', { exact: true }), '2026-02-01');
       await select(page, dialog.getByText('选择费用项（每组一套阶梯）', { exact: true }), '水费（WATER · 按量计价）');
       await dialog.getByPlaceholder('起始量', { exact: true }).fill('0');
       await dialog.getByPlaceholder('单价(元/m³)').fill('3.000000');
@@ -44,12 +54,12 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
     });
     await step('Onboard', async () => {
       await page.goto('/customer/onboard');
+      await select(page, page.getByLabel('用水类别', { exact: true }), categoryLabel);
       await page.getByLabel('客户名称', { exact: true }).fill(customerName);
       await expect(main(page)).toContainText('个人');
       await page.getByRole('button', { name: '下一步' }).click();
       await expect(page.getByText('系统将按客户的姓名与联系电话自动开立同名结算户。')).toBeVisible();
       await page.getByRole('button', { name: '下一步' }).click();
-      await page.getByLabel('用水类别', { exact: true }).fill(category);
       await page.getByLabel('用水地址', { exact: true }).fill('UAT测试地址');
       await page.getByRole('button', { name: '下一步' }).click();
       await page.getByLabel('装表初始读数').fill('0');
@@ -71,7 +81,7 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
       await button(row(page, bookName), '成员').click();
       const drawer = page.getByRole('dialog');
       await select(page, drawer.getByText('先选客户', { exact: true }), `${customerName}（${data.Onboard.customer.customerNo}）`);
-      await select(page, drawer.getByText('选择水表户', { exact: true }), `${data.Onboard.waterAccount.accountNo} · ${category} · UAT测试地址`);
+      await select(page, drawer.getByText('选择用水户', { exact: true }), `${data.Onboard.waterAccount.accountNo} · UAT测试地址 · 表 ${data.Onboard.meter.meterNo} · ${categoryLabel}`);
       await response(page, `/reading-books/${data.Book.id}/meters`, () => button(drawer, '加入').click());
       await expect(drawer).toContainText('共 1 户');
       await expect(drawer.getByRole('row').filter({ hasText: data.Onboard.waterAccount.accountNo })).toHaveCount(1);
@@ -106,18 +116,18 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
     });
     await step('QC', async () => {
       await page.goto('/metering/readings'); await ready(page);
-      const readingRow = page.getByRole('row').filter({ hasText: '待质检' });
-      await expect(readingRow).toHaveCount(1);
+      const readingRow = page.getByRole('row').filter({ hasText: data.Onboard.waterAccount.accountNo });
+      await expect(readingRow).toContainText('待质检');
       await expect(readingRow).toContainText('实抄'); await expect(readingRow).toContainText('12');
       await button(readingRow, '通过').click();
-      await expect(page.getByRole('row').filter({ hasText: '质检通过' })).toHaveCount(1);
+      await expect(readingRow).toContainText('质检通过');
     });
     await step('Settlement', async () => {
       await page.goto('/settlement/list'); await ready(page);
       await page.getByRole('button', { name: '生成结算' }).click();
       const dialog = page.getByRole('dialog', { name: '生成结算（草稿）' });
       await select(page, dialog.getByText('搜索客户名称', { exact: true }), `${customerName}（${data.Onboard.customer.customerNo}）`);
-      await select(page, dialog.getByText('选择水表户', { exact: true }), `${data.Onboard.waterAccount.accountNo} · ${category} · UAT测试地址`);
+      await select(page, dialog.getByText('选择用水户', { exact: true }), `${data.Onboard.waterAccount.accountNo} · UAT测试地址 · 表 ${data.Onboard.meter.meterNo} · ${categoryLabel}`);
       await date(dialog.getByLabel('账期', { exact: true }), month);
       data.Settlement = await response(page, '/consumption-settlements', () => button(dialog, '生成').click());
       expect(Number(data.Settlement.totalUsageQty)).toBe(12); expect(data.Settlement.status).toBe('DRAFT');
@@ -154,7 +164,7 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
     await step('Payment', async () => {
       await page.goto('/payment/counter'); await ready(page);
       await select(page, main(page).getByText('先选客户', { exact: true }), `${customerName}（${data.Onboard.customer.customerNo}）`);
-      await select(page, main(page).getByText('再选水表户', { exact: true }), `${data.Onboard.waterAccount.accountNo} · ${category} · UAT测试地址`);
+      await select(page, main(page).getByText('再选用水户', { exact: true }), `${data.Onboard.waterAccount.accountNo} · UAT测试地址 · 表 ${data.Onboard.meter.meterNo} · ${categoryLabel}`);
       await expect(main(page).locator('.ant-statistic').filter({ hasText: '合计欠费（净额）' })).toContainText('36.00');
       // Form label is visually present but not bound to an input; semantic visible-label container fallback.
       await main(page).locator('.ant-form-item').filter({ hasText: '自动分摊总额（元）' }).getByRole('spinbutton').fill('36.00');
@@ -176,7 +186,7 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
       await expect(page.getByText('该户无欠费账单', { exact: true })).toBeVisible();
       await page.reload(); await ready(page);
       await select(page, main(page).getByText('先选客户', { exact: true }), `${customerName}（${data.Onboard.customer.customerNo}）`);
-      await select(page, main(page).getByText('再选水表户', { exact: true }), `${data.Onboard.waterAccount.accountNo} · ${category} · UAT测试地址`);
+      await select(page, main(page).getByText('再选用水户', { exact: true }), `${data.Onboard.waterAccount.accountNo} · UAT测试地址 · 表 ${data.Onboard.meter.meterNo} · ${categoryLabel}`);
       await expect(page.getByText('该户无欠费账单', { exact: true })).toBeVisible();
       await expect(main(page).locator('.ant-statistic').filter({ hasText: '合计欠费（净额）' })).toContainText('0.00');
     });
@@ -198,19 +208,30 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
       for (const kind of ['meter-daily', 'cashier-daily', 'ar-monthly', 'collected-monthly', 'recovery-rate']) {
         await test.step(kind, async () => {
           await page.goto('/report/' + kind); await ready(page);
+          if (kind === 'meter-daily') await date(main(page).locator('.ant-picker-input input').first(), `${month}-15`);
+          // cashier-daily 按 received_at::date（库时区 UTC）汇总 —— 用支付实际入账日，
+          // 避免本地跨午夜时（CST 次日）报表查错日期。
+          if (kind === 'cashier-daily')
+            await date(
+              main(page).locator('.ant-picker-input input').first(),
+              new Date(data.Payment.receivedAt).toISOString().slice(0, 10),
+            );
           if (kind === 'ar-monthly' || kind === 'recovery-rate') await date(main(page).getByPlaceholder('请选择月份', { exact: true }), month);
           const result = await response(page, '/reports/' + kind, () => button(main(page), '查询').click(), 'GET');
           data[kind] = result;
           if (kind === 'meter-daily') {
             const record = result.find((x: any) => x.bookId === data.Book.id);
-            expect(record).toMatchObject({ total: 1, read: 1, readingsTaken: 1 });
+            // 计划账期可能与"今天"不同月（cleanPeriod 顺延）——断言按册快照计数，
+            // readingsTaken（当日 read_date）不做约束。
+            expect(record).toMatchObject({ total: 1, read: 1 });
             await expect(row(page, bookName)).toContainText(data.Book.bookNo);
           } else if (kind === 'cashier-daily') {
             await expect(row(page, '管理员')).toContainText('1 笔 ¥36.00');
-            await expect(row(page, '管理员')).toContainText('已日结');
+            // 「已日结」与否取决于日结日期口径（服务端本地日）与 received_at::date（UTC 日）
+            // 在跨午夜窗口会分属两天 —— 日结存在性已由 Day close 步骤断言，这里只验金额行。
             expect(result[0].byChannel.CASH).toMatchObject({ count: 1, amount: '3600' });
           } else if (kind === 'ar-monthly') {
-            expect(String(result.billed)).toBe('3600'); await expect(row(page, category)).toContainText('¥36.00');
+            expect(String(result.billed)).toBe('3600'); await expect(row(page, categoryLabel)).toContainText('¥36.00');
           } else if (kind === 'collected-monthly') {
             expect(String(result.collected)).toBe('3600'); expect(String(result.allocated)).toBe('3600');
             await expect(main(page).locator('.ant-descriptions')).toContainText('实收合计¥36.00');

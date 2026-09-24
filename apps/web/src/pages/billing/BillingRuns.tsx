@@ -206,7 +206,7 @@ export default function BillingRuns() {
       ),
     },
     {
-      title: '水表户',
+      title: '用水户',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 140,

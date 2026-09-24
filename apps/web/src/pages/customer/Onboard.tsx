@@ -69,14 +69,14 @@ interface WizardValues {
 const CONTENT_STEPS = [
   { content: 0, title: '客户', description: '新建或选择已有客户' },
   { content: 1, title: '结算户', description: '默认同户主 / 新建 / 已有' },
-  { content: 2, title: '水表户', description: '用水地址与户号' },
+  { content: 2, title: '用水户', description: '用水地址与户号' },
   { content: 3, title: '水表安装', description: '挂表与初始读数' },
 ];
 /** 监控表：无客户/结算户步骤 —— 服务端自动挂靠系统客户，永不计费。 */
 const MONITORING_CONTENTS = [2, 3];
 
 /**
- * 立户向导：一条事务建出 客户 + 结算户 + 水表户 + 水表 + ACTIVE 装表记录。
+ * 立户向导：一条事务建出 客户 + 结算户 + 用水户 + 水表 + ACTIVE 装表记录。
  * Idempotency-Key 在向导挂载时生成一次 —— 重复提交/双击复用同一键，服务端
  * 按相同 body 直接回放首次响应，绝不会重复立户；新一轮向导才换新键。
  */
@@ -235,7 +235,7 @@ export default function Onboard() {
         <Result
           status="success"
           title="立户完成"
-          subTitle="客户、结算户、水表户与水表已在同一事务中建好。"
+          subTitle="客户、结算户、用水户与水表已在同一事务中建好。"
           extra={[
             <Button type="primary" key="again" onClick={resetWizard}>
               继续立户
@@ -244,7 +244,7 @@ export default function Onboard() {
               key="view"
               to={`/customer/water-accounts?accountNo=${encodeURIComponent(result.waterAccount.accountNo)}`}
             >
-              <Button>查看水表户</Button>
+              <Button>查看用水户</Button>
             </Link>,
           ]}
         />
@@ -437,7 +437,7 @@ export default function Onboard() {
             <Form.Item
               name="acctHouseholdSize"
               label="用水人数"
-              extra="居民户一户多人口申报；留空则按资费方案的基准人数计费，后续可在水表户管理中补报"
+              extra="居民户一户多人口申报；留空则按资费方案的基准人数计费，后续可在用水户管理中补报"
             >
               <InputNumber min={1} max={99} precision={0} style={{ width: '100%' }} />
             </Form.Item>

@@ -24,7 +24,7 @@ import type {
   RecoveryRateReport,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtCent, fmtPeriod } from '../common';
+import { fmtCent, fmtPeriod, USAGE_CATEGORY_LABELS } from '../common';
 import { OrgUnitTreeSelect, ReadingBookSelect } from '../pickers';
 import { PAY_CHANNEL_LABELS } from '../payment/common';
 
@@ -404,7 +404,12 @@ export default function Reports({ kind }: { kind: ReportKind }) {
             dataSource={arRows}
             pagination={false}
             columns={[
-              { title: '用水类别', dataIndex: 'category', key: 'category' },
+              {
+                title: '用水类别',
+                dataIndex: 'category',
+                key: 'category',
+                render: (c: string) => USAGE_CATEGORY_LABELS[c] ?? c,
+              },
               { title: '账单数', dataIndex: 'count', key: 'count', width: 120, align: 'right' },
               {
                 title: '应收金额',

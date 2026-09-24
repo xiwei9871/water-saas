@@ -241,6 +241,8 @@ export interface WaterAccount {
     name: string;
     status: AccountStatus;
   };
+  /** RC1-4: ACTIVE installation's meter_no (installedAt desc, id desc). */
+  currentMeterNo?: string | null;
 }
 
 /** GET /water-accounts/:id — 在列表行基础上附带当前（展示用）人数。
@@ -544,6 +546,39 @@ export interface EstimatePreview {
   suggestedUsage: string | null;
   method: EstimateMethod;
   basis: { window: number; historyUsageQtys: string[] };
+}
+
+/* RC1-3: batch settlement generation (F11) */
+export type SettlementBatchItemStatus =
+  | 'READY'
+  | 'READY_ESTIMATED'
+  | 'GENERATED'
+  | 'GENERATED_ESTIMATED'
+  | 'SKIPPED_EXISTS'
+  | 'FAILED';
+
+export interface SettlementBatchItem {
+  waterAccountId: string;
+  accountNo: string;
+  status: SettlementBatchItemStatus;
+  settlementId?: string;
+  errorCode?: string;
+}
+
+export interface SettlementBatchReport {
+  period: string;
+  bookId?: string;
+  orgUnitId?: string;
+  total: number;
+  counts: {
+    ready: number;
+    readyEstimated: number;
+    generated: number;
+    generatedEstimated: number;
+    skippedExists: number;
+    failed: number;
+  };
+  items: SettlementBatchItem[];
 }
 
 /* ------------------------------------------------------------------ */

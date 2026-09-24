@@ -54,7 +54,7 @@ const yuanToCent = (v: number | null | undefined): number | null =>
 const centToYuan = (cent: string): number => Number(cent) / 100;
 
 /**
- * 收费台：选水表户 → 查欠费（outstanding 探针）→ 按账单分摊 →
+ * 收费台：选用水户 → 查欠费（outstanding 探针）→ 按账单分摊 →
  * 提交收款（幂等键随表单打开生成）→ 打印收据。
  * amount = 整数分 = Σ 分摊（服务端同样强校验 PAYMENT_ALLOC_MISMATCH）。
  */
@@ -441,14 +441,14 @@ export default function Cashier() {
                 customerId={customerId}
                 value={waterAccountId}
                 onChange={(v) => setWaterAccountId(v)}
-                placeholder="再选水表户"
+                placeholder="再选用水户"
               />
             </span>
           </>
         ) : (
           <Input.Search
             allowClear
-            placeholder="水表户 ID（uuid）"
+            placeholder="用水户 ID（uuid）"
             style={{ width: 320 }}
             value={accountIdInput}
             onChange={(e) => setAccountIdInput(e.target.value)}

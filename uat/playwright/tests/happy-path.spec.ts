@@ -123,7 +123,7 @@ test.describe('UAT core business happy path', () => {
     await page.goto('/payment/counter');
     await page.getByPlaceholder('先选客户').click();
     await page.locator('.ant-select-dropdown:visible .ant-select-item-option').filter({ hasText: customerName }).click();
-    await page.getByPlaceholder('再选水表户').click();
+    await page.getByPlaceholder('再选用水户').click();
     await page.locator('.ant-select-dropdown:visible .ant-select-item-option').first().click();
     await expect(page.getByText('合计欠费（净额）')).toBeVisible();
     await expect(page.getByText('36.00', { exact: false })).toBeVisible();

@@ -684,6 +684,12 @@ model BookMeter {
   updatedBy      String?  @map("updated_by") @db.Uuid
 
   @@id([bookId, waterAccountId])
+  // RC1-2: route order is server-assigned dense seq (F9) — UNIQUE backstop.
+  // One-book-per-account (F10) is enforced in the service layer (account
+  // FOR UPDATE + ACCOUNT_IN_OTHER_BOOK + transfer), deliberately NOT as a
+  // hard unique: the MULTI_BOOK detector reads physical book_meter rows and
+  // must stay exercisable by fault injection.
+  @@unique([bookId, seqNo])
   @@index([tenantId, bookId])
   @@index([tenantId, waterAccountId])
   @@map("book_meter")

@@ -157,7 +157,8 @@ export class ReadingBookController {
 
   /**
    * POST /reading-books/:id/meters — add a water account to the book.
-   * seqNo optional (defaults to route end); duplicate membership → 409.
+   * seq_no is always assigned server-side (RC1-2 / F9); an account already
+   * on another book → 409 ACCOUNT_IN_OTHER_BOOK (use /transfer instead).
    */
   @Post(':id/meters')
   @Permissions('metering:write')
@@ -171,12 +172,8 @@ export class ReadingBookController {
     if (!body?.waterAccountId) {
       throw new BadRequestException({ code: 'BOOK_MEMBER_FIELDS_REQUIRED' });
     }
-    if (body.seqNo !== undefined && (!Number.isInteger(body.seqNo) || body.seqNo < 1)) {
-      throw new BadRequestException({ code: 'SEQ_NO_INVALID' });
-    }
     const parsed: BookMemberBody = {
       waterAccountId: assertUuid(body.waterAccountId, 'waterAccountId'),
-      seqNo: body.seqNo,
     };
     const ctx = currentTenant();
     return withOptionalIdem(
@@ -185,6 +182,35 @@ export class ReadingBookController {
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
       (tx) => this.svc.addMemberTx(tx, ctx, id, parsed),
+    );
+  }
+
+  /**
+   * POST /reading-books/:id/meters/transfer — move an account's current
+   * membership into this book (RC1-2 / F10): remove-old + add-new in one
+   * transaction. No-op when the account is already here; a plain add when
+   * it has no membership yet.
+   */
+  @Post(':id/meters/transfer')
+  @Permissions('metering:write')
+  transferMember(
+    @Param('id') id: string,
+    @Body() body: BookMemberBody,
+    @Req() req: Request,
+    @Headers('idempotency-key') key?: string,
+  ) {
+    assertUuid(id, 'id');
+    if (!body?.waterAccountId) {
+      throw new BadRequestException({ code: 'BOOK_MEMBER_FIELDS_REQUIRED' });
+    }
+    const waterAccountId = assertUuid(body.waterAccountId, 'waterAccountId');
+    const ctx = currentTenant();
+    return withOptionalIdem(
+      this.prisma,
+      this.idem,
+      ctx,
+      { key, method: 'POST', route: req.path, body, responseStatus: 201 },
+      (tx) => this.svc.transferMemberTx(tx, ctx, id, waterAccountId, req),
     );
   }
 

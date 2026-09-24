@@ -720,3 +720,115 @@ describe('v0.2: book cadence + due-period warning', () => {
     expect(plan.body.cadenceWarning).toBeNull();
   });
 });
+
+/**
+ * RC1-2 (Human Pilot F9/F10): sequence integrity + single-book membership.
+ *  - operator-supplied seqNo is ignored — the server always assigns max+1
+ *  - concurrent adds serialize on the book lock → dense unique seqs
+ *  - an account on another book → 409 ACCOUNT_IN_OTHER_BOOK (with the
+ *    owning book's business identifiers for the transfer dialog)
+ *  - explicit transfer → exactly one membership, in one transaction
+ */
+describe('RC1-2: book membership integrity', () => {
+  let integBook1 = '';
+  let integBook2 = '';
+  const integAcct: string[] = [];
+
+  it('server assigns seqNo even when the client sends one; concurrent adds get dense unique seqs', async () => {
+    const book = await request(app.getHttpServer())
+      .post('/reading-books')
+      .set(auth(adminToken))
+      .send({ name: `T5 Integ1 ${RUN}`, orgUnitId: ORG_A })
+      .expect(201);
+    integBook1 = book.body.id;
+
+    for (let i = 0; i < 6; i++) {
+      const r = await onboard(`IA${i}`);
+      integAcct.push(r.waterAccount.id);
+    }
+
+    // A caller-supplied seqNo must NOT be honored through the public API —
+    // the first member is seq 1 regardless.
+    const first = await request(app.getHttpServer())
+      .post(`/reading-books/${integBook1}/meters`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: integAcct[0], seqNo: 99 })
+      .expect(201);
+    expect(first.body.seqNo).toBe(1);
+
+    // 5 concurrent adds → all 201, seqs are exactly {2,3,4,5,6}.
+    const results = await Promise.all(
+      integAcct.slice(1).map((id) =>
+        request(app.getHttpServer())
+          .post(`/reading-books/${integBook1}/meters`)
+          .set(auth(adminToken))
+          .send({ waterAccountId: id }),
+      ),
+    );
+    for (const r of results) expect(r.status).toBe(201);
+    const seqs = results.map((r) => r.body.seqNo).sort((a: number, b: number) => a - b);
+    expect(seqs).toEqual([2, 3, 4, 5, 6]);
+  });
+
+  it('adding an account that belongs to another book → 409 ACCOUNT_IN_OTHER_BOOK', async () => {
+    const book2 = await request(app.getHttpServer())
+      .post('/reading-books')
+      .set(auth(adminToken))
+      .send({ name: `T5 Integ2 ${RUN}`, orgUnitId: ORG_A })
+      .expect(201);
+    integBook2 = book2.body.id;
+
+    const res = await request(app.getHttpServer())
+      .post(`/reading-books/${integBook2}/meters`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: integAcct[0] });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'ACCOUNT_IN_OTHER_BOOK',
+      waterAccountId: integAcct[0],
+      bookId: integBook1,
+    });
+    expect(typeof res.body.bookNo).toBe('string');
+  });
+
+  it('explicit transfer → exactly one membership, appended at the route end', async () => {
+    const res = await request(app.getHttpServer())
+      .post(`/reading-books/${integBook2}/meters/transfer`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: integAcct[0] })
+      .expect(201);
+    expect(res.body.transferred).toBe(true);
+    expect(res.body.fromBook).toMatchObject({ id: integBook1 });
+    expect(res.body.seqNo).toBe(1);
+
+    // source book no longer holds the account …
+    const src = await request(app.getHttpServer())
+      .get(`/reading-books/${integBook1}`)
+      .set(auth(adminToken))
+      .expect(200);
+    expect(
+      src.body.members.map((m: { waterAccountId: string }) => m.waterAccountId),
+    ).not.toContain(integAcct[0]);
+
+    // … and the account can still not be plain-added to a third book.
+    const book3 = await request(app.getHttpServer())
+      .post('/reading-books')
+      .set(auth(adminToken))
+      .send({ name: `T5 Integ3 ${RUN}`, orgUnitId: ORG_A })
+      .expect(201);
+    const dup = await request(app.getHttpServer())
+      .post(`/reading-books/${book3.body.id}/meters`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: integAcct[0] });
+    expect(dup.status).toBe(409);
+    expect(dup.body).toMatchObject({ code: 'ACCOUNT_IN_OTHER_BOOK', bookId: integBook2 });
+
+    // transfer-to-same-book is an idempotent no-op.
+    const noop = await request(app.getHttpServer())
+      .post(`/reading-books/${integBook2}/meters/transfer`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: integAcct[0] })
+      .expect(201);
+    expect(noop.body.transferred).toBe(false);
+  });
+});

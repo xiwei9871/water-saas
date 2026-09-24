@@ -21,7 +21,7 @@ test('J6 meter lifecycle + account close', async ({ page, audit }, info) => {
 
   await login(page);
   await page.goto('/customer/meters');
-  await expect(page.getByText('水表档案').first()).toBeVisible();
+  await expect(page.getByText('水表管理').first()).toBeVisible();
 
   // ---- register replacement meter ----
   let newMeter = await db((p) => p.meter.findFirst({
@@ -52,7 +52,7 @@ test('J6 meter lifecycle + account close', async ({ page, audit }, info) => {
   }));
   if (!s.meterReplaced) {
     // filter 装拆记录 to SF-A-005 so the ACTIVE row is unambiguous
-    await selectPerson(page, page.locator('.ant-card').nth(1), A5, '先选客户', '按水表户过滤');
+    await selectPerson(page, page.locator('.ant-card').nth(1), A5, '先选客户', '按用水户过滤');
     const row = page.getByRole('row').filter({ hasText: 'M-SF-A-005' }).filter({ hasText: '在用' });
     await button(row, '更换').click();
     const modal = page.getByRole('dialog', { name: /换表/ });
@@ -126,7 +126,7 @@ test('J6 meter lifecycle + account close', async ({ page, audit }, info) => {
 
     // ---- remove the installation → close allowed ----
     await page.goto('/customer/meters');
-    await selectPerson(page, page.locator('.ant-card').nth(1), d1, '先选客户', '按水表户过滤');
+    await selectPerson(page, page.locator('.ant-card').nth(1), d1, '先选客户', '按用水户过滤');
     const instRow = page.getByRole('row').filter({ hasText: 'M-SF-D-001' }).filter({ hasText: '在用' });
     await button(instRow, '拆除').click();
     const rmModal = page.getByRole('dialog', { name: /拆表/ });

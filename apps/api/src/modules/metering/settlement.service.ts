@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -9,6 +10,8 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { estimateAvg3 } from '@ws/billing-core';
 import { estimateStreaksTx } from '../../common/estimate-streak.js';
+import { loadCoveringOrgsTx } from '../../common/account-aggregation-ownership.js';
+import { computeOrgScopeTx } from '../../common/org-scope.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
   assertAccountScopeTx as assertAccountCoverageTx,
@@ -71,6 +74,97 @@ export interface EstimatePreviewBody {
   waterAccountId: string;
   period: string;
 }
+
+/** RC1-3 (Human Pilot F11): batch generation input — period + optional
+ *  route/org narrowing + a shared estimateReason for estimated accounts. */
+export interface SettlementBatchBody {
+  period: string;
+  bookId?: string;
+  orgUnitId?: string;
+  estimateReason?: string | null;
+}
+
+export type BatchItemStatus =
+  | 'READY'
+  | 'READY_ESTIMATED'
+  | 'GENERATED'
+  | 'GENERATED_ESTIMATED'
+  | 'SKIPPED_EXISTS'
+  | 'FAILED';
+
+export interface BatchItem {
+  waterAccountId: string;
+  accountNo: string;
+  status: BatchItemStatus;
+  settlementId?: string;
+  errorCode?: string;
+}
+
+export interface BatchReport {
+  period: string;
+  bookId?: string;
+  orgUnitId?: string;
+  total: number;
+  counts: {
+    ready: number;
+    readyEstimated: number;
+    generated: number;
+    generatedEstimated: number;
+    skippedExists: number;
+    failed: number;
+  };
+  items: BatchItem[];
+}
+
+/** A batch over this many candidate accounts must be narrowed first. */
+export const BATCH_MAX_ACCOUNTS = 500;
+
+/** Sentinel: batch preview rolls its whole transaction back via this throw —
+ *  the report rides along so nothing the simulation wrote ever commits. */
+class BatchPreviewRollback extends Error {
+  constructor(readonly report: BatchReport) {
+    super('batch preview rollback');
+  }
+}
+
+/** The stable domain code out of a thrown Nest exception (else INTERNAL). */
+const exceptionCode = (err: unknown): string => {
+  if (err instanceof HttpException) {
+    const res = err.getResponse();
+    if (res && typeof res === 'object' && typeof (res as { code?: unknown }).code === 'string') {
+      return (res as { code: string }).code;
+    }
+    return `HTTP_${err.getStatus()}`;
+  }
+  return 'INTERNAL';
+};
+
+const batchReport = (body: SettlementBatchBody, items: BatchItem[]): BatchReport => {
+  const counts = {
+    ready: 0,
+    readyEstimated: 0,
+    generated: 0,
+    generatedEstimated: 0,
+    skippedExists: 0,
+    failed: 0,
+  };
+  for (const i of items) {
+    if (i.status === 'READY') counts.ready += 1;
+    else if (i.status === 'READY_ESTIMATED') counts.readyEstimated += 1;
+    else if (i.status === 'GENERATED') counts.generated += 1;
+    else if (i.status === 'GENERATED_ESTIMATED') counts.generatedEstimated += 1;
+    else if (i.status === 'SKIPPED_EXISTS') counts.skippedExists += 1;
+    else counts.failed += 1;
+  }
+  return {
+    period: body.period,
+    bookId: body.bookId,
+    orgUnitId: body.orgUnitId,
+    total: items.length,
+    counts,
+    items,
+  };
+};
 
 const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
 
@@ -612,6 +706,210 @@ export class SettlementService {
       select: SETTLEMENT_SELECT,
     });
     return (await this.attachDetails(tx, ctx, [row!]))[0];
+  }
+
+  // -------------------------------------------------------------------------
+  // RC1-3 batch generation (Human Pilot F11)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Candidate accounts for a batch: every account with ≥1 installation whose
+   * lifetime intersects the period, narrowed by current book membership
+   * (bookId) or covering-book org subtree (orgUnitId), ordered by accountNo
+   * for deterministic processing. Scoped callers silently lose accounts
+   * whose PERIOD plan coverage touches out-of-scope books — the same
+   * anchor assertAccountScope uses per account (they are not listed, not
+   * merely failed). CLOSED accounts stay in the candidate set and surface
+   * as FAILED(WATER_ACCOUNT_CLOSED) so the count is honest.
+   */
+  private async batchCandidates(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    body: SettlementBatchBody,
+  ): Promise<{ id: string; accountNo: string }[]> {
+    const { start, end } = periodBounds(body.period);
+
+    let memberIds: Set<string> | null = null;
+    if (body.bookId) {
+      const book = await tx.readingBook.findFirst({
+        where: { tenantId: ctx.tenantId, id: body.bookId },
+        select: { orgUnitId: true },
+      });
+      if (!book) throw new BadRequestException({ code: 'BOOK_NOT_FOUND' });
+      if (!orgInScope(ctx, book.orgUnitId)) throw outOfScope();
+      const members = await tx.bookMeter.findMany({
+        where: { tenantId: ctx.tenantId, bookId: body.bookId },
+        select: { waterAccountId: true },
+      });
+      memberIds = new Set(members.map((m) => m.waterAccountId));
+    }
+
+    let orgSubtree: Set<string> | null = null;
+    if (body.orgUnitId) {
+      const org = await tx.orgUnit.findFirst({
+        where: { tenantId: ctx.tenantId, id: body.orgUnitId },
+        select: { id: true },
+      });
+      if (!org) throw new BadRequestException({ code: 'ORG_UNIT_NOT_FOUND' });
+      if (!orgInScope(ctx, body.orgUnitId)) throw outOfScope();
+      orgSubtree = new Set(
+        await computeOrgScopeTx(tx, ctx.tenantId, body.orgUnitId, 'ORG_SUBTREE'),
+      );
+    }
+
+    const insts = await tx.meterInstallation.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        installedAt: { lt: end },
+        OR: [{ removedAt: null }, { removedAt: { gte: start } }],
+      },
+      select: { waterAccountId: true },
+    });
+    let ids = [...new Set(insts.map((i) => i.waterAccountId))];
+    if (memberIds !== null) ids = ids.filter((id) => memberIds!.has(id));
+    if (orgSubtree !== null) {
+      const covering = await loadCoveringOrgsTx(tx, ctx.tenantId, ids);
+      ids = ids.filter((id) =>
+        [...(covering.get(id) ?? [])].some((o) => orgSubtree!.has(o)),
+      );
+    }
+    if (ctx.scope !== 'ALL' && ids.length > 0) {
+      // Mirror assertAccountScope: plan items OF THIS PERIOD whose covering
+      // book sits outside the caller's subtree → excluded from candidates.
+      const bad = await tx.$queryRaw<{ water_account_id: string }[]>`
+        SELECT DISTINCT rpi.water_account_id::text
+        FROM reading_plan_item rpi
+        JOIN reading_plan rp
+          ON rp.tenant_id = rpi.tenant_id AND rp.id = rpi.plan_id
+        JOIN reading_book rb
+          ON rb.tenant_id = rpi.tenant_id AND rb.id = rp.book_id
+        WHERE rpi.tenant_id = ${ctx.tenantId}::uuid
+          AND rp.period = ${body.period}
+          AND rpi.water_account_id = ANY(${ids}::uuid[])
+          AND rb.org_unit_id <> ALL(${ctx.orgScope}::uuid[])`;
+      const badSet = new Set(bad.map((r) => r.water_account_id));
+      ids = ids.filter((id) => !badSet.has(id));
+    }
+
+    const accounts = await tx.waterAccount.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: ids } },
+      select: { id: true, accountNo: true },
+      orderBy: [{ accountNo: 'asc' }, { id: 'asc' }],
+    });
+    if (accounts.length > BATCH_MAX_ACCOUNTS) {
+      throw new BadRequestException({
+        code: 'BATCH_TOO_LARGE',
+        max: BATCH_MAX_ACCOUNTS,
+        candidates: accounts.length,
+      });
+    }
+    return accounts;
+  }
+
+  /**
+   * POST /consumption-settlements/batch/preview — runs the REAL generateTx
+   * per candidate inside a per-account SAVEPOINT that is always rolled
+   * back, then rolls back the outer transaction via a sentinel throw. The
+   * classification is therefore exactly what execute would do: READY /
+   * READY_ESTIMATED / SKIPPED_EXISTS / FAILED(code) — nothing persists.
+   */
+  async batchPreview(ctx: TenantCtx, body: SettlementBatchBody): Promise<BatchReport> {
+    try {
+      return await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+        const candidates = await this.batchCandidates(tx, ctx, body);
+        const existing = new Set(
+          (
+            await tx.consumptionSettlement.findMany({
+              where: {
+                tenantId: ctx.tenantId,
+                period: body.period,
+                waterAccountId: { in: candidates.map((c) => c.id) },
+              },
+              select: { waterAccountId: true },
+            })
+          ).map((r) => r.waterAccountId),
+        );
+        const items: BatchItem[] = [];
+        for (const c of candidates) {
+          if (existing.has(c.id)) {
+            items.push({
+              waterAccountId: c.id,
+              accountNo: c.accountNo,
+              status: 'SKIPPED_EXISTS',
+            });
+            continue;
+          }
+          let item: BatchItem;
+          await tx.$executeRaw`SAVEPOINT rc1_batch_item`;
+          try {
+            const created = await this.generateTx(tx, ctx, {
+              waterAccountId: c.id,
+              period: body.period,
+              estimateReason: body.estimateReason ?? null,
+            });
+            item = {
+              waterAccountId: c.id,
+              accountNo: c.accountNo,
+              status: created.isEstimated ? 'READY_ESTIMATED' : 'READY',
+            };
+          } catch (err) {
+            const code = exceptionCode(err);
+            item = {
+              waterAccountId: c.id,
+              accountNo: c.accountNo,
+              status: code === 'SETTLEMENT_ALREADY_EXISTS' ? 'SKIPPED_EXISTS' : 'FAILED',
+              ...(code === 'SETTLEMENT_ALREADY_EXISTS' ? {} : { errorCode: code }),
+            };
+          } finally {
+            await tx.$executeRaw`ROLLBACK TO SAVEPOINT rc1_batch_item`;
+          }
+          items.push(item);
+        }
+        throw new BatchPreviewRollback(batchReport(body, items));
+      });
+    } catch (err) {
+      if (err instanceof BatchPreviewRollback) return err.report;
+      throw err;
+    }
+  }
+
+  /**
+   * POST /consumption-settlements/batch — one independent runAsTenant
+   * transaction PER ACCOUNT in deterministic accountNo order: a single
+   * failure never aborts the batch, and retrying the batch is naturally
+   * idempotent (the unique key turns a rerun into SKIPPED_EXISTS).
+   */
+  async batchExecute(ctx: TenantCtx, body: SettlementBatchBody): Promise<BatchReport> {
+    const candidates = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.batchCandidates(tx, ctx, body),
+    );
+    const items: BatchItem[] = [];
+    for (const c of candidates) {
+      try {
+        const created = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+          this.generateTx(tx, ctx, {
+            waterAccountId: c.id,
+            period: body.period,
+            estimateReason: body.estimateReason ?? null,
+          }),
+        );
+        items.push({
+          waterAccountId: c.id,
+          accountNo: c.accountNo,
+          status: created.isEstimated ? 'GENERATED_ESTIMATED' : 'GENERATED',
+          settlementId: created.id,
+        });
+      } catch (err) {
+        const code = exceptionCode(err);
+        items.push({
+          waterAccountId: c.id,
+          accountNo: c.accountNo,
+          status: code === 'SETTLEMENT_ALREADY_EXISTS' ? 'SKIPPED_EXISTS' : 'FAILED',
+          ...(code === 'SETTLEMENT_ALREADY_EXISTS' ? {} : { errorCode: code }),
+        });
+      }
+    }
+    return batchReport(body, items);
   }
 
   // -------------------------------------------------------------------------

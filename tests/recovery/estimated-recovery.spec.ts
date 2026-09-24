@@ -96,7 +96,7 @@ test('Chrome: paid over-estimate → Chinese guidance → adjustment → zero cu
   await evidence(page, info, 'next-period-real-dial', next);
 
   await page.goto('/payment/counter'); await ready(page);
-  await selectPerson(page, main(page), person, '先选客户', '再选水表户');
+  await selectPerson(page, main(page), person, '先选客户', '再选用水户');
   const pickers = main(page).locator('.cashier-picker > .ant-select');
   const customerBox = await pickers.nth(0).boundingBox();
   const accountBox = await pickers.nth(1).boundingBox();

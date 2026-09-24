@@ -399,7 +399,7 @@ export default function SettleAccounts() {
               ]}
             />
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
-              结算的水表户
+              结算的用水户
             </div>
             <Table<WaterAccountRef>
               rowKey="id"

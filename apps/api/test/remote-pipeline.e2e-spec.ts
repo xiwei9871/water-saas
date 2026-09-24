@@ -130,25 +130,41 @@ const onboard = async (label: string) => {
   };
 };
 
-/** book + member + generated plan → returns {planId, items}. */
-const mkPlan = async (period: string, waterAccountIds: string[], tag: string) => {
+// RC1-2: an account can only be on ONE book at a time — repeated mkPlan
+// calls for the same account reuse its book; a second book requires the
+// transfer endpoint (see the ambiguity test).
+const bookByAccount = new Map<string, string>();
+const bookFor = async (waterAccountId: string, tag: string) => {
+  const cached = bookByAccount.get(waterAccountId);
+  if (cached) return cached;
   const book = await request(app.getHttpServer())
     .post('/reading-books')
     .set(auth(adminToken))
     .send({ name: `E5P book ${tag} ${RUN}`, orgUnitId: ORG_CO })
     .expect(201);
+  await request(app.getHttpServer())
+    .post(`/reading-books/${book.body.id}/meters`)
+    .set(auth(adminToken))
+    .send({ waterAccountId })
+    .expect(201);
+  bookByAccount.set(waterAccountId, book.body.id);
+  return book.body.id as string;
+};
+
+/** book + member + generated plan → returns {planId, items}. */
+const mkPlan = async (period: string, waterAccountIds: string[], tag: string) => {
+  const bookIds = new Set<string>();
   for (const id of waterAccountIds) {
-    await request(app.getHttpServer())
-      .post(`/reading-books/${book.body.id}/meters`)
-      .set(auth(adminToken))
-      .send({ waterAccountId: id })
-      .expect(201);
+    bookIds.add(await bookFor(id, tag));
+  }
+  if (bookIds.size !== 1) {
+    throw new Error('mkPlan: accounts span multiple books');
   }
   const plan = await request(app.getHttpServer())
     .post('/reading-plans/generate')
     .set(auth(adminToken))
     .send({
-      bookId: book.body.id,
+      bookId: [...bookIds][0],
       period,
       planDate: `${period.slice(0, 4)}-${period.slice(4)}-05`,
     })
@@ -503,7 +519,32 @@ describe('late recovery + plan ambiguity', () => {
 
   it('two items same account+period → FAILED PLAN_ITEM_AMBIGUOUS → fix snapshot → replay → CONVERTED', async () => {
     const p1 = await mkPlan('202703', [acct.A], 'amb1');
-    const p2 = await mkPlan('202703', [acct.A], 'amb2');
+    // RC1-2: two plans for the same account+period are only reachable via a
+    // mid-period transfer — the p1 item stays as a snapshot while the
+    // membership moves to the new book and p2 generates there.
+    const book2 = (
+      await request(app.getHttpServer())
+        .post('/reading-books')
+        .set(auth(adminToken))
+        .send({ name: `E5P book amb2 ${RUN}`, orgUnitId: ORG_CO })
+        .expect(201)
+    ).body;
+    await request(app.getHttpServer())
+      .post(`/reading-books/${book2.id}/meters/transfer`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: acct.A })
+      .expect(201);
+    const p2 = {
+      planId: '',
+      items: (
+        await request(app.getHttpServer())
+          .post('/reading-plans/generate')
+          .set(auth(adminToken))
+          .send({ bookId: book2.id, period: '202703', planDate: '2027-03-05' })
+          .expect(201)
+      ).body.items as { id: string; waterAccountId: string }[],
+    };
+    bookByAccount.set(acct.A, book2.id);
     const res = await ingest({
       vendorDeviceKey: DEVKEY,
       businessPeriod: '202703',

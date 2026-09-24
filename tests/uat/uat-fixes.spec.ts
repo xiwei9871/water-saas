@@ -11,7 +11,7 @@ test.beforeAll(async () => {
     const tenant = await p.tenant.findUniqueOrThrow({ where: { code: 'cd-water' } });
     const key = { tenantId: tenant.id, code: 'UAT_LAYOUT_REGRESSION', effectiveFrom: new Date('2026-01-01') };
     await p.tariffPlan.upsert({ where: { tenantId_code_effectiveFrom: key },
-      create: { ...key, name: tariffName, usageCategory: 'UAT_LAYOUT_REGRESSION' }, update: {} });
+      create: { ...key, name: tariffName, usageCategory: 'RES_METERED' }, update: {} });
   });
 });
 
@@ -70,7 +70,7 @@ test('UAT-003 tariff name and date widths with internal table scroll 1024', asyn
 });
 test('Shared header pattern also fits customer meter book and payment lists', async ({ page }, info) => {
   await login(page);
-  for (const [route,title] of [['/customer/customers','客户列表'], ['/customer/meters','水表档案'], ['/metering/books','抄表册'], ['/payment/payments','收款记录']])
+  for (const [route,title] of [['/customer/customers','客户列表'], ['/customer/meters','水表管理'], ['/metering/books','抄表册'], ['/payment/payments','收款记录']])
     await checkHeader(page, info, route, title, 1024);
 });
 test('UAT-004 global Chinese empty date month calendar pagination and modal labels', async ({ page }, info) => {

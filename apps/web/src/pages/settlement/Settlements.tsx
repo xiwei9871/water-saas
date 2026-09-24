@@ -3,6 +3,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons';
 import {
   Alert,
@@ -26,11 +27,14 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { api, apiErrorText, ApiError } from '../../api/client';
 import type {
   ConsumptionComponent,
   ConsumptionSettlement,
   EstimatePreview,
+  ReadingBook,
+  SettlementBatchItem,
+  SettlementBatchReport,
   SettlementStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
@@ -42,7 +46,7 @@ import {
   newIdemKey,
   useWaterAccountLabels,
 } from '../common';
-import { CustomerSelect, WaterAccountSelect } from '../pickers';
+import { CustomerSelect, OrgUnitTreeSelect, WaterAccountSelect } from '../pickers';
 import {
   COMPONENT_SOURCE_COLORS,
   COMPONENT_SOURCE_LABELS,
@@ -59,6 +63,26 @@ interface GenerateFormValues {
   estimateReason?: string;
 }
 
+/** RC1-3: 批量生成表单 —— 账期必填，册/营业所二选一或都不填（全范围）。 */
+interface BatchFormValues {
+  period: dayjs.Dayjs;
+  bookId?: string;
+  orgUnitId?: string;
+  estimateReason?: string;
+}
+
+const BATCH_STATUS_META: Record<
+  SettlementBatchItem['status'],
+  { label: string; color: string }
+> = {
+  READY: { label: '可生成', color: 'green' },
+  READY_ESTIMATED: { label: '可生成·预估', color: 'orange' },
+  GENERATED: { label: '已生成', color: 'green' },
+  GENERATED_ESTIMATED: { label: '已生成·预估', color: 'orange' },
+  SKIPPED_EXISTS: { label: '已存在·跳过', color: 'blue' },
+  FAILED: { label: '失败', color: 'red' },
+};
+
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /**
@@ -71,6 +95,7 @@ export default function Settlements() {
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
   const canCustomerRead = hasPerm('customer:read');
+  const canIamRead = hasPerm('iam:read');
 
   const [rows, setRows] = useState<ConsumptionSettlement[]>([]);
   const [loading, setLoading] = useState(false);
@@ -101,6 +126,14 @@ export default function Settlements() {
   }, [genAccountId]);
 
   const [acting, setActing] = useState<string | null>(null);
+
+  // RC1-3 批量生成
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchBooks, setBatchBooks] = useState<ReadingBook[]>([]);
+  const [batchPreview, setBatchPreview] = useState<SettlementBatchReport | null>(null);
+  const [batchResult, setBatchResult] = useState<SettlementBatchReport | null>(null);
+  const [batchBusy, setBatchBusy] = useState<'preview' | 'run' | null>(null);
+  const [batchForm] = Form.useForm<BatchFormValues>();
 
   const effectiveAccountId = canCustomerRead
     ? waterAccountId
@@ -177,7 +210,7 @@ export default function Settlements() {
   const doPreview = async () => {
     const values = genForm.getFieldsValue();
     if (!values.waterAccountId || !values.period) {
-      message.warning('请先选择水表户与账期');
+      message.warning('请先选择用水户与账期');
       return;
     }
     setPreviewing(true);
@@ -225,6 +258,93 @@ export default function Settlements() {
     }
   };
 
+  const openBatch = () => {
+    batchForm.resetFields();
+    setBatchPreview(null);
+    setBatchResult(null);
+    setBatchOpen(true);
+    api
+      .get<ReadingBook[]>('/reading-books', { params: { take: 200 } })
+      .then((res) => setBatchBooks(res.data))
+      .catch(() => setBatchBooks([]));
+  };
+
+  const batchPayload = async (): Promise<Record<string, unknown> | null> => {
+    let values: BatchFormValues;
+    try {
+      values = await batchForm.validateFields();
+    } catch {
+      return null;
+    }
+    return cleanBody({
+      period: values.period.format('YYYYMM'),
+      bookId: values.bookId,
+      orgUnitId: values.orgUnitId,
+      estimateReason: values.estimateReason,
+    });
+  };
+
+  const runBatchPreview = async () => {
+    const payload = await batchPayload();
+    if (!payload) return;
+    setBatchBusy('preview');
+    try {
+      const res = await api.post<SettlementBatchReport>(
+        '/consumption-settlements/batch/preview',
+        payload,
+      );
+      setBatchPreview(res.data);
+      setBatchResult(null);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setBatchBusy(null);
+    }
+  };
+
+  const runBatchExecute = async () => {
+    const payload = await batchPayload();
+    if (!payload) return;
+    setBatchBusy('run');
+    try {
+      const res = await api.post<SettlementBatchReport>(
+        '/consumption-settlements/batch',
+        payload,
+      );
+      setBatchResult(res.data);
+      message.success(
+        `批量生成完成：成功 ${res.data.counts.generated + res.data.counts.generatedEstimated} 户，跳过 ${res.data.counts.skippedExists} 户，失败 ${res.data.counts.failed} 户`,
+      );
+      await load(page, pageSize);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setBatchBusy(null);
+    }
+  };
+
+  const batchItemColumns: ColumnsType<SettlementBatchItem> = [
+    { title: '户号', dataIndex: 'accountNo', key: 'accountNo', width: 150 },
+    {
+      title: '结果',
+      dataIndex: 'status',
+      key: 'status',
+      width: 120,
+      render: (s: SettlementBatchItem['status']) => (
+        <Tag color={BATCH_STATUS_META[s].color}>{BATCH_STATUS_META[s].label}</Tag>
+      ),
+    },
+    {
+      title: '说明',
+      dataIndex: 'errorCode',
+      key: 'errorCode',
+      render: (code: string | undefined) =>
+        code ? apiErrorText(new ApiError(code, 0)) : '—',
+    },
+  ];
+
+  const batchShown = batchResult ?? batchPreview;
+
   const columns: ColumnsType<ConsumptionSettlement> = [
     {
       title: '账期',
@@ -234,7 +354,7 @@ export default function Settlements() {
       render: fmtPeriod,
     },
     {
-      title: '水表户',
+      title: '用水户',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
@@ -411,14 +531,14 @@ export default function Settlements() {
                     setWaterAccountId(v);
                     setPage(1);
                   }}
-                  placeholder="按水表户过滤"
+                  placeholder="按用水户过滤"
                 />
               </span>
             </>
           ) : (
             <Input.Search
               allowClear
-              placeholder="按水表户 ID 过滤"
+              placeholder="按用水户 ID 过滤"
               style={{ width: 260 }}
               value={accountIdInput}
               onChange={(e) => setAccountIdInput(e.target.value)}
@@ -480,6 +600,11 @@ export default function Settlements() {
               生成结算
             </Button>
           )}
+          {canWrite && (
+            <Button icon={<ThunderboltOutlined />} onClick={openBatch}>
+              批量生成
+            </Button>
+          )}
         </Space>
       }
     >
@@ -534,7 +659,7 @@ export default function Settlements() {
                 },
                 {
                   key: 'wa',
-                  label: '水表户',
+                  label: '用水户',
                   children: accountLabel(detail.waterAccountId),
                 },
                 {
@@ -621,15 +746,15 @@ export default function Settlements() {
         <Form form={genForm} layout="vertical">
           {canCustomerRead ? (
             <>
-              <Form.Item name="customerId" label="客户（仅用于过滤水表户）">
+              <Form.Item name="customerId" label="客户（仅用于过滤用水户）">
                 <CustomerSelect />
               </Form.Item>
               <Form.Item noStyle shouldUpdate={(a, b) => a.customerId !== b.customerId}>
                 {({ getFieldValue }) => (
                   <Form.Item
                     name="waterAccountId"
-                    label="水表户"
-                    rules={[{ required: true, message: '请选择水表户' }]}
+                    label="用水户"
+                    rules={[{ required: true, message: '请选择用水户' }]}
                   >
                     <WaterAccountSelect customerId={getFieldValue('customerId')} />
                   </Form.Item>
@@ -639,14 +764,14 @@ export default function Settlements() {
           ) : (
             <Form.Item
               name="waterAccountId"
-              label="水表户 ID"
+              label="用水户 ID"
               rules={[
-                { required: true, message: '请输入水表户 ID' },
+                { required: true, message: '请输入用水户 ID' },
                 { pattern: UUID_RE, message: 'ID 格式不正确' },
               ]}
-              extra="无客户查询权限，需直接填写水表户 ID"
+              extra="无客户查询权限，需直接填写用水户 ID"
             >
-              <Input placeholder="水表户 uuid" />
+              <Input placeholder="用水户 uuid" />
             </Form.Item>
           )}
           <Form.Item
@@ -703,6 +828,108 @@ export default function Settlements() {
             <Input.TextArea rows={2} placeholder="如：连续两月未抄见，按近三月均量预估" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* RC1-3 批量生成结算 */}
+      <Modal
+        open={batchOpen}
+        title="批量生成结算"
+        width={720}
+        footer={[
+          <Button key="close" onClick={() => setBatchOpen(false)}>
+            关闭
+          </Button>,
+          <Button
+            key="preview"
+            icon={<SearchOutlined />}
+            loading={batchBusy === 'preview'}
+            onClick={() => void runBatchPreview()}
+          >
+            预览分类
+          </Button>,
+          <Button
+            key="run"
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={batchBusy === 'run'}
+            onClick={() => void runBatchExecute()}
+          >
+            批量生成
+          </Button>,
+        ]}
+        onCancel={() => setBatchOpen(false)}
+        destroyOnHidden={false}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="服务端按账期筛选候选户（可按抄表册或营业所缩小范围），逐户独立生成：单户失败不影响其他户，重复执行不会重复生成。预估户需填预估原因。"
+        />
+        <Form form={batchForm} layout="vertical">
+          <Form.Item
+            name="period"
+            label="账期"
+            rules={[{ required: true, message: '请选择账期' }]}
+          >
+            <DatePicker picker="month" style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="bookId" label="抄表册（可空，缩小范围）">
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="不选则覆盖全部有安装的户"
+              options={batchBooks.map((b) => ({
+                value: b.id,
+                label: `${b.name}（${b.bookNo}）`,
+              }))}
+            />
+          </Form.Item>
+          {canIamRead && (
+            <Form.Item name="orgUnitId" label="营业所（可空，缩小范围）">
+              <OrgUnitTreeSelect placeholder="按当前册属营业所子树筛选" />
+            </Form.Item>
+          )}
+          <Form.Item
+            name="estimateReason"
+            label="预估原因"
+            extra="存在预估户时必填；不填则预估户标记为失败（ESTIMATE_REASON_REQUIRED）"
+          >
+            <Input.TextArea rows={2} placeholder="如：本月抄表受阻，按近三月均量预估" />
+          </Form.Item>
+        </Form>
+        {batchShown && (
+          <>
+            <Space wrap style={{ marginBottom: 8 }}>
+              <Tag color="blue">候选 {batchShown.total} 户</Tag>
+              {batchResult ? (
+                <>
+                  <Tag color="green">
+                    已生成 {batchShown.counts.generated + batchShown.counts.generatedEstimated}
+                  </Tag>
+                  <Tag color="orange">其中预估 {batchShown.counts.generatedEstimated}</Tag>
+                  <Tag color="blue">已存在跳过 {batchShown.counts.skippedExists}</Tag>
+                  <Tag color="red">失败 {batchShown.counts.failed}</Tag>
+                </>
+              ) : (
+                <>
+                  <Tag color="green">可生成 {batchShown.counts.ready}</Tag>
+                  <Tag color="orange">可生成·预估 {batchShown.counts.readyEstimated}</Tag>
+                  <Tag color="blue">已存在跳过 {batchShown.counts.skippedExists}</Tag>
+                  <Tag color="red">不可生成 {batchShown.counts.failed}</Tag>
+                </>
+              )}
+            </Space>
+            <Table<SettlementBatchItem>
+              rowKey="waterAccountId"
+              size="small"
+              columns={batchItemColumns}
+              dataSource={batchShown.items}
+              pagination={{ pageSize: 10, showSizeChanger: false }}
+            />
+          </>
+        )}
       </Modal>
     </Card>
   );

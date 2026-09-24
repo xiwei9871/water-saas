@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Headers,
+  HttpCode,
   Param,
   Post,
   Query,
@@ -19,6 +20,7 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 import {
   SettlementService,
+  type SettlementBatchBody,
   type SettlementCreateBody,
   type UsageOverride,
 } from './settlement.service.js';
@@ -47,6 +49,36 @@ interface OverrideWireBody {
   installationId?: string;
   usageQty?: unknown;
 }
+
+interface BatchWireBody {
+  period?: string;
+  bookId?: string;
+  orgUnitId?: string;
+  estimateReason?: string;
+}
+
+const parseBatchBody = (body: BatchWireBody | undefined): SettlementBatchBody => {
+  if (!body?.period) {
+    throw new BadRequestException({ code: 'SETTLEMENT_FIELDS_REQUIRED' });
+  }
+  if (
+    body.estimateReason !== undefined &&
+    body.estimateReason !== null &&
+    typeof body.estimateReason !== 'string'
+  ) {
+    throw new BadRequestException({ code: 'ESTIMATE_REASON_INVALID' });
+  }
+  return {
+    period: assertPeriod(body.period),
+    bookId: body.bookId === undefined ? undefined : assertUuid(body.bookId, 'bookId'),
+    orgUnitId:
+      body.orgUnitId === undefined ? undefined : assertUuid(body.orgUnitId, 'orgUnitId'),
+    estimateReason:
+      typeof body.estimateReason === 'string'
+        ? body.estimateReason.trim() || null
+        : null,
+  };
+};
 
 interface SettlementWireBody {
   waterAccountId?: string;
@@ -163,6 +195,31 @@ export class SettlementController {
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
       (tx) => this.svc.generateTx(tx, ctx, parsed),
     );
+  }
+
+  /**
+   * POST /consumption-settlements/batch/preview — RC1-3 (F11): classifies
+   * every candidate account for the period (optional bookId/orgUnitId
+   * narrowing) as READY / READY_ESTIMATED / SKIPPED_EXISTS / FAILED(code)
+   * by simulating the real generation path. Never writes.
+   */
+  @Post('batch/preview')
+  @HttpCode(200)
+  @Permissions('metering:write')
+  batchPreview(@Body() body: BatchWireBody) {
+    return this.svc.batchPreview(currentTenant(), parseBatchBody(body));
+  }
+
+  /**
+   * POST /consumption-settlements/batch — RC1-3 (F11): server-side batch
+   * generation, one independent transaction per account in accountNo
+   * order. A failure never aborts the batch; a rerun is idempotent
+   * (existing settlements report SKIPPED_EXISTS).
+   */
+  @Post('batch')
+  @Permissions('metering:write')
+  batchExecute(@Body() body: BatchWireBody) {
+    return this.svc.batchExecute(currentTenant(), parseBatchBody(body));
   }
 
   /**

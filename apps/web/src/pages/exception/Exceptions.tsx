@@ -67,7 +67,7 @@ const STATUS_COLORS: Record<string, string> = {
   RESOLVED: 'green',
 };
 const ANCHOR_LABELS: Record<string, string> = {
-  ACCOUNT: '水表户',
+  ACCOUNT: '用水户',
   TENANT: '租户级',
   REMOTE_SOURCE: '远传源',
 };

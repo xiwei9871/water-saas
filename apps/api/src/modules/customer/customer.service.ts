@@ -78,7 +78,9 @@ export class CustomerService {
           ...(hidden.length ? { id: { notIn: hidden } } : {}),
         },
         select: CUSTOMER_SELECT,
-        orderBy: { customerNo: 'asc' },
+        // RC1-5 (Human Pilot F1): newest-first so a just-created customer
+        // always lands on page one.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: q.take,
         skip: q.skip,
       });

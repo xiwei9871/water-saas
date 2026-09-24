@@ -26,6 +26,7 @@ import type { Customer, CustomerDetail, WaterAccountRef } from '../../api/types'
 import { useAuth } from '../../auth/AuthContext';
 import {
   CUST_TYPE_LABELS,
+  USAGE_CATEGORY_LABELS,
   cleanBody,
   cleanPatch,
   fmtTime,
@@ -43,7 +44,7 @@ interface CustomerFormValues {
   addr?: string;
 }
 
-/** 客户列表：名称/编号搜索 + take/skip 分页 + 新建/编辑 + 详情抽屉（名下水表户）。 */
+/** 客户列表：名称/编号搜索 + take/skip 分页 + 新建/编辑 + 详情抽屉（名下用水户）。 */
 export default function Customers() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
@@ -69,6 +70,8 @@ export default function Customers() {
 
   const [detail, setDetail] = useState<CustomerDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  // RC1-5: 新建后回第一页并高亮该行。
+  const [highlightId, setHighlightId] = useState<string | null>(null);
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -130,12 +133,14 @@ export default function Customers() {
     }
     setSaving(true);
     try {
+      let newId: string | null = null;
       if (modal?.mode === 'create') {
-        await api.post(
+        const created = await api.post<Customer>(
           '/customers',
           cleanBody({ ...values }),
           { headers: { 'Idempotency-Key': idemKey } },
         );
+        newId = created.data.id;
         message.success('客户已创建');
       } else if (modal?.mode === 'edit') {
         // customerNo 不可变 —— PATCH 只提交资料字段。
@@ -153,7 +158,14 @@ export default function Customers() {
         message.success('客户已更新');
       }
       setModal(null);
-      await load(page, pageSize);
+      if (newId) {
+        // RC1-5: 列表默认 createdAt desc —— 新记录必在第一页并高亮。
+        setHighlightId(newId);
+        setPage(1);
+        await load(1, pageSize);
+      } else {
+        await load(page, pageSize);
+      }
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -241,7 +253,12 @@ export default function Customers() {
         <Link to={`/customer/water-accounts?accountNo=${encodeURIComponent(no)}`}>{no}</Link>
       ),
     },
-    { title: '用水类别', dataIndex: 'usageCategory', key: 'usageCategory' },
+    {
+      title: '用水类别',
+      dataIndex: 'usageCategory',
+      key: 'usageCategory',
+      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+    },
     {
       title: '状态',
       dataIndex: 'status',
@@ -300,6 +317,7 @@ export default function Customers() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        rowClassName={(r) => (r.id === highlightId ? 'ws-row-highlight' : '')}
         pagination={{
           current: page,
           pageSize,
@@ -408,7 +426,7 @@ export default function Customers() {
             <Space
               style={{ margin: '16px 0 8px', justifyContent: 'space-between', width: '100%' }}
             >
-              <span style={{ fontWeight: 600 }}>名下水表户</span>
+              <span style={{ fontWeight: 600 }}>名下用水户</span>
               <Link to={`/customer/water-accounts?customerId=${detail.id}`}>
                 查看全部
               </Link>

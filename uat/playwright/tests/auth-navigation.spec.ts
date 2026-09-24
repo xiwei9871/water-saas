@@ -46,9 +46,9 @@ test.describe('UAT auth + navigation', () => {
 const routes: Array<[string, string]> = [
   ['/customer/onboard', '立户向导'],
   ['/customer/customers', '客户列表'],
-  ['/customer/water-accounts', '水表户'],
+  ['/customer/water-accounts', '用水户'],
   ['/customer/settle-accounts', '结算户'],
-  ['/customer/meters', '水表档案'],
+  ['/customer/meters', '水表管理'],
   ['/metering/books', '抄表册'],
   ['/metering/plans', '抄表计划'],
   ['/metering/readings', '抄表记录 / 质检'],

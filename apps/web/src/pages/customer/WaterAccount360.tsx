@@ -45,6 +45,7 @@ import {
   READ_SOURCE_LABELS,
   RESULT_TYPE_LABELS,
 } from '../metering/common';
+import { COMPONENT_SOURCE_LABELS } from '../settlement/common';
 import { AccountStatusTag } from '../pickers';
 import { MeterSection } from './MeterSection';
 
@@ -500,7 +501,11 @@ export function WaterAccount360({
                           render: (v: string | null) => v ?? '—',
                         },
                         { title: '用量', dataIndex: 'usageQty' },
-                        { title: '来源', dataIndex: 'sourceType' },
+                        {
+                          title: '来源',
+                          dataIndex: 'sourceType',
+                          render: (t: string) => COMPONENT_SOURCE_LABELS[t as keyof typeof COMPONENT_SOURCE_LABELS] ?? t,
+                        },
                       ]}
                     />
                   ),

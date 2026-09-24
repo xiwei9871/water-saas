@@ -142,7 +142,7 @@ type MeterModalState =
   | null;
 
 /**
- * 水表户：户号精确搜索 + 状态/客户过滤 + 开户 + 编辑 + 生命周期操作
+ * 用水户：户号精确搜索 + 状态/客户过滤 + 开户 + 编辑 + 生命周期操作
  * （暂停/恢复/销户/过户，各走独立 POST + account_event）。
  * URL 参数：?accountNo= / ?customerId=（客户详情抽屉的“查看全部”入口）。
  */
@@ -154,8 +154,12 @@ export default function WaterAccounts() {
 
   const [rows, setRows] = useState<WaterAccount[]>([]);
   const [loading, setLoading] = useState(false);
-  const [noInput, setNoInput] = useState(searchParams.get('accountNo') ?? '');
-  const [accountNo, setAccountNo] = useState(searchParams.get('accountNo') ?? '');
+  // RC1-4: 统一搜索（户号/客户名/客户号/电话/地址/在装表号）；?accountNo=
+  // 深链同样走这个框（包含匹配覆盖精确户号）。
+  const [qInput, setQInput] = useState(searchParams.get('accountNo') ?? '');
+  const [q, setQ] = useState(searchParams.get('accountNo') ?? '');
+  // RC1-5: 新建后回到第一页并高亮该行。
+  const [highlightId, setHighlightId] = useState<string | null>(null);
   const [status, setStatus] = useState<AccountStatus | undefined>(undefined);
   const [customerId, setCustomerId] = useState<string | undefined>(
     searchParams.get('customerId') ?? undefined,
@@ -199,8 +203,8 @@ export default function WaterAccounts() {
     const cid = searchParams.get('customerId');
     queueMicrotask(() => {
       if (no !== null) {
-        setNoInput(no);
-        setAccountNo(no);
+        setQInput(no);
+        setQ(no);
         setPage(1);
       }
       if (cid) setCustomerId(cid);
@@ -230,7 +234,7 @@ export default function WaterAccounts() {
           params: {
             take: size,
             skip: (p - 1) * size,
-            ...(accountNo.trim() ? { accountNo: accountNo.trim() } : {}),
+            ...(q.trim() ? { q: q.trim() } : {}),
             ...(status ? { status } : {}),
             ...(customerId ? { customerId } : {}),
           },
@@ -242,7 +246,7 @@ export default function WaterAccounts() {
         setLoading(false);
       }
     },
-    [accountNo, customerId, message, status],
+    [customerId, message, q, status],
   );
 
   useEffect(() => {
@@ -289,7 +293,8 @@ export default function WaterAccounts() {
   }, [message]);
 
   const openHousehold = (account: WaterAccount) => {
-    householdForm.setFieldsValue({ effectiveMonth: dayjs() });
+    // RC1-1: 默认生效账期=下个账期（申报向前生效，不回溯当月）。
+    householdForm.setFieldsValue({ effectiveMonth: dayjs().add(1, 'month') });
     setHhCurrent(null);
     setHhProfiles([]);
     openModal({ kind: 'household', account });
@@ -314,7 +319,9 @@ export default function WaterAccounts() {
         },
         { headers: { 'Idempotency-Key': idemKey } },
       );
-      message.success('人数申报已保存，自下个账期起生效于阶梯计费');
+      message.success(
+        `申报已保存，自 ${fmtPeriod(values.effectiveMonth.format('YYYYMM'))} 起生效`,
+      );
       householdForm.setFieldsValue({ householdSize: undefined });
       // 弹窗允许多次申报 —— 每次成功后换新幂等键（失败保留原键供重试回放）。
       setIdemKey(newIdemKey());
@@ -335,7 +342,7 @@ export default function WaterAccounts() {
     }
     setSaving(true);
     try {
-      await api.post(
+      const created = await api.post<WaterAccount>(
         '/water-accounts',
         cleanBody({
           customerId: values.customerId,
@@ -347,9 +354,13 @@ export default function WaterAccounts() {
         }),
         { headers: { 'Idempotency-Key': idemKey } },
       );
-      message.success('水表户已开立');
+      message.success('用水户已开立');
       setModal(null);
-      await load(page, pageSize);
+      // RC1-5: createdAt-desc ordering puts the new row on page one; jump
+      // there and highlight it so the operator sees it immediately.
+      setHighlightId(created.data.id);
+      setPage(1);
+      await load(1, pageSize);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -371,7 +382,7 @@ export default function WaterAccounts() {
         `/water-accounts/${modal.account.id}`,
         cleanBody({ usageCategory: values.usageCategory, addr: values.addr }),
       );
-      message.success('水表户已更新');
+      message.success('用水户已更新');
       setModal(null);
       await load(page, pageSize);
     } catch (err) {
@@ -567,6 +578,13 @@ export default function WaterAccounts() {
   const columns: ColumnsType<WaterAccount> = [
     { title: '户号', dataIndex: 'accountNo', key: 'accountNo', width: 150 },
     {
+      title: '当前表号',
+      dataIndex: 'currentMeterNo',
+      key: 'currentMeterNo',
+      width: 120,
+      render: (v: string | null | undefined) => v ?? '—',
+    },
+    {
       title: '客户',
       key: 'customer',
       width: 160,
@@ -722,17 +740,17 @@ export default function WaterAccounts() {
 
   return (
     <Card
-      title="水表户"
+      title="用水户"
       extra={
         <Space wrap>
           <Input.Search
             allowClear
-            placeholder="按户号精确查询"
-            style={{ width: 180 }}
-            value={noInput}
-            onChange={(e) => setNoInput(e.target.value)}
+            placeholder="搜户号/客户/电话/地址/表号"
+            style={{ width: 280 }}
+            value={qInput}
+            onChange={(e) => setQInput(e.target.value)}
             onSearch={(v) => {
-              setAccountNo(v);
+              setQ(v);
               setPage(1);
             }}
           />
@@ -798,9 +816,13 @@ export default function WaterAccounts() {
       <Table<WaterAccount>
         rowKey="id"
         size="middle"
+        scroll={{ x: 1400 }}
         loading={loading}
         columns={columns}
         dataSource={rows}
+        rowClassName={(r) =>
+          r.id === highlightId ? 'ws-row-highlight' : ''
+        }
         pagination={{
           current: page,
           pageSize,
@@ -816,7 +838,7 @@ export default function WaterAccounts() {
       {/* 开户 */}
       <Modal
         open={modal?.kind === 'create'}
-        title="开立水表户"
+        title="开立用水户"
         okText="开户"
         cancelText="取消"
         confirmLoading={saving}
@@ -865,7 +887,7 @@ export default function WaterAccounts() {
       {/* 编辑 */}
       <Modal
         open={modal?.kind === 'edit'}
-        title={modal?.kind === 'edit' ? `编辑水表户 — ${modal.account.accountNo}` : ''}
+        title={modal?.kind === 'edit' ? `编辑用水户 — ${modal.account.accountNo}` : ''}
         okText="保存"
         cancelText="取消"
         confirmLoading={saving}
@@ -915,7 +937,7 @@ export default function WaterAccounts() {
             type="warning"
             showIcon
             style={{ marginBottom: 16 }}
-            message={`原结算户预存余额 ${fmtCent(transferBalance)} 不会随改挂迁移 —— 余额归属结算户而非水表户；如需跨结算户转移请先办理预存退款。`}
+            message={`原结算户预存余额 ${fmtCent(transferBalance)} 不会随改挂迁移 —— 余额归属结算户而非用水户；如需跨结算户转移请先办理预存退款。`}
           />
         )}
         <Form form={transferForm} layout="vertical">
@@ -1001,8 +1023,9 @@ export default function WaterAccounts() {
         <Form form={householdForm} layout="inline" style={{ marginBottom: 16 }}>
           <Form.Item
             name="householdSize"
-            label="用水人数"
-            rules={[{ required: true, message: '请输入人数' }]}
+            label="变更申报人口"
+            rules={[{ required: true, message: '请输入变更后的人口数' }]}
+            extra="本次申报的新人口数（不是累计增量）"
           >
             <InputNumber min={1} max={99} precision={0} placeholder="人" />
           </Form.Item>
@@ -1010,6 +1033,7 @@ export default function WaterAccounts() {
             name="effectiveMonth"
             label="生效账期"
             rules={[{ required: true, message: '请选择生效账期' }]}
+            extra="自该账期起生效，不修改历史"
           >
             <DatePicker picker="month" allowClear={false} />
           </Form.Item>
@@ -1250,7 +1274,7 @@ export default function WaterAccounts() {
 }
 
 /**
- * 水表户详情的“水表”区（E7 对象中心视图）：
+ * 用水户详情的“水表”区（E7 对象中心视图）：
  * - 0 ACTIVE：装表入口
  * - 1 ACTIVE：当前表卡片 + 换表/拆表
  * - >1 ACTIVE：如实展示 + 异常警示（domain 允许多表，UI 不自动修复）

@@ -21,8 +21,9 @@ export const CUST_TYPE_LABELS: Record<CustType, string> = {
 /** 受控用水类别 —— 与 API 侧 common/usage-categories.ts 的固定集合一致；
  * 服务端 422 INVALID_USAGE_CATEGORY + DB CHECK 双重兜底。 */
 export const USAGE_CATEGORY_LABELS: Record<string, string> = {
-  RES_METERED: '居民（户表）',
-  RES_SHARED: '居民（非户表）',
+  // RC1-6 术语冻结：居民户表/居民合表/非居民/特种/监控表
+  RES_METERED: '居民户表',
+  RES_SHARED: '居民合表',
   NON_RES: '非居民',
   SPECIAL: '特种',
   MONITORING: '监控表',
@@ -134,7 +135,7 @@ export const cleanPatch = <T extends Record<string, unknown>>(
 };
 
 /**
- * 水表户 id → 户号 的批量水合 hook：结算/补差等列表只带
+ * 用水户 id → 户号 的批量水合 hook：结算/补差等列表只带
  * waterAccountId，逐条 GET /water-accounts/:id 解析成户号展示。
  * 需 customer:read —— 没有权限（或单条失败）时退化为短 uuid 显示。
  */

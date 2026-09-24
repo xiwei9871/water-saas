@@ -80,7 +80,11 @@ export class WaterAccountController {
     private readonly idem: IdempotencyService,
   ) {}
 
-  /** GET /water-accounts — ?customerId= / ?settleAccountId= / ?status= / ?accountNo=. */
+  /**
+   * GET /water-accounts — ?customerId= / ?settleAccountId= / ?status= /
+   * ?accountNo= / ?q= (RC1-4 unified: 户号/客户名/客户号/电话/地址/在装表号).
+   * Rows carry currentMeterNo (ACTIVE install, installedAt desc, id desc).
+   */
   @Get()
   @Permissions('customer:read')
   list(
@@ -88,6 +92,7 @@ export class WaterAccountController {
     @Query('settleAccountId') settleAccountId?: string,
     @Query('status') status?: string,
     @Query('accountNo') accountNo?: string,
+    @Query('q') q?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
@@ -102,6 +107,7 @@ export class WaterAccountController {
       settleAccountId,
       status: status as 'NORMAL' | 'SUSPENDED' | 'CLOSED' | undefined,
       accountNo,
+      q,
     });
   }
 

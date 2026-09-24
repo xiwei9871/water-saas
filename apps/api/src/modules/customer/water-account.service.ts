@@ -145,6 +145,12 @@ export class WaterAccountService {
     private readonly installs: MeterInstallationService,
   ) {}
 
+  /**
+   * GET /water-accounts — RC1-4 unified `q`: one box searches account_no,
+   * addr, customer name/no/phone AND the CURRENT meter's meter_no (ACTIVE
+   * installation). RC1-5: default order is newest-first (createdAt desc,
+   * id desc) so a just-created account lands on page one.
+   */
   list(
     ctx: TenantCtx,
     q: {
@@ -154,6 +160,7 @@ export class WaterAccountService {
       settleAccountId?: string;
       status?: AccountStatus;
       accountNo?: string;
+      q?: string;
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
@@ -162,20 +169,79 @@ export class WaterAccountService {
       // resurrect an out-of-scope account.
       const hidden =
         ctx.scope === 'ALL' ? [] : await outOfScopeAccountIds(tx, ctx);
-      return tx.waterAccount.findMany({
+      const needle = q.q?.trim();
+      let meterHitIds: string[] | null = null;
+      if (needle) {
+        const hits = await tx.meterInstallation.findMany({
+          where: {
+            tenantId: ctx.tenantId,
+            status: 'ACTIVE',
+            meter: { meterNo: { contains: needle, mode: 'insensitive' } },
+          },
+          select: { waterAccountId: true },
+        });
+        meterHitIds = [...new Set(hits.map((h) => h.waterAccountId))];
+      }
+      const rows = await tx.waterAccount.findMany({
         where: {
           tenantId: ctx.tenantId,
           customerId: q.customerId,
           settleAccountId: q.settleAccountId,
           status: q.status,
           accountNo: q.accountNo,
+          ...(needle
+            ? {
+                OR: [
+                  { accountNo: { contains: needle, mode: 'insensitive' } },
+                  { addr: { contains: needle, mode: 'insensitive' } },
+                  {
+                    customer: {
+                      is: {
+                        OR: [
+                          { name: { contains: needle, mode: 'insensitive' } },
+                          { customerNo: { contains: needle, mode: 'insensitive' } },
+                          { phone: { contains: needle, mode: 'insensitive' } },
+                        ],
+                      },
+                    },
+                  },
+                  { id: { in: meterHitIds ?? [] } },
+                ],
+              }
+            : {}),
           ...(hidden.length ? { id: { notIn: hidden } } : {}),
         },
         select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
-        orderBy: { accountNo: 'asc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: q.take,
         skip: q.skip,
       });
+      // 当前表号 = ACTIVE installation ORDER BY installed_at DESC, id DESC
+      // (E7 current-meter rule, shared with the 360 resolver).
+      const actives = rows.length
+        ? await tx.meterInstallation.findMany({
+            where: {
+              tenantId: ctx.tenantId,
+              waterAccountId: { in: rows.map((r) => r.id) },
+              status: 'ACTIVE',
+            },
+            select: {
+              waterAccountId: true,
+              meter: { select: { meterNo: true } },
+            },
+            orderBy: [{ installedAt: 'desc' }, { id: 'desc' }],
+          })
+        : [];
+      const currentMeter = new Map<string, string>();
+      for (const a of actives) {
+        if (!currentMeter.has(a.waterAccountId)) {
+          currentMeter.set(a.waterAccountId, a.meter.meterNo);
+        }
+      }
+      return rows.map((r) => ({
+        ...r,
+        currentMeterNo: currentMeter.get(r.id) ?? null,
+      }));
     });
   }
 

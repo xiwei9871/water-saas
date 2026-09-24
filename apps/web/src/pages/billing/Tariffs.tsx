@@ -812,7 +812,7 @@ export default function Tariffs() {
                 label="用水类别"
                 rules={[{ required: true, message: '请选择用水类别' }]}
                 style={{ width: '50%' }}
-                extra="须与水表户的用水类别一致"
+                extra="须与用水户的用水类别一致"
               >
                 <Select options={USAGE_CATEGORY_OPTIONS} placeholder="选择用水类别" />
               </Form.Item>
@@ -924,7 +924,9 @@ export default function Tariffs() {
                 {
                   key: 'uc',
                   label: '用水类别',
-                  children: detail.usageCategory,
+                  children:
+                    USAGE_CATEGORY_LABELS[detail.usageCategory] ??
+                    detail.usageCategory,
                 },
                 {
                   key: 'status',

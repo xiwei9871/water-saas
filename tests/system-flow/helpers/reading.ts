@@ -43,7 +43,7 @@ export async function addBookMembers(page: Page, bookName: string, members: any[
   await expect(drawer.getByText('册成员', { exact: false }).first()).toBeVisible();
   for (const m of members) {
     await choose(page, drawer.getByText('先选客户', { exact: true }), personLabel(m), m.customer.name);
-    await choose(page, drawer.getByText('选择水表户', { exact: true }), accountLabel(m));
+    await choose(page, drawer.getByText('选择用水户', { exact: true }), accountLabel(m));
     await response(page, /\/reading-books\/[0-9a-f-]+\/meters/, () =>
       button(drawer, '加入').click());
     await expect(drawer.getByRole('row').filter({ hasText: m.waterAccount.accountNo })).toBeVisible();

@@ -99,7 +99,7 @@ test('J7 exception center', async ({ page, audit }, info) => {
     where: { tenantId: s.tenantId, waterAccountId: X1.waterAccount.id, status: 'ACTIVE' } }));
   if (x1Active) {
     await page.goto('/customer/meters');
-    await selectPerson(page, page.locator('.ant-card').nth(1), X1, '先选客户', '按水表户过滤');
+    await selectPerson(page, page.locator('.ant-card').nth(1), X1, '先选客户', '按用水户过滤');
     const instRow = page.getByRole('row').filter({ hasText: 'M-SF-X-001' }).filter({ hasText: '在用' });
     await button(instRow, '拆除').click();
     const rmModal = page.getByRole('dialog', { name: /拆表/ });

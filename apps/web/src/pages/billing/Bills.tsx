@@ -261,7 +261,7 @@ export default function Bills() {
   const columns: ColumnsType<Bill> = [
     { title: '账期', dataIndex: 'period', key: 'period', width: 90, render: fmtPeriod },
     {
-      title: '水表户',
+      title: '用水户',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 140,
@@ -450,7 +450,7 @@ export default function Bills() {
                     setWaterAccountId(undefined);
                     setPage(1);
                   }}
-                  placeholder="先选客户（联动水表户）"
+                  placeholder="先选客户（联动用水户）"
                 />
               </span>
               <span style={{ width: 200, display: 'inline-block' }}>
@@ -461,7 +461,7 @@ export default function Bills() {
                     setWaterAccountId(v);
                     setPage(1);
                   }}
-                  placeholder="按水表户过滤"
+                  placeholder="按用水户过滤"
                 />
               </span>
               <span style={{ width: 200, display: 'inline-block' }}>
@@ -479,7 +479,7 @@ export default function Bills() {
             <>
               <Input.Search
                 allowClear
-                placeholder="按水表户 ID 过滤"
+                placeholder="按用水户 ID 过滤"
                 style={{ width: 220 }}
                 value={accountIdInput}
                 onChange={(e) => setAccountIdInput(e.target.value)}
@@ -610,7 +610,7 @@ export default function Bills() {
                 },
                 {
                   key: 'wa',
-                  label: '水表户',
+                  label: '用水户',
                   children: accountLabel(detail.waterAccountId),
                 },
                 { key: 'sa', label: '结算户', children: shortId(detail.settleAccountId) },

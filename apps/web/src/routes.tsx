@@ -30,6 +30,7 @@ import RemoteSources from './pages/metering/RemoteSources';
 import Cashier from './pages/payment/Cashier';
 import DayClose from './pages/payment/DayClose';
 import Payments from './pages/payment/Payments';
+import Prepayments from './pages/payment/Prepayments';
 import Reports from './pages/report/Reports';
 import Reconciliations from './pages/settlement/Reconciliations';
 import Settlements from './pages/settlement/Settlements';
@@ -100,7 +101,7 @@ export const APP_ROUTES: AppRoute[] = [
       {
         key: 'customer-water-accounts',
         path: '/customer/water-accounts',
-        label: '水表户',
+        label: '用水户',
         element: <WaterAccounts />,
       },
       {
@@ -112,7 +113,7 @@ export const APP_ROUTES: AppRoute[] = [
       {
         key: 'customer-meters',
         path: '/customer/meters',
-        label: '水表档案',
+        label: '水表管理',
         element: <Meters />,
       },
     ],
@@ -238,6 +239,12 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/payment/payments',
         label: '收款记录',
         element: <Payments />,
+      },
+      {
+        key: 'payment-prepayments',
+        path: '/payment/prepayments',
+        label: '预存管理',
+        element: <Prepayments />,
       },
       {
         key: 'payment-day-close',
