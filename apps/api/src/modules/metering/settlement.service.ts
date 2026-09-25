@@ -120,7 +120,10 @@ export interface BatchReport {
 export const BATCH_MAX_ACCOUNTS = 500;
 
 /** Sentinel: batch preview rolls its whole transaction back via this throw —
- *  the report rides along so nothing the simulation wrote ever commits. */
+ *  the report rides along so none of the simulated business writes commit.
+ *  Note: this only guarantees zero business-state side effects — the audit
+ *  interceptor still writes an audit_log row in a separate transaction after
+ *  the successful response (the preview attempt itself is auditable). */
 class BatchPreviewRollback extends Error {
   constructor(readonly report: BatchReport) {
     super('batch preview rollback');
@@ -811,7 +814,9 @@ export class SettlementService {
    * per candidate inside a per-account SAVEPOINT that is always rolled
    * back, then rolls back the outer transaction via a sentinel throw. The
    * classification is therefore exactly what execute would do: READY /
-   * READY_ESTIMATED / SKIPPED_EXISTS / FAILED(code) — nothing persists.
+   * READY_ESTIMATED / SKIPPED_EXISTS / FAILED(code) — no business state
+   * persists. (An audit_log row for the preview request may still be
+   * written post-response by the audit interceptor; that is intentional.)
    */
   async batchPreview(ctx: TenantCtx, body: SettlementBatchBody): Promise<BatchReport> {
     try {

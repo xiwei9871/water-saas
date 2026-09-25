@@ -831,4 +831,51 @@ describe('RC1-2: book membership integrity', () => {
       .expect(201);
     expect(noop.body.transferred).toBe(false);
   });
+
+  it('same account raced into two different books → exactly one membership', async () => {
+    // RC2 gate: the single-book invariant rests entirely on the
+    // water_account FOR UPDATE lock inside addMemberTx — there is
+    // deliberately no DB unique on (tenant_id, water_account_id) so the
+    // E9 fault harness can still build MULTI_BOOK. Same-account concurrent
+    // adds to two different books take different book locks and serialize
+    // only on the account lock — this is the race that must not leak.
+    for (let round = 0; round < 3; round++) {
+      const acc = await onboard(`Race${round}`);
+      const [bookA, bookB] = await Promise.all([
+        request(app.getHttpServer())
+          .post('/reading-books')
+          .set(auth(adminToken))
+          .send({ name: `T5 RaceA${round} ${RUN}`, orgUnitId: ORG_A })
+          .expect(201),
+        request(app.getHttpServer())
+          .post('/reading-books')
+          .set(auth(adminToken))
+          .send({ name: `T5 RaceB${round} ${RUN}`, orgUnitId: ORG_A })
+          .expect(201),
+      ]);
+
+      const [ra, rb] = await Promise.all([
+        request(app.getHttpServer())
+          .post(`/reading-books/${bookA.body.id}/meters`)
+          .set(auth(adminToken))
+          .send({ waterAccountId: acc.waterAccount.id }),
+        request(app.getHttpServer())
+          .post(`/reading-books/${bookB.body.id}/meters`)
+          .set(auth(adminToken))
+          .send({ waterAccountId: acc.waterAccount.id }),
+      ]);
+
+      const statuses = [ra.status, rb.status].sort((x, y) => x - y);
+      expect(statuses).toEqual([201, 409]);
+      const loser = ra.status === 409 ? ra : rb;
+      expect(loser.body).toMatchObject({ code: 'ACCOUNT_IN_OTHER_BOOK' });
+
+      // physical truth: exactly one membership row for the account
+      const rows = await owner.query(
+        `SELECT count(*)::int AS n FROM book_meter WHERE water_account_id = $1`,
+        [acc.waterAccount.id],
+      );
+      expect(rows.rows[0].n).toBe(1);
+    }
+  });
 });
