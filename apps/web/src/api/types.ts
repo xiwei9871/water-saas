@@ -1076,7 +1076,11 @@ export interface RemoteDeviceBinding {
     removedAt: string | null;
     status: InstallationStatus;
     meter: { meterNo: string };
-    waterAccount: { accountNo: string };
+    waterAccount: {
+      accountNo: string;
+      /** Round-2: 户号旁带客户名。 */
+      customer?: { name: string } | null;
+    };
   } | null;
 }
 
