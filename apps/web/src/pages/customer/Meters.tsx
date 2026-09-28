@@ -115,6 +115,7 @@ export default function Meters() {
   const [rows, setRows] = useState<Meter[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<MeterStatus | undefined>();
+  const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
@@ -158,6 +159,7 @@ export default function Meters() {
             take: size,
             skip: (p - 1) * size,
             ...(statusFilter ? { status: statusFilter } : {}),
+            ...(search ? { q: search } : {}),
           },
         });
         setRows(res.data);
@@ -167,7 +169,7 @@ export default function Meters() {
         setLoading(false);
       }
     },
-    [message, statusFilter],
+    [message, statusFilter, search],
   );
 
   useEffect(() => {
@@ -386,6 +388,20 @@ export default function Meters() {
   const meterColumns: ColumnsType<Meter> = [
     { title: '表号', dataIndex: 'meterNo', key: 'meterNo', width: 150 },
     {
+      title: '在装户号',
+      dataIndex: 'currentAccountNo',
+      key: 'currentAccountNo',
+      width: 140,
+      render: (v: string | null | undefined) => v ?? '—',
+    },
+    {
+      title: '在装客户',
+      dataIndex: 'currentCustomerName',
+      key: 'currentCustomerName',
+      width: 120,
+      render: (v: string | null | undefined) => v ?? '—',
+    },
+    {
       title: '出厂编号',
       dataIndex: 'serialNo',
       key: 'serialNo',
@@ -563,6 +579,15 @@ export default function Meters() {
         title="水表管理"
         extra={
           <Space wrap>
+            <Input.Search
+              allowClear
+              placeholder="搜表号/户号/客户名"
+              style={{ width: 200 }}
+              onSearch={(v) => {
+                setSearch(v.trim());
+                setPage(1);
+              }}
+            />
             <Select
               allowClear
               placeholder="按状态筛选"

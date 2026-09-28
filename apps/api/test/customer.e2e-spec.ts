@@ -259,6 +259,55 @@ describe('onboard wizard (立户)', () => {
     });
   });
 
+  // Round-2 pilot feedback: one household must read as ONE number — the
+  // four doc numbers may only differ by prefix letter (C/S/A/M + yyyyMM +
+  // same 6-digit suffix).
+  it('aligns customer/settle/account/meter suffix for one household', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `T4 Aligned ${RUN}`, custType: 'PERSONAL' },
+        account: { usageCategory: 'RES_METERED', addr: '5 Align Ave' },
+        meter: { brand: 't4-brand' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+
+    const { customer, settleAccount, waterAccount, meter } = res.body;
+    expect([
+      customer.customerNo[0],
+      settleAccount.settleNo[0],
+      waterAccount.accountNo[0],
+      meter.meterNo[0],
+    ]).toEqual(['C', 'S', 'A', 'M']);
+    const suffix = waterAccount.accountNo.slice(1);
+    expect(customer.customerNo.slice(1)).toBe(suffix);
+    expect(settleAccount.settleNo.slice(1)).toBe(suffix);
+    expect(meter.meterNo.slice(1)).toBe(suffix);
+  });
+
+  it('linked customer keeps its number; newly created S/A/M still align', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customerId: custId, // T4 Alice from the first onboard
+        account: { usageCategory: 'RES_METERED', addr: '6 Align Ave' },
+        meter: { brand: 't4-brand' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+
+    const { customer, settleAccount, waterAccount, meter } = res.body;
+    expect(customer.id).toBe(custId);
+    const suffix = waterAccount.accountNo.slice(1);
+    expect(settleAccount.settleNo.slice(1)).toBe(suffix);
+    expect(meter.meterNo.slice(1)).toBe(suffix);
+    // the pre-existing customer number is untouched, not re-aligned
+    expect(customer.customerNo).toMatch(/^C\d{12}$/);
+  });
+
   it('rejects malformed wizard bodies (400, not 500)', async () => {
     // neither customer nor customerId
     await request(app.getHttpServer())

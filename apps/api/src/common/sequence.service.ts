@@ -27,6 +27,17 @@ const currentPeriod = (): string => {
  * metering (book_no), payment (payment_no/receipt_no) — and the module
  * direction forbids payment importing customer where it originally sat.
  */
+export interface SeqSlot {
+  seqKey: string;
+  prefix: string;
+  /**
+   * True when `no` is already taken in that entity's number space.
+   * Explicit/migrated numbers can sit ahead of a counter, so alignment must
+   * skip candidates that were never issued by sys_sequence itself.
+   */
+  exists?: (no: string) => Promise<boolean>;
+}
+
 @Injectable()
 export class SequenceService {
   async nextFormatted(
@@ -48,5 +59,72 @@ export class SequenceService {
                     updated_by = ${staffId ?? null}::uuid
       RETURNING cur_val`;
     return `${prefix}${period}${rows[0].cur_val.toString().padStart(6, '0')}`;
+  }
+
+  /**
+   * Round-2 numbering: entities created inside ONE onboard share a single
+   * numeric suffix — 客户号/结算户/户号/表号 differ only by prefix, so an
+   * operator can tell at a glance that C/S/A/M rows are the same household.
+   *
+   * Locks every slot's (tenant, seq_key, period) row FOR UPDATE inside the
+   * caller's tx, then issues max(cur_val)+1 to ALL slots — counters jump
+   * forward together (gaps are fine, numbering is unique not gapless) and
+   * stay aligned for the next onboard. A candidate already taken by an
+   * explicit/migrated number bumps the shared target until all spaces are
+   * free. Same-tx rollback returns the numbers, like nextFormatted.
+   */
+  async nextAligned(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    slots: SeqSlot[],
+    staffId?: string,
+  ): Promise<string[]> {
+    if (slots.length === 0) return [];
+    const period = currentPeriod();
+    for (const s of slots) {
+      await tx.$executeRaw`
+        INSERT INTO sys_sequence (id, tenant_id, seq_key, period, cur_val,
+                                  created_at, created_by, updated_at, updated_by)
+        VALUES (gen_random_uuid(), ${tenantId}::uuid, ${s.seqKey},
+                ${period}::char(6), 0, now(), ${staffId ?? null}::uuid,
+                now(), ${staffId ?? null}::uuid)
+        ON CONFLICT (tenant_id, seq_key, period) DO NOTHING`;
+    }
+    const rows = await tx.$queryRaw<{ seq_key: string; cur_val: bigint }[]>`
+      SELECT seq_key, cur_val FROM sys_sequence
+      WHERE tenant_id = ${tenantId}::uuid AND period = ${period}::char(6)
+        AND seq_key IN (${Prisma.join(slots.map((s) => s.seqKey))})
+      ORDER BY seq_key FOR UPDATE`;
+    const cur = new Map(rows.map((r) => [r.seq_key, Number(r.cur_val)]));
+    let target = Math.max(...slots.map((s) => cur.get(s.seqKey) ?? 0)) + 1;
+    let attempts = 0;
+    for (;;) {
+      const candidates = slots.map(
+        (s) => `${s.prefix}${period}${String(target).padStart(6, '0')}`,
+      );
+      const taken = await Promise.all(
+        slots.map((s, i) =>
+          s.exists ? s.exists(candidates[i]) : Promise.resolve(false),
+        ),
+      );
+      if (!taken.some(Boolean)) break;
+      if (++attempts >= 50) {
+        throw new Error(
+          'aligned numbering exhausted: explicit numbers occupy 50 consecutive suffixes',
+        );
+      }
+      target += 1;
+    }
+    for (const s of slots) {
+      await tx.$executeRaw`
+        UPDATE sys_sequence
+        SET cur_val = ${target}, updated_at = now(),
+            updated_by = ${staffId ?? null}::uuid
+        WHERE tenant_id = ${tenantId}::uuid AND seq_key = ${s.seqKey}
+          AND period = ${period}::char(6)`;
+    }
+    return slots.map(
+      (s) => `${s.prefix}${period}${String(target).padStart(6, '0')}`,
+    );
   }
 }

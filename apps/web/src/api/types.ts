@@ -318,6 +318,10 @@ export interface Meter {
   maxDial: string | null;
   parentMeterId: string | null;
   status: MeterStatus;
+  /** List-only: account the device is currently mounted on (ACTIVE install). */
+  currentAccountNo?: string | null;
+  /** List-only: name of that account's customer. */
+  currentCustomerName?: string | null;
   createdAt: string;
   updatedAt: string;
 }
