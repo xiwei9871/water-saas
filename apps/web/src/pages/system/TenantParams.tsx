@@ -170,7 +170,7 @@ export default function TenantParams() {
         pagination={{ pageSize: 20 }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={modal?.mode === 'create' ? '新增参数' : `编辑参数 — ${modal?.param.key}`}
         okText="保存"

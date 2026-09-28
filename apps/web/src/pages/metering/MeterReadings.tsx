@@ -526,7 +526,7 @@ export default function MeterReadings() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1900 }}
+        scroll={{ x: 1900, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -540,7 +540,7 @@ export default function MeterReadings() {
       />
 
       {/* 更正读数 */}
-      <Modal
+      <Modal maskClosable={false}
         open={supersedeTarget !== null}
         title="更正读数（追加新事实行，原记录保留为历史）"
         okText="更正"
@@ -573,7 +573,7 @@ export default function MeterReadings() {
       </Modal>
 
       {/* CSV 批量导入 */}
-      <Modal
+      <Modal maskClosable={false}
         open={importOpen}
         title="批量导入抄表记录（全部成功或全部回滚）"
         okText="导入"

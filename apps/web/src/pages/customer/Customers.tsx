@@ -330,7 +330,7 @@ export default function Customers() {
         }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={modal?.mode === 'create' ? '新增客户' : '编辑客户'}
         okText="保存"

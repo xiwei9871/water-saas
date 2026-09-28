@@ -46,7 +46,11 @@ const INSTALLATION_SUMMARY = {
   removedAt: true,
   status: true,
   meter: { select: { meterNo: true } },
-  waterAccount: { select: { accountNo: true } },
+  // Round-2: installation rows expose the customer name — every 户号
+  // surface in the UI must answer "这是哪家的" at a glance.
+  waterAccount: {
+    select: { accountNo: true, customer: { select: { name: true } } },
+  },
 } satisfies Prisma.MeterInstallationSelect;
 
 export interface RemoteDeviceBody {

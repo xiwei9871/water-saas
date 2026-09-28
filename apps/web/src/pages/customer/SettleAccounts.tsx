@@ -321,7 +321,7 @@ export default function SettleAccounts() {
         }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={modal?.mode === 'create' ? '新增结算户' : '编辑结算户'}
         okText="保存"

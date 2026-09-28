@@ -30,7 +30,16 @@ export const INSTALLATION_SELECT = {
 
 const INSTALLATION_INCLUDE = {
   meter: { select: { id: true, meterNo: true, status: true, brand: true, model: true } },
-  waterAccount: { select: { id: true, accountNo: true, status: true } },
+  waterAccount: {
+    select: {
+      id: true,
+      accountNo: true,
+      status: true,
+      // Round-2: every operator list that shows 户号 also carries the
+      // customer name — "这是哪家的表" must be readable at a glance.
+      customer: { select: { name: true } },
+    },
+  },
 } satisfies Prisma.MeterInstallationInclude;
 
 export interface InstallBody {

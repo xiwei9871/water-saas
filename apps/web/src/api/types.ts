@@ -348,7 +348,13 @@ export interface MeterInstallation {
     brand: string | null;
     model: string | null;
   };
-  waterAccount: { id: string; accountNo: string; status: AccountStatus };
+  waterAccount: {
+    id: string;
+    accountNo: string;
+    status: AccountStatus;
+    /** Round-2: customer name travels with 户号 on operator lists. */
+    customer?: { name: string } | null;
+  };
 }
 
 /** POST /water-accounts/onboard response — the whole freshly-built graph. */
@@ -401,6 +407,8 @@ export interface BookMember {
     accountNo: string;
     addr: string;
     status: AccountStatus;
+    /** Round-2: member rows carry customer name alongside 户号. */
+    customer?: { name: string } | null;
   } | null;
 }
 

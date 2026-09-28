@@ -265,7 +265,7 @@ export default function Roles() {
         pagination={false}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={modal?.mode === 'create' ? '新增角色' : '编辑角色'}
         okText="保存"

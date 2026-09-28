@@ -327,7 +327,13 @@ export default function ReadingPlans() {
               b.data.members.map((m: BookMember) => [
                 m.waterAccountId,
                 m.waterAccount
-                  ? `${m.waterAccount.accountNo} · ${m.waterAccount.addr}`
+                  ? [
+                      m.waterAccount.accountNo,
+                      m.waterAccount.customer?.name,
+                      m.waterAccount.addr,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
                   : `${m.waterAccountId.slice(0, 8)}…`,
               ]),
             ),
@@ -733,7 +739,7 @@ export default function ReadingPlans() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1300 }}
+        scroll={{ x: 1300, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -747,7 +753,7 @@ export default function ReadingPlans() {
       />
 
       {/* 生成计划 */}
-      <Modal
+      <Modal maskClosable={false}
         open={genOpen}
         title="生成抄表计划"
         okText="生成"
@@ -851,7 +857,7 @@ export default function ReadingPlans() {
       </Drawer>
 
       {/* 单条抄表录入 */}
-      <Modal
+      <Modal maskClosable={false}
         open={entryItem !== null}
         title={entryItem ? `抄表录入 — ${accountLabel(entryItem)}` : ''}
         okText="提交"
@@ -940,7 +946,7 @@ export default function ReadingPlans() {
       </Modal>
 
       {/* 批量抄表录入 */}
-      <Modal
+      <Modal maskClosable={false}
         open={batchOpen}
         title="批量抄表录入（单事务，任一行失败整批回滚）"
         okText={`提交（${[...batchRows.values()].filter((r) => (r.resultType === 'NO_READ' ? !!r.exceptionCode : !!r.readingValue.trim())).length} 行）`}

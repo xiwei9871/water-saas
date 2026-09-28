@@ -463,9 +463,16 @@ export default function ReadingBooks() {
     {
       title: '户号',
       key: 'accountNo',
-      width: 160,
+      width: 150,
       render: (_: unknown, m: BookMember) =>
         m.waterAccount?.accountNo ?? `${m.waterAccountId.slice(0, 8)}…`,
+    },
+    {
+      title: '客户',
+      key: 'customerName',
+      width: 110,
+      ellipsis: true,
+      render: (_: unknown, m: BookMember) => m.waterAccount?.customer?.name ?? '—',
     },
     {
       title: '地址',
@@ -574,7 +581,7 @@ export default function ReadingBooks() {
       />
 
       {/* 新建 / 编辑 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={
           modal?.kind === 'create'
@@ -671,6 +678,7 @@ export default function ReadingBooks() {
 
       {/* 成员管理抽屉 */}
       <Drawer
+        maskClosable={false}
         open={membersBook !== null || membersLoading}
         width={640}
         title={membersBook ? `册成员 — ${membersBook.name}（${membersBook.bookNo}）` : '册成员'}

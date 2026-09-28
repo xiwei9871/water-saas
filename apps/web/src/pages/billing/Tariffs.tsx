@@ -761,7 +761,7 @@ export default function Tariffs() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -775,7 +775,7 @@ export default function Tariffs() {
       />
 
       {/* 新建 / 草稿编辑 / 新版本（阶梯编辑器） */}
-      <Modal
+      <Modal maskClosable={false}
         open={
           modal?.kind === 'create' || modal?.kind === 'edit' || modal?.kind === 'newVersion'
         }
@@ -867,7 +867,7 @@ export default function Tariffs() {
       </Modal>
 
       {/* 生效中编辑：仅可提前结束窗口 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'editActive'}
         title={
           modal?.kind === 'editActive'

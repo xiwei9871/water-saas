@@ -26,12 +26,13 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText, ApiError } from '../../api/client';
 import type {
   ConsumptionComponent,
   ConsumptionSettlement,
   EstimatePreview,
+  MeterReading,
   ReadingBook,
   SettlementBatchItem,
   SettlementBatchReport,
@@ -54,6 +55,7 @@ import {
   SETTLEMENT_STATUS_COLORS,
   SETTLEMENT_STATUS_LABELS,
 } from './common';
+import { EXCEPTION_CODE_LABELS } from '../metering/common';
 
 interface GenerateFormValues {
   customerId?: string; // 仅级联过滤
@@ -117,13 +119,26 @@ export default function Settlements() {
   const [preview, setPreview] = useState<EstimatePreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [genForm] = Form.useForm<GenerateFormValues>();
+  // Round-2: 自动预填的「预估原因」文本。账户/账期一变，若字段仍等于自动
+  // 文本则清掉（防止沿用他户原因）；操作员手改过的内容永远保留。
+  const prefilledReasonRef = useRef<string | null>(null);
+  const clearStaleEstimateReason = useCallback(() => {
+    const cur = genForm.getFieldValue('estimateReason');
+    if (prefilledReasonRef.current && cur === prefilledReasonRef.current) {
+      genForm.setFieldValue('estimateReason', undefined);
+    }
+    prefilledReasonRef.current = null;
+  }, [genForm]);
   // 账户变化后预览作废 —— 避免把别的账户的建议量当成依据（账期侧在
   // DatePicker onChange 里同样处理）。setState 走 microtask，不在 effect
   // 内同步触发级联渲染。
   const genAccountId = Form.useWatch('waterAccountId', genForm);
   useEffect(() => {
-    queueMicrotask(() => setPreview(null));
-  }, [genAccountId]);
+    queueMicrotask(() => {
+      setPreview(null);
+      clearStaleEstimateReason();
+    });
+  }, [genAccountId, clearStaleEstimateReason]);
 
   const [acting, setActing] = useState<string | null>(null);
 
@@ -220,6 +235,30 @@ export default function Settlements() {
         period: values.period.format('YYYYMM'),
       });
       setPreview(res.data);
+      // Round-2: 预估原因默认引用当期“未抄见原因”（exceptionCode 中文标签），
+      // 仅在该字段为空时预填 —— 已输入内容不被覆盖，且始终可改。
+      if (!genForm.getFieldValue('estimateReason')) {
+        try {
+          const rd = await api.get<MeterReading[]>('/meter-readings', {
+            params: {
+              waterAccountId: values.waterAccountId,
+              period: values.period.format('YYYYMM'),
+              resultType: 'NO_READ',
+              take: 5,
+            },
+          });
+          const noRead = rd.data.find((r) => r.exceptionCode) ?? rd.data[0];
+          const code = noRead?.exceptionCode;
+          if (noRead && code) {
+            const text = `未抄见（${EXCEPTION_CODE_LABELS[code]}），按预估口径结算`;
+            genForm.setFieldValue('estimateReason', text);
+            // 记录自动文本 —— 之后换户/换期时能识别并清掉这条过时预填。
+            prefilledReasonRef.current = text;
+          }
+        } catch {
+          // 预填失败不阻塞 —— 操作员仍可手填。
+        }
+      }
     } catch (err) {
       message.error(apiErrorText(err));
       setPreview(null);
@@ -593,6 +632,7 @@ export default function Settlements() {
               onClick={() => {
                 genForm.resetFields();
                 setPreview(null);
+                prefilledReasonRef.current = null;
                 setGenIdemKey(newIdemKey());
                 setGenOpen(true);
               }}
@@ -614,7 +654,7 @@ export default function Settlements() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1100, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -727,7 +767,7 @@ export default function Settlements() {
       </Drawer>
 
       {/* 生成结算 */}
-      <Modal
+      <Modal maskClosable={false}
         open={genOpen}
         title="生成结算（草稿）"
         okText="生成"
@@ -782,7 +822,10 @@ export default function Settlements() {
             <DatePicker
               picker="month"
               style={{ width: '100%' }}
-              onChange={() => setPreview(null)}
+              onChange={() => {
+                setPreview(null);
+                clearStaleEstimateReason();
+              }}
             />
           </Form.Item>
           <Form.Item label="预估预览">
@@ -831,7 +874,7 @@ export default function Settlements() {
       </Modal>
 
       {/* RC1-3 批量生成结算 */}
-      <Modal
+      <Modal maskClosable={false}
         open={batchOpen}
         title="批量生成结算"
         width={720}

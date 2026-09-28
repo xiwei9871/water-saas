@@ -354,7 +354,7 @@ export default function RemoteEvents() {
           </>
         )}
 
-        <Modal
+        <Modal maskClosable={false}
           title="冲突裁决 — 远传读数 vs 人工读数"
           open={resolveOpen}
           onCancel={() => setResolveOpen(false)}

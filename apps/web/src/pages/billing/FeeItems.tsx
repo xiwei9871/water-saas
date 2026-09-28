@@ -223,7 +223,7 @@ export default function FeeItems() {
         }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={
           modal?.kind === 'create'

@@ -816,7 +816,7 @@ export default function WaterAccounts() {
       <Table<WaterAccount>
         rowKey="id"
         size="middle"
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         loading={loading}
         columns={columns}
         dataSource={rows}
@@ -836,7 +836,7 @@ export default function WaterAccounts() {
       />
 
       {/* 开户 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'create'}
         title="开立用水户"
         okText="开户"
@@ -885,7 +885,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 编辑 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'edit'}
         title={modal?.kind === 'edit' ? `编辑用水户 — ${modal.account.accountNo}` : ''}
         okText="保存"
@@ -914,7 +914,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 过户 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'transfer'}
         title={
           modal?.kind === 'transfer' ? `过户 — ${modal.account.accountNo}` : ''
@@ -957,7 +957,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 暂停 / 恢复 / 销户 */}
-      <Modal
+      <Modal maskClosable={false}
         open={eventKind !== null}
         title={
           eventKind && modal && 'account' in modal
@@ -992,7 +992,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 一户多人口申报 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'household'}
         title={
           modal?.kind === 'household'
@@ -1129,7 +1129,7 @@ export default function WaterAccounts() {
       </Drawer>
 
       {/* 装表（户内） */}
-      <Modal
+      <Modal maskClosable={false}
         open={meterModal?.kind === 'install'}
         title="装表"
         okText="确认装表"
@@ -1170,7 +1170,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 拆表（户内） */}
-      <Modal
+      <Modal maskClosable={false}
         open={meterModal?.kind === 'remove'}
         title={
           meterModal?.kind === 'remove'
@@ -1211,7 +1211,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 换表（户内）— 原子操作，两个读数分属不同物理表盘 */}
-      <Modal
+      <Modal maskClosable={false}
         open={meterModal?.kind === 'replace'}
         title={
           meterModal?.kind === 'replace'

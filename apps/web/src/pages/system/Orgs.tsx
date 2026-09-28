@@ -289,7 +289,7 @@ export default function Orgs() {
         </Col>
       </Row>
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={modal?.mode === 'create' ? '新增组织' : '编辑组织'}
         okText="保存"

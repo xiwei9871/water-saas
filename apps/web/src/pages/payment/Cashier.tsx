@@ -640,7 +640,7 @@ export default function Cashier() {
         />
       )}
 
-      <Modal
+      <Modal maskClosable={false}
         title="预存充值"
         open={topUpOpen}
         onCancel={() => setTopUpOpen(false)}
@@ -680,7 +680,7 @@ export default function Cashier() {
         </Form>
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         title="预存退款"
         open={refundOpen}
         onCancel={() => setRefundOpen(false)}

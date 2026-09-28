@@ -278,7 +278,7 @@ export default function StaffPage() {
         pagination={{ pageSize: 20, showSizeChanger: true }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={modal?.mode === 'create' ? '新增用户' : '编辑用户'}
         okText="保存"
@@ -354,7 +354,7 @@ export default function StaffPage() {
         </Form>
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         open={pwdTarget !== null}
         title={pwdTarget ? `重置密码 — ${pwdTarget.name}` : ''}
         okText="重置"

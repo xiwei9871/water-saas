@@ -428,7 +428,7 @@ export default function BillingRuns() {
       />
 
       {/* 新建批次 */}
-      <Modal
+      <Modal maskClosable={false}
         open={createOpen}
         title="新建开账批次"
         okText="生成"

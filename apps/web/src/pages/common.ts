@@ -164,7 +164,13 @@ export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
       if (cancelled) return;
       setLabels((prev) => {
         const next = new Map(prev);
-        res.forEach((a, i) => next.set(missing[i], a ? a.accountNo : null));
+        // 户号 + 客户名一起显示 —— 操作员在任何列表都能一眼对上是谁的户。
+        res.forEach((a, i) =>
+          next.set(
+            missing[i],
+            a ? `${a.accountNo} · ${a.customer.name}` : null,
+          ),
+        );
         return next;
       });
     });

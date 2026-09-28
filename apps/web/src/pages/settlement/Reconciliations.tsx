@@ -398,7 +398,7 @@ export default function Reconciliations() {
       />
 
       {/* 发起补差 */}
-      <Modal
+      <Modal maskClosable={false}
         open={createOpen}
         title="发起补差"
         okText="发起"

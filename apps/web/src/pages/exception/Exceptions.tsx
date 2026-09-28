@@ -516,7 +516,7 @@ export default function Exceptions() {
         )}
       </Drawer>
 
-      <Modal
+      <Modal maskClosable={false}
         title="忽略异常"
         open={ignoreOpen}
         confirmLoading={acting}
@@ -539,7 +539,7 @@ export default function Exceptions() {
         />
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         title="标记已解决"
         open={resolveOpen}
         confirmLoading={acting}
@@ -568,7 +568,7 @@ export default function Exceptions() {
         />
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         title="指派处理人"
         open={assignOpen}
         confirmLoading={acting}

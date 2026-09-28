@@ -518,7 +518,7 @@ export default function Bills() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -532,7 +532,7 @@ export default function Bills() {
       />
 
       {/* 换票重开 */}
-      <Modal
+      <Modal maskClosable={false}
         open={replaceFor !== null}
         title={
           replaceFor

@@ -357,7 +357,7 @@ export default function DayClose() {
       />
 
       {/* 执行日结 */}
-      <Modal
+      <Modal maskClosable={false}
         open={closeOpen}
         title="执行日结"
         okText="日结"

@@ -481,8 +481,11 @@ export default function Meters() {
     {
       title: '用水户',
       key: 'account',
-      width: 150,
-      render: (_: unknown, r: MeterInstallation) => r.waterAccount.accountNo,
+      width: 220,
+      render: (_: unknown, r: MeterInstallation) =>
+        r.waterAccount.customer?.name
+          ? `${r.waterAccount.accountNo} · ${r.waterAccount.customer.name}`
+          : r.waterAccount.accountNo,
     },
     {
       title: '表号',
@@ -729,7 +732,7 @@ export default function Meters() {
       </div>
 
       {/* 登记 / 编辑水表 */}
-      <Modal
+      <Modal maskClosable={false}
         open={meterModal !== null}
         title={meterModal?.mode === 'create' ? '登记水表' : '编辑水表'}
         okText="保存"
@@ -787,7 +790,7 @@ export default function Meters() {
       </Modal>
 
       {/* 装表 */}
-      <Modal
+      <Modal maskClosable={false}
         open={installOpen}
         title="装表"
         okText="确认装表"
@@ -840,7 +843,7 @@ export default function Meters() {
       </Modal>
 
       {/* 拆表 */}
-      <Modal
+      <Modal maskClosable={false}
         open={removeTarget !== null}
         title={removeTarget ? `拆表 — ${removeTarget.meter.meterNo}` : ''}
         okText="确认拆除"
@@ -877,7 +880,7 @@ export default function Meters() {
       </Modal>
 
       {/* 换表 — 原子操作：旧表止码 + 新表始码各自独立填写 */}
-      <Modal
+      <Modal maskClosable={false}
         open={replaceTarget !== null}
         title={
           replaceTarget

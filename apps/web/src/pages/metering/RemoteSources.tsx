@@ -367,7 +367,7 @@ export default function RemoteSources() {
         }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         title={modal?.kind === 'edit' ? `编辑数据源 ${modal.row.code}` : '新建数据源'}
         open={modal !== null}
         onCancel={() => setModal(null)}
@@ -432,7 +432,7 @@ export default function RemoteSources() {
         </Form>
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         title={`导入远传文件 — ${importSource?.name ?? ''}`}
         open={importSource !== null}
         onCancel={() => setImportSource(null)}

@@ -41,6 +41,8 @@ const ACCOUNT_SUMMARY = {
   accountNo: true,
   addr: true,
   status: true,
+  // Round-2: member rows carry the customer name — 册员清单不能只有户号。
+  customer: { select: { name: true } },
 } satisfies Prisma.WaterAccountSelect;
 
 export interface ReadingBookBody {
