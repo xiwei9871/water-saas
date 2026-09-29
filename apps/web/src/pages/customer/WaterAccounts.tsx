@@ -585,9 +585,9 @@ export default function WaterAccounts() {
       render: (v: string | null | undefined) => v ?? '—',
     },
     {
-      title: '客户',
+      title: '客户名称',
       key: 'customer',
-      width: 160,
+      width: 170,
       render: (_: unknown, r: WaterAccount) =>
         r.customer ? `${r.customer.name}（${r.customer.customerNo}）` : '—',
     },

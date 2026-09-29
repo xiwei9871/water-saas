@@ -188,7 +188,7 @@ export default function Customers() {
 
   const columns: ColumnsType<Customer> = [
     { title: '客户编号', dataIndex: 'customerNo', key: 'customerNo', width: 150 },
-    { title: '名称', dataIndex: 'name', key: 'name' },
+    { title: '客户名称', dataIndex: 'name', key: 'name' },
     {
       title: '类型',
       dataIndex: 'custType',
@@ -400,7 +400,7 @@ export default function Customers() {
               column={1}
               items={[
                 { key: 'no', label: '客户编号', children: detail.customerNo },
-                { key: 'name', label: '名称', children: detail.name },
+                { key: 'name', label: '客户名称', children: detail.name },
                 {
                   key: 'type',
                   label: '类型',

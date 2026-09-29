@@ -37,7 +37,13 @@ import type {
   TopUpResult,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtCent, fmtPeriod, newIdemKey } from '../common';
+import {
+  fmtCent,
+  fmtPeriod,
+  newIdemKey,
+  useSettleAccountLabels,
+  useWaterAccountLabels,
+} from '../common';
 import { CustomerSelect, WaterAccountSelect } from '../pickers';
 import { BILL_KIND_COLORS, BILL_KIND_LABELS } from '../billing/common';
 import { PAY_CHANNEL_LABELS, PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from './common';
@@ -71,6 +77,11 @@ export default function Cashier() {
 
   const [outstanding, setOutstanding] = useState<AccountOutstanding | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // 水合当前户的 户号·客户名称 / 结算户号·名称 —— 收费时操作员必须
+  // 一眼确认"收的是谁的钱"，短 uuid 不行。
+  const { accountInfo } = useWaterAccountLabels([outstanding?.waterAccountId]);
+  const settleLabel = useSettleAccountLabels([outstanding?.settleAccountId]);
 
   /** billId → 分摊金额（元，InputNumber 数值）。 */
   const [allocs, setAllocs] = useState<Record<string, number | null>>({});
@@ -490,9 +501,18 @@ export default function Cashier() {
               }}
             />
             <Statistic
+              title="用水户"
+              value={
+                accountInfo(outstanding.waterAccountId)
+                  ? `${accountInfo(outstanding.waterAccountId)!.accountNo} · ${accountInfo(outstanding.waterAccountId)!.customerName}`
+                  : outstanding.waterAccountId.slice(0, 8) + '…'
+              }
+              valueStyle={{ fontSize: 16 }}
+            />
+            <Statistic
               title="结算户"
-              value={outstanding.settleAccountId.slice(0, 8) + '…'}
-              valueStyle={{ fontSize: 16, fontFamily: 'monospace' }}
+              value={settleLabel(outstanding.settleAccountId)}
+              valueStyle={{ fontSize: 16 }}
             />
             <Space>
               {canWrite && (

@@ -184,7 +184,14 @@ export default function Settlements() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  const accountLabel = useWaterAccountLabels(rows.map((r) => r.waterAccountId));
+  const { accountLabel, accountInfo } = useWaterAccountLabels(
+    rows.map((r) => r.waterAccountId),
+  );
+  // 批量 preview/run 结果项也要客户名称 —— 同一 hook、同一缓存。
+  const batchItems = (batchResult ?? batchPreview)?.items ?? [];
+  const { accountInfo: batchAccountInfo } = useWaterAccountLabels(
+    batchItems.map((i) => i.waterAccountId),
+  );
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -365,6 +372,14 @@ export default function Settlements() {
   const batchItemColumns: ColumnsType<SettlementBatchItem> = [
     { title: '户号', dataIndex: 'accountNo', key: 'accountNo', width: 150 },
     {
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, i: SettlementBatchItem) =>
+        batchAccountInfo(i.waterAccountId)?.customerName ?? '—',
+    },
+    {
       title: '结果',
       dataIndex: 'status',
       key: 'status',
@@ -393,15 +408,23 @@ export default function Settlements() {
       render: fmtPeriod,
     },
     {
-      title: '用水户',
+      title: '户号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
       render: (id: string) => (
         <Tooltip title={id}>
-          <span>{accountLabel(id)}</span>
+          <span>{accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
         </Tooltip>
       ),
+    },
+    {
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, r: ConsumptionSettlement) =>
+        accountInfo(r.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '结算水量',

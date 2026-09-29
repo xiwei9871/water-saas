@@ -193,7 +193,7 @@ export default function SettleAccounts() {
 
   const columns: ColumnsType<SettleAccount> = [
     { title: '结算号', dataIndex: 'settleNo', key: 'settleNo', width: 150 },
-    { title: '名称', dataIndex: 'name', key: 'name' },
+    { title: '结算户名称', dataIndex: 'name', key: 'name' },
     {
       title: '电话',
       dataIndex: 'phone',
@@ -384,7 +384,7 @@ export default function SettleAccounts() {
               column={1}
               items={[
                 { key: 'no', label: '结算号', children: detail.settleNo },
-                { key: 'name', label: '名称', children: detail.name },
+                { key: 'name', label: '结算户名称', children: detail.name },
                 {
                   key: 'status',
                   label: '状态',

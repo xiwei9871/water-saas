@@ -314,7 +314,7 @@ export function WaterAccount360({
             <Descriptions.Item label="状态">
               <AccountStatusTag status={account?.status ?? 'NORMAL'} />
             </Descriptions.Item>
-            <Descriptions.Item label="客户">
+            <Descriptions.Item label="客户名称">
               {account?.customer
                 ? `${account.customer.name}（${account.customer.customerNo}）`
                 : '—'}

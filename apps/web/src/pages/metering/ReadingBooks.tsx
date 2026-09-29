@@ -468,7 +468,7 @@ export default function ReadingBooks() {
         m.waterAccount?.accountNo ?? `${m.waterAccountId.slice(0, 8)}…`,
     },
     {
-      title: '客户',
+      title: '客户名称',
       key: 'customerName',
       width: 110,
       ellipsis: true,

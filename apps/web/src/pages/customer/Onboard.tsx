@@ -255,7 +255,7 @@ export default function Onboard() {
           items={[
             {
               key: 'cust',
-              label: '客户',
+              label: '客户名称',
               children: `${result.customer.name}（${result.customer.customerNo}）`,
             },
             {

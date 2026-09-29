@@ -7,6 +7,7 @@ import type {
   InstallReason,
   InstallationStatus,
   MeterStatus,
+  SettleAccount,
   WaterAccount,
 } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
@@ -134,12 +135,86 @@ export const cleanPatch = <T extends Record<string, unknown>>(
   return out;
 };
 
+/** 用水户水合结果：户号与客户名分开，表格里能拆成两列。 */
+export interface WaterAccountBrief {
+  accountNo: string;
+  customerName: string;
+}
+
 /**
- * 用水户 id → 户号 的批量水合 hook：结算/补差等列表只带
- * waterAccountId，逐条 GET /water-accounts/:id 解析成户号展示。
- * 需 customer:read —— 没有权限（或单条失败）时退化为短 uuid 显示。
+ * 用水户 id → {户号, 客户名称} 的批量水合 hook：结算/补差等列表只带
+ * waterAccountId，逐条 GET /water-accounts/:id 解析展示。
+ * 需 customer:read —— 没有权限（或单条失败）时 info 返回 null，
+ * accountLabel 退化为短 uuid。
+ *
+ * 返回两个 accessor：
+ * - accountInfo(id) → WaterAccountBrief | null  —— 表格分列用（户号列 +
+ *   客户名称列分开渲染）；
+ * - accountLabel(id) → '户号 · 客户名称' 单行文本 —— 详情标题、描述位用。
  */
 export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
+  const { hasPerm } = useAuth();
+  const canRead = hasPerm('customer:read');
+  const [briefs, setBriefs] = useState(
+    () => new Map<string, WaterAccountBrief | null>(),
+  );
+  const key = ids
+    .filter((i): i is string => !!i)
+    .sort()
+    .join(',');
+
+  useEffect(() => {
+    if (!canRead) return;
+    const missing = key.split(',').filter((id) => id && !briefs.has(id));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      missing.map((id) =>
+        api
+          .get<WaterAccount>(`/water-accounts/${id}`)
+          .then((r) => r.data)
+          .catch(() => null),
+      ),
+    ).then((res) => {
+      if (cancelled) return;
+      setBriefs((prev) => {
+        const next = new Map(prev);
+        res.forEach((a, i) =>
+          next.set(
+            missing[i],
+            a ? { accountNo: a.accountNo, customerName: a.customer.name } : null,
+          ),
+        );
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, canRead, briefs]);
+
+  const accountInfo = useCallback(
+    (id: string | null | undefined): WaterAccountBrief | null =>
+      id ? (briefs.get(id) ?? null) : null,
+    [briefs],
+  );
+  const accountLabel = useCallback(
+    (id: string | null | undefined) => {
+      if (!id) return '—';
+      const b = briefs.get(id);
+      return b ? `${b.accountNo} · ${b.customerName}` : `${id.slice(0, 8)}…`;
+    },
+    [briefs],
+  );
+  return { accountInfo, accountLabel };
+};
+
+/**
+ * 结算户 id → '结算户号 · 名称' 的批量水合 hook（账单列表等只带
+ * settleAccountId）。与 useWaterAccountLabels 同样的权限语义：
+ * 需 customer:read，缺失退化为短 uuid。
+ */
+export const useSettleAccountLabels = (ids: (string | null | undefined)[]) => {
   const { hasPerm } = useAuth();
   const canRead = hasPerm('customer:read');
   const [labels, setLabels] = useState(() => new Map<string, string | null>());
@@ -156,7 +231,7 @@ export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
     void Promise.all(
       missing.map((id) =>
         api
-          .get<WaterAccount>(`/water-accounts/${id}`)
+          .get<SettleAccount>(`/settle-accounts/${id}`)
           .then((r) => r.data)
           .catch(() => null),
       ),
@@ -164,12 +239,8 @@ export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
       if (cancelled) return;
       setLabels((prev) => {
         const next = new Map(prev);
-        // 户号 + 客户名一起显示 —— 操作员在任何列表都能一眼对上是谁的户。
-        res.forEach((a, i) =>
-          next.set(
-            missing[i],
-            a ? `${a.accountNo} · ${a.customer.name}` : null,
-          ),
+        res.forEach((s, i) =>
+          next.set(missing[i], s ? `${s.settleNo} · ${s.name}` : null),
         );
         return next;
       });

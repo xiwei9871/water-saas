@@ -191,7 +191,7 @@ export default function BillingRuns() {
     () => (detail?.bills ?? []).map((b) => b.waterAccountId),
     [detail],
   );
-  const accountLabel = useWaterAccountLabels(detailAccountIds);
+  const { accountInfo } = useWaterAccountLabels(detailAccountIds);
 
   const billColumns: ColumnsType<Bill> = [
     {
@@ -206,11 +206,23 @@ export default function BillingRuns() {
       ),
     },
     {
-      title: '用水户',
+      title: '户号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
-      width: 140,
-      render: (id: string) => accountLabel(id),
+      width: 150,
+      render: (id: string) => (
+        <Tooltip title={id}>
+          <span>{accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
+        </Tooltip>
+      ),
+    },
+    {
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, b: Bill) =>
+        accountInfo(b.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '类型',

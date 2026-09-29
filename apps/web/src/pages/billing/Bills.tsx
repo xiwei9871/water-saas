@@ -41,6 +41,7 @@ import {
   fmtPeriod,
   fmtTime,
   newIdemKey,
+  useSettleAccountLabels,
   useWaterAccountLabels,
 } from '../common';
 import { CustomerSelect, SettleAccountSelect, WaterAccountSelect } from '../pickers';
@@ -158,7 +159,13 @@ export default function Bills() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  const accountLabel = useWaterAccountLabels(rows.map((r) => r.waterAccountId));
+  const { accountLabel, accountInfo } = useWaterAccountLabels(
+    rows.map((r) => r.waterAccountId),
+  );
+  // 结算户同理水合 —— 只给操作员看短 uuid 没法用。
+  const settleLabel = useSettleAccountLabels(
+    rows.map((r) => r.settleAccountId),
+  );
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -261,22 +268,30 @@ export default function Bills() {
   const columns: ColumnsType<Bill> = [
     { title: '账期', dataIndex: 'period', key: 'period', width: 90, render: fmtPeriod },
     {
-      title: '用水户',
+      title: '户号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
-      width: 140,
+      width: 150,
       render: (id: string) => (
         <Tooltip title={id}>
-          <span>{accountLabel(id)}</span>
+          <span>{accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
         </Tooltip>
       ),
+    },
+    {
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, r: Bill) =>
+        accountInfo(r.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '结算户',
       dataIndex: 'settleAccountId',
       key: 'settleAccountId',
-      width: 110,
-      render: shortId,
+      width: 180,
+      render: (id: string) => settleLabel(id),
     },
     {
       title: '类型',
@@ -613,7 +628,7 @@ export default function Bills() {
                   label: '用水户',
                   children: accountLabel(detail.waterAccountId),
                 },
-                { key: 'sa', label: '结算户', children: shortId(detail.settleAccountId) },
+                { key: 'sa', label: '结算户', children: settleLabel(detail.settleAccountId) },
                 {
                   key: 'est',
                   label: '口径',

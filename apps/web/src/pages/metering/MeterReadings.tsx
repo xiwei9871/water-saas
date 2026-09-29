@@ -273,7 +273,7 @@ export default function MeterReadings() {
 
   const columns: ColumnsType<MeterReading> = [
     { title: '户号', key: 'account', width: 165, render: (_, r) => r.account?.accountNo ?? '—' },
-    { title: '客户', key: 'customer', width: 190, render: (_, r) => r.account?.customerName ?? '—' },
+    { title: '客户名称', key: 'customer', width: 190, render: (_, r) => r.account?.customerName ?? '—' },
     { title: '用水地址', key: 'addr', width: 220, render: (_, r) => r.account?.addr ?? '—' },
     {
       title: '账期',
@@ -644,7 +644,7 @@ export default function MeterReadings() {
             column={1}
             items={[
               { key: 'accountNo', label: '户号', children: detail.account?.accountNo ?? '—' },
-              { key: 'customer', label: '客户', children: detail.account?.customerName ?? '—' },
+              { key: 'customer', label: '客户名称', children: detail.account?.customerName ?? '—' },
               { key: 'address', label: '用水地址', children: detail.account?.addr ?? '—' },
               { key: 'meterNo', label: '表号', children: detail.meterNo ?? '—' },
               {
