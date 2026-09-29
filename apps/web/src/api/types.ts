@@ -125,6 +125,9 @@ export interface Staff {
   status: StaffStatus;
   createdAt: string;
   updatedAt: string;
+  /** Round-2: current role bindings — the edit form prefills from this.
+   * Carries id (unlike login RoleSummary) so roleIds can be re-submitted. */
+  roles?: { id: string; code: string; name: string }[];
 }
 
 /** GET /iam/roles — rows carry their bound permission CODES in `perms`. */

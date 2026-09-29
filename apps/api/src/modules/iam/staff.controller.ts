@@ -70,8 +70,8 @@ export class StaffController {
     if (orgUnitId && !orgInScope(ctx, orgUnitId)) {
       return [];
     }
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.staff.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const staff = await tx.staff.findMany({
         where: {
           tenantId: ctx.tenantId,
           // ALL scope: no org filter — ctx.orgScope is frozen at login and
@@ -80,8 +80,28 @@ export class StaffController {
         },
         select: SAFE_SELECT,
         orderBy: { login: 'asc' },
-      }),
-    );
+      });
+      if (staff.length === 0) return [];
+      // Round-2: rows carry their current role bindings so the edit form
+      // can prefill — previously the role Select opened empty and an
+      // untouched submit had to rely on the rolesTouched sentinel.
+      const links = await tx.staffRole.findMany({
+        where: { tenantId: ctx.tenantId, staffId: { in: staff.map((s) => s.id) } },
+        select: { staffId: true, roleId: true },
+      });
+      const roles = await tx.role.findMany({
+        where: { tenantId: ctx.tenantId, id: { in: links.map((l) => l.roleId) } },
+        select: { id: true, code: true, name: true },
+      });
+      const roleById = new Map(roles.map((r) => [r.id, r]));
+      return staff.map((s) => ({
+        ...s,
+        roles: links
+          .filter((l) => l.staffId === s.id)
+          .map((l) => roleById.get(l.roleId))
+          .filter((r): r is NonNullable<typeof r> => !!r),
+      }));
+    });
   }
 
   private async createStaffTx(

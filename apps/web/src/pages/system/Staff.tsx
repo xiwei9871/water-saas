@@ -54,7 +54,7 @@ export default function StaffPage() {
   >(null);
   const [pwdTarget, setPwdTarget] = useState<Staff | null>(null);
   const [saving, setSaving] = useState(false);
-  const [rolesTouched, setRolesTouched] = useState(false);
+
   const [form] = Form.useForm<StaffFormValues>();
   const [pwdForm] = Form.useForm<{ password: string }>();
 
@@ -112,7 +112,6 @@ export default function StaffPage() {
 
   const openCreate = () => {
     form.resetFields();
-    setRolesTouched(false);
     setModal({ mode: 'create' });
   };
   const openEdit = (staff: Staff) => {
@@ -121,9 +120,9 @@ export default function StaffPage() {
       name: staff.name,
       orgUnitId: staff.orgUnitId,
       status: staff.status,
-      roleIds: undefined,
+      // 回填当前角色 —— 之前 list 不带绑定只能留空，现在原样展示。
+      roleIds: (staff.roles ?? []).map((r) => r.id),
     });
-    setRolesTouched(false);
     setModal({ mode: 'edit', staff });
   };
 
@@ -143,7 +142,7 @@ export default function StaffPage() {
           password: values.password,
           orgUnitId: values.orgUnitId,
           // roleIds omitted entirely → stays a delegated (non-admin) create.
-          ...(isAdmin && rolesTouched ? { roleIds: values.roleIds ?? [] } : {}),
+          ...(isAdmin ? { roleIds: values.roleIds ?? [] } : {}),
         });
         message.success('用户已创建');
       } else if (modal?.mode === 'edit') {
@@ -151,9 +150,8 @@ export default function StaffPage() {
           name: values.name,
           orgUnitId: values.orgUnitId,
           status: values.status,
-          // The list API does not return current role bindings — an empty
-          // untouched field MUST NOT wipe them, so only send when changed.
-          ...(isAdmin && rolesTouched ? { roleIds: values.roleIds ?? [] } : {}),
+          // 角色已回填 —— 提交即当前选择的整体替换（清空 = 有意清空）。
+          ...(isAdmin ? { roleIds: values.roleIds ?? [] } : {}),
         });
         message.success('用户已更新');
       }
@@ -195,6 +193,19 @@ export default function StaffPage() {
       dataIndex: 'orgUnitId',
       key: 'orgUnitId',
       render: (id: string) => orgName(id),
+    },
+    {
+      title: '角色',
+      key: 'roles',
+      width: 160,
+      render: (_: unknown, r: Staff) =>
+        r.roles && r.roles.length > 0
+          ? r.roles.map((role) => (
+              <Tag key={role.id} style={{ marginBottom: 2 }}>
+                {role.name}
+              </Tag>
+            ))
+          : '—',
     },
     {
       title: '状态',
@@ -337,7 +348,7 @@ export default function StaffPage() {
             <Form.Item
               name="roleIds"
               label="角色"
-              extra="不改动此字段则保持原角色不变；一旦修改（含清空），提交将整体替换该用户的角色。"
+              extra="显示该用户当前角色；提交时以所选内容整体替换（清空即移除全部角色）。"
             >
               <Select
                 mode="multiple"
@@ -347,7 +358,6 @@ export default function StaffPage() {
                   value: r.id,
                   label: `${r.name}（${r.code}）`,
                 }))}
-                onChange={() => setRolesTouched(true)}
               />
             </Form.Item>
           )}
