@@ -561,7 +561,7 @@ export default function BillingRuns() {
               columns={billColumns}
               dataSource={detail.bills}
               pagination={false}
-              scroll={{ y: 320 }}
+              scroll={{ x: 900, y: 320 }}
               locale={{ emptyText: '本批次暂无账单' }}
             />
           </>

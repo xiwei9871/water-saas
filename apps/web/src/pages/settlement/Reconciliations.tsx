@@ -395,6 +395,8 @@ export default function Reconciliations() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        // 列宽总和超过视口 —— scroll.x 让溢出发生在表格内而不是整页。
+        scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
