@@ -96,6 +96,8 @@ export default function Settlements() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
+  // 终审是复核动作 —— 抄表员只生成草稿，终审归复核员（Round-2 报告 §3）。
+  const canFinalize = hasPerm('metering:qc');
   const canCustomerRead = hasPerm('customer:read');
   const canIamRead = hasPerm('iam:read');
 
@@ -129,16 +131,50 @@ export default function Settlements() {
     }
     prefilledReasonRef.current = null;
   }, [genForm]);
-  // 账户变化后预览作废 —— 避免把别的账户的建议量当成依据（账期侧在
-  // DatePicker onChange 里同样处理）。setState 走 microtask，不在 effect
-  // 内同步触发级联渲染。
+  // Round-2 §7: 预估原因在选定「户 + 账期」后立即自动预填（不再依赖点
+  // 预览按钮）——拉当期 NO_READ 记录的 exceptionCode 中文标签。字段为空
+  // 或仍是上一条自动文本时才写入；手改过的内容永远保留。
+  const prefillEstimateReason = useCallback(
+    async (accountId: string, period: string) => {
+      try {
+        const rd = await api.get<MeterReading[]>('/meter-readings', {
+          params: {
+            waterAccountId: accountId,
+            period,
+            resultType: 'NO_READ',
+            take: 5,
+          },
+        });
+        const noRead = rd.data.find((r) => r.exceptionCode) ?? rd.data[0];
+        const code = noRead?.exceptionCode;
+        if (noRead && code) {
+          const cur = genForm.getFieldValue('estimateReason');
+          if (!cur || cur === prefilledReasonRef.current) {
+            const text = `未抄见（${EXCEPTION_CODE_LABELS[code]}），按预估口径结算`;
+            genForm.setFieldValue('estimateReason', text);
+            prefilledReasonRef.current = text;
+          }
+        }
+      } catch {
+        // 预填失败不阻塞 —— 操作员仍可手填。
+      }
+    },
+    [genForm],
+  );
+
+  // 账户/账期变化后预览作废 —— 避免把别户别期的建议量当依据；同时尝试
+  // 重新预填预估原因。setState 走 microtask，不在 effect 内同步级联。
   const genAccountId = Form.useWatch('waterAccountId', genForm);
+  const genPeriod = Form.useWatch('period', genForm);
   useEffect(() => {
     queueMicrotask(() => {
       setPreview(null);
       clearStaleEstimateReason();
+      if (genAccountId && genPeriod) {
+        void prefillEstimateReason(genAccountId, genPeriod.format('YYYYMM'));
+      }
     });
-  }, [genAccountId, clearStaleEstimateReason]);
+  }, [genAccountId, genPeriod, clearStaleEstimateReason, prefillEstimateReason]);
 
   const [acting, setActing] = useState<string | null>(null);
 
@@ -242,30 +278,11 @@ export default function Settlements() {
         period: values.period.format('YYYYMM'),
       });
       setPreview(res.data);
-      // Round-2: 预估原因默认引用当期“未抄见原因”（exceptionCode 中文标签），
-      // 仅在该字段为空时预填 —— 已输入内容不被覆盖，且始终可改。
-      if (!genForm.getFieldValue('estimateReason')) {
-        try {
-          const rd = await api.get<MeterReading[]>('/meter-readings', {
-            params: {
-              waterAccountId: values.waterAccountId,
-              period: values.period.format('YYYYMM'),
-              resultType: 'NO_READ',
-              take: 5,
-            },
-          });
-          const noRead = rd.data.find((r) => r.exceptionCode) ?? rd.data[0];
-          const code = noRead?.exceptionCode;
-          if (noRead && code) {
-            const text = `未抄见（${EXCEPTION_CODE_LABELS[code]}），按预估口径结算`;
-            genForm.setFieldValue('estimateReason', text);
-            // 记录自动文本 —— 之后换户/换期时能识别并清掉这条过时预填。
-            prefilledReasonRef.current = text;
-          }
-        } catch {
-          // 预填失败不阻塞 —— 操作员仍可手填。
-        }
-      }
+      // 兜底再试一次 —— 户/期未变而选中后拉取失败（瞬时网络）的场景。
+      await prefillEstimateReason(
+        values.waterAccountId,
+        values.period.format('YYYYMM'),
+      );
     } catch (err) {
       message.error(apiErrorText(err));
       setPreview(null);
@@ -412,9 +429,9 @@ export default function Settlements() {
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
-      render: (id: string) => (
+      render: (id: string, r: ConsumptionSettlement) => (
         <Tooltip title={id}>
-          <span>{accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
+          <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
         </Tooltip>
       ),
     },
@@ -424,7 +441,7 @@ export default function Settlements() {
       width: 130,
       ellipsis: true,
       render: (_: unknown, r: ConsumptionSettlement) =>
-        accountInfo(r.waterAccountId)?.customerName ?? '—',
+        r.customerName ?? accountInfo(r.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '结算水量',
@@ -479,7 +496,7 @@ export default function Settlements() {
           <Button size="small" icon={<SearchOutlined />} onClick={() => void openDetail(record)}>
             详情
           </Button>
-          {canWrite && record.status === 'DRAFT' && (
+          {canFinalize && record.status === 'DRAFT' && (
             <Popconfirm
               title={`终审 ${fmtPeriod(record.period)} 结算？`}
               description="终审后不可修改；错误终审通过补差处理。"
@@ -696,7 +713,11 @@ export default function Settlements() {
         width={720}
         title={
           detail
-            ? `结算详情 — ${accountLabel(detail.waterAccountId)} · ${fmtPeriod(detail.period)}`
+            ? `结算详情 — ${
+                detail.accountNo
+                  ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                  : accountLabel(detail.waterAccountId)
+              } · ${fmtPeriod(detail.period)}`
             : '结算详情'
         }
         onClose={() => setDetail(null)}
@@ -723,7 +744,9 @@ export default function Settlements() {
                 {
                   key: 'wa',
                   label: '用水户',
-                  children: accountLabel(detail.waterAccountId),
+                  children: detail.accountNo
+                    ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                    : accountLabel(detail.waterAccountId),
                 },
                 {
                   key: 'total',

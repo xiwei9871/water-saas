@@ -491,15 +491,30 @@ export default function Reports({ kind }: { kind: ReportKind }) {
                 children: fmtCent(recovery?.billed),
               },
               {
+                key: 'aw',
+                label: '窗口内销账',
+                children: fmtCent(recovery?.allocatedInWindow),
+              },
+              {
+                key: 'at',
+                label: '累计销账',
+                children: fmtCent(recovery?.allocatedTotal),
+              },
+              {
                 key: 'c',
-                label: '实收',
+                label: '当月现金实收',
                 children: fmtCent(recovery?.collected),
+              },
+              {
+                key: 'pp',
+                label: '其中历史欠费回收',
+                children: fmtCent(recovery?.priorPeriodCollected),
               },
             ]}
           />
           <Card size="small" style={{ maxWidth: 360 }}>
             <Statistic
-              title="回收率（实收 / 应收）"
+              title="回收率（窗口内销账 / 应收）"
               value={recovery?.rate === null || recovery === null || Number(recovery.billed) < 0 ? '—' : `${(Number(recovery.rate) * 100).toFixed(2)}%`}
               valueStyle={{ fontSize: 32 }}
             />
@@ -512,8 +527,8 @@ export default function Reports({ kind }: { kind: ReportKind }) {
             )}
           </Card>
           <Alert type="info" showIcon style={{ marginTop: 12 }}
-            message="统计口径：应收按账单账期统计，实收按收款日期统计（含红冲）。"
-            description="本月收回历史欠费会计入本月实收，不代表本月账单的缴清比例。可选择截止月查看累计口径。" />
+            message="统计口径：应收按账单账期；回收率只数本期账单在其收费窗口（到期日）内被销账的金额，不会超 100%。"
+            description="当月现金实收为收款日期口径（含红冲），其中清偿历史欠费的部分单列展示；累计销账含逾期后收回。可选择截止月查看累计口径。" />
         </>
       )}
     </Card>

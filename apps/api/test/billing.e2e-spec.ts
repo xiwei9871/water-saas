@@ -1364,3 +1364,57 @@ describe('RC1: bulk YTD equivalence + pricing drift', () => {
     expect(single.toString()).toBe('110');
   });
 });
+
+describe('Round-2 §9 — 开账前置校验 GET /billing-runs/preflight', () => {
+  it('returns coverage buckets: missingReading / missingSettlement / draftSettlement / willBillCount', async () => {
+    // 全新账期 202703：P1 有 FINAL 结算、P2 无结算，两户均未抄表。
+    await onboard('P1', 'RES_METERED');
+    await onboard('P2', 'RES_METERED');
+    const bookRes = await post('/reading-books', {
+      name: `T10 Preflight ${RUN}`,
+      orgUnitId: ORG_A,
+    }).expect(201);
+    const bookId = bookRes.body.id;
+    await post(`/reading-books/${bookId}/meters`, {
+      waterAccountId: acct['P1'],
+    }).expect(201);
+    await post(`/reading-books/${bookId}/meters`, {
+      waterAccountId: acct['P2'],
+    }).expect(201);
+    const plan = await post('/reading-plans/generate', {
+      bookId,
+      period: '202703',
+      planDate: '2027-03-05',
+    }).expect(201);
+    expect(plan.body.items).toHaveLength(2);
+
+    await seedSettlement('P1-03', acct['P1'], '202703', 40);
+    // P2 留 DRAFT 结算 → 走 draftSettlement 桶而非 missingSettlement。
+    await owner.query(
+      `INSERT INTO consumption_settlement
+         (id, tenant_id, water_account_id, period, total_usage_qty, status,
+          created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, '202703', 20, 'DRAFT', now(), now())`,
+      [T10A, acct['P2']],
+    );
+
+    const res = await get('/billing-runs/preflight?period=202703');
+    expect(res.body).toMatchObject({
+      period: '202703',
+      plannedCount: 2,
+      willBillCount: 1,
+    });
+    const body = res.body as {
+      missingReading: { waterAccountId: string }[];
+      missingSettlement: { waterAccountId: string }[];
+      draftSettlement: { waterAccountId: string }[];
+    };
+    expect(body.missingReading.map((r) => r.waterAccountId).sort()).toEqual(
+      [acct['P1'], acct['P2']].sort(),
+    );
+    expect(body.missingSettlement).toEqual([]);
+    expect(body.draftSettlement.map((r) => r.waterAccountId)).toEqual([
+      acct['P2'],
+    ]);
+  });
+});

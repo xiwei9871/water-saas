@@ -228,7 +228,9 @@ export class SettlementController {
    * corrections go through reconciliation).
    */
   @Post(':id/finalize')
-  @Permissions('metering:write')
+  // Round-2 report §3: 终审是复核动作，与"生成结算"分离 —— 抄表员
+  // (metering:write) 只生成草稿，终审归复核员 (metering:qc)。
+  @Permissions('metering:qc')
   finalize(
     @Param('id') id: string,
     @Req() req: Request,

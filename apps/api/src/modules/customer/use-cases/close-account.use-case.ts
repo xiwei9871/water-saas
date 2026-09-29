@@ -52,6 +52,15 @@ export class CloseAccountUseCase {
         outstanding: outstanding.toString(),
       });
     }
+    // Round-2 报告 §1b：预存结余同样挡住销户 —— 钱必须当日经收费台
+    // 「预存退款」退给客户后再销，不能销户留孤儿余额。
+    const prepay = await this.finance.getPrepaymentBalance(ctx.tenantId, accountId, tx);
+    if (prepay !== 0n) {
+      throw new ConflictException({
+        code: 'ACCOUNT_PREPAY_BALANCE',
+        balance: prepay.toString(),
+      });
+    }
     return this.accounts.closeTx(tx, ctx, accountId, body, req);
   }
 }

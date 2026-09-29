@@ -17,6 +17,7 @@ import {
   assertAccountScopeTx as assertAccountCoverageTx,
   outOfScopeAccountIds,
 } from '../../common/account-scope.js';
+import { embedAccountIdentity } from '../../common/account-identity.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
 export const SETTLEMENT_SELECT = {
@@ -944,7 +945,7 @@ export class SettlementService {
       ctx,
       [...new Set(rows.map((r) => r.waterAccountId))],
     );
-    return rows.map((r) => ({
+    return (await embedAccountIdentity(tx, ctx.tenantId, rows)).map((r) => ({
       ...r,
       components: bySettlement.get(r.id) ?? [],
       consecutiveEstimates: streaks.get(r.id) ?? 0,

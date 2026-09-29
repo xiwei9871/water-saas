@@ -155,6 +155,7 @@ const CODE_LABELS: Record<string, string> = {
   ACCOUNT_CLOSED: '用水户已销户，无法操作',
   WATER_ACCOUNT_CLOSED: '用水户已销户，无法生成结算',
   ACCOUNT_OUTSTANDING_BALANCE: '存在未结清余额或欠费，无法销户',
+  ACCOUNT_PREPAY_BALANCE: '存在未退预存结余，请先在收费台办理预存退款',
   INVALID_ACCOUNT_STATUS_TRANSITION: '当前账户状态不允许该操作',
   TRANSFER_TARGET_REQUIRED: '请选择过户目标客户或结算户',
   ONBOARD_CUSTOMER_XOR: '客户需二选一：新建或选择已有',

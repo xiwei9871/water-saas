@@ -32,6 +32,7 @@ import type {
   Bill,
   BillingRun,
   BillingRunDetail,
+  BillingRunPreflight,
   RunStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
@@ -73,6 +74,9 @@ export default function BillingRuns() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createIdemKey, setCreateIdemKey] = useState('');
   const [saving, setSaving] = useState(false);
+  // Round-2 §9：选定账期后自动预检本期抄表/结算覆盖。
+  const [preflight, setPreflight] = useState<BillingRunPreflight | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
   const [createForm] = Form.useForm<CreateFormValues>();
 
@@ -106,6 +110,20 @@ export default function BillingRuns() {
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
     [page, pageSize, rows.length],
   );
+
+  const fetchPreflight = async (p: string) => {
+    setPreflightLoading(true);
+    try {
+      const res = await api.get<BillingRunPreflight>('/billing-runs/preflight', {
+        params: { period: p },
+      });
+      setPreflight(res.data);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setPreflightLoading(false);
+    }
+  };
 
   const detailSeq = useRef(0);
 
@@ -210,9 +228,9 @@ export default function BillingRuns() {
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
-      render: (id: string) => (
+      render: (id: string, b: Bill) => (
         <Tooltip title={id}>
-          <span>{accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
+          <span>{b.accountNo ?? accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
         </Tooltip>
       ),
     },
@@ -222,7 +240,7 @@ export default function BillingRuns() {
       width: 130,
       ellipsis: true,
       render: (_: unknown, b: Bill) =>
-        accountInfo(b.waterAccountId)?.customerName ?? '—',
+        b.customerName ?? accountInfo(b.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '类型',
@@ -462,9 +480,63 @@ export default function BillingRuns() {
             label="账期"
             rules={[{ required: true, message: '请选择账期' }]}
           >
-            <DatePicker picker="month" style={{ width: '100%' }} />
+            <DatePicker
+              picker="month"
+              style={{ width: '100%' }}
+              onChange={(v) => {
+                setPreflight(null);
+                if (v) void fetchPreflight(v.format('YYYYMM'));
+              }}
+            />
           </Form.Item>
         </Form>
+        {preflightLoading && (
+          <Alert type="info" showIcon style={{ marginTop: 4 }} message="正在预检本期抄表/结算覆盖…" />
+        )}
+        {preflight && !preflightLoading && (
+          <Alert
+            type={
+              preflight.missingSettlement.length === 0 &&
+              preflight.draftSettlement.length === 0 &&
+              preflight.missingReading.length === 0
+                ? 'success'
+                : 'warning'
+            }
+            showIcon
+            style={{ marginTop: 4 }}
+            message={`本期计划 ${preflight.plannedCount} 户 · 已终审可出账 ${preflight.willBillCount} 户`}
+            description={
+              <div>
+                {preflight.missingReading.length > 0 && (
+                  <div style={{ marginBottom: 4 }}>
+                    <b>{preflight.missingReading.length} 户本期未抄表</b>：
+                    {preflight.missingReading.slice(0, 10).map((r) => `${r.accountNo}（${r.customerName}）`).join('、')}
+                    {preflight.missingReading.length > 10 ? ` 等 ${preflight.missingReading.length} 户` : ''}
+                  </div>
+                )}
+                {preflight.missingSettlement.length > 0 && (
+                  <div style={{ marginBottom: 4 }}>
+                    <b>{preflight.missingSettlement.length} 户未生成结算</b>：
+                    {preflight.missingSettlement.slice(0, 10).map((r) => `${r.accountNo}（${r.customerName}）`).join('、')}
+                    {preflight.missingSettlement.length > 10 ? ` 等 ${preflight.missingSettlement.length} 户` : ''}
+                  </div>
+                )}
+                {preflight.draftSettlement.length > 0 && (
+                  <div style={{ marginBottom: 4 }}>
+                    <b>{preflight.draftSettlement.length} 户结算未终审（不会出账）</b>：
+                    {preflight.draftSettlement.slice(0, 10).map((r) => `${r.accountNo}（${r.customerName}）`).join('、')}
+                    {preflight.draftSettlement.length > 10 ? ` 等 ${preflight.draftSettlement.length} 户` : ''}
+                  </div>
+                )}
+                {preflight.missingSettlement.length === 0 &&
+                  preflight.draftSettlement.length === 0 &&
+                  preflight.missingReading.length === 0 && (
+                    <span>本期计划户均已终审结算，可直接生成。</span>
+                  )}
+              </div>
+            }
+          />
+        )}
       </Modal>
 
       {/* 批次详情抽屉 */}

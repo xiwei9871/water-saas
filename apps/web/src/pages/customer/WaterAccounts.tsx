@@ -28,6 +28,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   AccountInstallation,
+  AccountOutstanding,
   AccountStatus,
   Customer,
   HouseholdProfile,
@@ -174,6 +175,10 @@ export default function WaterAccounts() {
   const [saving, setSaving] = useState(false);
   // E6：过户前预取原结算户的预存余额，用于“余额不迁移”警告。
   const [transferBalance, setTransferBalance] = useState<string | null>(null);
+  // Round-2 §1：销户预检 —— 打开销户弹窗即拉欠费/贷方/预存结余，
+  // 分类给出处理指引，未清零时禁用确认。
+  const [closeCheck, setCloseCheck] = useState<AccountOutstanding | null>(null);
+  const [closeCheckLoading, setCloseCheckLoading] = useState(false);
   const [createForm] = Form.useForm<CreateFormValues>();
   const [editForm] = Form.useForm<EditFormValues>();
   const [transferForm] = Form.useForm<TransferFormValues>();
@@ -271,6 +276,23 @@ export default function WaterAccounts() {
         )
         .then((res) => setTransferBalance(res.data.balance))
         .catch(() => setTransferBalance('0')); // 无预存读权限时不阻塞过户
+    }
+    if (m.kind === 'close') {
+      void refreshCloseCheck(m.account.id);
+    }
+  };
+
+  const refreshCloseCheck = async (accountId: string) => {
+    setCloseCheckLoading(true);
+    try {
+      const res = await api.get<AccountOutstanding>(
+        `/water-accounts/${accountId}/outstanding`,
+      );
+      setCloseCheck(res.data);
+    } catch {
+      setCloseCheck(null); // 预检失败不阻塞 —— 服务端仍会校验
+    } finally {
+      setCloseCheckLoading(false);
     }
   };
 
@@ -965,7 +987,16 @@ export default function WaterAccounts() {
             : ''
         }
         okText={eventKind ? EVENT_TEXT[eventKind].ok : '确定'}
-        okButtonProps={{ danger: eventKind === 'close' }}
+        okButtonProps={{
+          danger: eventKind === 'close',
+          disabled:
+            eventKind === 'close' &&
+            (closeCheckLoading ||
+              (closeCheck !== null &&
+                (Number(closeCheck.totalOutstanding) !== 0 ||
+                  Number(closeCheck.reversedBillCredit) !== 0 ||
+                  Number(closeCheck.prepaymentBalance) !== 0))),
+        }}
         cancelText="取消"
         confirmLoading={saving}
         onOk={() => void submitEvent()}
@@ -973,13 +1004,64 @@ export default function WaterAccounts() {
         destroyOnHidden
       >
         {eventKind === 'close' && (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="销户为不可逆操作"
-            description="销户前须结清该户全部欠费与余额，存在未结清款项时服务端将拒绝。"
-          />
+          <>
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="销户为不可逆操作"
+              description="销户前须结清该户全部欠费与余额，存在未结清款项时服务端将拒绝。"
+            />
+            {closeCheckLoading && <Alert type="info" showIcon style={{ marginBottom: 12 }} message="正在检查该户欠费与结余…" />}
+            {closeCheck && Number(closeCheck.totalOutstanding) > 0 && (
+              <Alert
+                type="error"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`欠费 ${fmtCent(closeCheck.totalOutstanding)} 未结清`}
+                description="请先引导客户到收费台缴清欠费，结清后点击下方「重新检查」再销户。"
+              />
+            )}
+            {closeCheck && Number(closeCheck.reversedBillCredit) !== 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`应退贷方余额 ${fmtCent(closeCheck.reversedBillCredit)}（已缴后被红冲的款项）`}
+                description="这是应退给客户的钱，不是欠费 —— 请到收费台对该户执行「收款红冲」退款，退回后点击下方「重新检查」再销户。"
+              />
+            )}
+            {closeCheck && Number(closeCheck.prepaymentBalance) !== 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`预存结余 ${fmtCent(closeCheck.prepaymentBalance)} 待退`}
+                description="请到收费台对该结算户执行「预存退款」，当日退回客户后点击下方「重新检查」再销户。"
+              />
+            )}
+            {closeCheck &&
+              Number(closeCheck.totalOutstanding) === 0 &&
+              Number(closeCheck.reversedBillCredit) === 0 &&
+              Number(closeCheck.prepaymentBalance) === 0 && (
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message="预检通过：无欠费、无待退余额、无预存结余"
+                />
+              )}
+            {closeCheck && modal && 'account' in modal && (
+              <Button
+                size="small"
+                loading={closeCheckLoading}
+                style={{ marginBottom: 16 }}
+                onClick={() => void refreshCloseCheck(modal.account.id)}
+              >
+                重新检查
+              </Button>
+            )}
+          </>
         )}
         <Form form={eventForm} layout="vertical">
           <Form.Item name="effectiveDate" label="生效日期">

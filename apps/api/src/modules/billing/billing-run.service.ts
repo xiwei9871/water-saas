@@ -16,6 +16,7 @@ import {
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
+import { embedAccountIdentity } from '../../common/account-identity.js';
 import { BILL_SELECT, type BillRow } from './bill.service.js';
 import {
   billDueDays,
@@ -212,6 +213,96 @@ export class BillingRunService {
       });
       if (!run) throw new NotFoundException({ code: 'BILLING_RUN_NOT_FOUND' });
       return this.withBills(tx, ctx, run);
+    });
+  }
+
+  /**
+   * GET /billing-runs/preflight?period= — Round-2 报告 §9 开账前置校验:
+   * 把"本期该抄/该结算但没做"的户暴露给操作员，而不是开账后才发现
+   * 少出账。口径 = 本期抄表计划覆盖的户：
+   *   missingReading    有计划项但本期无任何抄表记录
+   *   missingSettlement 有计划项但无结算（读没读都算 —— 未结算即不会出账）
+   *   draftSettlement   有结算但仍是 DRAFT（未终审 → 不会出账）
+   *   willBillCount     本期 FINAL 结算总数（开账将生成账单数）
+   * 只读探针，不阻止创建 —— 缺漏户可能有合理原因（暂停/整月未用水等），
+   * 由操作员确认后照常开账。
+   */
+  async preflight(ctx: TenantCtx, period: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.$queryRaw<
+        {
+          waterAccountId: string;
+          accountNo: string;
+          customerName: string;
+          read: boolean;
+          settlementStatus: string | null;
+        }[]
+      >`
+        WITH planned AS (
+          SELECT DISTINCT ON (rpi.water_account_id)
+                 rpi.water_account_id, wa.account_no, c.name AS customer_name,
+                 rpi.completed_reading_id
+          FROM reading_plan_item rpi
+          JOIN reading_plan rp
+            ON rp.tenant_id = rpi.tenant_id AND rp.id = rpi.plan_id
+          JOIN water_account wa
+            ON wa.tenant_id = rpi.tenant_id AND wa.id = rpi.water_account_id
+          JOIN customer c
+            ON c.tenant_id = wa.tenant_id AND c.id = wa.customer_id
+          WHERE rpi.tenant_id = ${ctx.tenantId}::uuid AND rp.period = ${period}
+          ORDER BY rpi.water_account_id, rpi.seq_no
+        )
+        SELECT p.water_account_id AS "waterAccountId",
+               p.account_no AS "accountNo",
+               p.customer_name AS "customerName",
+               (p.completed_reading_id IS NOT NULL OR EXISTS (
+                 SELECT 1 FROM meter_reading mr
+                 JOIN meter_installation mi
+                   ON mi.tenant_id = mr.tenant_id AND mi.id = mr.installation_id
+                 WHERE mr.tenant_id = ${ctx.tenantId}::uuid
+                   AND mi.water_account_id = p.water_account_id
+                   AND mr.period = ${period}
+               )) AS "read",
+               cs.status::text AS "settlementStatus"
+        FROM planned p
+        LEFT JOIN consumption_settlement cs
+          ON cs.tenant_id = ${ctx.tenantId}::uuid
+         AND cs.water_account_id = p.water_account_id
+         AND cs.period = ${period}
+        ORDER BY p.account_no`;
+      // UNIQUE(tenant,account,period) → 每户至多一条本期结算行。
+      const missingReading = rows
+        .filter((r) => !r.read)
+        .map((r) => ({
+          waterAccountId: r.waterAccountId,
+          accountNo: r.accountNo,
+          customerName: r.customerName,
+        }));
+      const missingSettlement = rows
+        .filter((r) => r.settlementStatus === null)
+        .map((r) => ({
+          waterAccountId: r.waterAccountId,
+          accountNo: r.accountNo,
+          customerName: r.customerName,
+        }));
+      const draftSettlement = rows
+        .filter((r) => r.settlementStatus === 'DRAFT')
+        .map((r) => ({
+          waterAccountId: r.waterAccountId,
+          accountNo: r.accountNo,
+          customerName: r.customerName,
+        }));
+      const willBill = await tx.consumptionSettlement.count({
+        where: { tenantId: ctx.tenantId, period, status: 'FINAL' },
+      });
+      return {
+        period,
+        plannedCount: rows.length,
+        willBillCount: willBill,
+        missingReading,
+        missingSettlement,
+        draftSettlement,
+      };
     });
   }
 
@@ -757,7 +848,9 @@ export class BillingRunService {
       select: BILL_SELECT,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
-    return { ...run, bills };
+    // 批次账单行内嵌户号+客户名称 —— 复核岗无 customer:read 也能核对
+    // （Round-2 报告 §9：admin 见名称、复核员只见 uuid 的问题源）。
+    return { ...run, bills: await embedAccountIdentity(tx, ctx.tenantId, bills) };
   }
 
   private async loadAccountFacts(

@@ -48,12 +48,15 @@ const ORG_B = 'b6b6b6b6-0000-4000-8000-0000000000c0';
 const ROLE_ADMIN_A = 'a6a6a6a6-0000-4000-8000-00000000ad01';
 const ROLE_VIEWER_A = 'a6a6a6a6-0000-4000-8000-000000001e01';
 const ROLE_WRITER_A = 'a6a6a6a6-0000-4000-8000-000000001e02';
+const ROLE_REVIEWER_A = 'a6a6a6a6-0000-4000-8000-000000001e03';
 const ROLE_B_ADMIN = 'b6b6b6b6-0000-4000-8000-00000000ad01';
 const PERM_MET_READ = 'a6a6a6a6-0000-4000-8000-00000000e601';
 const PERM_MET_WRITE = 'a6a6a6a6-0000-4000-8000-00000000e602';
+const PERM_MET_QC = 'a6a6a6a6-0000-4000-8000-00000000e603';
 const STAFF_ADMIN_A = 'a6a6a6a6-0000-4000-8000-0000000a0001';
 const STAFF_VIEWER_A = 'a6a6a6a6-0000-4000-8000-0000000b0002';
 const STAFF_WRITER_A = 'a6a6a6a6-0000-4000-8000-0000000b0004';
+const STAFF_REVIEWER_A = 'a6a6a6a6-0000-4000-8000-0000000b0005';
 const STAFF_B_ADMIN = 'b6b6b6b6-0000-4000-8000-0000000a0001';
 
 const owner = new pg.Client({ connectionString: OWNER_URL });
@@ -61,6 +64,7 @@ let app: INestApplication<App>;
 let adminToken = '';
 let viewerToken = '';
 let writerToken = '';
+let reviewerToken = '';
 let tenantBToken = '';
 
 // ids populated by the sequential suite
@@ -143,39 +147,44 @@ beforeAll(async () => {
      VALUES ($1, $3, 'admin', 'T6 Admin', 'ALL', now(), now()),
             ($2, $3, 't6-viewer', 'T6 Viewer', 'ORG_SUBTREE', now(), now()),
             ($6, $3, 't6-writer', 'T6 Writer', 'ORG_SUBTREE', now(), now()),
+            ($7, $3, 't6-reviewer', 'T6 Reviewer', 'ORG_SUBTREE', now(), now()),
             ($4, $5, 'admin', 'T6B Admin', 'ALL', now(), now())
      ON CONFLICT DO NOTHING`,
-    [ROLE_ADMIN_A, ROLE_VIEWER_A, T6A, ROLE_B_ADMIN, T6B, ROLE_WRITER_A],
+    [ROLE_ADMIN_A, ROLE_VIEWER_A, T6A, ROLE_B_ADMIN, T6B, ROLE_WRITER_A, ROLE_REVIEWER_A],
   );
   await owner.query(
     `INSERT INTO permission (id, tenant_id, code, type, created_at, updated_at)
      VALUES ($1, $2, 'metering:read', 'ACTION', now(), now()),
-            ($3, $2, 'metering:write', 'ACTION', now(), now())
+            ($3, $2, 'metering:write', 'ACTION', now(), now()),
+            ($4, $2, 'metering:qc', 'ACTION', now(), now())
      ON CONFLICT DO NOTHING`,
-    [PERM_MET_READ, T6A, PERM_MET_WRITE],
+    [PERM_MET_READ, T6A, PERM_MET_WRITE, PERM_MET_QC],
   );
   await owner.query(
     `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
      VALUES ($1, $2, $3, now(), now()),
-            ($1, $4, $5, now(), now())
+            ($1, $4, $5, now(), now()),
+            ($1, $6, $7, now(), now())
      ON CONFLICT DO NOTHING`,
-    [T6A, ROLE_VIEWER_A, PERM_MET_READ, ROLE_WRITER_A, PERM_MET_WRITE],
+    [T6A, ROLE_VIEWER_A, PERM_MET_READ, ROLE_WRITER_A, PERM_MET_WRITE, ROLE_REVIEWER_A, PERM_MET_QC],
   );
   await owner.query(
     `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
      VALUES ($1, $4, $6, 't6-admin',   $7, 'T6 Admin',  'ACTIVE', now(), now()),
             ($2, $4, $6, 't6-viewer',  $7, 'T6 Viewer', 'ACTIVE', now(), now()),
             ($9, $4, $10,'t6-writer',  $7, 'T6 Writer', 'ACTIVE', now(), now()),
+            ($11,$4, $6, 't6-reviewer',$7, 'T6 Reviewer','ACTIVE', now(), now()),
             ($3, $5, $8, 't6b-admin',  $7, 'T6B Admin', 'ACTIVE', now(), now())
      ON CONFLICT (tenant_id, login) DO NOTHING`,
-    [STAFF_ADMIN_A, STAFF_VIEWER_A, STAFF_B_ADMIN, T6A, T6B, ORG_A, hash, ORG_B, STAFF_WRITER_A, ORG_A_BR],
+    [STAFF_ADMIN_A, STAFF_VIEWER_A, STAFF_B_ADMIN, T6A, T6B, ORG_A, hash, ORG_B, STAFF_WRITER_A, ORG_A_BR, STAFF_REVIEWER_A],
   );
   await owner.query(
     `INSERT INTO staff_role (tenant_id, staff_id, role_id, created_at, updated_at)
      VALUES ($1, $2, $4, now(), now()),
             ($1, $3, $5, now(), now()),
             ($1, $6, $7, now(), now()),
-            ($8, $9, $10, now(), now())
+            ($8, $9, $10, now(), now()),
+            ($1, $11, $12, now(), now())
      ON CONFLICT DO NOTHING`,
     [
       T6A,
@@ -188,6 +197,8 @@ beforeAll(async () => {
       T6B,
       STAFF_B_ADMIN,
       ROLE_B_ADMIN,
+      STAFF_REVIEWER_A,
+      ROLE_REVIEWER_A,
     ],
   );
 
@@ -207,6 +218,7 @@ beforeAll(async () => {
   adminToken = await login('t6-water', 't6-admin');
   viewerToken = await login('t6-water', 't6-viewer');
   writerToken = await login('t6-water', 't6-writer');
+  reviewerToken = await login('t6-water', 't6-reviewer');
   tenantBToken = await login('t6-other', 't6b-admin');
 });
 
@@ -836,17 +848,46 @@ describe('tenant isolation + permissions + scope', () => {
     expect(entry.status).toBe(403);
     expect(entry.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
 
-    for (const [route, body] of [
-      [`/meter-readings/${aReading.id}/qc`, { action: 'pass' }],
-      [`/meter-readings/${aReading.id}/supersede`, { readingValue: 9 }],
-    ] as const) {
-      const res = await request(app.getHttpServer())
-        .post(route)
-        .set(auth(writerToken))
-        .send(body);
-      expect(res.status).toBe(403);
-      expect(res.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
-    }
+    // QC is gated on metering:qc alone now — a writer hits PERMISSION_DENIED
+    // before org scope is even evaluated. Entry/supersede stay writer-scoped.
+    const qcRes = await request(app.getHttpServer())
+      .post(`/meter-readings/${aReading.id}/qc`)
+      .set(auth(writerToken))
+      .send({ action: 'pass' });
+    expect(qcRes.status).toBe(403);
+    expect(qcRes.body).toMatchObject({ code: 'PERMISSION_DENIED' });
+    const supRes = await request(app.getHttpServer())
+      .post(`/meter-readings/${aReading.id}/supersede`)
+      .set(auth(writerToken))
+      .send({ readingValue: 9 });
+    expect(supRes.status).toBe(403);
+    expect(supRes.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+  });
+
+  it('QC split (Round-2 §2): metering:write cannot QC; metering:qc can', async () => {
+    // Fresh PENDING reading so neither verdict is terminal.
+    const plan = await genPlan('perm', '209903');
+    const entry = await request(app.getHttpServer())
+      .post('/meter-readings')
+      .set(auth(adminToken))
+      .send({ planItemId: itemOf('perm', 'A'), resultType: 'ACTUAL', readingValue: 7 });
+    expect(entry.status).toBe(201);
+    const readingId: string = entry.body.id;
+
+    const denied = await request(app.getHttpServer())
+      .post(`/meter-readings/${readingId}/qc`)
+      .set(auth(writerToken))
+      .send({ action: 'pass' });
+    expect(denied.status).toBe(403);
+    expect(denied.body).toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    const ok = await request(app.getHttpServer())
+      .post(`/meter-readings/${readingId}/qc`)
+      .set(auth(reviewerToken))
+      .send({ action: 'pass' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.qcStatus).toBe('PASSED');
+    void plan;
   });
 
   it('metering:read holder reads but cannot write (403)', async () => {

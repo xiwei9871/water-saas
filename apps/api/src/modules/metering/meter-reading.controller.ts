@@ -337,7 +337,9 @@ export class MeterReadingController {
    * records that the read happened, not that it was good.
    */
   @Post(':id/qc')
-  @AnyPermissions('metering:qc', 'metering:write')
+  // Round-2 report §2: 质检是复核动作 —— metering:write（录表）不再放行，
+  // 只有挂 metering:qc 的角色（复核员）能通过/驳回。
+  @Permissions('metering:qc')
   qc(
     @Param('id') id: string,
     @Body() body: { action?: string },

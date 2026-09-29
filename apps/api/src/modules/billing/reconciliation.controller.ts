@@ -12,7 +12,7 @@ import {
 import type { Request } from 'express';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
-import { Permissions } from '../../common/permissions.decorator.js';
+import { AnyPermissions, Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
@@ -84,6 +84,38 @@ export class ReconciliationController {
     });
   }
 
+  /**
+   * GET /reconciliations/account-lookup?q= — 户号/客户名搜索器
+   * (Round-2 报告 §8)。挂在业务权限上而非 customer:read —— 有补差权限
+   * 的角色（billing / metering:qc）都可用它选户，返回仅 id+户号+客户名。
+   * Literal route MUST precede :id.
+   */
+  @Get('account-lookup')
+  @AnyPermissions(
+    'billing:read',
+    'billing:write',
+    'metering:qc',
+    'metering:write',
+  )
+  accountLookup(@Query('q') q?: string) {
+    return this.svc.accountLookup(currentTenant(), q?.trim() || undefined);
+  }
+
+  /**
+   * GET /reconciliations/drift-hints — 已结算读数被修正但未补差
+   * (Round-2 报告 §7 补差需求闭环)。录入员/复核员/账务都能看到待办。
+   */
+  @Get('drift-hints')
+  @AnyPermissions(
+    'billing:read',
+    'billing:write',
+    'metering:qc',
+    'metering:write',
+  )
+  driftHints() {
+    return this.svc.driftHints(currentTenant());
+  }
+
   /** GET /reconciliations/:id — the reconciliation row. */
   @Get(':id')
   @Permissions('billing:read')
@@ -98,7 +130,7 @@ export class ReconciliationController {
    * RECONCILIATION_EXISTS (UNIQUE(tenant_id, actual_reading_id)).
    */
   @Post()
-  @Permissions('billing:write')
+  @AnyPermissions('billing:write', 'metering:qc')
   create(
     @Body() body: ReconciliationWireBody,
     @Req() req: Request,

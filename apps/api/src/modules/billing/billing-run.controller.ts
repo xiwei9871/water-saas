@@ -70,6 +70,20 @@ export class BillingRunController {
     });
   }
 
+  /**
+   * GET /billing-runs/preflight?period=YYYYMM — Round-2 报告 §9：开账前
+   * 覆盖预检（缺抄/缺结算/未终审清单 + 将出账数）。Literal route MUST
+   * precede :id.
+   */
+  @Get('preflight')
+  @Permissions('billing:read')
+  preflight(@Query('period') period?: string) {
+    if (!period) {
+      throw new BadRequestException({ code: 'PERIOD_REQUIRED', field: 'period' });
+    }
+    return this.svc.preflight(currentTenant(), assertPeriod(period));
+  }
+
   /** GET /billing-runs/:id — run + its bill list. */
   @Get(':id')
   @Permissions('billing:read')

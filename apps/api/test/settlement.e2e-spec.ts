@@ -49,12 +49,15 @@ const ORG_B = 'b7b7b7b7-0000-4000-8000-0000000000c0';
 const ROLE_ADMIN_A = 'a7a7a7a7-0000-4000-8000-00000000ad01';
 const ROLE_VIEWER_A = 'a7a7a7a7-0000-4000-8000-000000001e01';
 const ROLE_WRITER_A = 'a7a7a7a7-0000-4000-8000-000000001e02';
+const ROLE_REVIEWER_A = 'a7a7a7a7-0000-4000-8000-000000001e03';
 const ROLE_B_ADMIN = 'b7b7b7b7-0000-4000-8000-00000000ad01';
 const PERM_MET_READ = 'a7a7a7a7-0000-4000-8000-00000000e601';
 const PERM_MET_WRITE = 'a7a7a7a7-0000-4000-8000-00000000e602';
+const PERM_MET_QC = 'a7a7a7a7-0000-4000-8000-00000000e603';
 const STAFF_ADMIN_A = 'a7a7a7a7-0000-4000-8000-0000000a0001';
 const STAFF_VIEWER_A = 'a7a7a7a7-0000-4000-8000-0000000b0002';
 const STAFF_WRITER_A = 'a7a7a7a7-0000-4000-8000-0000000b0004';
+const STAFF_REVIEWER_A = 'a7a7a7a7-0000-4000-8000-0000000b0005';
 const STAFF_B_ADMIN = 'b7b7b7b7-0000-4000-8000-0000000a0001';
 
 const owner = new pg.Client({ connectionString: OWNER_URL });
@@ -62,6 +65,7 @@ let app: INestApplication<App>;
 let adminToken = '';
 let viewerToken = '';
 let writerToken = '';
+let reviewerToken = '';
 let tenantBToken = '';
 
 // ids populated by the sequential suite
@@ -190,39 +194,44 @@ beforeAll(async () => {
      VALUES ($1, $3, 'admin', 'T7 Admin', 'ALL', now(), now()),
             ($2, $3, 't7-viewer', 'T7 Viewer', 'ORG_SUBTREE', now(), now()),
             ($6, $3, 't7-writer', 'T7 Writer', 'ORG_SUBTREE', now(), now()),
+            ($7, $3, 't7-reviewer', 'T7 Reviewer', 'ORG_SUBTREE', now(), now()),
             ($4, $5, 'admin', 'T7B Admin', 'ALL', now(), now())
      ON CONFLICT DO NOTHING`,
-    [ROLE_ADMIN_A, ROLE_VIEWER_A, T7A, ROLE_B_ADMIN, T7B, ROLE_WRITER_A],
+    [ROLE_ADMIN_A, ROLE_VIEWER_A, T7A, ROLE_B_ADMIN, T7B, ROLE_WRITER_A, ROLE_REVIEWER_A],
   );
   await owner.query(
     `INSERT INTO permission (id, tenant_id, code, type, created_at, updated_at)
      VALUES ($1, $2, 'metering:read', 'ACTION', now(), now()),
-            ($3, $2, 'metering:write', 'ACTION', now(), now())
+            ($3, $2, 'metering:write', 'ACTION', now(), now()),
+            ($4, $2, 'metering:qc', 'ACTION', now(), now())
      ON CONFLICT DO NOTHING`,
-    [PERM_MET_READ, T7A, PERM_MET_WRITE],
+    [PERM_MET_READ, T7A, PERM_MET_WRITE, PERM_MET_QC],
   );
   await owner.query(
     `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
      VALUES ($1, $2, $3, now(), now()),
-            ($1, $4, $5, now(), now())
+            ($1, $4, $5, now(), now()),
+            ($1, $6, $7, now(), now())
      ON CONFLICT DO NOTHING`,
-    [T7A, ROLE_VIEWER_A, PERM_MET_READ, ROLE_WRITER_A, PERM_MET_WRITE],
+    [T7A, ROLE_VIEWER_A, PERM_MET_READ, ROLE_WRITER_A, PERM_MET_WRITE, ROLE_REVIEWER_A, PERM_MET_QC],
   );
   await owner.query(
     `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
      VALUES ($1, $4, $6, 't7-admin',   $7, 'T7 Admin',  'ACTIVE', now(), now()),
             ($2, $4, $6, 't7-viewer',  $7, 'T7 Viewer', 'ACTIVE', now(), now()),
             ($9, $4, $10,'t7-writer',  $7, 'T7 Writer', 'ACTIVE', now(), now()),
+            ($11,$4, $6, 't7-reviewer',$7, 'T7 Reviewer','ACTIVE', now(), now()),
             ($3, $5, $8, 't7b-admin',  $7, 'T7B Admin', 'ACTIVE', now(), now())
      ON CONFLICT (tenant_id, login) DO NOTHING`,
-    [STAFF_ADMIN_A, STAFF_VIEWER_A, STAFF_B_ADMIN, T7A, T7B, ORG_A, hash, ORG_B, STAFF_WRITER_A, ORG_A_BR],
+    [STAFF_ADMIN_A, STAFF_VIEWER_A, STAFF_B_ADMIN, T7A, T7B, ORG_A, hash, ORG_B, STAFF_WRITER_A, ORG_A_BR, STAFF_REVIEWER_A],
   );
   await owner.query(
     `INSERT INTO staff_role (tenant_id, staff_id, role_id, created_at, updated_at)
      VALUES ($1, $2, $4, now(), now()),
             ($1, $3, $5, now(), now()),
             ($1, $6, $7, now(), now()),
-            ($8, $9, $10, now(), now())
+            ($8, $9, $10, now(), now()),
+            ($1, $11, $12, now(), now())
      ON CONFLICT DO NOTHING`,
     [
       T7A,
@@ -235,6 +244,8 @@ beforeAll(async () => {
       T7B,
       STAFF_B_ADMIN,
       ROLE_B_ADMIN,
+      STAFF_REVIEWER_A,
+      ROLE_REVIEWER_A,
     ],
   );
 
@@ -254,6 +265,7 @@ beforeAll(async () => {
   adminToken = await login('t7-water', 't7-admin');
   viewerToken = await login('t7-water', 't7-viewer');
   writerToken = await login('t7-water', 't7-writer');
+  reviewerToken = await login('t7-water', 't7-reviewer');
   tenantBToken = await login('t7-other', 't7b-admin');
 });
 
@@ -655,7 +667,7 @@ describe('estimate preview', () => {
 });
 
 describe('idempotency + scope + isolation', () => {
-  it('scoped writer (branch subtree) → 403 ORG_OUT_OF_SCOPE on generate/finalize', async () => {
+  it('scoped writer (branch subtree) → 403 on generate; finalize denied by perm', async () => {
     // F lands in p12's book (ORG_A) — outside the writer's branch subtree.
     await genPlan('p12', '202612');
     const gen = await request(app.getHttpServer())
@@ -665,12 +677,37 @@ describe('idempotency + scope + isolation', () => {
     expect(gen.status).toBe(403);
     expect(gen.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
 
+    // Round-2 §3: 终审 requires metering:qc — a writer fails the permission
+    // gate before org scope is even evaluated.
     const fin = await request(app.getHttpServer())
       .post(`/consumption-settlements/${settlement['E09']}/finalize`)
       .set(auth(writerToken))
       .send({});
     expect(fin.status).toBe(403);
-    expect(fin.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+    expect(fin.body).toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  it('finalize split (Round-2 §3): writer 403; reviewer (metering:qc) finalizes', async () => {
+    // Fresh DRAFT inside the reviewer's company subtree — E has reading
+    // history so AUTO_AVG3 prices it with a reason alone (F is multi-meter
+    // and would need per-install overrides).
+    const created = await settle('E', '202611', { estimateReason: 'split probe' });
+    expect(created.status).toBe(201);
+    const id: string = created.body.id;
+
+    const denied = await request(app.getHttpServer())
+      .post(`/consumption-settlements/${id}/finalize`)
+      .set(auth(writerToken))
+      .send({});
+    expect(denied.status).toBe(403);
+    expect(denied.body).toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    const ok = await request(app.getHttpServer())
+      .post(`/consumption-settlements/${id}/finalize`)
+      .set(auth(reviewerToken))
+      .send({});
+    expect(ok.status).toBe(201);
+    expect(ok.body.status).toBe('FINAL');
   });
 
   it('Idempotency-Key replays generation verbatim (no double-write)', async () => {

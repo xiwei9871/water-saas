@@ -87,10 +87,11 @@ f47ac10b-58cc-4372-a567-0e02b2c3d480,NO_READ,,LOCKED,2026-10-05`;
  * 追加新事实行）+ CSV 批量导入（all-or-nothing，失败行报告内嵌展示）。
  */
 export default function MeterReadings() {
-  const { message } = AntdApp.useApp();
+  const { message, modal } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
-  const canQc = canWrite || hasPerm('metering:qc');
+  // 质检是复核动作（metering:qc），录表权限不再放行（Round-2 报告 §2）。
+  const canQc = hasPerm('metering:qc');
   const [searchInput, setSearchInput] = useState('');
   const [query, setQuery] = useState('');
   const canIamRead = hasPerm('iam:read');
@@ -193,7 +194,7 @@ export default function MeterReadings() {
     }
   };
 
-  const qc = async (reading: MeterReading, action: QcAction) => {
+  const doQc = async (reading: MeterReading, action: QcAction) => {
     setActing(reading.id);
     try {
       await api.post(
@@ -209,6 +210,25 @@ export default function MeterReadings() {
     } finally {
       setActing(null);
     }
+  };
+
+  /**
+   * Round-2 报告 §10：通过一条「未抄见」读数且该户已连续多期未抄见时，
+   * 强制二次确认 —— 长期估抄需要复核员有意识地放行，不能顺手点过。
+   */
+  const qc = (reading: MeterReading, action: QcAction) => {
+    const streak = reading.consecutiveNoRead ?? 0;
+    if (action === 'pass' && reading.resultType === 'NO_READ' && streak >= 2) {
+      modal.confirm({
+        title: '连续未抄见警示',
+        content: `该户截至本期已连续 ${streak} 期未抄见（含本条）。通过后将继续按预估口径结算；达到连续预估上限的账户请转异常中心跟进入户核查。确认仍要通过？`,
+        okText: '仍要通过',
+        cancelText: '取消',
+        onOk: () => doQc(reading, action),
+      });
+      return;
+    }
+    void doQc(reading, action);
   };
 
   const submitSupersede = async () => {
@@ -304,13 +324,18 @@ export default function MeterReadings() {
       width: 150,
       render: (_: unknown, r: MeterReading) =>
         r.resultType === 'NO_READ' ? (
-          <Space size={4}>
+          <Space size={4} wrap>
             <Tag color="orange">
               {r.exceptionCode ? EXCEPTION_CODE_LABELS[r.exceptionCode] : r.exceptionCode}
             </Tag>
             {r.estimateQty != null && (
               <Tooltip title="抄表员预计用量，非表码">
                 <Tag color="cyan">估 {r.estimateQty} m³</Tag>
+              </Tooltip>
+            )}
+            {(r.consecutiveNoRead ?? 0) >= 2 && (
+              <Tooltip title="该户连续多期未抄见，复核前请确认是否已达连续预估上限并需入户核查">
+                <Tag color="red">连{r.consecutiveNoRead}期未抄</Tag>
               </Tooltip>
             )}
           </Space>

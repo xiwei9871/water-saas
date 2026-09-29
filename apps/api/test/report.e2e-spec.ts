@@ -656,23 +656,30 @@ describe('GET /reports/collected-monthly', () => {
 });
 
 describe('GET /reports/recovery-rate', () => {
-  it('single-month rate at 4dp; through-cumulative; billed=0 → null', async () => {
+  it('rate = 应收销账/应收（≤100% 口径）；当月现金实收与历史清收单列', async () => {
     const oct = (await get('/reports/recovery-rate?period=202610')).body;
+    // billed=20000; 销账 = 4000+2500+1000−1500+3200 = 9200
+    // （p5 的 800 分摊到 DRAFT 账单 → 不进分子；due_date 未设 → 全在窗口内）
     expect(oct).toMatchObject({
       period: '202610',
       through: null,
       billed: '20000',
       collected: '10000',
-      rate: '0.5000',
+      allocatedTotal: '9200',
+      allocatedInWindow: '9200',
+      priorPeriodCollected: '0',
+      rate: '0.4600',
     });
-    // cumulative ≤ 202611: billed 20000+7777, collected 10000+2000.
+    // cumulative ≤ 202611: billed 20000+7777; alloc 9200+2000 = 11200.
     const cum = (await get('/reports/recovery-rate?period=202610&through=202611')).body;
     expect(cum).toMatchObject({
       period: '202610',
       through: '202611',
       billed: '27777',
       collected: '12000',
-      rate: '0.4320',
+      allocatedTotal: '11200',
+      allocatedInWindow: '11200',
+      rate: '0.4032',
     });
     const zero = (await get('/reports/recovery-rate?period=202612')).body;
     expect(zero).toMatchObject({ billed: '0', collected: '0', rate: null });
@@ -811,7 +818,7 @@ describe('E10-RC1 scoped reports (B2)', () => {
       .get('/reports/recovery-rate?period=202610')
       .set(auth(adminToken))
       .expect(200);
-    expect(all.body.rate).toBe('0.3704'); // 10000 / 27000
+    expect(all.body.rate).toBe('0.3407'); // 9200 / 27000（销账口径）
     for (const t of [scopedToken, readerToken]) {
       const res = await request(app.getHttpServer())
         .get('/reports/recovery-rate?period=202610')

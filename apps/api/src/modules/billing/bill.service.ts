@@ -8,6 +8,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { DomainError } from '@ws/billing-core';
 import type { Request } from 'express';
+import { embedAccountIdentity } from '../../common/account-identity.js';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
@@ -135,7 +136,7 @@ export class BillService {
         !q.waterAccountId && ctx.scope !== 'ALL'
           ? await outOfScopeAccountIds(tx, ctx)
           : [];
-      return tx.bill.findMany({
+      const rows = await tx.bill.findMany({
         where: {
           tenantId: ctx.tenantId,
           period: q.period,
@@ -150,7 +151,34 @@ export class BillService {
         take: q.take,
         skip: q.skip,
       });
+      return this.embedIdentity(tx, ctx, rows);
     });
+  }
+
+  /**
+   * 户号/客户名称/结算户号/结算户名称 are part of the bill document —
+   * embedded inline so roles without customer:read still see real
+   * identifiers instead of uuids (Round-2 report §4/§9).
+   */
+  private async embedIdentity<T extends { waterAccountId: string; settleAccountId: string }>(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    rows: T[],
+  ) {
+    const withAccount = await embedAccountIdentity(tx, ctx.tenantId, rows);
+    const settleIds = [...new Set(rows.map((r) => r.settleAccountId))];
+    const settles = settleIds.length
+      ? await tx.settleAccount.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: settleIds } },
+          select: { id: true, settleNo: true, name: true },
+        })
+      : [];
+    const bySettle = new Map(settles.map((s) => [s.id, s]));
+    return withAccount.map((r) => ({
+      ...r,
+      settleNo: bySettle.get(r.settleAccountId)?.settleNo ?? null,
+      settleName: bySettle.get(r.settleAccountId)?.name ?? null,
+    }));
   }
 
   async getById(ctx: TenantCtx, id: string) {
@@ -444,7 +472,7 @@ export class BillService {
   // internals
   // -------------------------------------------------------------------------
 
-  private async withItems<T extends { id: string }>(
+  private async withItems<T extends { id: string; waterAccountId: string; settleAccountId: string }>(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     bill: T,
@@ -469,7 +497,8 @@ export class BillService {
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
-    return { ...bill, items, allocs };
+    const [identified] = await this.embedIdentity(tx, ctx, [bill]);
+    return { ...identified, items, allocs };
   }
 
   /**

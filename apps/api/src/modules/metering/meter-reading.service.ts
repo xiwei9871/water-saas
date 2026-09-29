@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
+import { noReadStreaksTx } from '../../common/no-read-streak.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
   assertAccountScopeTx,
@@ -43,6 +44,7 @@ const READING_DISPLAY_SELECT = {
   ...METER_READING_SELECT,
   installation: {
     select: {
+      waterAccountId: true,
       waterAccount: {
         select: {
           accountNo: true,
@@ -312,6 +314,7 @@ export class MeterReadingService {
     return rows.map(({ installation, ...r }) => ({
       ...r,
       account: {
+        id: installation.waterAccountId,
         accountNo: installation.waterAccount.accountNo,
         customerName: installation.waterAccount.customer.name,
         addr: installation.waterAccount.addr,
@@ -329,11 +332,13 @@ export class MeterReadingService {
    * validReadings applies). Lets a client mark 已被更正 rows without a
    * second round-trip.
    */
-  private async attachSupersededBy<T extends { id: string }>(
+  private async attachSupersededBy<
+    T extends { id: string; period: string; account?: { id: string } },
+  >(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     rows: T[],
-  ): Promise<(T & { supersededById: string | null })[]> {
+  ): Promise<(T & { supersededById: string | null; consecutiveNoRead: number })[]> {
     if (rows.length === 0) return [];
     const children = await tx.meterReading.findMany({
       where: {
@@ -343,7 +348,21 @@ export class MeterReadingService {
       select: { id: true, supersedesReadingId: true },
     });
     const byParent = new Map(children.map((c) => [c.supersedesReadingId, c.id]));
-    return rows.map((r) => ({ ...r, supersededById: byParent.get(r.id) ?? null }));
+    // Round-2 §10: trailing NO_READ run per (account, period) — QC sees
+    // "已连续 N 期未抄见" instead of approving blind.
+    const streaks = await noReadStreaksTx(
+      tx,
+      ctx.tenantId,
+      rows
+        .filter((r) => r.account?.id)
+        .map((r) => ({ waterAccountId: r.account!.id, period: r.period })),
+    );
+    return rows.map((r) => ({
+      ...r,
+      supersededById: byParent.get(r.id) ?? null,
+      consecutiveNoRead:
+        streaks.get(`${r.account?.id}:${r.period}`) ?? 0,
+    }));
   }
 
   /**

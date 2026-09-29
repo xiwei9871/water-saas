@@ -460,6 +460,74 @@ export function WaterAccountSearchSelect({
 }
 
 /**
+ * 业务侧用水户搜索（Round-2 §8）：GET /reconciliations/account-lookup 走
+ * billing/metering 业务权限而非 customer:read —— 账务/复核角色也能按
+ * 户号或客户名选户，不再手填 uuid。返回行仅 id/户号/客户名。
+ */
+export function BillingAccountSelect({
+  value,
+  onChange,
+  placeholder,
+  disabled,
+}: PickerProps) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+
+  const fetch = useCallback(
+    async (kw: string) => {
+      setFetching(true);
+      try {
+        const res = await api.get<
+          { id: string; accountNo: string; customerName: string }[]
+        >('/reconciliations/account-lookup', {
+          params: kw.trim() ? { q: kw.trim() } : {},
+        });
+        setOptions(
+          res.data.map((a) => ({
+            value: a.id,
+            label: `${a.accountNo} · ${a.customerName}`,
+          })),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setFetching(false);
+      }
+    },
+    [message],
+  );
+
+  useEffect(() => {
+    queueMicrotask(() => void fetch(''));
+  }, [fetch]);
+  const onSearch = useDebounced((kw) => void fetch(kw));
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      filterOption={false}
+      placeholder={placeholder ?? '搜索户号/客户名称'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
+      onSearch={onSearch}
+      notFoundContent={fetching ? '加载中…' : '无匹配用水户'}
+    />
+  );
+}
+
+/**
  * 员工选择（抄表员等）：/iam/staff 需 iam:read —— 调用方应先
  * hasPerm('iam:read') 判断，没有权限时隐藏或退化（抄表册默认取
  * 当前用户所属组织时同样处理）。全量拉取后本地过滤。

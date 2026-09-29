@@ -15,6 +15,8 @@ import {
   type FeeItemInput,
 } from '@ws/billing-core';
 import type { Request } from 'express';
+import { embedAccountIdentity } from '../../common/account-identity.js';
+import { outOfScopeAccountIds } from '../../common/account-scope.js';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -51,6 +53,16 @@ export const RECONCILIATION_SELECT = {
 type ReconStatus = 'DRAFT' | 'ABSORBED' | 'APPLIED' | 'MANUAL_REVIEW';
 
 const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
+
+/** GET /reconciliations/drift-hints 行形状。 */
+export interface DriftHintRow {
+  waterAccountId: string;
+  accountNo: string;
+  customerName: string;
+  readingId: string;
+  period: string;
+  readDate: Date;
+}
 
 interface TrustedReading {
   id: string;
@@ -159,21 +171,25 @@ export class ReconciliationService {
       period?: string;
     },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.reconciliation.findMany({
-        where: {
-          tenantId: ctx.tenantId,
-          waterAccountId: q.waterAccountId,
-          status: q.status,
-          ...(q.period !== undefined
-            ? { fromPeriod: { lte: q.period }, toPeriod: { gte: q.period } }
-            : {}),
-        },
-        select: RECONCILIATION_SELECT,
-        orderBy: [{ toPeriod: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
-        take: q.take,
-        skip: q.skip,
-      }),
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) =>
+      embedAccountIdentity(
+        tx,
+        ctx.tenantId,
+        await tx.reconciliation.findMany({
+          where: {
+            tenantId: ctx.tenantId,
+            waterAccountId: q.waterAccountId,
+            status: q.status,
+            ...(q.period !== undefined
+              ? { fromPeriod: { lte: q.period }, toPeriod: { gte: q.period } }
+              : {}),
+          },
+          select: RECONCILIATION_SELECT,
+          orderBy: [{ toPeriod: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
+          take: q.take,
+          skip: q.skip,
+        }),
+      ),
     );
   }
 
@@ -184,7 +200,89 @@ export class ReconciliationService {
         select: RECONCILIATION_SELECT,
       });
       if (!row) throw new NotFoundException({ code: 'RECONCILIATION_NOT_FOUND' });
-      return row;
+      return (await embedAccountIdentity(tx, ctx.tenantId, [row]))[0];
+    });
+  }
+
+  /**
+   * GET /reconciliations/account-lookup — slim picker rows for actors who
+   * can reconcile but may NOT have customer:read (Round-2 报告 §8: 录入
+   * 只认户号/客户名搜索，不许手填 uuid)。Scope filter still applies —
+   * caller sees only labels of accounts inside their org scope.
+   */
+  accountLookup(ctx: TenantCtx, q?: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const excluded =
+        ctx.scope === 'ALL' ? [] : await outOfScopeAccountIds(tx, ctx);
+      const rows = await tx.waterAccount.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          status: { not: 'CLOSED' },
+          ...(excluded.length > 0 ? { id: { notIn: excluded } } : {}),
+          ...(q
+            ? {
+                OR: [
+                  { accountNo: { contains: q, mode: 'insensitive' } },
+                  { customer: { name: { contains: q, mode: 'insensitive' } } },
+                ],
+              }
+            : {}),
+        },
+        select: {
+          id: true,
+          accountNo: true,
+          customer: { select: { name: true } },
+        },
+        orderBy: { accountNo: 'asc' },
+        take: 20,
+      });
+      return rows.map((r) => ({
+        id: r.id,
+        accountNo: r.accountNo,
+        customerName: r.customer.name,
+      }));
+    });
+  }
+
+  /**
+   * GET /reconciliations/drift-hints — "已结算读数被修正但未补差" 待办
+   * (Round-2 报告 §7: 补差需求信号闭环). A PASSED real/remote reading R2
+   * supersedes R1 which still feeds a FINAL settlement, and R2 has not
+   * yet anchored a reconciliation → fact-level to-do for the reviewer.
+   */
+  async driftHints(ctx: TenantCtx) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const excluded =
+        ctx.scope === 'ALL' ? [] : await outOfScopeAccountIds(tx, ctx);
+      return tx.$queryRaw<DriftHintRow[]>`
+        SELECT wa.id AS "waterAccountId", wa.account_no AS "accountNo",
+               c.name AS "customerName", r2.id AS "readingId",
+               r2.period, r2.read_date AS "readDate"
+        FROM meter_reading r2
+        JOIN meter_reading r1
+          ON r1.tenant_id = r2.tenant_id AND r1.id = r2.supersedes_reading_id
+        JOIN consumption_component cc
+          ON cc.tenant_id = r1.tenant_id AND cc.source_reading_id = r1.id
+        JOIN consumption_settlement cs
+          ON cs.tenant_id = cc.tenant_id AND cs.id = cc.settlement_id
+         AND cs.status = 'FINAL'
+        JOIN meter_installation mi
+          ON mi.tenant_id = r2.tenant_id AND mi.id = r2.installation_id
+        JOIN water_account wa
+          ON wa.tenant_id = mi.tenant_id AND wa.id = mi.water_account_id
+        JOIN customer c
+          ON c.tenant_id = wa.tenant_id AND c.id = wa.customer_id
+        WHERE r2.tenant_id = ${ctx.tenantId}::uuid
+          AND r2.qc_status = 'PASSED'
+          AND r2.result_type IN ('ACTUAL', 'REMOTE')
+          AND wa.id <> ALL(${excluded}::uuid[])
+          AND NOT EXISTS (
+            SELECT 1 FROM reconciliation rc
+            WHERE rc.tenant_id = r2.tenant_id AND rc.actual_reading_id = r2.id
+          )
+        GROUP BY wa.id, wa.account_no, c.name, r2.id, r2.period, r2.read_date
+        ORDER BY r2.period DESC, wa.account_no ASC
+        LIMIT 100`;
     });
   }
 

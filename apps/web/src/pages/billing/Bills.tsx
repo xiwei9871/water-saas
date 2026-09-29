@@ -272,9 +272,9 @@ export default function Bills() {
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
-      render: (id: string) => (
+      render: (id: string, r: Bill) => (
         <Tooltip title={id}>
-          <span>{accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
+          <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
         </Tooltip>
       ),
     },
@@ -284,14 +284,17 @@ export default function Bills() {
       width: 130,
       ellipsis: true,
       render: (_: unknown, r: Bill) =>
-        accountInfo(r.waterAccountId)?.customerName ?? '—',
+        r.customerName ?? accountInfo(r.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '结算户',
       dataIndex: 'settleAccountId',
       key: 'settleAccountId',
       width: 180,
-      render: (id: string) => settleLabel(id),
+      render: (id: string, r: Bill) =>
+        r.settleNo
+          ? `${r.settleNo}${r.settleName ? ` · ${r.settleName}` : ''}`
+          : settleLabel(id),
     },
     {
       title: '类型',
@@ -585,7 +588,11 @@ export default function Bills() {
         width={760}
         title={
           detail
-            ? `账单详情 — ${fmtPeriod(detail.period)} ${accountLabel(detail.waterAccountId)}`
+            ? `账单详情 — ${fmtPeriod(detail.period)} ${
+                detail.accountNo
+                  ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                  : accountLabel(detail.waterAccountId)
+              }`
             : '账单详情'
         }
         onClose={() => setDetail(null)}
@@ -626,9 +633,17 @@ export default function Bills() {
                 {
                   key: 'wa',
                   label: '用水户',
-                  children: accountLabel(detail.waterAccountId),
+                  children: detail.accountNo
+                    ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                    : accountLabel(detail.waterAccountId),
                 },
-                { key: 'sa', label: '结算户', children: settleLabel(detail.settleAccountId) },
+                {
+                  key: 'sa',
+                  label: '结算户',
+                  children: detail.settleNo
+                    ? `${detail.settleNo}${detail.settleName ? ` · ${detail.settleName}` : ''}`
+                    : settleLabel(detail.settleAccountId),
+                },
                 {
                   key: 'est',
                   label: '口径',

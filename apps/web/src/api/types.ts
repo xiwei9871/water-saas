@@ -470,7 +470,7 @@ export interface ReadingPlanProgress {
  * probe): non-null when a newer correction row points at this one.
  */
 export interface MeterReading {
-  account?: { accountNo: string; customerName: string; addr: string };
+  account?: { id: string; accountNo: string; customerName: string; addr: string };
   meterNo?: string;
   operatorName?: string | null;
   qcByName?: string | null;
@@ -488,6 +488,8 @@ export interface MeterReading {
   estimateQty: string | null;
   supersedesReadingId: string | null;
   supersededById: string | null;
+  /** 截至该期该户连续未抄见期数（Round-2 §10：复核警示用）。 */
+  consecutiveNoRead: number;
   qcStatus: QcStatus;
   qcBy: string | null;
   qcAt: string | null;
@@ -551,6 +553,9 @@ export interface ConsumptionSettlement {
   status: SettlementStatus;
   createdAt: string;
   updatedAt: string;
+  /** 单据内嵌身份 —— 不依赖 customer:read（Round-2 报告 §4）。 */
+  accountNo: string | null;
+  customerName: string | null;
   components: ConsumptionComponent[];
   /** Trailing run of consecutive estimated settlements (per account). */
   consecutiveEstimates: number;
@@ -621,6 +626,9 @@ export interface Reconciliation {
   status: ReconStatus;
   createdAt: string;
   updatedAt: string;
+  /** 单据内嵌身份 —— 不依赖 customer:read（Round-2 报告 §4）。 */
+  accountNo: string | null;
+  customerName: string | null;
 }
 
 /** POST /reconciliations — row + the adjustment bill it minted (if any). */
@@ -712,6 +720,16 @@ export interface BillingRun {
 }
 
 /** GET /billing-runs/:id — run + its bills (created order). */
+/** GET /billing-runs/preflight — 开账前覆盖预检（Round-2 §9）。 */
+export interface BillingRunPreflight {
+  period: string;
+  plannedCount: number;
+  willBillCount: number;
+  missingReading: { waterAccountId: string; accountNo: string; customerName: string }[];
+  missingSettlement: { waterAccountId: string; accountNo: string; customerName: string }[];
+  draftSettlement: { waterAccountId: string; accountNo: string; customerName: string }[];
+}
+
 export interface BillingRunDetail extends BillingRun {
   bills: Bill[];
 }
@@ -736,6 +754,11 @@ export interface Bill {
   dueDate: string | null;
   createdAt: string;
   updatedAt: string;
+  /** 单据内嵌身份 —— 不依赖 customer:read（Round-2 报告 §4/§9）。 */
+  accountNo: string | null;
+  customerName: string | null;
+  settleNo: string | null;
+  settleName: string | null;
 }
 
 /** bill_item — qty/unitPrice are decimals, amount is bigint cents. */
@@ -1016,7 +1039,15 @@ export interface RecoveryRateReport {
   period: string;
   through: string | null;
   billed: string;
+  /** 当月现金实收（含历史欠费清偿、红冲净减）——参考口径。 */
   collected: string;
+  /** 本期账单累计销账（含逾期后收回部分）。 */
+  allocatedTotal: string;
+  /** 其中在账单收费窗口（due_date）内销账 —— rate 的分子。 */
+  allocatedInWindow: string;
+  /** 当月收款中清偿历史欠费（账期 < period 的账单）部分。 */
+  priorPeriodCollected: string;
+  /** 回收率 = allocatedInWindow / billed，≤ 1。 */
   rate: string | null;
 }
 

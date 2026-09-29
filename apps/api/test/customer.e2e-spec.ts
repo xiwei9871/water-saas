@@ -542,6 +542,57 @@ describe('account events (过户/暂停/恢复/销户)', () => {
     await owner.query(`UPDATE bill SET status = 'PAID' WHERE id = $1`, [bill.id]);
   });
 
+  it('close refuses while prepay balance remains → ACCOUNT_PREPAY_BALANCE (Round-2 §1b)', async () => {
+    const sa = (
+      await owner.query(
+        `SELECT settle_account_id::text AS id FROM water_account WHERE id = $1`,
+        [acctId],
+      )
+    ).rows[0].id;
+    const payId = (
+      await owner.query(
+        `INSERT INTO payment (id, tenant_id, payment_no, settle_account_id, cashier_id,
+                              org_unit_id, channel, amount, status, received_at,
+                              created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'CASH', 5000, 'RECEIVED',
+                 '2026-01-10T09:00:00Z', now(), now())
+         RETURNING id::text AS id`,
+        [T4A, `T4P${String(Date.now()).slice(-8)}`, sa, STAFF_ADMIN_A, ORG_A],
+      )
+    ).rows[0].id;
+    const lotId = (
+      await owner.query(
+        `INSERT INTO prepayment_ledger_entry
+           (id, tenant_id, settle_account_id, type, amount, payment_id,
+            operator_id, idempotency_key, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'TOP_UP', 5000, $3, $4, $5, now())
+         RETURNING id::text AS id`,
+        [T4A, sa, payId, STAFF_ADMIN_A, `t4-topup-${RUN}`],
+      )
+    ).rows[0].id;
+
+    const res = await request(app.getHttpServer())
+      .post(`/water-accounts/${acctId}/close`)
+      .set(auth(adminToken))
+      .send({})
+      .expect(409);
+    expect(res.body).toMatchObject({
+      code: 'ACCOUNT_PREPAY_BALANCE',
+      balance: '5000',
+    });
+
+    // 退款清零（REFUND 负分录：payment_id + origin_top_up_id + reason）→
+    // 预检通过路径留给下一个用例。
+    await owner.query(
+      `INSERT INTO prepayment_ledger_entry
+         (id, tenant_id, settle_account_id, type, amount, payment_id,
+          origin_top_up_id, reason, operator_id, idempotency_key, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'REFUND', -5000, $3, $4, 'close-refund',
+               $5, $6, now())`,
+      [T4A, sa, payId, lotId, STAFF_ADMIN_A, `t4-refund-${RUN}`],
+    );
+  });
+
   it('close with outstanding cleared → CLOSED + closedAt + CLOSE event; second close → 409', async () => {
     // E7 close guard: the ACTIVE installation from the swap test must be
     // removed first — closing with an ACTIVE meter is a 409.
