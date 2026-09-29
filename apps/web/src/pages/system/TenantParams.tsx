@@ -1,6 +1,7 @@
 import { EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
   App as AntdApp,
+  Alert,
   Button,
   Card,
   Form,
@@ -30,6 +31,43 @@ const pretty = (v: unknown): string => {
   } catch {
     return String(v);
   }
+};
+
+/**
+ * 已知参数键的中文名与用途说明 —— 操作员不该对着英文 key 猜含义。
+ * 未登记的 key 照常显示（自定义参数），说明栏提示未登记。
+ */
+const KNOWN_PARAMS: Record<string, { name: string; desc: string }> = {
+  max_consecutive_estimates: {
+    name: '连续预估上限',
+    desc: '同一用水户连续按预估口径结算的次数上限，达到后自动进入异常队列需人工处理。默认 2。',
+  },
+  reconcile_alloc_policy: {
+    name: '补差分摊口径',
+    desc: '补差金额如何分摊："PROPORTIONAL_TO_SETTLED"=按各期已结算量比例分摊；"ALL_TO_CURRENT"=全部计入当前账期。',
+  },
+  negative_usage_policy: {
+    name: '负用量处理（预留）',
+    desc: '抄见量小于上期时的处理策略，当前为预留参数暂不生效。"CLAMP_REVIEW"=归零并转人工复核。',
+  },
+  bill_due_days: {
+    name: '账单缴费期限（天）',
+    desc: '出账后多少天为缴费截止日。未设置时默认 15 天。',
+  },
+};
+
+const prettyValue = (key: string, v: unknown): string => {
+  if (key === 'reconcile_alloc_policy' && typeof v === 'string') {
+    return v === 'PROPORTIONAL_TO_SETTLED'
+      ? '按已结算量比例分摊'
+      : v === 'ALL_TO_CURRENT'
+        ? '全部计入当期'
+        : v;
+  }
+  if (key === 'negative_usage_policy' && v === 'CLAMP_REVIEW') {
+    return '归零并转人工复核';
+  }
+  return JSON.stringify(v);
 };
 
 /** 租户参数：key/value 列表 + JSON 编辑（PUT 为 upsert，可新增 key）。 */
@@ -107,14 +145,34 @@ export default function TenantParams() {
   };
 
   const columns: ColumnsType<TenantParam> = [
-    { title: '参数键', dataIndex: 'key', key: 'key', width: 280 },
+    {
+      title: '参数',
+      dataIndex: 'key',
+      key: 'key',
+      width: 200,
+      render: (key: string) => (
+        <>
+          <div>{KNOWN_PARAMS[key]?.name ?? '自定义参数'}</div>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {key}
+          </Typography.Text>
+        </>
+      ),
+    },
+    {
+      title: '用途说明',
+      key: 'desc',
+      render: (_: unknown, r: TenantParam) =>
+        KNOWN_PARAMS[r.key]?.desc ?? '—',
+    },
     {
       title: '参数值（JSON）',
       dataIndex: 'value',
       key: 'value',
-      render: (v: unknown) => (
+      width: 220,
+      render: (v: unknown, r: TenantParam) => (
         <Typography.Text code copyable={{ text: JSON.stringify(v) }}>
-          {JSON.stringify(v)}
+          {prettyValue(r.key, v)}
         </Typography.Text>
       ),
     },
@@ -190,6 +248,20 @@ export default function TenantParams() {
               disabled={modal?.mode === 'edit'}
               placeholder="如 max_consecutive_estimates"
             />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(a, b) => a.key !== b.key}>
+            {({ getFieldValue }) => {
+              const known = KNOWN_PARAMS[getFieldValue('key') as string];
+              return known ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message={known.name}
+                  description={known.desc}
+                />
+              ) : null;
+            }}
           </Form.Item>
           <Form.Item
             name="value"
