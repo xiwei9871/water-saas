@@ -96,6 +96,7 @@ export class ReconciliationController {
     'billing:write',
     'metering:qc',
     'metering:write',
+    'metering:read',
   )
   accountLookup(@Query('q') q?: string) {
     return this.svc.accountLookup(currentTenant(), q?.trim() || undefined);

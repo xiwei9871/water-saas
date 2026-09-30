@@ -940,6 +940,43 @@ export class SettlementService {
       list.push(c);
       bySettlement.set(c.settlementId, list);
     }
+    // 分量人读引用（9·30 报告 §3）：安装记录 → 表号，来源读数 →
+    // 读数/日期/结果类型 —— 详情不再摆截断 uuid。
+    const instIds = [...new Set(components.map((c) => c.installationId))];
+    const insts = instIds.length
+      ? await tx.meterInstallation.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: instIds } },
+          select: { id: true, meter: { select: { meterNo: true } } },
+        })
+      : [];
+    const meterNoByInst = new Map(insts.map((i) => [i.id, i.meter.meterNo]));
+    const readingIds = [
+      ...new Set(
+        components
+          .map((c) => c.sourceReadingId)
+          .filter((v): v is string => !!v),
+      ),
+    ];
+    const readings = readingIds.length
+      ? await tx.meterReading.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: readingIds } },
+          select: {
+            id: true,
+            period: true,
+            readDate: true,
+            resultType: true,
+            readingValue: true,
+            estimateQty: true,
+          },
+        })
+      : [];
+    const readingById = new Map(readings.map((r) => [r.id, r]));
+    const namedComponents = (settlementId: string) =>
+      (bySettlement.get(settlementId) ?? []).map((c) => ({
+        ...c,
+        meterNo: meterNoByInst.get(c.installationId) ?? null,
+        sourceReading: (c.sourceReadingId && readingById.get(c.sourceReadingId)) ?? null,
+      }));
     const streaks = await this.estimateStreaks(
       tx,
       ctx,
@@ -947,7 +984,7 @@ export class SettlementService {
     );
     return (await embedAccountIdentity(tx, ctx.tenantId, rows)).map((r) => ({
       ...r,
-      components: bySettlement.get(r.id) ?? [],
+      components: namedComponents(r.id),
       consecutiveEstimates: streaks.get(r.id) ?? 0,
     }));
   }

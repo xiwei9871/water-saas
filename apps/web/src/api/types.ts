@@ -520,6 +520,16 @@ export interface ConsumptionComponent {
   usageQty: string;
   sourceType: ComponentSourceType;
   sourceReadingId: string | null;
+  /** 人读引用（9·30 报告 §3）：表号 + 来源读数概要。 */
+  meterNo: string | null;
+  sourceReading: {
+    id: string;
+    period: string;
+    readDate: string;
+    resultType: ReadResultType;
+    readingValue: string | null;
+    estimateQty: string | null;
+  } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -710,6 +720,8 @@ export interface BillingRun {
   period: string;
   runType: RunType;
   status: RunStatus;
+  /** DRAFT 批次的生成进度：GENERATING（多事务生成中）→ READY。 */
+  generationStatus: 'GENERATING' | 'READY';
   postedAt: string | null;
   totalCount: number;
   successCount: number;
@@ -767,6 +779,9 @@ export interface BillItem {
   tenantId: string;
   billId: string;
   feeItemId: string | null;
+  /** 详情内嵌费用项标识（9·30 报告 §1）—— 不展示裸 uuid。 */
+  feeItemCode: string | null;
+  feeItemName: string | null;
   itemType: BillItemType;
   description: string | null;
   /** Decimal(18,4) — string; negated on reversal mirror rows. */
@@ -793,6 +808,13 @@ export interface BillAlloc {
 export interface BillDetail extends Bill {
   items: BillItem[];
   allocs: BillAlloc[];
+  /** 人读引用（9·30 报告 §1）：批次/资费版本/来源单据的可读标识。 */
+  billingRunRef: { period: string; runType: RunType; createdAt: string } | null;
+  tariffPlanRef: { code: string; name: string } | null;
+  /** SETTLEMENT/ORIGINAL_BILL → 该单据账期；RECONCILIATION → fromPeriod。 */
+  sourcePeriod: string | null;
+  /** RECONCILIATION → toPeriod（补差覆盖区间）。 */
+  sourcePeriodTo: string | null;
 }
 
 /* ------------------------------------------------------------------ */

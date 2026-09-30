@@ -472,7 +472,17 @@ export class BillService {
   // internals
   // -------------------------------------------------------------------------
 
-  private async withItems<T extends { id: string; waterAccountId: string; settleAccountId: string }>(
+  private async withItems<
+    T extends {
+      id: string;
+      waterAccountId: string;
+      settleAccountId: string;
+      sourceType: string;
+      sourceId: string;
+      billingRunId: string | null;
+      tariffPlanId: string | null;
+    },
+  >(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     bill: T,
@@ -497,8 +507,71 @@ export class BillService {
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
+    // 详情页人读引用（9·30 报告 §1）：费用项名称 + 开账批次/资费版本/
+    // 来源单据的可读标识 —— 明细里不再只摆 uuid。
+    const feeItemIds = [
+      ...new Set(items.map((i) => i.feeItemId).filter((v): v is string => !!v)),
+    ];
+    const feeItems = feeItemIds.length
+      ? await tx.feeItem.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: feeItemIds } },
+          select: { id: true, code: true, name: true },
+        })
+      : [];
+    const feeMap = new Map(feeItems.map((f) => [f.id, f]));
+    const namedItems = items.map((i) => ({
+      ...i,
+      feeItemCode: (i.feeItemId && feeMap.get(i.feeItemId)?.code) ?? null,
+      feeItemName: (i.feeItemId && feeMap.get(i.feeItemId)?.name) ?? null,
+    }));
+    const billingRunRef = bill.billingRunId
+      ? await tx.billingRun.findFirst({
+          where: { tenantId: ctx.tenantId, id: bill.billingRunId },
+          select: { period: true, runType: true, createdAt: true },
+        })
+      : null;
+    const tariffPlanRef = bill.tariffPlanId
+      ? await tx.tariffPlan.findFirst({
+          where: { tenantId: ctx.tenantId, id: bill.tariffPlanId },
+          select: { code: true, name: true },
+        })
+      : null;
+    let sourcePeriod: string | null = null;
+    let sourcePeriodTo: string | null = null;
+    if (bill.sourceId && bill.sourceType === 'SETTLEMENT') {
+      sourcePeriod =
+        (
+          await tx.consumptionSettlement.findFirst({
+            where: { tenantId: ctx.tenantId, id: bill.sourceId },
+            select: { period: true },
+          })
+        )?.period ?? null;
+    } else if (bill.sourceId && bill.sourceType === 'ORIGINAL_BILL') {
+      sourcePeriod =
+        (
+          await tx.bill.findFirst({
+            where: { tenantId: ctx.tenantId, id: bill.sourceId },
+            select: { period: true },
+          })
+        )?.period ?? null;
+    } else if (bill.sourceId && bill.sourceType === 'RECONCILIATION') {
+      const rec = await tx.reconciliation.findFirst({
+        where: { tenantId: ctx.tenantId, id: bill.sourceId },
+        select: { fromPeriod: true, toPeriod: true },
+      });
+      sourcePeriod = rec?.fromPeriod ?? null;
+      sourcePeriodTo = rec?.toPeriod ?? null;
+    }
     const [identified] = await this.embedIdentity(tx, ctx, [bill]);
-    return { ...identified, items, allocs };
+    return {
+      ...identified,
+      items: namedItems,
+      allocs,
+      billingRunRef,
+      tariffPlanRef,
+      sourcePeriod,
+      sourcePeriodTo,
+    };
   }
 
   /**

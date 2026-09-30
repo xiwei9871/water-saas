@@ -52,6 +52,8 @@ import {
   BILL_SOURCE_TYPE_LABELS,
   BILL_STATUS_COLORS,
   BILL_STATUS_LABELS,
+  RUN_TYPE_LABELS,
+  describeBillItem,
 } from './common';
 
 interface ReplaceFormValues {
@@ -392,17 +394,17 @@ export default function Bills() {
     },
     {
       title: '费用项',
-      dataIndex: 'feeItemId',
-      key: 'feeItemId',
-      width: 100,
-      render: shortId,
+      key: 'feeItem',
+      width: 110,
+      render: (_: unknown, r: BillItem) =>
+        r.feeItemName ?? r.feeItemCode ?? shortId(r.feeItemId),
     },
     {
       title: '描述',
       dataIndex: 'description',
       key: 'description',
       ellipsis: true,
-      render: (v: string | null) => v ?? '—',
+      render: (v: string | null) => describeBillItem(v),
     },
     {
       title: '数量',
@@ -659,19 +661,29 @@ export default function Bills() {
                   children: (
                     <Space size={4}>
                       {BILL_SOURCE_TYPE_LABELS[detail.sourceType]}
-                      {shortId(detail.sourceId)}
+                      {detail.sourcePeriod
+                        ? detail.sourcePeriodTo
+                          ? `（${fmtPeriod(detail.sourcePeriod)} → ${fmtPeriod(detail.sourcePeriodTo)}）`
+                          : `（${fmtPeriod(detail.sourcePeriod)}）`
+                        : shortId(detail.sourceId)}
                     </Space>
                   ),
                 },
                 {
                   key: 'run',
                   label: '开账批次',
-                  children: shortId(detail.billingRunId),
+                  children: detail.billingRunRef
+                    ? `${fmtPeriod(detail.billingRunRef.period)} · ${
+                        RUN_TYPE_LABELS[detail.billingRunRef.runType]
+                      }批次 · ${fmtTime(detail.billingRunRef.createdAt)} 创建`
+                    : '—',
                 },
                 {
                   key: 'tariff',
                   label: '资费版本',
-                  children: shortId(detail.tariffPlanId),
+                  children: detail.tariffPlanRef
+                    ? `${detail.tariffPlanRef.name}（${detail.tariffPlanRef.code}）`
+                    : '—',
                 },
                 {
                   key: 'issued',

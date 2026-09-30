@@ -627,6 +627,28 @@ export default function BillingRuns() {
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
               批次账单（{detail.bills.length} 张）
             </div>
+            {detail.successCount > detail.bills.length && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={`有 ${detail.successCount - detail.bills.length} 户的账单已由同账期其他批次生成 —— 同一结算只会出账一次，不会重复出账。`}
+                description={
+                  detail.status === 'DRAFT' && detail.bills.length === 0
+                    ? '本批次名下没有账单：正式账单请查看「账单」页或该账期已过账的批次；若本批次为重复创建，可在列表行点「作废」清理。'
+                    : undefined
+                }
+              />
+            )}
+            {detail.status === 'DRAFT' &&
+              detail.generationStatus === 'GENERATING' && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 8 }}
+                  message="批次正在生成中，账单稍后可见 —— 请刷新详情。"
+                />
+              )}
             <Table<Bill>
               rowKey="id"
               size="small"

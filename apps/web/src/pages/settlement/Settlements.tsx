@@ -42,12 +42,18 @@ import { useAuth } from '../../auth/AuthContext';
 import {
   DECIMAL_RULE,
   cleanBody,
+  fmtDate,
   fmtPeriod,
   fmtTime,
   newIdemKey,
   useWaterAccountLabels,
 } from '../common';
-import { CustomerSelect, OrgUnitTreeSelect, WaterAccountSelect } from '../pickers';
+import {
+  BillingAccountSelect,
+  CustomerSelect,
+  OrgUnitTreeSelect,
+  WaterAccountSelect,
+} from '../pickers';
 import {
   COMPONENT_SOURCE_COLORS,
   COMPONENT_SOURCE_LABELS,
@@ -85,8 +91,6 @@ const BATCH_STATUS_META: Record<
   FAILED: { label: '失败', color: 'red' },
 };
 
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
 /**
  * 结算水量：列表（账期/账户/状态/预估过滤）+ 详情抽屉（分量 + 预估依据）
  * + 终审（DRAFT→FINAL）+ 生成结算（usageQty 快捷预估 / estimateReason
@@ -105,7 +109,7 @@ export default function Settlements() {
   const [loading, setLoading] = useState(false);
   const [filterCustomerId, setFilterCustomerId] = useState<string | undefined>(undefined);
   const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
-  const [accountIdInput, setAccountIdInput] = useState(''); // 无 customer:read 的兜底输入
+  const [accountIdInput, setAccountIdInput] = useState<string | undefined>(undefined); // 无 customer:read 的业务侧选户
   const [period, setPeriod] = useState<dayjs.Dayjs | null>(null);
   const [status, setStatus] = useState<SettlementStatus | undefined>(undefined);
   const [isEstimated, setIsEstimated] = useState<boolean | undefined>(undefined);
@@ -186,11 +190,7 @@ export default function Settlements() {
   const [batchBusy, setBatchBusy] = useState<'preview' | 'run' | null>(null);
   const [batchForm] = Form.useForm<BatchFormValues>();
 
-  const effectiveAccountId = canCustomerRead
-    ? waterAccountId
-    : UUID_RE.test(accountIdInput.trim())
-      ? accountIdInput.trim()
-      : undefined;
+  const effectiveAccountId = canCustomerRead ? waterAccountId : accountIdInput;
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -522,15 +522,15 @@ export default function Settlements() {
 
   const componentColumns: ColumnsType<ConsumptionComponent> = [
     {
-      title: '安装记录',
-      dataIndex: 'installationId',
-      key: 'installationId',
-      width: 110,
-      render: (id: string) => (
-        <Tooltip title={id}>
-          <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-        </Tooltip>
-      ),
+      title: '表号',
+      key: 'meterNo',
+      width: 120,
+      render: (_: unknown, c: ConsumptionComponent) =>
+        c.meterNo ?? (
+          <Tooltip title={c.installationId}>
+            <span style={{ fontFamily: 'monospace' }}>{c.installationId.slice(0, 8)}…</span>
+          </Tooltip>
+        ),
     },
     {
       title: '来源',
@@ -538,8 +538,12 @@ export default function Settlements() {
       key: 'sourceType',
       width: 110,
       render: (t: ConsumptionComponent['sourceType'], c) =>
-        t === 'ESTIMATE' && c.sourceReadingId ? (
-          <Tooltip title={`抄表员在未抄见时给出的预计用量，来源读数 ${c.sourceReadingId.slice(0, 8)}…`}>
+        t === 'ESTIMATE' && c.sourceReading ? (
+          <Tooltip
+            title={`抄表员在未抄见时给出的预计用量 ${c.sourceReading.estimateQty ?? '—'} m³（${fmtPeriod(
+              c.sourceReading.period,
+            )} · ${fmtDate(c.sourceReading.readDate)}）`}
+          >
             <Tag color="cyan">抄表员估水</Tag>
           </Tooltip>
         ) : (
@@ -570,17 +574,18 @@ export default function Settlements() {
     },
     {
       title: '来源读数',
-      dataIndex: 'sourceReadingId',
-      key: 'sourceReadingId',
-      width: 110,
-      render: (id: string | null) =>
-        id ? (
-          <Tooltip title={id}>
-            <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
+      key: 'sourceReading',
+      width: 170,
+      render: (_: unknown, c: ConsumptionComponent) => {
+        const r = c.sourceReading;
+        if (!r) return '—';
+        const val = r.readingValue ?? r.estimateQty;
+        return (
+          <Tooltip title={`读数ID ${r.id}`}>
+            {val ?? '—'} m³ · {fmtDate(r.readDate)}
           </Tooltip>
-        ) : (
-          '—'
-        ),
+        );
+      },
     },
   ];
 
@@ -615,14 +620,16 @@ export default function Settlements() {
               </span>
             </>
           ) : (
-            <Input.Search
-              allowClear
-              placeholder="按用水户 ID 过滤"
-              style={{ width: 260 }}
-              value={accountIdInput}
-              onChange={(e) => setAccountIdInput(e.target.value)}
-              onSearch={() => setPage(1)}
-            />
+            <span style={{ width: 260, display: 'inline-block' }}>
+              <BillingAccountSelect
+                value={accountIdInput}
+                onChange={(v) => {
+                  setAccountIdInput(v);
+                  setPage(1);
+                }}
+                placeholder="搜索户号/客户名称过滤"
+              />
+            </span>
           )}
           <DatePicker
             picker="month"
@@ -850,14 +857,10 @@ export default function Settlements() {
           ) : (
             <Form.Item
               name="waterAccountId"
-              label="用水户 ID"
-              rules={[
-                { required: true, message: '请输入用水户 ID' },
-                { pattern: UUID_RE, message: 'ID 格式不正确' },
-              ]}
-              extra="无客户查询权限，需直接填写用水户 ID"
+              label="用水户"
+              rules={[{ required: true, message: '请选择用水户' }]}
             >
-              <Input placeholder="用水户 uuid" />
+              <BillingAccountSelect placeholder="搜索户号/客户名称" />
             </Form.Item>
           )}
           <Form.Item
