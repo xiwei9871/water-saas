@@ -9,7 +9,6 @@ import {
   Card,
   Descriptions,
   Drawer,
-  Input,
   Popconfirm,
   Select,
   Space,
@@ -28,11 +27,10 @@ import type {
   PaymentDetail,
   PaymentStatus,
   Receipt,
-  Staff,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { fmtCent, fmtTime, newIdemKey } from '../common';
-import { SettleAccountSelect, StaffSelect } from '../pickers';
+import { SettleAccountLookupSelect, StaffLookupSelect } from '../pickers';
 import {
   PAY_CHANNEL_COLORS,
   PAY_CHANNEL_LABELS,
@@ -41,9 +39,6 @@ import {
   PREPAY_ENTRY_COLORS,
   PREPAY_ENTRY_LABELS,
 } from './common';
-
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 const shortId = (id: string | null | undefined) =>
   id ? (
@@ -64,37 +59,22 @@ export default function Payments() {
   const canWrite = hasPerm('payment:write');
   // E6：含预存腿的冲正可由 prepayment:reverse 触发（服务端按收款事实判定）。
   const canReverse = canWrite || hasPerm('prepayment:reverse');
-  const canIamRead = hasPerm('iam:read');
-  const canCustomerRead = hasPerm('customer:read');
 
   const [rows, setRows] = useState<Payment[]>([]);
   const [loading, setLoading] = useState(false);
   const [settleAccountId, setSettleAccountId] = useState<string | undefined>(undefined);
-  const [settleIdInput, setSettleIdInput] = useState('');
   const [cashierId, setCashierId] = useState<string | undefined>(undefined);
-  const [cashierIdInput, setCashierIdInput] = useState('');
   const [status, setStatus] = useState<PaymentStatus | undefined>(undefined);
   const [channel, setChannel] = useState<PayChannel | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-
-  const [staff, setStaff] = useState<Staff[]>([]);
-
   const [detail, setDetail] = useState<PaymentDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
   const [printing, setPrinting] = useState(false);
 
-  const effectiveSettleId = canCustomerRead
-    ? settleAccountId
-    : UUID_RE.test(settleIdInput.trim())
-      ? settleIdInput.trim()
-      : undefined;
-  const effectiveCashierId = canIamRead
-    ? cashierId
-    : UUID_RE.test(cashierIdInput.trim())
-      ? cashierIdInput.trim()
-      : undefined;
+  const effectiveSettleId = settleAccountId;
+  const effectiveCashierId = cashierId;
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -124,22 +104,8 @@ export default function Payments() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  // 收款员姓名展示 —— 仅 iam:read 可拉取；否则退化为短 id。
-  useEffect(() => {
-    if (!canIamRead) return;
-    api
-      .get<Staff[]>('/iam/staff')
-      .then((res) => setStaff(res.data))
-      .catch(() => setStaff([]));
-  }, [canIamRead]);
-
-  const staffName = useCallback(
-    (id: string) => {
-      const s = staff.find((x) => x.id === id);
-      return s ? `${s.name}（${s.login}）` : `${id.slice(0, 8)}…`;
-    },
-    [staff],
-  );
+  // 10/8 报告 §2：结算户/收费员姓名由 API 内嵌返回（settleNo/settleName/
+  // cashierName），不再依赖 customer:read / iam:read 做前端水合。
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -238,17 +204,19 @@ export default function Payments() {
     { title: '收款单号', dataIndex: 'paymentNo', key: 'paymentNo', width: 170 },
     {
       title: '结算户',
-      dataIndex: 'settleAccountId',
-      key: 'settleAccountId',
-      width: 110,
-      render: shortId,
+      key: 'settle',
+      width: 200,
+      render: (_: unknown, r: Payment) =>
+        r.settleNo
+          ? `${r.settleNo}${r.settleName ? ` · ${r.settleName}` : ''}`
+          : shortId(r.settleAccountId),
     },
     {
       title: '收费员',
-      dataIndex: 'cashierId',
-      key: 'cashierId',
-      width: 140,
-      render: staffName,
+      dataIndex: 'cashierName',
+      key: 'cashierName',
+      width: 150,
+      render: (v: string | null, r: Payment) => v ?? shortId(r.cashierId),
     },
     {
       title: '渠道',
@@ -325,48 +293,27 @@ export default function Payments() {
       title="收款记录"
       extra={
         <Space wrap>
-          {canCustomerRead ? (
-            <span style={{ width: 200, display: 'inline-block' }}>
-              <SettleAccountSelect
-                value={settleAccountId}
-                onChange={(v) => {
-                  setSettleAccountId(v);
-                  setPage(1);
-                }}
-                placeholder="按结算户过滤"
-              />
-            </span>
-          ) : (
-            <Input.Search
-              allowClear
-              placeholder="按结算户 ID 过滤"
-              style={{ width: 220 }}
-              value={settleIdInput}
-              onChange={(e) => setSettleIdInput(e.target.value)}
-              onSearch={() => setPage(1)}
+          <span style={{ width: 220, display: 'inline-block' }}>
+            <SettleAccountLookupSelect
+              includeClosed
+              value={settleAccountId}
+              onChange={(v) => {
+                setSettleAccountId(v);
+                setPage(1);
+              }}
+              placeholder="按结算户过滤"
             />
-          )}
-          {canIamRead ? (
-            <span style={{ width: 190, display: 'inline-block' }}>
-              <StaffSelect
-                value={cashierId}
-                onChange={(v) => {
-                  setCashierId(v);
-                  setPage(1);
-                }}
-                placeholder="按收费员过滤"
-              />
-            </span>
-          ) : (
-            <Input.Search
-              allowClear
-              placeholder="按收费员 ID 过滤"
-              style={{ width: 220 }}
-              value={cashierIdInput}
-              onChange={(e) => setCashierIdInput(e.target.value)}
-              onSearch={() => setPage(1)}
+          </span>
+          <span style={{ width: 190, display: 'inline-block' }}>
+            <StaffLookupSelect
+              value={cashierId}
+              onChange={(v) => {
+                setCashierId(v);
+                setPage(1);
+              }}
+              placeholder="按收费员过滤"
             />
-          )}
+          </span>
           <Select
             allowClear
             placeholder="渠道"
@@ -446,11 +393,17 @@ export default function Payments() {
                     </Tag>
                   ),
                 },
-                { key: 'sa', label: '结算户', children: shortId(detail.settleAccountId) },
+                {
+                  key: 'sa',
+                  label: '结算户',
+                  children: detail.settleNo
+                    ? `${detail.settleNo}${detail.settleName ? ` · ${detail.settleName}` : ''}`
+                    : shortId(detail.settleAccountId),
+                },
                 {
                   key: 'cashier',
                   label: '收费员',
-                  children: staffName(detail.cashierId),
+                  children: detail.cashierName ?? shortId(detail.cashierId),
                 },
                 {
                   key: 'channel',
@@ -469,12 +422,14 @@ export default function Payments() {
                 {
                   key: 'reversalOf',
                   label: '红冲对象',
-                  children: detail.reversalOfId ? shortId(detail.reversalOfId) : '—',
+                  children: detail.reversalOfNo ?? (detail.reversalOfId ? shortId(detail.reversalOfId) : '—'),
                 },
                 {
                   key: 'dayClose',
                   label: '日结单',
-                  children: shortId(detail.dayCloseId),
+                  children: detail.dayCloseDate
+                    ? `${detail.dayCloseDate.slice(0, 10)} 日结单`
+                    : shortId(detail.dayCloseId),
                 },
                 {
                   key: 'receivedAt',
@@ -529,10 +484,14 @@ export default function Payments() {
                       title: '批次/关联',
                       key: 'ref',
                       render: (_: unknown, e: (typeof detail.prepaymentEntries)[number]) => (
-                        <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                          {e.originTopUpId ? `批次 ${e.originTopUpId.slice(0, 8)}… ` : ''}
-                          {e.reason ?? ''}
-                        </span>
+                        <Space size={4}>
+                          {e.originTopUpId && (
+                            <Tooltip title={e.originTopUpId}>
+                              <Tag>关联原充值</Tag>
+                            </Tooltip>
+                          )}
+                          {e.reason && <span style={{ fontSize: 12 }}>{e.reason}</span>}
+                        </Space>
                       ),
                     },
                   ]}

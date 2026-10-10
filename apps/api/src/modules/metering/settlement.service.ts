@@ -409,6 +409,7 @@ export class SettlementService {
     const instIds = installations.map((i) => i.id);
     const prevChain = await this.prevChain(tx, ctx, body.waterAccountId, instIds, body.period);
     const readings = await this.validReadings(tx, ctx, instIds, body.period);
+    const pendingReadings = await this.pendingQcReadings(tx, ctx, instIds, body.period);
     const readerEstimates = await this.readerEstimates(tx, ctx, instIds, body.period);
     const history = await this.historyUsages(tx, ctx, body.waterAccountId, body.period);
     const suggested = estimateAvg3(history);
@@ -472,6 +473,19 @@ export class SettlementService {
           sourceReadingId: valid.id,
         });
       } else {
+        // 10/8 报告 §6: 读数已录入但未过质检 ≠ 需要预估 —— 报真实
+        // 原因，把操作员引去质检而不是填预估原因。
+        const pending = pendingReadings.get(inst.id);
+        if (pending) {
+          throw new ConflictException({
+            code: 'READING_PENDING_QC',
+            waterAccountId: body.waterAccountId,
+            installationId: inst.id,
+            period: body.period,
+            readingId: pending.id,
+            qcStatus: pending.qcStatus,
+          });
+        }
         estimatedInsts.push(inst);
         drafts.push({
           installationId: inst.id,
@@ -1146,6 +1160,56 @@ export class SettlementService {
       }
     }
     return valid;
+  }
+
+  /**
+   * 10/8 报告 §6: in-period ACTUAL/REMOTE readings awaiting review
+   * (qcStatus PENDING/MANUAL_REVIEW, not superseded) — the "real cause"
+   * behind most would-be-estimate components. Same superseded-child
+   * probe as validReadings.
+   */
+  private async pendingQcReadings(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    installationIds: string[],
+    period: string,
+  ) {
+    const candidates = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        installationId: { in: installationIds },
+        period,
+        resultType: { in: ['ACTUAL', 'REMOTE'] },
+        qcStatus: { in: ['PENDING', 'MANUAL_REVIEW'] },
+      },
+      select: {
+        id: true,
+        installationId: true,
+        qcStatus: true,
+        readDate: true,
+        createdAt: true,
+      },
+      orderBy: [{ readDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    if (candidates.length === 0) {
+      return new Map<string, { id: string; qcStatus: string }>();
+    }
+    const children = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        supersedesReadingId: { in: candidates.map((c) => c.id) },
+      },
+      select: { supersedesReadingId: true },
+    });
+    const superseded = new Set(children.map((c) => c.supersedesReadingId));
+    const pending = new Map<string, { id: string; qcStatus: string }>();
+    for (const r of candidates) {
+      if (superseded.has(r.id)) continue;
+      if (!pending.has(r.installationId)) {
+        pending.set(r.installationId, { id: r.id, qcStatus: r.qcStatus });
+      }
+    }
+    return pending;
   }
 
   /**

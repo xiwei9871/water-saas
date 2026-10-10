@@ -841,7 +841,7 @@ describe('v0.2: monitoring skip + household-scaled pricing', () => {
     const mon = await post('/water-accounts/onboard', {
       account: { usageCategory: 'MONITORING', addr: 'DMA-09 入口' },
       meter: { brand: 't10-brand' },
-      installation: { initialReading: 0 },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
     }).expect(201);
     const st = await post('/consumption-settlements', {
       waterAccountId: mon.body.waterAccount.id,
@@ -887,9 +887,14 @@ describe('v0.2: monitoring skip + household-scaled pricing', () => {
 
     const a = await post('/water-accounts/onboard', {
       customer: { name: `T10 HH ${RUN}`, custType: 'PERSONAL' },
-      account: { usageCategory: 'RES_SHARED', addr: 'hh st', householdSize: 5 },
+      account: {
+        usageCategory: 'RES_SHARED',
+        addr: 'hh st',
+        householdSize: 5,
+        openedAt: '2026-01-01',
+      },
       meter: { brand: 't10-brand' },
-      installation: { initialReading: 0 },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
     }).expect(201);
     const st = await post('/consumption-settlements', {
       waterAccountId: a.body.waterAccount.id,
@@ -919,9 +924,14 @@ describe('v0.2: monitoring skip + household-scaled pricing', () => {
     // 216×3 + 14×5 = 718.00 — proving the shift priced it.
     const a4 = await post('/water-accounts/onboard', {
       customer: { name: `T10 HH4 ${RUN}`, custType: 'PERSONAL' },
-      account: { usageCategory: 'RES_SHARED', addr: 'hh4 st', householdSize: 4 },
+      account: {
+        usageCategory: 'RES_SHARED',
+        addr: 'hh4 st',
+        householdSize: 4,
+        openedAt: '2026-01-01',
+      },
       meter: { brand: 't10-brand' },
-      installation: { initialReading: 0 },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
     }).expect(201);
     const st4 = await post('/consumption-settlements', {
       waterAccountId: a4.body.waterAccount.id,

@@ -9,6 +9,10 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { isBookDue, type BookCadence } from '../../common/reading-cadence.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import {
+  embedOrgNames,
+  embedStaffNames,
+} from '../../common/account-identity.js';
 import { assertAccountScopeTx } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
@@ -123,11 +127,47 @@ export class ReadingPlanService {
         take: q.take,
         skip: q.skip,
       });
-      return rows.map((r) => {
+      const plans = rows.map((r) => {
         const { items, ...plan } = r as typeof r & { items?: unknown[] };
         return { ...plan, ...(items ? { myItem: items[0] ?? null } : {}) };
       });
+      return this.embedBookAndReader(tx, ctx, plans);
     });
+  }
+
+  /**
+   * 10/8 报告 §3：计划行内嵌 册号/册名/所属组织名/抄表员姓名 ——
+   * book_id 是裸列无 ORM 关系，批量二次查询后统一水合；无 iam:read
+   * 的角色不再看到截断 uuid。
+   */
+  private async embedBookAndReader<
+    T extends { bookId: string; readerId?: string | null },
+  >(tx: Prisma.TransactionClient, ctx: TenantCtx, rows: T[]) {
+    const bookIds = [...new Set(rows.map((r) => r.bookId))];
+    const books = bookIds.length
+      ? await tx.readingBook.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: bookIds } },
+          select: { id: true, bookNo: true, name: true, orgUnitId: true },
+        })
+      : [];
+    const byBook = new Map(books.map((b) => [b.id, b]));
+    const withBook = rows.map((r) => {
+      const b = byBook.get(r.bookId);
+      return {
+        ...r,
+        bookNo: b?.bookNo ?? null,
+        bookName: b?.name ?? null,
+        orgUnitId: b?.orgUnitId ?? null,
+      };
+    });
+    return embedOrgNames(
+      tx,
+      ctx.tenantId,
+      await embedStaffNames(tx, ctx.tenantId, withBook, {
+        readerId: 'readerName',
+      }),
+      { orgUnitId: 'orgUnitName' },
+    );
   }
 
   async getById(ctx: TenantCtx, id: string) {
@@ -141,7 +181,8 @@ export class ReadingPlanService {
       });
       if (!plan) return null;
       await this.assertPlanBookInScope(tx, ctx, plan.bookId);
-      return plan;
+      const [enriched] = await this.embedBookAndReader(tx, ctx, [plan]);
+      return enriched;
     });
     if (!row) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
     return row;

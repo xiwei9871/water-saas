@@ -44,7 +44,11 @@ import {
   useSettleAccountLabels,
   useWaterAccountLabels,
 } from '../common';
-import { CustomerSelect, SettleAccountSelect, WaterAccountSelect } from '../pickers';
+import {
+  BillingAccountSelect,
+  BillingRunSelect,
+  SettleAccountLookupSelect,
+} from '../pickers';
 import {
   BILL_ITEM_TYPE_LABELS,
   BILL_KIND_COLORS,
@@ -59,9 +63,6 @@ import {
 interface ReplaceFormValues {
   usageQty: string;
 }
-
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 const shortId = (id: string | null | undefined) =>
   id ? (
@@ -89,17 +90,12 @@ export default function Bills() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('billing:write');
-  const canCustomerRead = hasPerm('customer:read');
 
   const [rows, setRows] = useState<Bill[]>([]);
   const [loading, setLoading] = useState(false);
-  const [filterCustomerId, setFilterCustomerId] = useState<string | undefined>(undefined);
   const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
-  const [accountIdInput, setAccountIdInput] = useState('');
   const [settleAccountId, setSettleAccountId] = useState<string | undefined>(undefined);
-  const [settleIdInput, setSettleIdInput] = useState('');
-  const [runIdInput, setRunIdInput] = useState('');
-  const [billingRunId, setBillingRunId] = useState('');
+  const [billingRunId, setBillingRunId] = useState<string | undefined>(undefined);
   const [period, setPeriod] = useState<dayjs.Dayjs | null>(null);
   const [status, setStatus] = useState<BillStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
@@ -118,19 +114,9 @@ export default function Bills() {
   const [acting, setActing] = useState<string | null>(null);
   const [replaceForm] = Form.useForm<ReplaceFormValues>();
 
-  const effectiveAccountId = canCustomerRead
-    ? waterAccountId
-    : UUID_RE.test(accountIdInput.trim())
-      ? accountIdInput.trim()
-      : undefined;
-  const effectiveSettleId = canCustomerRead
-    ? settleAccountId
-    : UUID_RE.test(settleIdInput.trim())
-      ? settleIdInput.trim()
-      : undefined;
-  const effectiveRunId = UUID_RE.test(billingRunId.trim())
-    ? billingRunId.trim()
-    : undefined;
+  const effectiveAccountId = waterAccountId;
+  const effectiveSettleId = settleAccountId;
+  const effectiveRunId = billingRunId;
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -460,72 +446,39 @@ export default function Bills() {
               setPage(1);
             }}
           />
-          {canCustomerRead ? (
-            <>
-              <span style={{ width: 170, display: 'inline-block' }}>
-                <CustomerSelect
-                  value={filterCustomerId}
-                  onChange={(v) => {
-                    setFilterCustomerId(v);
-                    setWaterAccountId(undefined);
-                    setPage(1);
-                  }}
-                  placeholder="先选客户（联动用水户）"
-                />
-              </span>
-              <span style={{ width: 200, display: 'inline-block' }}>
-                <WaterAccountSelect
-                  customerId={filterCustomerId}
-                  value={waterAccountId}
-                  onChange={(v) => {
-                    setWaterAccountId(v);
-                    setPage(1);
-                  }}
-                  placeholder="按用水户过滤"
-                />
-              </span>
-              <span style={{ width: 200, display: 'inline-block' }}>
-                <SettleAccountSelect
-                  value={settleAccountId}
-                  onChange={(v) => {
-                    setSettleAccountId(v);
-                    setPage(1);
-                  }}
-                  placeholder="按结算户过滤"
-                />
-              </span>
-            </>
-          ) : (
-            <>
-              <Input.Search
-                allowClear
-                placeholder="按用水户 ID 过滤"
-                style={{ width: 220 }}
-                value={accountIdInput}
-                onChange={(e) => setAccountIdInput(e.target.value)}
-                onSearch={() => setPage(1)}
-              />
-              <Input.Search
-                allowClear
-                placeholder="按结算户 ID 过滤"
-                style={{ width: 220 }}
-                value={settleIdInput}
-                onChange={(e) => setSettleIdInput(e.target.value)}
-                onSearch={() => setPage(1)}
-              />
-            </>
-          )}
-          <Input.Search
-            allowClear
-            placeholder="按批次 ID 过滤"
-            style={{ width: 220 }}
-            value={runIdInput}
-            onChange={(e) => setRunIdInput(e.target.value)}
-            onSearch={(v) => {
-              setBillingRunId(v);
-              setPage(1);
-            }}
-          />
+          {/* 10/8 报告 §1：全部走搜索选择器（户号/名称模糊），不再出现
+              uuid 输入框；includeClosed 让已销户的历史账单也能筛到。 */}
+          <span style={{ width: 230, display: 'inline-block' }}>
+            <BillingAccountSelect
+              includeClosed
+              value={waterAccountId}
+              onChange={(v) => {
+                setWaterAccountId(v);
+                setPage(1);
+              }}
+              placeholder="按户号/客户名称过滤"
+            />
+          </span>
+          <span style={{ width: 210, display: 'inline-block' }}>
+            <SettleAccountLookupSelect
+              includeClosed
+              value={settleAccountId}
+              onChange={(v) => {
+                setSettleAccountId(v);
+                setPage(1);
+              }}
+              placeholder="按结算户过滤"
+            />
+          </span>
+          <span style={{ width: 260, display: 'inline-block' }}>
+            <BillingRunSelect
+              value={billingRunId}
+              onChange={(v) => {
+                setBillingRunId(v);
+                setPage(1);
+              }}
+            />
+          </span>
           <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
             刷新
           </Button>
@@ -757,8 +710,8 @@ export default function Bills() {
                       key: 'ref',
                       render: (_: unknown, a: BillAlloc) =>
                         a.source === 'PREPAYMENT'
-                          ? shortId(a.prepaymentEntryId)
-                          : shortId(a.paymentId),
+                          ? `预存抵扣（${a.prepaymentEntryType ?? '流水'}）`
+                          : (a.paymentNo ?? shortId(a.paymentId)),
                     },
                     {
                       title: '时间',

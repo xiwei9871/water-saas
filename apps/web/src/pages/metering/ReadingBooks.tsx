@@ -31,10 +31,8 @@ import type {
   BookCadence,
   BookMember,
   MeterChannel,
-  OrgUnit,
   ReadingBook,
   ReadingBookDetail,
-  Staff,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -45,6 +43,7 @@ import {
 } from '../common';
 import {
   AccountStatusTag,
+  BillingAccountSelect,
   CustomerSelect,
   OrgUnitTreeSelect,
   StaffSelect,
@@ -77,8 +76,6 @@ interface MemberFormValues {
   waterAccountId: string;
 }
 
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 type ModalState =
   | { kind: 'create' }
@@ -106,9 +103,6 @@ export default function ReadingBooks() {
   const [orgFilter, setOrgFilter] = useState<string | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-
-  const [orgs, setOrgs] = useState<OrgUnit[]>([]);
-  const [staff, setStaff] = useState<Staff[]>([]);
 
   const [modal, setModal] = useState<ModalState>(null);
   const [idemKey, setIdemKey] = useState('');
@@ -148,30 +142,11 @@ export default function ReadingBooks() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  // 组织/员工名称展示 —— 仅 iam:read 用户可拉取；失败静默退化为短 id。
-  useEffect(() => {
-    if (!canIamRead) return;
-    api
-      .get<OrgUnit[]>('/iam/orgs')
-      .then((res) => setOrgs(res.data))
-      .catch(() => setOrgs([]));
-    api
-      .get<Staff[]>('/iam/staff')
-      .then((res) => setStaff(res.data))
-      .catch(() => setStaff([]));
-  }, [canIamRead]);
-
-  const orgName = useCallback(
-    (id: string) => orgs.find((o) => o.id === id)?.name ?? `${id.slice(0, 8)}…`,
-    [orgs],
-  );
+  // 组织/抄表员名称已由 API 内嵌（orgUnitName/readerName），本地 id 切片仅兜底。
+  const orgName = useCallback((id: string) => `${id.slice(0, 8)}…`, []);
   const staffName = useCallback(
-    (id: string | null) => {
-      if (!id) return '—';
-      const s = staff.find((x) => x.id === id);
-      return s ? `${s.name}（${s.login}）` : `${id.slice(0, 8)}…`;
-    },
-    [staff],
+    (id: string | null) => (id ? `${id.slice(0, 8)}…` : '—'),
+    [],
   );
 
   const total = useMemo(
@@ -375,17 +350,17 @@ export default function ReadingBooks() {
     { title: '名称', dataIndex: 'name', key: 'name' },
     {
       title: '所属组织',
-      dataIndex: 'orgUnitId',
-      key: 'orgUnitId',
+      key: 'orgUnit',
       width: 140,
-      render: orgName,
+      render: (_: unknown, r: ReadingBook) =>
+        r.orgUnitName ?? orgName(r.orgUnitId),
     },
     {
       title: '默认抄表员',
-      dataIndex: 'readerId',
-      key: 'readerId',
+      key: 'reader',
       width: 150,
-      render: staffName,
+      render: (_: unknown, r: ReadingBook) =>
+        r.readerName ?? staffName(r.readerId),
     },
     {
       title: '抄表日',
@@ -718,16 +693,13 @@ export default function ReadingBooks() {
                     </Form.Item>
                   </>
                 ) : (
-                  // 无 customer:read 时退化为手填 uuid（服务端仍校验）。
+                  // 无 customer:read 走业务侧户号搜索，不填 uuid。
                   <Form.Item
                     name="waterAccountId"
-                    rules={[
-                      { required: true, message: '请输入用水户 ID' },
-                      { pattern: UUID_RE, message: 'ID 格式不正确' },
-                    ]}
+                    rules={[{ required: true, message: '请选择用水户' }]}
                     style={{ minWidth: 300 }}
                   >
-                    <Input placeholder="用水户 uuid" />
+                    <BillingAccountSelect placeholder="搜索户号/客户名" />
                   </Form.Item>
                 )}
                 <Form.Item>

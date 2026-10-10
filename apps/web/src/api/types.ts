@@ -391,7 +391,10 @@ export interface ReadingBook {
   bookNo: string;
   name: string;
   orgUnitId: string;
+  /** 10/8 报告 §3：服务端内嵌人读名称（无 iam:read 也可见）。 */
+  orgUnitName: string | null;
   readerId: string | null;
+  readerName: string | null;
   scheduleDay: number | null;
   cadence: BookCadence;
   /** BIMONTHLY 必填，YYYYMM；MONTHLY 恒为 null。 */
@@ -425,10 +428,16 @@ export interface ReadingPlan {
   id: string;
   tenantId: string;
   bookId: string;
+  /** 10/8 报告 §3：服务端内嵌（册号/册名/组织名/抄表员名）。 */
+  bookNo: string | null;
+  bookName: string | null;
+  orgUnitId: string | null;
+  orgUnitName: string | null;
   /** char(6) YYYYMM. */
   period: string;
   planDate: string;
   readerId: string | null;
+  readerName: string | null;
   status: PlanStatus;
   createdAt: string;
   updatedAt: string;
@@ -639,6 +648,10 @@ export interface Reconciliation {
   /** 单据内嵌身份 —— 不依赖 customer:read（Round-2 报告 §4）。 */
   accountNo: string | null;
   customerName: string | null;
+  /** 10/8 §8：锚点/实抄读数 + 吸收结算的人读引用。 */
+  anchorReading: { period: string; readDate: string; readingValue: string | null } | null;
+  actualReading: { period: string; readDate: string; readingValue: string | null } | null;
+  absorbedSettlement: { period: string } | null;
 }
 
 /** POST /reconciliations — row + the adjustment bill it minted (if any). */
@@ -710,6 +723,9 @@ export interface RunFailure {
   stage: 'generate' | 'post';
   code: string;
   message?: string;
+  /** Enriched on detail read — human-readable account identity. */
+  accountNo?: string;
+  customerName?: string | null;
 }
 
 /** GET /billing-runs — a period batch row. */
@@ -800,6 +816,9 @@ export interface BillAlloc {
   source: 'PAYMENT' | 'PREPAYMENT';
   paymentId: string | null;
   prepaymentEntryId: string | null;
+  /** 10/8 §8：人读引用 —— 收款单号 / 预存流水类型。 */
+  paymentNo: string | null;
+  prepaymentEntryType: string | null;
   amount: string;
   createdAt: string;
 }
@@ -828,6 +847,13 @@ export interface Payment {
   paymentNo: string;
   settleAccountId: string;
   cashierId: string;
+  /** 10/8 报告 §2：内嵌人读身份（无 customer:read / iam:read 也可见）。 */
+  settleNo: string | null;
+  settleName: string | null;
+  cashierName: string | null;
+  /** 红冲对象收款单号；日结日期。 */
+  reversalOfNo: string | null;
+  dayCloseDate: string | null;
   orgUnitId: string;
   channel: PayChannel;
   amount: string;
@@ -867,6 +893,8 @@ export interface PrepaymentEntry {
   reversalOfEntryId: string | null;
   idempotencyKey: string;
   operatorId: string | null;
+  /** 10/8 §8：内嵌操作员姓名（SYSTEM 行为 null）。 */
+  operatorName: string | null;
   reason: string | null;
   createdAt: string;
   createdBy: string;
@@ -930,6 +958,8 @@ export interface CashierDayClose {
   id: string;
   tenantId: string;
   cashierId: string;
+  /** 10/8 报告 §2/§5：内嵌收费员姓名（无 iam:read 也可见）。 */
+  cashierName: string | null;
   orgUnitId: string;
   /** DATE column — ISO string (YYYY-MM-DD). */
   closeDate: string;
@@ -945,6 +975,11 @@ export interface CashierDayClose {
     reversalAmount: string;
   } | null;
   status: DayCloseStatus;
+  /** 代结场景：执行人 ≠ 收费员本人。 */
+  createdBy: string;
+  updatedBy: string;
+  /** 经办人姓名（内嵌，代结时与收费员不同）。 */
+  createdByName: string | null;
   closedAt: string;
   createdAt: string;
   updatedAt: string;

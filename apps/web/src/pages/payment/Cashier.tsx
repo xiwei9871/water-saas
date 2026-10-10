@@ -44,12 +44,13 @@ import {
   useSettleAccountLabels,
   useWaterAccountLabels,
 } from '../common';
-import { CustomerSelect, WaterAccountSelect } from '../pickers';
+import {
+  BillingAccountSelect,
+  CustomerSelect,
+  WaterAccountSelect,
+} from '../pickers';
 import { BILL_KIND_COLORS, BILL_KIND_LABELS } from '../billing/common';
 import { PAY_CHANNEL_LABELS, PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from './common';
-
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /** 元（最多 2 位小数）→ 整数分；非法输入返回 null。 */
 const yuanToCent = (v: number | null | undefined): number | null =>
@@ -73,7 +74,6 @@ export default function Cashier() {
 
   const [customerId, setCustomerId] = useState<string | undefined>(undefined);
   const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
-  const [accountIdInput, setAccountIdInput] = useState('');
 
   const [outstanding, setOutstanding] = useState<AccountOutstanding | null>(null);
   const [loading, setLoading] = useState(false);
@@ -114,11 +114,7 @@ export default function Cashier() {
 
   const fetchSeq = useRef(0);
 
-  const effectiveAccountId = canCustomerRead
-    ? waterAccountId
-    : UUID_RE.test(accountIdInput.trim())
-      ? accountIdInput.trim()
-      : undefined;
+  const effectiveAccountId = waterAccountId;
 
   const loadOutstanding = useCallback(
     async (accountId: string) => {
@@ -457,14 +453,13 @@ export default function Cashier() {
             </span>
           </>
         ) : (
-          <Input.Search
-            allowClear
-            placeholder="用水户 ID（uuid）"
-            style={{ width: 320 }}
-            value={accountIdInput}
-            onChange={(e) => setAccountIdInput(e.target.value)}
-            onSearch={() => void 0}
-          />
+          <span className="cashier-picker" style={{ width: 340, display: 'inline-block' }}>
+            <BillingAccountSelect
+              value={waterAccountId}
+              onChange={(v) => setWaterAccountId(v)}
+              placeholder="搜索户号/客户名"
+            />
+          </span>
         )}
         {outstanding && (
           <Button
@@ -792,9 +787,10 @@ export default function Cashier() {
             },
             {
               title: '操作人',
-              dataIndex: 'operatorId',
-              width: 90,
-              render: (v: string | null) => v ?? 'SYSTEM',
+              key: 'operatorName',
+              width: 110,
+              render: (_: unknown, e: PrepaymentEntry) =>
+                e.operatorName ?? 'SYSTEM',
             },
             {
               title: '批次/关联',
@@ -802,14 +798,14 @@ export default function Cashier() {
               render: (_: unknown, e: PrepaymentEntry) => (
                 <Space size={4} direction="vertical">
                   {e.originTopUpId && (
-                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                      批次 {e.originTopUpId.slice(0, 8)}…
-                    </span>
+                    <Tooltip title={e.originTopUpId}>
+                      <Tag>关联原充值</Tag>
+                    </Tooltip>
                   )}
                   {e.reversalOfEntryId && (
-                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                      冲正 {e.reversalOfEntryId.slice(0, 8)}…
-                    </span>
+                    <Tooltip title={e.reversalOfEntryId}>
+                      <Tag color="red">冲正流水</Tag>
+                    </Tooltip>
                   )}
                   {e.reason && <span style={{ fontSize: 12 }}>{e.reason}</span>}
                 </Space>

@@ -33,6 +33,7 @@ import type {
   BillingRun,
   BillingRunDetail,
   BillingRunPreflight,
+  RunFailure,
   RunStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
@@ -589,14 +590,18 @@ export default function BillingRuns() {
                   pagination={false}
                   columns={[
                     {
-                      title: '结算 ID',
-                      dataIndex: 'settlementId',
-                      key: 'settlementId',
-                      render: (id: string) => (
-                        <Tooltip title={id}>
-                          <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-                        </Tooltip>
-                      ),
+                      title: '用水户',
+                      key: 'account',
+                      render: (_: unknown, f: RunFailure) =>
+                        f.accountNo ? (
+                          `${f.accountNo}${f.customerName ? ` · ${f.customerName}` : ''}`
+                        ) : (
+                          <Tooltip title={f.settlementId}>
+                            <span style={{ fontFamily: 'monospace' }}>
+                              {f.settlementId.slice(0, 8)}…
+                            </span>
+                          </Tooltip>
+                        ),
                     },
                     {
                       title: '阶段',

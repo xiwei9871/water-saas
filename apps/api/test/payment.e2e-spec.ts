@@ -822,6 +822,48 @@ describe('cashier day-close', () => {
     const second = (await get(`/cashier-day-close/${pay['CLOSE2']}`, cashierToken)).body;
     expect(second.payments.map((p: { id: string }) => p.id)).toEqual([pay['C1-rev']]);
   });
+
+  it('proxy close: admin may close another cashier, non-admin may not (10/8 §5)', async () => {
+    // Cashier targets someone else's drawer → 403 before the service runs.
+    const forbidden = await post(
+      '/cashier-day-close/close',
+      { cashierId: STAFF_ADMIN_A },
+      cashierToken,
+    );
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body).toMatchObject({ code: 'DAY_CLOSE_PROXY_FORBIDDEN' });
+
+    // cashierId === own drawer keeps the ordinary semantics.
+    const self = await post(
+      '/cashier-day-close/close',
+      { cashierId: STAFF_CASHIER_A },
+      cashierToken,
+    );
+    expect(self.status).toBe(409);
+    expect(self.body).toMatchObject({ code: 'DAY_CLOSE_EXISTS' });
+
+    // A new RECEIVED payment lands in cashier A's drawer (a reversal of
+    // C2 — negative line) and the ADMIN proxy-closes it on a fresh date.
+    const rev = await post(`/payments/${pay['C2']}/reverse`, {}, cashierToken).expect(201);
+    pay['C2-rev'] = rev.body.id;
+    const day3 = new Date(Date.now() + 2 * 86400_000).toISOString().slice(0, 10);
+    const proxy = await post(
+      '/cashier-day-close/close',
+      { cashierId: STAFF_CASHIER_A, closeDate: day3 },
+      adminToken,
+    ).expect(201);
+    // The document belongs to the TARGET cashier; createdBy records the
+    // admin who executed the proxy close.
+    expect(proxy.body).toMatchObject({
+      cashierId: STAFF_CASHIER_A,
+      totalCount: 1,
+      totalAmount: '-2500',
+      createdBy: STAFF_ADMIN_A,
+    });
+    expect(proxy.body.cashierName).toBeTruthy();
+    expect(proxy.body.payments.map((p: { id: string }) => p.id)).toEqual([pay['C2-rev']]);
+    expect((await get(`/payments/${pay['C2-rev']}`)).body.dayCloseId).toBe(proxy.body.id);
+  });
 });
 
 describe('getOutstanding ↔ close-account after payment', () => {

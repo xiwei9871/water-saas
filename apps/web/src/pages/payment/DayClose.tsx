@@ -12,7 +12,6 @@ import {
   Descriptions,
   Drawer,
   Form,
-  Input,
   Modal,
   Space,
   Spin,
@@ -28,53 +27,44 @@ import type {
   CashierDayCloseDetail,
   DayClosePayment,
   PayChannel,
-  Staff,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { fmtCent, fmtDate, fmtTime } from '../common';
-import { StaffSelect } from '../pickers';
+import { StaffLookupSelect } from '../pickers';
 import { PAY_CHANNEL_COLORS, PAY_CHANNEL_LABELS, PAYMENT_STATUS_COLORS, PAYMENT_STATUS_LABELS } from './common';
 
 interface CloseFormValues {
   closeDate: dayjs.Dayjs;
+  /** 管理员代结：目标收费员；留空 = 当前登录用户自己的抽屉。 */
+  cashierId?: string;
 }
-
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /**
  * 收费员日结（CashierDayClose）：把收款员 ≤ 日结日的全部 RECEIVED
  * 收款扫入一张 POSTED 日结单。日结本身自幂等（重复 → DAY_CLOSE_EXISTS /
  * 空 → DAY_CLOSE_EMPTY），不带 Idempotency-Key。
+ * 管理员可在日结弹窗里指定 cashierId 代其他收费员日结。
  */
 export default function DayClose() {
   const { message } = AntdApp.useApp();
-  const { hasPerm } = useAuth();
+  const { hasPerm, user } = useAuth();
   const canWrite = hasPerm('payment:write');
-  const canIamRead = hasPerm('iam:read');
+  const isAdmin = hasPerm('*');
 
   const [rows, setRows] = useState<CashierDayClose[]>([]);
   const [loading, setLoading] = useState(false);
   const [closeDate, setCloseDate] = useState<dayjs.Dayjs | null>(null);
   const [cashierId, setCashierId] = useState<string | undefined>(undefined);
-  const [cashierIdInput, setCashierIdInput] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-
-  const [staff, setStaff] = useState<Staff[]>([]);
 
   const [detail, setDetail] = useState<CashierDayCloseDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
   const [closeOpen, setCloseOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [closeCashierLabel, setCloseCashierLabel] = useState<string>();
   const [closeForm] = Form.useForm<CloseFormValues>();
-
-  const effectiveCashierId = canIamRead
-    ? cashierId
-    : UUID_RE.test(cashierIdInput.trim())
-      ? cashierIdInput.trim()
-      : undefined;
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -85,7 +75,7 @@ export default function DayClose() {
             take: size,
             skip: (p - 1) * size,
             ...(closeDate ? { closeDate: closeDate.format('YYYY-MM-DD') } : {}),
-            ...(effectiveCashierId ? { cashierId: effectiveCashierId } : {}),
+            ...(cashierId ? { cashierId } : {}),
           },
         });
         setRows(res.data);
@@ -95,27 +85,17 @@ export default function DayClose() {
         setLoading(false);
       }
     },
-    [closeDate, effectiveCashierId, message],
+    [closeDate, cashierId, message],
   );
 
   useEffect(() => {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  useEffect(() => {
-    if (!canIamRead) return;
-    api
-      .get<Staff[]>('/iam/staff')
-      .then((res) => setStaff(res.data))
-      .catch(() => setStaff([]));
-  }, [canIamRead]);
-
   const staffName = useCallback(
-    (id: string) => {
-      const s = staff.find((x) => x.id === id);
-      return s ? `${s.name}（${s.login}）` : `${id.slice(0, 8)}…`;
-    },
-    [staff],
+    (r: { cashierId: string; cashierName?: string | null }) =>
+      r.cashierName ?? `${r.cashierId.slice(0, 8)}…`,
+    [],
   );
 
   const total = useMemo(
@@ -151,9 +131,10 @@ export default function DayClose() {
     try {
       const res = await api.post<CashierDayCloseDetail>('/cashier-day-close/close', {
         closeDate: values.closeDate.format('YYYY-MM-DD'),
+        ...(values.cashierId ? { cashierId: values.cashierId } : {}),
       });
       message.success(
-        `日结完成：${fmtDate(res.data.closeDate)} 共 ${res.data.totalCount} 笔、${fmtCent(res.data.totalAmount)}`,
+        `日结完成：${res.data.cashierName ?? '当前用户'} ${fmtDate(res.data.closeDate)} 共 ${res.data.totalCount} 笔、${fmtCent(res.data.totalAmount)}`,
       );
       setCloseOpen(false);
       await load(page, pageSize);
@@ -185,10 +166,9 @@ export default function DayClose() {
     },
     {
       title: '收费员',
-      dataIndex: 'cashierId',
-      key: 'cashierId',
-      width: 150,
-      render: staffName,
+      key: 'cashierName',
+      width: 160,
+      render: (_: unknown, r: CashierDayClose) => staffName(r),
     },
     {
       title: '笔数',
@@ -298,27 +278,16 @@ export default function DayClose() {
               setPage(1);
             }}
           />
-          {canIamRead ? (
-            <span style={{ width: 190, display: 'inline-block' }}>
-              <StaffSelect
-                value={cashierId}
-                onChange={(v) => {
-                  setCashierId(v);
-                  setPage(1);
-                }}
-                placeholder="按收费员过滤"
-              />
-            </span>
-          ) : (
-            <Input.Search
-              allowClear
-              placeholder="按收费员 ID 过滤"
-              style={{ width: 220 }}
-              value={cashierIdInput}
-              onChange={(e) => setCashierIdInput(e.target.value)}
-              onSearch={() => setPage(1)}
+          <span style={{ width: 200, display: 'inline-block' }}>
+            <StaffLookupSelect
+              value={cashierId}
+              onChange={(v) => {
+                setCashierId(v);
+                setPage(1);
+              }}
+              placeholder="按收费员过滤"
             />
-          )}
+          </span>
           <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
             刷新
           </Button>
@@ -329,6 +298,7 @@ export default function DayClose() {
               onClick={() => {
                 closeForm.resetFields();
                 closeForm.setFieldsValue({ closeDate: dayjs() });
+                setCloseCashierLabel(undefined);
                 setCloseOpen(true);
               }}
             >
@@ -372,9 +342,21 @@ export default function DayClose() {
           type="warning"
           showIcon
           style={{ marginBottom: 16 }}
-          message="将把当前用户在日结日（含）之前收款的全部未日结收款扫入一张日结单。日结单签发后不可更改；红冲收款以负额行计入下一次日结。"
+          message={`将把「${closeCashierLabel ?? user?.name ?? '当前用户'}」在日结日（含）之前收款的全部未日结收款扫入一张日结单。日结单签发后不可更改；红冲收款以负额行计入下一次日结。`}
         />
         <Form form={closeForm} layout="vertical">
+          {isAdmin && (
+            <Form.Item
+              name="cashierId"
+              label="代结收费员（选填）"
+              extra="留空＝日结自己的收款抽屉；选择后将为该收费员生成日结单"
+            >
+              <StaffLookupSelect
+                placeholder="默认当前登录用户"
+                onLabelChange={setCloseCashierLabel}
+              />
+            </Form.Item>
+          )}
           <Form.Item
             name="closeDate"
             label="日结日期"
@@ -391,7 +373,7 @@ export default function DayClose() {
         open={detail !== null || detailLoading}
         width={720}
         title={
-          detail ? `日结详情 — ${fmtDate(detail.closeDate)} ${staffName(detail.cashierId)}` : '日结详情'
+          detail ? `日结详情 — ${fmtDate(detail.closeDate)} ${staffName(detail)}` : '日结详情'
         }
         onClose={() => setDetail(null)}
       >
@@ -405,7 +387,14 @@ export default function DayClose() {
               column={2}
               items={[
                 { key: 'date', label: '日结日期', children: fmtDate(detail.closeDate) },
-                { key: 'cashier', label: '收费员', children: staffName(detail.cashierId) },
+                { key: 'cashier', label: '收费员', children: staffName(detail) },
+                ...(detail.createdBy && detail.createdBy !== detail.cashierId
+                  ? [{
+                      key: 'operator',
+                      label: '经办人（代结）',
+                      children: detail.createdByName ?? `${detail.createdBy.slice(0, 8)}…`,
+                    }]
+                  : []),
                 { key: 'count', label: '笔数', children: detail.totalCount },
                 {
                   key: 'amount',

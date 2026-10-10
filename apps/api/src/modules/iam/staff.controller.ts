@@ -18,7 +18,10 @@ import { createHash } from 'node:crypto';
 import type { Request } from 'express';
 import { assertAdmin } from '../../common/admin.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
-import { Permissions } from '../../common/permissions.decorator.js';
+import {
+  AnyPermissions,
+  Permissions,
+} from '../../common/permissions.decorator.js';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import { currentTenant, orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -61,6 +64,52 @@ export class StaffController {
     private readonly prisma: TenantPrismaService,
     private readonly idem: IdempotencyService,
   ) {}
+
+  /**
+   * GET /iam/staff/lookup?q= — 员工姓名级搜索器（10/8 报告 §2/§3）：
+   * 收费员/抄表员等业务角色也要能按姓名选人（筛选、指派），不能要求
+   * iam:read。返回仅 id+姓名+登录名，scope 过滤沿用组织范围。
+   */
+  @Get('lookup')
+  @AnyPermissions(
+    'iam:read',
+    'customer:read',
+    'metering:read',
+    'metering:write',
+    'metering:qc',
+    'billing:read',
+    'billing:write',
+    'payment:read',
+    'payment:write',
+    'prepayment:reverse',
+    'report:read',
+    'exception:read',
+  )
+  lookup(@Query('q') q?: string) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.staff.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          status: 'ACTIVE',
+          orgUnitId:
+            ctx.scope === 'ALL' ? undefined : { in: ctx.orgScope },
+          ...(q?.trim()
+            ? {
+                OR: [
+                  { name: { contains: q.trim(), mode: 'insensitive' } },
+                  { login: { contains: q.trim(), mode: 'insensitive' } },
+                ],
+              }
+            : {}),
+        },
+        select: { id: true, name: true, login: true },
+        orderBy: { login: 'asc' },
+        take: 20,
+      });
+      return rows;
+    });
+  }
 
   /** List staff, scoped to the caller's orgScope; optional ?orgUnitId filter. */
   @Get()

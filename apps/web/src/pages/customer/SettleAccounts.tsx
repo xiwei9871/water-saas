@@ -426,15 +426,6 @@ export default function SettleAccounts() {
                   locale={{ emptyText: '无预存批次' }}
                   columns={[
                     {
-                      title: '批次',
-                      dataIndex: 'topUpEntryId',
-                      render: (v: string) => (
-                        <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                          {v.slice(0, 8)}…
-                        </span>
-                      ),
-                    },
-                    {
                       title: '充值额',
                       dataIndex: 'amount',
                       align: 'right',

@@ -33,7 +33,6 @@ import type {
   BookMember,
   PlanItemStatus,
   PlanStatus,
-  ReadingBook,
   ReadingBookDetail,
   ReadingPlan,
   ReadingPlanDetail,
@@ -41,7 +40,6 @@ import type {
   MeterReading,
   ReadingPlanProgress,
   ReadResultType,
-  Staff,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { EXCEPTION_CODES, READ_RESULT_TYPES } from '@ws/types';
@@ -113,8 +111,6 @@ export default function ReadingPlans() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const [books, setBooks] = useState<ReadingBook[]>([]);
-  const [staff, setStaff] = useState<Staff[]>([]);
   const [progressMap, setProgressMap] = useState<Map<string, ReadingPlanProgress>>(
     new Map(),
   );
@@ -177,22 +173,7 @@ export default function ReadingPlans() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  // 册名/抄表员水合 + 当前页各计划进度。
-  useEffect(() => {
-    api
-      .get<ReadingBook[]>('/reading-books', { params: { take: 200 } })
-      .then((res) => setBooks(res.data))
-      .catch(() => setBooks([]));
-  }, []);
-
-  useEffect(() => {
-    if (!canIamRead) return;
-    api
-      .get<Staff[]>('/iam/staff')
-      .then((res) => setStaff(res.data))
-      .catch(() => setStaff([]));
-  }, [canIamRead]);
-
+  // 册名/抄表员已由 API 内嵌（bookName/readerName）；本地仅加载各计划进度。
   useEffect(() => {
     if (rows.length === 0) return;
     let cancelled = false;
@@ -219,19 +200,12 @@ export default function ReadingPlans() {
   }, [rows]);
 
   const bookLabel = useCallback(
-    (id: string) => {
-      const b = books.find((x) => x.id === id);
-      return b ? `${b.name}（${b.bookNo}）` : `${id.slice(0, 8)}…`;
-    },
-    [books],
+    (id: string) => `${id.slice(0, 8)}…`,
+    [],
   );
   const staffName = useCallback(
-    (id: string | null) => {
-      if (!id) return '—';
-      const s = staff.find((x) => x.id === id);
-      return s ? `${s.name}（${s.login}）` : `${id.slice(0, 8)}…`;
-    },
-    [staff],
+    (id: string | null) => (id ? `${id.slice(0, 8)}…` : '—'),
+    [],
   );
 
   const total = useMemo(
@@ -524,9 +498,9 @@ export default function ReadingPlans() {
     },
     {
       title: '抄表册',
-      dataIndex: 'bookId',
-      key: 'bookId',
-      render: bookLabel,
+      key: 'book',
+      render: (_: unknown, r: ReadingPlan) =>
+        r.bookName ? `${r.bookName}（${r.bookNo}）` : bookLabel(r.bookId),
     },
     {
       title: '计划抄表日',
@@ -537,10 +511,10 @@ export default function ReadingPlans() {
     },
     {
       title: '抄表员',
-      dataIndex: 'readerId',
-      key: 'readerId',
+      key: 'reader',
       width: 150,
-      render: staffName,
+      render: (_: unknown, r: ReadingPlan) =>
+        r.readerName ?? staffName(r.readerId),
     },
     {
       title: '状态',
@@ -795,7 +769,7 @@ export default function ReadingPlans() {
         width={760}
         title={
           detail
-            ? `计划明细 — ${bookLabel(detail.bookId)} · ${fmtPeriod(detail.period)}`
+            ? `计划明细 — ${detail.bookName ? `${detail.bookName}（${detail.bookNo}）` : bookLabel(detail.bookId)} · ${fmtPeriod(detail.period)}`
             : '计划明细'
         }
         onClose={() => setDrawerPlanId(null)}
@@ -818,7 +792,7 @@ export default function ReadingPlans() {
                 </>
               )}
               <span style={{ color: '#888' }}>
-                计划日 {fmtDate(detail.planDate)} · 抄表员 {staffName(detail.readerId)}
+                计划日 {fmtDate(detail.planDate)} · 抄表员 {detail.readerName ?? staffName(detail.readerId)}
               </span>
             </Space>
             <Space wrap style={{ marginBottom: 12 }}>

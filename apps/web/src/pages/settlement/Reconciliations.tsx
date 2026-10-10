@@ -35,6 +35,7 @@ import { useAuth } from '../../auth/AuthContext';
 import {
   cleanBody,
   fmtCent,
+  fmtDate,
   fmtPeriod,
   fmtTime,
   newIdemKey,
@@ -106,9 +107,10 @@ function TrustedReadingPicker({
 
   const extra = '留空自动取该户最新一条可信实抄（质检通过的实抄/远传）';
   if (!canMeterRead || failed) {
+    // 读数列表拉不下来时只允许自动取最新，不手填 uuid。
     return (
-      <Form.Item name="actualReadingId" label="实抄读数 ID（可空）" extra={extra}>
-        <Input placeholder="meter_reading uuid（可空）" />
+      <Form.Item label="实抄读数" extra={extra}>
+        <Input disabled value="自动取最新可信实抄" />
       </Form.Item>
     );
   }
@@ -645,12 +647,16 @@ export default function Reconciliations() {
               {
                 key: 'anchor',
                 label: '锚点读数',
-                children: shortId(detail.anchorReadingId),
+                children: detail.anchorReading
+                  ? `${detail.anchorReading.readingValue ?? '—'} m³ · ${fmtDate(detail.anchorReading.readDate)}（${fmtPeriod(detail.anchorReading.period)}）`
+                  : shortId(detail.anchorReadingId),
               },
               {
                 key: 'actual',
                 label: '实抄读数',
-                children: shortId(detail.actualReadingId),
+                children: detail.actualReading
+                  ? `${detail.actualReading.readingValue ?? '—'} m³ · ${fmtDate(detail.actualReading.readDate)}（${fmtPeriod(detail.actualReading.period)}）`
+                  : shortId(detail.actualReadingId),
               },
               {
                 key: 'actualTotal',
@@ -665,7 +671,11 @@ export default function Reconciliations() {
               {
                 key: 'absorbed',
                 label: '吸收至结算',
-                children: shortId(detail.absorbedSettlementId),
+                children: detail.absorbedSettlement
+                  ? `结算水量（${fmtPeriod(detail.absorbedSettlement.period)}）`
+                  : (detail.absorbedSettlementId
+                      ? shortId(detail.absorbedSettlementId)
+                      : '—'),
               },
               {
                 key: 'correct',

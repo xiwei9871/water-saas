@@ -5,6 +5,7 @@ import {
   EyeOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SettingOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
 import {
@@ -18,6 +19,7 @@ import {
   Form,
   Input,
   Modal,
+  Popover,
   Select,
   Space,
   Spin,
@@ -36,7 +38,6 @@ import type {
   MeterReading,
   QcStatus,
   ReadResultType,
-  Staff,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -94,7 +95,6 @@ export default function MeterReadings() {
   const canQc = hasPerm('metering:qc');
   const [searchInput, setSearchInput] = useState('');
   const [query, setQuery] = useState('');
-  const canIamRead = hasPerm('iam:read');
 
   const [rows, setRows] = useState<MeterReading[]>([]);
   const [loading, setLoading] = useState(false);
@@ -110,7 +110,6 @@ export default function MeterReadings() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const [staff, setStaff] = useState<Staff[]>([]);
   const [acting, setActing] = useState<string | null>(null);
 
   const [supersedeTarget, setSupersedeTarget] = useState<MeterReading | null>(null);
@@ -159,22 +158,10 @@ export default function MeterReadings() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  useEffect(() => {
-    if (!canIamRead) return;
-    api
-      .get<Staff[]>('/iam/staff')
-      .then((res) => setStaff(res.data))
-      .catch(() => setStaff([]));
-  }, [canIamRead]);
-
-  const staffName = useCallback(
-    (id: string | null) => {
-      if (!id) return '—';
-      const s = staff.find((x) => x.id === id);
-      return s ? s.name : `${id.slice(0, 8)}…`;
-    },
-    [staff],
-  );
+  const staffName = useCallback((id: string | null) => {
+    if (!id) return '—';
+    return `${id.slice(0, 8)}…`;
+  }, []);
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -423,7 +410,7 @@ export default function MeterReadings() {
                 icon={QC_ACTION_TEXT[a].icon}
                 danger={QC_ACTION_TEXT[a].danger}
                 loading={acting === record.id}
-                onClick={() => void qc(record, a)}
+                onClick={() => qc(record, a)}
               >
                 {QC_ACTION_TEXT[a].label}
               </Button>
@@ -466,28 +453,46 @@ export default function MeterReadings() {
           <Input.Search allowClear placeholder="搜索户号、客户或地址" style={{ width: 250 }}
             value={searchInput} onChange={e => setSearchInput(e.target.value)}
             onSearch={value => { setQuery(value.trim()); setPage(1); }} />
-          <Input.Search
-            allowClear
-            placeholder="计划明细 ID"
-            style={{ width: 200 }}
-            value={planItemInput}
-            onChange={(e) => setPlanItemInput(e.target.value)}
-            onSearch={(v) => {
-              setPlanItemId(v);
-              setPage(1);
-            }}
-          />
-          <Input.Search
-            allowClear
-            placeholder="表计安装 ID"
-            style={{ width: 200 }}
-            value={installationInput}
-            onChange={(e) => setInstallationInput(e.target.value)}
-            onSearch={(v) => {
-              setInstallationId(v);
-              setPage(1);
-            }}
-          />
+          <Popover
+            trigger="click"
+            placement="bottomLeft"
+            title="高级筛选（技术参数，日常按户号搜索即可）"
+            content={
+              <Space direction="vertical" style={{ width: 300 }}>
+                <Input.Search
+                  allowClear
+                  placeholder="计划明细 ID"
+                  value={planItemInput}
+                  onChange={(e) => setPlanItemInput(e.target.value)}
+                  onSearch={(v) => {
+                    setPlanItemId(v);
+                    setPage(1);
+                  }}
+                />
+                <Input.Search
+                  allowClear
+                  placeholder="表计安装 ID"
+                  value={installationInput}
+                  onChange={(e) => setInstallationInput(e.target.value)}
+                  onSearch={(v) => {
+                    setInstallationId(v);
+                    setPage(1);
+                  }}
+                />
+              </Space>
+            }
+          >
+            <Button
+              icon={<SettingOutlined />}
+              type={
+                planItemId.trim() || installationId.trim()
+                  ? 'primary'
+                  : 'default'
+              }
+            >
+              高级筛选
+            </Button>
+          </Popover>
           <DatePicker
             picker="month"
             allowClear
@@ -714,12 +719,15 @@ export default function MeterReadings() {
                 children: <Tag>{READ_SOURCE_LABELS[detail.source]}</Tag>,
               },
               {
-                key: 'item',
-                label: '计划明细',
-                children: detail.planItemId ?? '—（计划外录入）',
+                key: 'tech',
+                label: '技术标识',
+                children: (
+                  <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                    明细 {detail.planItemId ?? '无（计划外录入）'} · 安装{' '}
+                    {detail.installationId} · 表计 {detail.meterId}
+                  </span>
+                ),
               },
-              { key: 'inst', label: '表计安装 ID', children: detail.installationId },
-              { key: 'meter', label: '表计 ID', children: detail.meterId },
               {
                 key: 'chain',
                 label: '更正链',

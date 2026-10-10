@@ -94,7 +94,7 @@ export class ExceptionController {
   }
 
   @Get('options/assignees')
-  @Permissions('exception:manage')
+  @Permissions('exception:read')
   optionAssignees() {
     return this.svc.optionAssignees(currentTenant());
   }

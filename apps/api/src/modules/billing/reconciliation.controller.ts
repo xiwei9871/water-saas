@@ -97,9 +97,43 @@ export class ReconciliationController {
     'metering:qc',
     'metering:write',
     'metering:read',
+    'payment:read',
+    'payment:write',
+    'customer:read',
+    'customer:write',
+    'prepayment:reverse',
   )
-  accountLookup(@Query('q') q?: string) {
-    return this.svc.accountLookup(currentTenant(), q?.trim() || undefined);
+  accountLookup(@Query('q') q?: string, @Query('includeClosed') ic?: string) {
+    // 筛选场景须能选到已销户的历史户 —— includeClosed=1 放行；业务
+    // 办理场景保持默认（不给已销户开新单）。
+    return this.svc.accountLookup(
+      currentTenant(),
+      q?.trim() || undefined,
+      ic === '1' || ic === 'true',
+    );
+  }
+
+  /**
+   * GET /reconciliations/settle-account-lookup?q= — 结算户号/名称搜索器
+   * (10/8 报告 §1-2)。同 account-lookup 的业务权限与 scope 语义。
+   * Literal route MUST precede :id.
+   */
+  @Get('settle-account-lookup')
+  @AnyPermissions(
+    'billing:read',
+    'billing:write',
+    'metering:qc',
+    'metering:write',
+    'metering:read',
+    'payment:read',
+    'payment:write',
+  )
+  settleAccountLookup(@Query('q') q?: string, @Query('includeClosed') ic?: string) {
+    return this.svc.settleAccountLookup(
+      currentTenant(),
+      q?.trim() || undefined,
+      ic === '1' || ic === 'true',
+    );
   }
 
   /**

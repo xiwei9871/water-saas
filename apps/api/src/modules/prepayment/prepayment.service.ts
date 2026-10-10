@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { embedStaffNames } from '../../common/account-identity.js';
 import { SequenceService } from '../../common/sequence.service.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -780,7 +781,10 @@ export class PrepaymentService {
           AND (${args.type ?? null}::"PrepaymentEntryType" IS NULL
                OR type = ${args.type ?? null}::"PrepaymentEntryType")
           ${scopeFilter}`;
-      return { total: Number(count[0]?.n ?? 0n), items: rows.map(mapEntry) };
+      const items = await embedStaffNames(tx, ctx.tenantId, rows.map(mapEntry), {
+        operatorId: 'operatorName',
+      });
+      return { total: Number(count[0]?.n ?? 0n), items };
     });
   }
 

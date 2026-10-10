@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PayChannel, Prisma } from '@prisma/client';
+import { embedStaffNames } from '../../common/account-identity.js';
 import { type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
@@ -19,6 +20,8 @@ export const DAY_CLOSE_SELECT = {
   prepaymentBreakdown: true,
   status: true,
   closedAt: true,
+  createdBy: true,
+  updatedBy: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.CashierDayCloseSelect;
@@ -97,12 +100,12 @@ const memberWire = (p: {
 export class DayCloseService {
   constructor(private readonly prisma: TenantPrismaService) {}
 
-  list(
+  async list(
     ctx: TenantCtx,
     q: { take: number; skip: number; cashierId?: string; closeDate?: string },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.cashierDayClose.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.cashierDayClose.findMany({
         where: {
           tenantId: ctx.tenantId,
           cashierId: q.cashierId,
@@ -114,8 +117,12 @@ export class DayCloseService {
         orderBy: [{ closeDate: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+      return embedStaffNames(tx, ctx.tenantId, rows, {
+        cashierId: 'cashierName',
+        createdBy: 'createdByName',
+      });
+    });
   }
 
   /**
@@ -147,8 +154,12 @@ export class DayCloseService {
         SELECT SUM(-amount)::bigint AS s FROM prepayment_ledger_entry
         WHERE tenant_id = ${ctx.tenantId}::uuid
           AND type = 'APPLY' AND created_at::date = ${close.closeDate}::date`;
+      const [named] = await embedStaffNames(tx, ctx.tenantId, [close], {
+        cashierId: 'cashierName',
+        createdBy: 'createdByName',
+      });
       return {
-        ...close,
+        ...named,
         systemApplyAmount: (applyRows[0]?.s ?? 0n).toString(),
         payments: members.map(memberWire),
       };
@@ -165,15 +176,18 @@ export class DayCloseService {
   async closeTx(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
-    body: { closeDate?: string },
+    body: { closeDate?: string; cashierId?: string },
   ) {
     // The staff row lock serializes closes for this cashier: a second
     // concurrent close blocks here, then sees the winner's committed
     // row → DAY_CLOSE_EXISTS. It also yields the cashier's org_unit.
+    // body.cashierId (admin proxy-close) targets another drawer; the
+    // close's createdBy/updatedBy still record who executed it.
+    const targetCashierId = body.cashierId ?? ctx.staffId;
     const staffRows = await tx.$queryRaw<{ id: string; org_unit_id: string }[]>`
       SELECT id::text AS id, org_unit_id::text AS org_unit_id
       FROM staff
-      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${ctx.staffId}::uuid
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${targetCashierId}::uuid
       FOR UPDATE`;
     const staff = staffRows[0];
     if (!staff) throw new NotFoundException({ code: 'STAFF_NOT_FOUND' });
@@ -188,7 +202,7 @@ export class DayCloseService {
     const existing = await tx.cashierDayClose.findFirst({
       where: {
         tenantId: ctx.tenantId,
-        cashierId: ctx.staffId,
+        cashierId: targetCashierId,
         closeDate: closeDateValue,
       },
       select: { id: true },
@@ -205,7 +219,7 @@ export class DayCloseService {
              received_at, reversal_of_id::text AS reversal_of_id
       FROM payment
       WHERE tenant_id = ${ctx.tenantId}::uuid
-        AND cashier_id = ${ctx.staffId}::uuid
+        AND cashier_id = ${targetCashierId}::uuid
         AND status = 'RECEIVED'
         AND received_at::date <= ${closeDate}::date
       ORDER BY received_at, id`;
@@ -292,7 +306,7 @@ export class DayCloseService {
     const close = await tx.cashierDayClose.create({
       data: {
         tenantId: ctx.tenantId,
-        cashierId: ctx.staffId,
+        cashierId: targetCashierId,
         orgUnitId: staff.org_unit_id,
         closeDate: closeDateValue,
         totalCount: pending.length,
@@ -321,8 +335,12 @@ export class DayCloseService {
       throw new ConflictException({ code: 'DAY_CLOSE_LOST_RACE' });
     }
 
+    const [named] = await embedStaffNames(tx, ctx.tenantId, [close], {
+      cashierId: 'cashierName',
+      createdBy: 'createdByName',
+    });
     return {
-      ...close,
+      ...named,
       payments: pending.map((p) =>
         memberWire({
           id: p.id,

@@ -850,7 +850,52 @@ export class BillingRunService {
     });
     // 批次账单行内嵌户号+客户名称 —— 复核岗无 customer:read 也能核对
     // （Round-2 报告 §9：admin 见名称、复核员只见 uuid 的问题源）。
-    return { ...run, bills: await embedAccountIdentity(tx, ctx.tenantId, bills) };
+    // 失败结算同样带户号/客户名，操作员按业务标识定位而不是抄 uuid。
+    const enriched = await embedAccountIdentity(tx, ctx.tenantId, bills);
+    return {
+      ...run,
+      failedSettlementIds: await this.embedFailureAccounts(
+        tx,
+        ctx,
+        run as { failedSettlementIds?: unknown },
+      ),
+      bills: enriched,
+    };
+  }
+
+  private async embedFailureAccounts(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    run: { failedSettlementIds?: unknown },
+  ) {
+    const raw = run.failedSettlementIds;
+    if (!Array.isArray(raw) || raw.length === 0) return raw;
+    const entries = raw as { settlementId?: string; stage?: string; code?: string; message?: string }[];
+    const ids = [...new Set(entries.map((e) => e.settlementId).filter((v): v is string => !!v))];
+    const settlements = await tx.consumptionSettlement.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: ids } },
+      select: { id: true, waterAccountId: true },
+    });
+    const accounts = await tx.waterAccount.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: { in: [...new Set(settlements.map((s) => s.waterAccountId))] },
+      },
+      select: { id: true, accountNo: true, customer: { select: { name: true } } },
+    });
+    const accountMap = new Map(
+      accounts.map((a) => [
+        a.id,
+        { accountNo: a.accountNo, customerName: a.customer?.name ?? null },
+      ]),
+    );
+    const map = new Map(
+      settlements.map((s) => [s.id, accountMap.get(s.waterAccountId)]),
+    );
+    return entries.map((e) => ({
+      ...e,
+      ...(e.settlementId ? (map.get(e.settlementId) ?? null) : null),
+    }));
   }
 
   private async loadAccountFacts(

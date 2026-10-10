@@ -507,6 +507,39 @@ export class BillService {
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
+    // 10/8 报告 §8 延伸：分摊行内嵌收款单号 / 预存流水类型 ——
+    // "收款/流水"列不再摆截断 uuid。
+    const allocPaymentIds = [
+      ...new Set(allocs.map((a) => a.paymentId).filter((v): v is string => !!v)),
+    ];
+    const allocEntryIds = [
+      ...new Set(
+        allocs
+          .map((a) => a.prepaymentEntryId)
+          .filter((v): v is string => !!v),
+      ),
+    ];
+    const allocPayments = allocPaymentIds.length
+      ? await tx.payment.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: allocPaymentIds } },
+          select: { id: true, paymentNo: true },
+        })
+      : [];
+    const allocEntries = allocEntryIds.length
+      ? await tx.prepaymentLedgerEntry.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: allocEntryIds } },
+          select: { id: true, type: true },
+        })
+      : [];
+    const allocPayNo = new Map(allocPayments.map((p) => [p.id, p.paymentNo]));
+    const allocEntryType = new Map(allocEntries.map((e) => [e.id, e.type]));
+    const namedAllocs = allocs.map((a) => ({
+      ...a,
+      paymentNo: (a.paymentId && allocPayNo.get(a.paymentId)) ?? null,
+      prepaymentEntryType:
+        (a.prepaymentEntryId && allocEntryType.get(a.prepaymentEntryId)) ??
+        null,
+    }));
     // 详情页人读引用（9·30 报告 §1）：费用项名称 + 开账批次/资费版本/
     // 来源单据的可读标识 —— 明细里不再只摆 uuid。
     const feeItemIds = [
@@ -566,7 +599,7 @@ export class BillService {
     return {
       ...identified,
       items: namedItems,
-      allocs,
+      allocs: namedAllocs,
       billingRunRef,
       tariffPlanRef,
       sourcePeriod,

@@ -820,20 +820,25 @@ describe('T7 review follow-ups: supersede exclusion + rollover', () => {
     expect(Number(c.usageQty)).toBe(187);
   });
 
-  it('superseded parent with child still PENDING → ESTIMATE (no valid fact)', async () => {
+  it('superseded parent with child still PENDING → READING_PENDING_QC (10/8 §6)', async () => {
     await genPlan('x2', '202702');
     const parent = await passActual('x2', 'S', 300, '2027-02-06');
-    await request(app.getHttpServer())
-      .post(`/meter-readings/${parent.id}/supersede`)
-      .set(auth(adminToken))
-      .send({ readingValue: 310 })
-      .expect(201);
-    // Child deliberately left PENDING — the parent is superseded history
-    // and the child is unverdicted, so no READING source exists.
-    const res = await settle('S', '202702', { estimateReason: 'correction pending QC' }).expect(201);
-    const c = componentOf(res.body, inst['S2']);
-    expect(c.sourceType).toBe('ESTIMATE');
-    expect(res.body.isEstimated).toBe(true);
+    const child = (
+      await request(app.getHttpServer())
+        .post(`/meter-readings/${parent.id}/supersede`)
+        .set(auth(adminToken))
+        .send({ readingValue: 310 })
+        .expect(201)
+    ).body;
+    // Child deliberately left PENDING — the truthful blocker is "读数未
+    // 质检", not "需要预估" (10/8 报告 §6: 报错必须说真实原因).
+    const res = await settle('S', '202702', { estimateReason: 'correction pending QC' });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'READING_PENDING_QC',
+      readingId: child.id,
+      qcStatus: 'PENDING',
+    });
   });
 
   it('rollover: end < prev with maxDial → usage = (maxDial − prev) + end', async () => {

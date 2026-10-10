@@ -162,12 +162,12 @@ export default function Exceptions() {
   }, [loadSummary]);
 
   useEffect(() => {
-    if (!canManage) return;
+    // exception:read 也可获取（显示处理人姓名用，非管理操作）。
     api
       .get<{ id: string; name: string }[]>('/exceptions/options/assignees')
       .then((r) => setStaff(r.data.map((s) => ({ id: s.id, name: s.name }))))
       .catch(() => setStaff([]));
-  }, [canManage]);
+  }, []);
 
   useEffect(() => {
     // exception:read-gated projections — no iam/metering permission needed.

@@ -14,7 +14,7 @@ import type { Request } from 'express';
 import { assertDecimal, assertOptionalDate } from '../../common/decimal.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
-import { AnyPermissions, Permissions } from '../../common/permissions.decorator.js';
+import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';

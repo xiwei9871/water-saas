@@ -452,6 +452,19 @@ export default function Reports({ kind }: { kind: ReportKind }) {
               },
             ]}
           />
+          {collected &&
+            Object.values(collected.byChannel ?? {}).reduce(
+              (s, b) => s + (b?.count ?? 0),
+              0,
+            ) === 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="本月暂无收款记录"
+              description="实收月报按收款日期（received_at）统计所选月份，与是否执行过日结无关。若收款发生在其他月份，请切换账期查看；刚录入的收款刷新本页即可计入。"
+            />
+          )}
           <Table<ChannelRow>
             rowKey="channel"
             size="middle"

@@ -8,6 +8,7 @@ import {
 import {
   Alert,
   App as AntdApp,
+  AutoComplete,
   Button,
   Card,
   DatePicker,
@@ -761,7 +762,20 @@ export default function Meters() {
             <Input />
           </Form.Item>
           <Form.Item name="caliber" label="口径">
-            <Input placeholder="如 DN15" />
+            {/* 10/8 报告 §4：常用口径下拉可选，未列举的可手工录入。 */}
+            <AutoComplete
+              placeholder="选择或输入口径，如 DN15"
+              options={[
+                'DN15',
+                'DN20',
+                'DN25',
+                'DN40',
+                'DN50',
+                'DN100',
+                'DN150',
+                'DN200',
+              ].map((v) => ({ value: v }))}
+            />
           </Form.Item>
           <Form.Item
             name="maxDial"

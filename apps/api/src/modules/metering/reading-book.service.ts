@@ -17,6 +17,10 @@ import {
   type MeterChannel,
 } from '../../common/reading-cadence.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import {
+  embedOrgNames,
+  embedStaffNames,
+} from '../../common/account-identity.js';
 import { assertAccountScopeTx } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
@@ -133,7 +137,7 @@ export class ReadingBookService {
             })
           ).map((m) => m.bookId)
         : undefined;
-      return tx.readingBook.findMany({
+      const rows = await tx.readingBook.findMany({
         where: {
           tenantId: ctx.tenantId,
           bookNo: q.bookNo,
@@ -147,6 +151,16 @@ export class ReadingBookService {
         take: q.take,
         skip: q.skip,
       });
+      // 10/8 报告 §3：组织名/抄表员姓名由服务端内嵌 —— 无 iam:read 的
+      // 业务角色不再看到截断 uuid。
+      return embedOrgNames(
+        tx,
+        ctx.tenantId,
+        await embedStaffNames(tx, ctx.tenantId, rows, {
+          readerId: 'readerName',
+        }),
+        { orgUnitId: 'orgUnitName' },
+      );
     });
   }
 
@@ -183,7 +197,15 @@ export class ReadingBookService {
       // member list is customer data but the book itself already gates.
       if (!orgInScope(ctx, book.orgUnitId)) throw outOfScope();
       const members = await this.membersOf(tx, ctx, id);
-      return { ...book, members };
+      const [enriched] = await embedOrgNames(
+        tx,
+        ctx.tenantId,
+        await embedStaffNames(tx, ctx.tenantId, [book], {
+          readerId: 'readerName',
+        }),
+        { orgUnitId: 'orgUnitName' },
+      );
+      return { ...enriched, members };
     });
   }
 

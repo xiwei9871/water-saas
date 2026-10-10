@@ -15,6 +15,10 @@ import {
   outOfScopeSettleAccountIds,
 } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import {
+  embedSettleIdentity,
+  embedStaffNames,
+} from '../../common/account-identity.js';
 import { lockAccountForUpdate } from '../billing/pricing.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
 
@@ -194,7 +198,7 @@ export class PaymentService {
         !q.settleAccountId && ctx.scope !== 'ALL'
           ? await outOfScopeSettleAccountIds(tx, ctx)
           : [];
-      return tx.payment.findMany({
+      const rows = await tx.payment.findMany({
         where: {
           tenantId: ctx.tenantId,
           settleAccountId: q.settleAccountId,
@@ -208,6 +212,18 @@ export class PaymentService {
         take: q.take,
         skip: q.skip,
       });
+      // 10/8 报告 §2：结算户号/名称 + 收费员姓名内嵌，无 customer:read /
+      // iam:read 的收费/账务角色不再看到裸 uuid。
+      return this.embedRefs(
+        tx,
+        ctx,
+        await embedStaffNames(
+          tx,
+          ctx.tenantId,
+          await embedSettleIdentity(tx, ctx.tenantId, rows),
+          { cashierId: 'cashierName' },
+        ),
+      );
     });
   }
 
@@ -858,7 +874,65 @@ export class PaymentService {
       payment.id,
       ['TOP_UP', 'REFUND', 'REVERSAL'],
     );
-    return { ...payment, allocs, receipt, prepaymentEntries };
+    const [enriched] = await this.embedRefs(
+      tx,
+      ctx,
+      await embedStaffNames(
+        tx,
+        ctx.tenantId,
+        await embedSettleIdentity(tx, ctx.tenantId, [
+          payment as T & { settleAccountId?: string | null },
+        ]),
+        { cashierId: 'cashierName' },
+      ),
+    );
+    return { ...enriched, allocs, receipt, prepaymentEntries };
+  }
+
+  /**
+   * 10/8 报告 §2 延伸：reversalOfId/dayCloseId 同样内嵌人读引用 —
+   * 红冲对象 → 原收款单号；日结单 → 日结日期（详情可再点入）。
+   */
+  private async embedRefs<T extends object>(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    rows: T[],
+  ) {
+    const ref = (r: T) =>
+      r as { reversalOfId?: string | null; dayCloseId?: string | null };
+    const revIds = [
+      ...new Set(
+        rows.map((r) => ref(r).reversalOfId).filter((v): v is string => !!v),
+      ),
+    ];
+    const closeIds = [
+      ...new Set(
+        rows.map((r) => ref(r).dayCloseId).filter((v): v is string => !!v),
+      ),
+    ];
+    const revs = revIds.length
+      ? await tx.payment.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: revIds } },
+          select: { id: true, paymentNo: true },
+        })
+      : [];
+    const closes = closeIds.length
+      ? await tx.cashierDayClose.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: closeIds } },
+          select: { id: true, closeDate: true },
+        })
+      : [];
+    const revById = new Map(revs.map((p) => [p.id, p.paymentNo]));
+    const closeById = new Map(closes.map((c) => [c.id, c.closeDate]));
+    return rows.map((r) => ({
+      ...r,
+      reversalOfNo: ref(r).reversalOfId
+        ? (revById.get(ref(r).reversalOfId!) ?? null)
+        : null,
+      dayCloseDate: ref(r).dayCloseId
+        ? (closeById.get(ref(r).dayCloseId!) ?? null)
+        : null,
+    }));
   }
 
   /** Σ payment_alloc.amount per bill (reversal allocs net negative). */

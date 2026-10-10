@@ -224,8 +224,9 @@ const CODE_LABELS: Record<string, string> = {
   IS_ESTIMATED_INVALID: '预估标志无效',
   SETTLEMENT_FIELDS_REQUIRED: '请选择用水户并填写账期',
   ESTIMATE_REASON_INVALID: '预估原因格式不正确',
-  ESTIMATE_REASON_REQUIRED: '存在预估分量时必须填写预估原因',
+  ESTIMATE_REASON_REQUIRED: '本期无有效实抄读数，结算分量按预估处理——必须填写预估原因',
   ESTIMATE_USAGE_REQUIRED: '无历史用量可预估，请手工填写用量',
+  READING_PENDING_QC: '本期读数已录入但尚未通过质检——请先由有质检权限的角色（复核员）在「抄表记录」完成质检，再生成结算',
   SETTLEMENT_NOT_FOUND: '结算记录不存在',
   SETTLEMENT_ALREADY_EXISTS: '该用水户本期已生成结算',
   SETTLEMENT_PERIOD_ALREADY_FINALIZED: '该账期已封结或已开账，无法在此账期拆表',
@@ -238,7 +239,7 @@ const CODE_LABELS: Record<string, string> = {
   DUPLICATE_OVERRIDE: '用量覆盖存在重复的安装记录',
   PREV_EXCEEDS_MAX_DIAL: '上期读数超出表计最大量程，请先修正读数链',
   NEGATIVE_USAGE: '读数倒挂且无法按量程翻转解释，请先更正读数',
-  ESTIMATE_RECOVERY_REQUIRES_RECONCILIATION: '实抄止度低于此前估计止度，请先到“补差管理”校正已出账估水，再生成本期结算；这不是水表翻转',
+  ESTIMATE_RECOVERY_REQUIRES_RECONCILIATION: '实抄止度低于此前估抄止度——需由有补差权限的角色（复核员/综合业务）在「补差管理」校正已出账估水后再生成本期结算；这不是水表翻转',
   PREVIEW_FIELDS_REQUIRED: '请选择用水户并填写账期',
   BATCH_TOO_LARGE: '候选户数超过单次批量上限（500），请先按抄表册或营业所缩小范围',
   // billing domain — reconciliation
@@ -312,9 +313,10 @@ const CODE_LABELS: Record<string, string> = {
   RECEIPT_VOID: '收据已作废，不能打印',
   // day close
   DAY_CLOSE_NOT_FOUND: '日结单不存在',
-  DAY_CLOSE_EXISTS: '该日期已完成日结，不能重复日结',
-  DAY_CLOSE_EMPTY: '该日期（含之前）没有待日结的收款',
+  DAY_CLOSE_EXISTS: '该收费员在该日期已完成日结，不能重复日结',
+  DAY_CLOSE_EMPTY: '该收费员在该日期（含之前）没有待日结的收款记录',
   DAY_CLOSE_LOST_RACE: '日结过程中收款状态被并发修改，请重试',
+  DAY_CLOSE_PROXY_FORBIDDEN: '仅管理员可代其他收费员执行日结',
   // reports
   REPORT_PARAM_REQUIRED: '请填写报表查询参数',
   NOT_IMPLEMENTED: '该能力尚未开通（接口预留）',

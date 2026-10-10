@@ -16,7 +16,10 @@ import {
 } from '@ws/billing-core';
 import type { Request } from 'express';
 import { embedAccountIdentity } from '../../common/account-identity.js';
-import { outOfScopeAccountIds } from '../../common/account-scope.js';
+import {
+  outOfScopeAccountIds,
+  outOfScopeSettleAccountIds,
+} from '../../common/account-scope.js';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -172,23 +175,27 @@ export class ReconciliationService {
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) =>
-      embedAccountIdentity(
+      this.embedReconRefs(
         tx,
-        ctx.tenantId,
-        await tx.reconciliation.findMany({
-          where: {
-            tenantId: ctx.tenantId,
-            waterAccountId: q.waterAccountId,
-            status: q.status,
-            ...(q.period !== undefined
-              ? { fromPeriod: { lte: q.period }, toPeriod: { gte: q.period } }
-              : {}),
-          },
-          select: RECONCILIATION_SELECT,
-          orderBy: [{ toPeriod: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
-          take: q.take,
-          skip: q.skip,
-        }),
+        ctx,
+        await embedAccountIdentity(
+          tx,
+          ctx.tenantId,
+          await tx.reconciliation.findMany({
+            where: {
+              tenantId: ctx.tenantId,
+              waterAccountId: q.waterAccountId,
+              status: q.status,
+              ...(q.period !== undefined
+                ? { fromPeriod: { lte: q.period }, toPeriod: { gte: q.period } }
+                : {}),
+            },
+            select: RECONCILIATION_SELECT,
+            orderBy: [{ toPeriod: 'desc' }, { createdAt: 'desc' }, { id: 'asc' }],
+            take: q.take,
+            skip: q.skip,
+          }),
+        ),
       ),
     );
   }
@@ -200,8 +207,68 @@ export class ReconciliationService {
         select: RECONCILIATION_SELECT,
       });
       if (!row) throw new NotFoundException({ code: 'RECONCILIATION_NOT_FOUND' });
-      return (await embedAccountIdentity(tx, ctx.tenantId, [row]))[0];
+      return this.embedReconRefs(
+        tx,
+        ctx,
+        await embedAccountIdentity(tx, ctx.tenantId, [row]),
+      ).then((rows) => rows[0]);
     });
+  }
+
+  /**
+   * 10/8 报告 §8：锚点/实抄读数 + 吸收结算的人读引用内嵌 ——
+   * 详情不再摆截断 uuid。
+   */
+  private async embedReconRefs<
+    T extends {
+      anchorReadingId: string | null;
+      actualReadingId: string | null;
+      absorbedSettlementId: string | null;
+    },
+  >(tx: Prisma.TransactionClient, ctx: TenantCtx, rows: T[]) {
+    const readingIds = [
+      ...new Set(
+        rows
+          .flatMap((r) => [r.anchorReadingId, r.actualReadingId])
+          .filter((v): v is string => !!v),
+      ),
+    ];
+    const settlementIds = [
+      ...new Set(
+        rows
+          .map((r) => r.absorbedSettlementId)
+          .filter((v): v is string => !!v),
+      ),
+    ];
+    const readings = readingIds.length
+      ? await tx.meterReading.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: readingIds } },
+          select: {
+            id: true,
+            period: true,
+            readDate: true,
+            readingValue: true,
+          },
+        })
+      : [];
+    const settlements = settlementIds.length
+      ? await tx.consumptionSettlement.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: settlementIds } },
+          select: { id: true, period: true },
+        })
+      : [];
+    const readingById = new Map(readings.map((r) => [r.id, r]));
+    const settleById = new Map(settlements.map((s) => [s.id, s]));
+    return rows.map((r) => ({
+      ...r,
+      anchorReading:
+        (r.anchorReadingId && readingById.get(r.anchorReadingId)) ?? null,
+      actualReading:
+        (r.actualReadingId && readingById.get(r.actualReadingId)) ?? null,
+      absorbedSettlement:
+        (r.absorbedSettlementId && settleById.get(r.absorbedSettlementId)) ??
+        null,
+    }));
   }
 
   /**
@@ -210,14 +277,14 @@ export class ReconciliationService {
    * 只认户号/客户名搜索，不许手填 uuid)。Scope filter still applies —
    * caller sees only labels of accounts inside their org scope.
    */
-  accountLookup(ctx: TenantCtx, q?: string) {
+  accountLookup(ctx: TenantCtx, q?: string, includeClosed = false) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const excluded =
         ctx.scope === 'ALL' ? [] : await outOfScopeAccountIds(tx, ctx);
       const rows = await tx.waterAccount.findMany({
         where: {
           tenantId: ctx.tenantId,
-          status: { not: 'CLOSED' },
+          ...(includeClosed ? {} : { status: { not: 'CLOSED' as const } }),
           ...(excluded.length > 0 ? { id: { notIn: excluded } } : {}),
           ...(q
             ? {
@@ -241,6 +308,38 @@ export class ReconciliationService {
         accountNo: r.accountNo,
         customerName: r.customer.name,
       }));
+    });
+  }
+
+  /**
+   * GET /reconciliations/settle-account-lookup — 结算户号/名称搜索器
+   * (10/8 报告 §1-2: 账单/收款记录的结算户筛选不许手填 uuid)。与
+   * accountLookup 同一权限语义：挂业务权限、按组织 scope 过滤、只回
+   * id+结算号+名称。
+   */
+  settleAccountLookup(ctx: TenantCtx, q?: string, includeClosed = false) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const excluded =
+        ctx.scope === 'ALL' ? [] : await outOfScopeSettleAccountIds(tx, ctx);
+      const rows = await tx.settleAccount.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          ...(includeClosed ? {} : { status: { not: 'CLOSED' as const } }),
+          ...(excluded.length > 0 ? { id: { notIn: excluded } } : {}),
+          ...(q
+            ? {
+                OR: [
+                  { settleNo: { contains: q, mode: 'insensitive' } },
+                  { name: { contains: q, mode: 'insensitive' } },
+                ],
+              }
+            : {}),
+        },
+        select: { id: true, settleNo: true, name: true },
+        orderBy: { settleNo: 'asc' },
+        take: 20,
+      });
+      return rows;
     });
   }
 
