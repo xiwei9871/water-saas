@@ -39,6 +39,16 @@ export const A = {
   REMOTE_EVENT_CONFLICT: 'REMOTE_EVENT_CONFLICT',
   REMOTE_EVENT_KEY_CONFLICT: 'REMOTE_EVENT_KEY_CONFLICT',
   UNPAID_BILL_OVERDUE: 'UNPAID_BILL_OVERDUE',
+  // T1 (10·8-9 报告 §7): 读数已录未质检 —— 阻塞结算生成，工单指向抄表记录质检
+  READING_QC_PENDING: 'READING_QC_PENDING',
+  // 实抄止度低于已出账估止（drift-hints 的工单化）—— 指向补差管理
+  SETTLEMENT_DRIFT: 'SETTLEMENT_DRIFT',
+  // 开账前置检查三态（计划覆盖户：缺读数 / 缺结算 / 结算未终审）
+  PLANNED_NO_READING: 'PLANNED_NO_READING',
+  PLANNED_NO_SETTLEMENT: 'PLANNED_NO_SETTLEMENT',
+  SETTLEMENT_UNFINALIZED: 'SETTLEMENT_UNFINALIZED',
+  // 销户后结算户仍挂余额/欠费 —— 指向客户管理处理
+  CLOSED_BALANCE_LEFT: 'CLOSED_BALANCE_LEFT',
 } as const;
 
 /** severity is deterministic by type — never operator-editable (Gate Q2). */
@@ -56,6 +66,8 @@ export const severityOf = (type: string): AnomalySeverity =>
 const SUFFIX: Record<string, string> = {
   [A.READING_QC_REVIEW]: 'QC_REVIEW',
   [A.READING_QC_REJECTED]: 'QC_REJECTED',
+  [A.READING_QC_PENDING]: 'QC_PENDING',
+  [A.SETTLEMENT_DRIFT]: 'DRIFT',
   [A.REMOTE_EVENT_UNBOUND]: 'UNBOUND',
   [A.REMOTE_EVENT_WAITING_PLAN]: 'WAITING_PLAN',
   [A.REMOTE_EVENT_FAILED]: 'FAILED',

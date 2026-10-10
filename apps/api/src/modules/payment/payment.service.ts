@@ -75,7 +75,7 @@ export const RECEIPT_SELECT = {
   updatedAt: true,
 } satisfies Prisma.ReceiptSelect;
 
-type PayChannel = 'CASH' | 'POS' | 'TRANSFER';
+type PayChannel = 'CASH' | 'POS' | 'TRANSFER' | 'ONLINE' | 'BANK_DEDUCT';
 type PaymentStatus = 'RECEIVED' | 'DAY_CLOSED' | 'REVERSED';
 type BillStatus = 'DRAFT' | 'POSTED' | 'PARTIAL_PAID' | 'PAID' | 'REVERSED';
 

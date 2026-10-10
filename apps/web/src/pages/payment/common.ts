@@ -6,12 +6,16 @@ export const PAY_CHANNEL_LABELS: Record<PayChannel, string> = {
   CASH: '现金',
   POS: 'POS 刷卡',
   TRANSFER: '转账',
+  ONLINE: '线上缴费',
+  BANK_DEDUCT: '银行代扣',
 };
 
 export const PAY_CHANNEL_COLORS: Record<PayChannel, string> = {
   CASH: 'green',
   POS: 'blue',
   TRANSFER: 'purple',
+  ONLINE: 'geekblue',
+  BANK_DEDUCT: 'orange',
 };
 
 export const PAYMENT_STATUS_LABELS: Record<PaymentStatus, string> = {

@@ -1,4 +1,7 @@
 import { Module } from '@nestjs/common';
+import { AnalysisService } from './analysis.service.js';
+import { QueryController } from './query.controller.js';
+import { QueryService } from './query.service.js';
 import { ReportService } from './report.service.js';
 import { ReportsController } from './reports.controller.js';
 
@@ -15,7 +18,7 @@ import { ReportsController } from './reports.controller.js';
  * this module ever writes.
  */
 @Module({
-  controllers: [ReportsController],
-  providers: [ReportService],
+  controllers: [ReportsController, QueryController],
+  providers: [ReportService, QueryService, AnalysisService],
 })
 export class ReportModule {}

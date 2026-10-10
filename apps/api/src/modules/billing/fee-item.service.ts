@@ -16,6 +16,7 @@ export const FEE_ITEM_SELECT = {
   code: true,
   name: true,
   calcType: true,
+  kind: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.FeeItemSelect;
@@ -26,10 +27,13 @@ export interface FeeItemBody {
   code?: string;
   name?: string;
   calcType?: string;
+  kind?: string;
 }
 
 export interface FeeItemPatchBody {
   name?: string;
+  /** G1: kind 可改（重新归类不影响历史账单快照），code/calcType 仍写一次。 */
+  kind?: string;
 }
 
 /**
@@ -100,6 +104,9 @@ export class FeeItemService {
           code: body.code,
           name: body.name,
           calcType: body.calcType as CalcType,
+          ...(body.kind !== undefined
+            ? { kind: body.kind as 'WATER_FEE' | 'AGENCY' | 'OTHER' }
+            : {}),
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
         },
@@ -131,7 +138,13 @@ export class FeeItemService {
     // anyway); the update itself keys on the PK like reading-book does.
     return tx.feeItem.update({
       where: { id },
-      data: { name: body.name, updatedBy: ctx.staffId },
+      data: {
+        name: body.name,
+        ...(body.kind !== undefined
+          ? { kind: body.kind as 'WATER_FEE' | 'AGENCY' | 'OTHER' }
+          : {}),
+        updatedBy: ctx.staffId,
+      },
       select: FEE_ITEM_SELECT,
     });
   }

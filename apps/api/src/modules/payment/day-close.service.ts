@@ -42,7 +42,7 @@ const PAYMENT_MEMBER_SELECT = {
 export interface ClaimedPayment {
   id: string;
   payment_no: string;
-  channel: 'CASH' | 'POS' | 'TRANSFER';
+  channel: 'CASH' | 'POS' | 'TRANSFER' | 'ONLINE' | 'BANK_DEDUCT';
   amount: bigint;
   received_at: Date;
   reversal_of_id: string | null;

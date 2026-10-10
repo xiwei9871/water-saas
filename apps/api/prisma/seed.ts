@@ -116,17 +116,51 @@ async function seedTenant({ code, name }: TenantSeed) {
     create: { tenantId, staffId: admin.id, roleId: roles['admin'] },
   });
 
-  // fee items: 水费/污水费/水资源费
+  // fee items: 水费/污水费/水资源费 —— kind 是 G1 分类（综合单价口径
+  // 只计 WATER_FEE，污水/水资源费是代收的 AGENCY）。
   const feeItems = [
-    { code: 'WATER', name: '水费', calcType: 'PER_QTY' as const },
-    { code: 'SEWAGE', name: '污水费', calcType: 'PER_QTY' as const },
-    { code: 'WATER_RESOURCE', name: '水资源费', calcType: 'PER_QTY' as const },
+    { code: 'WATER', name: '水费', calcType: 'PER_QTY' as const, kind: 'WATER_FEE' as const },
+    { code: 'SEWAGE', name: '污水费', calcType: 'PER_QTY' as const, kind: 'AGENCY' as const },
+    { code: 'WATER_RESOURCE', name: '水资源费', calcType: 'PER_QTY' as const, kind: 'AGENCY' as const },
   ];
   for (const f of feeItems) {
     await prisma.feeItem.upsert({
       where: { tenantId_code: { tenantId, code: f.code } },
-      update: { name: f.name, calcType: f.calcType },
+      update: { name: f.name, calcType: f.calcType, kind: f.kind },
       create: { tenantId, ...f },
+    });
+  }
+
+  // G4 统一字典默认项 —— 租户可增改停；code 稳定（核销登记按其引用）。
+  const dicts: { category: string; code: string; name: string; seq: number }[] = [
+    { category: 'WRITEOFF_REASON', code: 'UNREACHABLE', name: '无法联系客户', seq: 1 },
+    { category: 'WRITEOFF_REASON', code: 'CLOSED_NO_ASSET', name: '销户无财产可追', seq: 2 },
+    { category: 'WRITEOFF_REASON', code: 'AGED_OVER_3Y', name: '账龄超3年', seq: 3 },
+    { category: 'REVERSAL_TYPE', code: 'MISCHARGE', name: '错收退款', seq: 1 },
+    { category: 'REVERSAL_TYPE', code: 'OVERPAY', name: '多收退回', seq: 2 },
+    { category: 'REVERSAL_TYPE', code: 'ADJUST', name: '账务调整', seq: 3 },
+    { category: 'AGING_BUCKET', code: 'M0_3', name: '0-3个月', seq: 1 },
+    { category: 'AGING_BUCKET', code: 'M3_6', name: '3-6个月', seq: 2 },
+    { category: 'AGING_BUCKET', code: 'M6_12', name: '6-12个月', seq: 3 },
+    { category: 'AGING_BUCKET', code: 'M12P', name: '12个月以上', seq: 4 },
+    { category: 'LOSS_REASON', code: 'MOVE_OUT', name: '搬迁', seq: 1 },
+    { category: 'LOSS_REASON', code: 'DEMOLISH', name: '拆迁', seq: 2 },
+    { category: 'LOSS_REASON', code: 'SWITCH', name: '改供', seq: 3 },
+    { category: 'ADJUST_TYPE', code: 'RELIEF', name: '政策性减免', seq: 1 },
+    { category: 'ADJUST_TYPE', code: 'DISCOUNT', name: '优惠减免', seq: 2 },
+    { category: 'ADJUST_TYPE', code: 'CORRECTION', name: '差错调整', seq: 3 },
+  ];
+  for (const d of dicts) {
+    await prisma.sysDict.upsert({
+      where: {
+        tenantId_category_code: {
+          tenantId,
+          category: d.category,
+          code: d.code,
+        },
+      },
+      update: { name: d.name, seq: d.seq },
+      create: { tenantId, ...d },
     });
   }
 

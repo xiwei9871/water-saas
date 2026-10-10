@@ -50,6 +50,25 @@ const TYPE_LABELS: Record<string, string> = {
   REMOTE_EVENT_CONFLICT: '远传读数冲突',
   REMOTE_EVENT_KEY_CONFLICT: '事件键冲突',
   UNPAID_BILL_OVERDUE: '账单逾期',
+  READING_QC_PENDING: '读数待质检',
+  SETTLEMENT_DRIFT: '待补差',
+  PLANNED_NO_READING: '计划缺读数',
+  PLANNED_NO_SETTLEMENT: '计划缺结算',
+  SETTLEMENT_UNFINALIZED: '结算未终审',
+  CLOSED_BALANCE_LEFT: '销户余额残留',
+};
+
+/** T1 工单去向：按异常类型直达处理页（覆盖 anchorRef 默认跳转）。 */
+const TARGET_PAGE: Record<string, string> = {
+  READING_QC_PENDING: '/metering/readings',
+  READING_QC_REVIEW: '/metering/readings',
+  READING_QC_REJECTED: '/metering/readings',
+  SETTLEMENT_DRIFT: '/settlement/reconciliations',
+  PLANNED_NO_READING: '/metering/readings',
+  PLANNED_NO_SETTLEMENT: '/settlement/list',
+  SETTLEMENT_UNFINALIZED: '/settlement/list',
+  CLOSED_BALANCE_LEFT: '/customer/settle-accounts',
+  UNPAID_BILL_OVERDUE: '/billing/bills',
 };
 
 const SEV_COLORS = { BLOCKING: 'red', WARNING: 'orange', INFO: 'blue' } as const;
@@ -236,6 +255,11 @@ export default function Exceptions() {
 
   const drill = () => {
     if (!detail) return;
+    const target = TARGET_PAGE[detail.fact.type];
+    if (target) {
+      navigate(target);
+      return;
+    }
     const ref = detail.fact.anchorRef;
     if (ref.kind === 'water-account') {
       setDrill360(ref.id);
@@ -277,11 +301,18 @@ export default function Exceptions() {
     },
     {
       title: '操作',
-      width: 70,
+      width: 150,
       render: (_, r) => (
-        <Button size="small" icon={<EyeOutlined />} onClick={() => void openDetail(r.key)}>
-          详情
-        </Button>
+        <Space size={4}>
+          <Button size="small" icon={<EyeOutlined />} onClick={() => void openDetail(r.key)}>
+            详情
+          </Button>
+          {TARGET_PAGE[r.type] && (
+            <Button size="small" type="link" onClick={() => navigate(TARGET_PAGE[r.type])}>
+              去处理
+            </Button>
+          )}
+        </Space>
       ),
     },
   ];

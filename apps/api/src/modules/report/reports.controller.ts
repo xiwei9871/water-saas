@@ -7,6 +7,7 @@ import {
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { assertUuid } from '../../common/uuid.js';
+import { AnalysisService } from './analysis.service.js';
 import { ReportService } from './report.service.js';
 
 /** period is char(6) YYYYMM — same guard as billing/metering controllers. */
@@ -50,7 +51,10 @@ const required = (v: unknown, field: string): string => {
  */
 @Controller('reports')
 export class ReportsController {
-  constructor(private readonly svc: ReportService) {}
+  constructor(
+    private readonly svc: ReportService,
+    private readonly analysis: AnalysisService,
+  ) {}
 
   /**
    * GET /reports/meter-daily?date=YYYY-MM-DD[&bookId][&orgUnitId] —
@@ -132,5 +136,57 @@ export class ReportsController {
       throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'through' });
     }
     return this.svc.recoveryRate(currentTenant(), { period: p, through: t });
+  }
+
+  /**
+   * GET /reports/metric-dictionary — C1 指标字典：25 个 KPI 的口径、
+   * 公式、数据源 + version。日/月/年报响应中的 metricVersion 与此
+   * 对账；数据源未到位指标返回 available=false + 原因而非静默报 0。
+   */
+  @Get('metric-dictionary')
+  @Permissions('report:read')
+  metricDictionary() {
+    return this.analysis.metricsDictionary();
+  }
+
+  /**
+   * GET /reports/ops-daily?date=YYYY-MM-DD — B1 运营日报：当日应收/
+   * 实收（当期/陈欠分列）、抄表进度、按组织/渠道/抄表员切片、异常
+   * 明细（大额红冲、欠费 TOP）。
+   */
+  @Get('ops-daily')
+  @Permissions('report:read')
+  opsDaily(@Query('date') date?: string) {
+    return this.analysis.opsDaily(currentTenant(), {
+      date: assertDate(required(date, 'date')),
+    });
+  }
+
+  /**
+   * GET /reports/analysis-monthly?period=YYYYMM — B2 经营月报：全量
+   * 总量指标（售水量/应收/实收/当期实收/陈欠回收/回收率/欠费/综合
+   * 单价/同比环比/抄表四率）+ 分类汇总 + 异常清单。指标 code 与
+   * metric-dictionary 一一对应。
+   */
+  @Get('analysis-monthly')
+  @Permissions('report:read')
+  analysisMonthly(@Query('period') period?: string) {
+    return this.analysis.analysisMonthly(currentTenant(), {
+      period: assertPeriod(required(period, 'period')),
+    });
+  }
+
+  /**
+   * GET /reports/analysis-yearly?year=YYYY — B3 年报：年度总量 +
+   * 12 个月趋势 + 同比 + 坏账核销/红冲/销户/欠费 TOP 清单。
+   */
+  @Get('analysis-yearly')
+  @Permissions('report:read')
+  analysisYearly(@Query('year') year?: string) {
+    const y = required(year, 'year');
+    if (!/^\d{4}$/.test(y)) {
+      throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'year' });
+    }
+    return this.analysis.analysisYearly(currentTenant(), { year: y });
   }
 }

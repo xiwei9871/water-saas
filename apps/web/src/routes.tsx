@@ -31,10 +31,15 @@ import Cashier from './pages/payment/Cashier';
 import DayClose from './pages/payment/DayClose';
 import Payments from './pages/payment/Payments';
 import Prepayments from './pages/payment/Prepayments';
+import Writeoffs from './pages/payment/Writeoffs';
+import Analysis from './pages/report/Analysis';
+import MetricDict from './pages/report/MetricDict';
+import Queries from './pages/report/Queries';
 import Reports from './pages/report/Reports';
 import Reconciliations from './pages/settlement/Reconciliations';
 import Settlements from './pages/settlement/Settlements';
 import AuditLogs from './pages/system/AuditLogs';
+import Dicts from './pages/system/Dicts';
 import Orgs from './pages/system/Orgs';
 import Roles from './pages/system/Roles';
 import Staff from './pages/system/Staff';
@@ -252,6 +257,12 @@ export const APP_ROUTES: AppRoute[] = [
         label: '收费员日结',
         element: <DayClose />,
       },
+      {
+        key: 'payment-writeoffs',
+        path: '/payment/writeoffs',
+        label: '坏账核销',
+        element: <Writeoffs />,
+      },
     ],
   },
   {
@@ -292,6 +303,60 @@ export const APP_ROUTES: AppRoute[] = [
         label: '回收率',
         element: <Reports key="recovery-rate" kind="recovery-rate" />,
       },
+      {
+        key: 'report-ops-daily',
+        path: '/report/ops-daily',
+        label: '运营日报',
+        element: <Analysis key="ops-daily" kind="ops-daily" />,
+      },
+      {
+        key: 'report-analysis-monthly',
+        path: '/report/analysis-monthly',
+        label: '经营月报',
+        element: <Analysis key="analysis-monthly" kind="analysis-monthly" />,
+      },
+      {
+        key: 'report-analysis-yearly',
+        path: '/report/analysis-yearly',
+        label: '年报',
+        element: <Analysis key="analysis-yearly" kind="analysis-yearly" />,
+      },
+      {
+        key: 'query-accounts',
+        path: '/report/query/accounts',
+        label: '用户档案查询',
+        element: <Queries key="accounts" kind="accounts" />,
+      },
+      {
+        key: 'query-usage',
+        path: '/report/query/usage-details',
+        label: '水量明细查询',
+        element: <Queries key="usage-details" kind="usage-details" />,
+      },
+      {
+        key: 'query-bills',
+        path: '/report/query/bill-details',
+        label: '账单明细查询',
+        element: <Queries key="bill-details" kind="bill-details" />,
+      },
+      {
+        key: 'query-payments',
+        path: '/report/query/payments',
+        label: '收款流水查询',
+        element: <Queries key="payments" kind="payments" />,
+      },
+      {
+        key: 'query-arrears',
+        path: '/report/query/arrears',
+        label: '欠费明细查询',
+        element: <Queries key="arrears" kind="arrears" />,
+      },
+      {
+        key: 'report-metric-dict',
+        path: '/report/metric-dict',
+        label: '指标字典',
+        element: <MetricDict />,
+      },
     ],
   },
   {
@@ -305,6 +370,7 @@ export const APP_ROUTES: AppRoute[] = [
       { key: 'system-staff', path: '/system/staff', label: '用户管理', element: <Staff /> },
       { key: 'system-roles', path: '/system/roles', label: '角色权限', element: <Roles /> },
       { key: 'system-params', path: '/system/params', label: '租户参数', element: <TenantParams /> },
+      { key: 'system-dicts', path: '/system/dicts', label: '字典管理', element: <Dicts /> },
       { key: 'system-audit', path: '/system/audit-logs', label: '操作日志', element: <AuditLogs /> },
     ],
   },

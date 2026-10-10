@@ -153,6 +153,49 @@ export class ExceptionService {
     });
   }
 
+  /**
+   * T2 导航徽标 — 按业务域分组的 OPEN 工单计数（ignored/resolved 不计）。
+   * 与 list() 同口径（scope 过滤后），前端把域计数映射到左侧菜单组。
+   */
+  async badge(ctx: TenantCtx) {
+    const DOMAIN: Record<string, string> = {
+      NO_ACTIVE_METER: 'metering', MULTI_ACTIVE_METER: 'metering',
+      NO_BOOK: 'metering', MULTI_BOOK: 'metering',
+      READING_QC_REVIEW: 'metering', READING_QC_REJECTED: 'metering',
+      READING_QC_PENDING: 'metering', ESTIMATE_STREAK: 'metering',
+      REMOTE_EVENT_UNBOUND: 'metering', REMOTE_EVENT_WAITING_PLAN: 'metering',
+      REMOTE_EVENT_FAILED: 'metering', REMOTE_EVENT_CONFLICT: 'metering',
+      REMOTE_EVENT_KEY_CONFLICT: 'metering',
+      SETTLEMENT_DRIFT: 'settlement',
+      PLANNED_NO_READING: 'settlement', PLANNED_NO_SETTLEMENT: 'settlement',
+      SETTLEMENT_UNFINALIZED: 'settlement',
+      UNPAID_BILL_OVERDUE: 'billing',
+      CLOSED_BALANCE_LEFT: 'customer',
+    };
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const facts = await filterVisible(tx, ctx, await detectAll(tx, ctx.tenantId));
+      const episodes = await tx.workItem.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          anomalyKey: { in: facts.map((f) => f.key) },
+          clearedAt: null,
+        },
+        select: { anomalyKey: true, status: true },
+      });
+      const epByKey = new Map(episodes.map((e) => [e.anomalyKey, e.status]));
+      const byDomain: Record<string, number> = {};
+      let total = 0;
+      for (const f of facts) {
+        const s = epByKey.get(f.key) ?? 'OPEN';
+        if (s === 'IGNORED' || s === 'RESOLVED') continue;
+        total++;
+        const d = DOMAIN[f.type] ?? 'other';
+        byDomain[d] = (byDomain[d] ?? 0) + 1;
+      }
+      return { total, byDomain, asOf: new Date().toISOString() };
+    });
+  }
+
   async detail(ctx: TenantCtx, key: string) {
     const parsed = parseKey(key);
     if (!parsed) throw badKey();

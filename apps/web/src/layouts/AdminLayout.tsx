@@ -1,13 +1,14 @@
 import { LogoutOutlined, UserOutlined } from '@ant-design/icons';
-import { Button, Layout, Menu, Space, Spin, Tag } from 'antd';
+import { Badge, Button, Layout, Menu, Space, Spin, Tag } from 'antd';
 import type { MenuProps } from 'antd';
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Navigate,
   Outlet,
   useLocation,
   useNavigate,
 } from 'react-router-dom';
+import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { APP_ROUTES, leafRoutes } from '../routes';
 import type { AppRoute } from '../routes';
@@ -16,19 +17,42 @@ const { Sider, Header, Content } = Layout;
 
 type MenuItem = Required<MenuProps>['items'][number];
 
+/** T2: 顶层菜单组 → 异常域。徽标计数来自 GET /exceptions/badge。 */
+const DOMAIN_OF_MENU: Record<string, string> = {
+  '/metering': 'metering',
+  '/settlement': 'settlement',
+  '/billing': 'billing',
+  '/customer': 'customer',
+  '/payment': 'billing',
+};
+
 /** Route tree → AntD menu items, filtered by permission. */
 const toMenuItems = (
   routes: AppRoute[],
   hasPerm: (...codes: string[]) => boolean,
+  badge?: Record<string, number>,
 ): MenuItem[] =>
   routes
     .filter((r) => !r.perms || hasPerm(...r.perms))
-    .map((r) => ({
-      key: r.path,
-      icon: r.icon,
-      label: r.label,
-      children: r.children ? toMenuItems(r.children, hasPerm) : undefined,
-    }));
+    .map((r) => {
+      const domain = DOMAIN_OF_MENU[r.path];
+      const count = domain ? (badge?.[domain] ?? 0) : 0;
+      const isExceptionRoot = r.path === '/exceptions';
+      const n = isExceptionRoot ? (badge?.total ?? 0) : count;
+      return {
+        key: r.path,
+        icon: r.icon,
+        label:
+          n > 0 ? (
+            <Badge count={n} size="small" offset={[8, 0]}>
+              {r.label}
+            </Badge>
+          ) : (
+            r.label
+          ),
+        children: r.children ? toMenuItems(r.children, hasPerm) : undefined,
+      };
+    });
 
 /** Best matching menu key for the current location (longest path wins). */
 const selectedKeyOf = (pathname: string): string => {
@@ -48,7 +72,30 @@ export default function AdminLayout() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const items = useMemo(() => toMenuItems(APP_ROUTES, hasPerm), [hasPerm]);
+  const [badge, setBadge] = useState<{ total: number; byDomain: Record<string, number> } | null>(null);
+
+  useEffect(() => {
+    if (!user || !hasPerm('exception:read')) return;
+    let stopped = false;
+    const load = () =>
+      api
+        .get<{ total: number; byDomain: Record<string, number> }>('/exceptions/badge')
+        .then((r) => {
+          if (!stopped) setBadge(r.data);
+        })
+        .catch(() => undefined);
+    void load();
+    const t = setInterval(() => void load(), 60_000);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+    };
+  }, [user, hasPerm]);
+
+  const items = useMemo(
+    () => toMenuItems(APP_ROUTES, hasPerm, badge?.byDomain ? { ...badge.byDomain, total: badge.total } : undefined),
+    [hasPerm, badge],
+  );
 
   if (loading) {
     return (

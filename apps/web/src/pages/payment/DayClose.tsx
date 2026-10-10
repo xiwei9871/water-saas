@@ -147,7 +147,7 @@ export default function DayClose() {
   };
 
   const channelBuckets = (b: CashierDayClose['byChannel']) =>
-    (['CASH', 'POS', 'TRANSFER'] as const).map((c) => {
+    (['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => {
       const bucket = b?.[c];
       return (
         <Tag key={c} color={PAY_CHANNEL_COLORS[c]}>

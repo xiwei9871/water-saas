@@ -11,6 +11,7 @@ import type {
   DayCloseStatus,
   EstimateMethod,
   ExceptionCode,
+  FeeItemKind,
   InstallReason,
   InstallationStatus,
   MeterStatus,
@@ -45,6 +46,7 @@ export type {
   DayCloseStatus,
   EstimateMethod,
   ExceptionCode,
+  FeeItemKind,
   InstallReason,
   InstallationStatus,
   MeterStatus,
@@ -670,6 +672,8 @@ export interface FeeItem {
   code: string;
   name: string;
   calcType: CalcType;
+  /** G1: 水费/代收/其他 — 综合单价只计 WATER_FEE。 */
+  kind?: FeeItemKind;
   createdAt: string;
   updatedAt: string;
 }

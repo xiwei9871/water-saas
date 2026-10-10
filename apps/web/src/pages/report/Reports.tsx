@@ -43,7 +43,7 @@ const TITLES: Record<ReportKind, string> = {
   'recovery-rate': '回收率',
 };
 
-const CHANNELS = ['CASH', 'POS', 'TRANSFER'] as const;
+const CHANNELS = ['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const;
 
 interface ChannelRow {
   channel: PayChannel;

@@ -222,6 +222,25 @@ enum PayChannel {
   CASH
   POS
   TRANSFER
+  ONLINE
+  BANK_DEDUCT
+}
+
+/** G1: fee item classification — 综合单价口径 = 水费收入(不含代收项)/售水量。 */
+enum FeeItemKind {
+  WATER_FEE
+  AGENCY
+  OTHER
+}
+
+enum DictStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum WriteoffStatus {
+  ACTIVE
+  REVERSED
 }
 
 enum PaymentStatus {
@@ -895,6 +914,7 @@ model FeeItem {
   code      String
   name      String
   calcType  CalcType @map("calc_type")
+  kind      FeeItemKind @default(WATER_FEE)
   createdAt DateTime @default(now()) @map("created_at")
   createdBy String?  @map("created_by") @db.Uuid
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -1459,4 +1479,62 @@ enum WorkItemStatus {
 enum ResolutionSource {
   AUTO
   MANUAL
+}
+
+// ---------------------------------------------------------------------------
+// E10 查询导出 / 报表支撑 — G4 统一字典 + G2 坏账核销登记
+// ---------------------------------------------------------------------------
+
+/**
+ * G4 统一可配置字典：红冲/减免/核销/流失原因、账龄分段等筛选类别集中一表，
+ * 由租户在系统管理页增删停用，不散落硬编码。category 为约定字符串（见
+ * web 端 DICT_CATEGORIES），新增类别不需要迁移。
+ */
+model SysDict {
+  id        String     @id @default(uuid()) @db.Uuid
+  tenantId  String     @map("tenant_id") @db.Uuid
+  category  String
+  code      String
+  name      String
+  seq       Int        @default(0)
+  status    DictStatus @default(ACTIVE)
+  value     Json?      @db.JsonB
+  createdAt DateTime   @default(now()) @map("created_at")
+  createdBy String?    @map("created_by") @db.Uuid
+  updatedAt DateTime   @updatedAt @map("updated_at")
+  updatedBy String?    @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, category, code])
+  @@unique([tenantId, id])
+  @@index([tenantId, category, status])
+  @@map("sys_dict")
+}
+
+/**
+ * G2 坏账核销登记（轻量版）：人工登记 + 原因 + 留痕，不做账务冲销——
+ * 应收数据保持原样（financial invariant 不破），报表在展示层扣减/标注。
+ * 粒度到结算户 + 可选账单/用水户；REVERSED 保留历史（append-only 语义）。
+ */
+model BadDebtWriteoff {
+  id              String         @id @default(uuid()) @db.Uuid
+  tenantId        String         @map("tenant_id") @db.Uuid
+  settleAccountId String         @map("settle_account_id") @db.Uuid
+  waterAccountId  String?        @map("water_account_id") @db.Uuid
+  billId          String?        @map("bill_id") @db.Uuid
+  amount          BigInt
+  reasonCode      String         @map("reason_code")
+  note            String?
+  status          WriteoffStatus @default(ACTIVE)
+  effectiveDate   DateTime       @map("effective_date") @db.Date
+  reversedAt      DateTime?      @map("reversed_at")
+  reversedBy      String?        @map("reversed_by") @db.Uuid
+  createdAt       DateTime       @default(now()) @map("created_at")
+  createdBy       String?        @map("created_by") @db.Uuid
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  updatedBy       String?        @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId, settleAccountId, status])
+  @@index([tenantId, effectiveDate])
+  @@map("bad_debt_writeoff")
 }

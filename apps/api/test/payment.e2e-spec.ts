@@ -750,6 +750,8 @@ describe('cashier day-close', () => {
       CASH: { count: 1, amount: '4000' },
       POS: { count: 1, amount: '2500' },
       TRANSFER: { count: 0, amount: '0' },
+      ONLINE: { count: 0, amount: '0' },
+      BANK_DEDUCT: { count: 0, amount: '0' },
     });
     expect(
       close.body.payments.map((p: { id: string }) => p.id).sort(),

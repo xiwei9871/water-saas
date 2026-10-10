@@ -6,6 +6,7 @@ import { DayCloseService } from './day-close.service.js';
 import { PaymentController } from './payment.controller.js';
 import { PaymentService } from './payment.service.js';
 import { ReceiptController } from './receipt.controller.js';
+import { WriteoffController } from './writeoff.controller.js';
 
 /**
  * Payment module （收款） — counter collection with multi-bill
@@ -33,6 +34,7 @@ import { ReceiptController } from './receipt.controller.js';
     AccountOutstandingController,
     ReceiptController,
     DayCloseController,
+    WriteoffController,
   ],
   providers: [PaymentService, DayCloseService],
 })

@@ -87,6 +87,12 @@ export class ExceptionController {
     return this.svc.optionOrgs(currentTenant());
   }
 
+  @Get('badge')
+  @Permissions('exception:read')
+  badge() {
+    return this.svc.badge(currentTenant());
+  }
+
   @Get('options/books')
   @Permissions('exception:read')
   optionBooks() {

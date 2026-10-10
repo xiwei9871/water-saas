@@ -579,7 +579,7 @@ export default function Cashier() {
                     value={channel}
                     onChange={setChannel}
                     disabled={!canWrite}
-                    options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+                    options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                       value: c,
                       label: PAY_CHANNEL_LABELS[c],
                     }))}
@@ -686,7 +686,7 @@ export default function Cashier() {
               style={{ width: 200 }}
               value={topUpChannel}
               onChange={setTopUpChannel}
-              options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+              options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                 value: c,
                 label: PAY_CHANNEL_LABELS[c],
               }))}
@@ -727,7 +727,7 @@ export default function Cashier() {
               style={{ width: 200 }}
               value={refundChannel}
               onChange={setRefundChannel}
-              options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+              options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                 value: c,
                 label: PAY_CHANNEL_LABELS[c],
               }))}

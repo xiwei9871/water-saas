@@ -121,7 +121,9 @@ const onboard = async (label: string) => {
       customer: { name: `E5P ${label} ${RUN}`, custType: 'PERSONAL' },
       account: { usageCategory: 'RES_METERED', addr: `${label} Pipe St` },
       meter: { brand: 'e5p-brand', caliber: 'DN15' },
-      installation: { initialReading: 0 },
+      // Pinned installedAt: binding window derives from it — default "now"
+      // drifts past the fixed 2026-10 event dates and flips CONVERTED to UNBOUND.
+      installation: { initialReading: 0, installedAt: '2026-01-01T00:00:00Z' },
     })
     .expect(201);
   return res.body as {

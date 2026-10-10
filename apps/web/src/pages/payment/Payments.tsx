@@ -318,7 +318,7 @@ export default function Payments() {
             allowClear
             placeholder="渠道"
             style={{ width: 120 }}
-            options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+            options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
               value: c,
               label: PAY_CHANNEL_LABELS[c],
             }))}

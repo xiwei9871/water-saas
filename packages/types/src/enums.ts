@@ -69,8 +69,12 @@ export type BillStatus = (typeof BILL_STATUSES)[number];
 export const BILL_ITEM_TYPES = ['NORMAL', 'ADJUSTMENT', 'PENALTY'] as const;
 export type BillItemType = (typeof BILL_ITEM_TYPES)[number];
 
-export const PAY_CHANNELS = ['CASH', 'POS', 'TRANSFER'] as const;
+export const PAY_CHANNELS = ['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const;
 export type PayChannel = (typeof PAY_CHANNELS)[number];
+
+/** G1 费用项分类 — 综合单价口径只计 WATER_FEE。 */
+export const FEE_ITEM_KINDS = ['WATER_FEE', 'AGENCY', 'OTHER'] as const;
+export type FeeItemKind = (typeof FEE_ITEM_KINDS)[number];
 
 export const PAYMENT_STATUSES = ['RECEIVED', 'DAY_CLOSED', 'REVERSED'] as const;
 export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
