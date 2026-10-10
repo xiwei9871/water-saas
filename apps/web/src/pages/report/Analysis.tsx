@@ -14,7 +14,7 @@ import {
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
-import { fmtCent, fmtDate, fmtPeriod } from '../common';
+import { fmtCent, fmtDate, fmtPeriod, USAGE_CATEGORY_LABELS } from '../common';
 import { PAY_CHANNEL_LABELS } from '../payment/common';
 
 export type AnalysisKind = 'ops-daily' | 'analysis-monthly' | 'analysis-yearly';
@@ -269,7 +269,12 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         rowKey="category"
         pagination={false}
         columns={[
-          { key: 'category', dataIndex: 'category', title: '用水类别' },
+          {
+            key: 'category',
+            dataIndex: 'category',
+            title: '用水类别',
+            render: (v) => USAGE_CATEGORY_LABELS[v as string] ?? v,
+          },
           { key: 'billed', dataIndex: 'billed', title: '应收(元)', align: 'right', render: yuan },
           { key: 'qty', dataIndex: 'qty', title: '售水量(m³)', align: 'right', render: qty },
         ]}
@@ -295,7 +300,15 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         rowKey="bucket"
         pagination={false}
         columns={[
-          { key: 'bucket', dataIndex: 'bucket', title: '账龄' },
+          {
+            key: 'bucket',
+            dataIndex: 'bucket',
+            title: '账龄',
+            render: (v) =>
+              ({ '0-3': '0-3个月', '3-6': '3-6个月', '6-12': '6-12个月', '12+': '12个月以上' })[
+                v as string
+              ] ?? v,
+          },
           { key: 'amount', dataIndex: 'amount', title: '欠费(元)', align: 'right', render: yuan },
         ]}
         dataSource={Object.entries(aging).map(([bucket, amount]) => ({ bucket, amount }))}
@@ -372,6 +385,48 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         dataSource={(lists.reversalList ?? []) as Row[]}
         locale={{ emptyText: '本期无红冲/退费' }}
       />
+      <Table<Row>
+        style={{ marginTop: 16 }}
+        size="small"
+        title={() => '调账明细'}
+        rowKey={(_r, i) => String(i)}
+        pagination={false}
+        columns={[
+          { key: 'accountNo', dataIndex: 'accountNo', title: '户号' },
+          { key: 'customerName', dataIndex: 'customerName', title: '户名' },
+          { key: 'period', dataIndex: 'period', title: '账期', render: fmtPeriod },
+          { key: 'amount', dataIndex: 'amount', title: '调整额(元)', align: 'right', render: yuan },
+          {
+            key: 'kind',
+            dataIndex: 'kind',
+            title: '账单类型',
+            render: (v) => ({ NORMAL: '正常', ADJUSTMENT: '调账', REVERSAL: '红冲' })[v as string] ?? v,
+          },
+        ]}
+        dataSource={(lists.adjustList ?? []) as Row[]}
+        locale={{ emptyText: '本期无调账' }}
+      />
+      <Table<Row>
+        style={{ marginTop: 16 }}
+        size="small"
+        title={() => '异常读数清单'}
+        rowKey={(_r, i) => String(i)}
+        pagination={false}
+        columns={[
+          { key: 'accountNo', dataIndex: 'accountNo', title: '户号' },
+          { key: 'period', dataIndex: 'period', title: '账期', render: fmtPeriod },
+          {
+            key: 'qc',
+            dataIndex: 'qc',
+            title: '质检状态',
+            render: (v) =>
+              ({ MANUAL_REVIEW: '待复核', REJECTED: '已驳回' })[v as string] ?? v,
+          },
+          { key: 'readingValue', dataIndex: 'readingValue', title: '读数', align: 'right' },
+        ]}
+        dataSource={(lists.abnormalReadings ?? []) as Row[]}
+        locale={{ emptyText: '本期无异常读数' }}
+      />
     </>
   );
 }
@@ -431,7 +486,12 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
           { key: 'settleNo', dataIndex: 'settleNo', title: '结算户号' },
           { key: 'name', dataIndex: 'name', title: '户名' },
           { key: 'amount', dataIndex: 'amount', title: '核销额(元)', align: 'right', render: yuan },
-          { key: 'reasonCode', dataIndex: 'reasonCode', title: '原因' },
+          {
+            key: 'reasonCode',
+            dataIndex: 'reasonCode',
+            title: '原因',
+            render: (v, r) => (r.reasonName as string) ?? v,
+          },
           { key: 'effectiveDate', dataIndex: 'effectiveDate', title: '生效日期', render: fmtDate },
           {
             key: 'status',
@@ -442,6 +502,25 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(lists.writeoffs ?? []) as Row[]}
         locale={{ emptyText: '本年无核销记录' }}
+      />
+      <Table<Row>
+        style={{ marginTop: 16 }}
+        size="small"
+        title={() => '红冲/退费（按渠道）'}
+        rowKey="channel"
+        pagination={false}
+        columns={[
+          {
+            key: 'channel',
+            dataIndex: 'channel',
+            title: '渠道',
+            render: (v) => PAY_CHANNEL_LABELS[v as keyof typeof PAY_CHANNEL_LABELS] ?? v,
+          },
+          { key: 'amount', dataIndex: 'amount', title: '净额(元)', align: 'right', render: yuan },
+          { key: 'cnt', dataIndex: 'cnt', title: '笔数', align: 'right' },
+        ]}
+        dataSource={(lists.reversals ?? []) as Row[]}
+        locale={{ emptyText: '本年无红冲/退费' }}
       />
       <Table<Row>
         style={{ marginTop: 16 }}

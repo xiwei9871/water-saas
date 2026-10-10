@@ -77,6 +77,8 @@ export class AnalysisService {
           ${wa}`;
 
       // 当日实收：柜台口径 + 当期/陈欠分列（分摊到本月账期 vs 历史账期）
+      // p→a 一对多：amount 只对 payment 单表聚合（子查询），否则一笔
+      // 分摊到多张账单的收款在 amount 里会被重复计数。
       const collected = await tx.$queryRaw<
         {
           amount: bigint | null;
@@ -84,7 +86,10 @@ export class AnalysisService {
           arrears: bigint | null;
         }[]
       >`
-        SELECT sum(p.amount)::bigint AS amount,
+        SELECT (SELECT sum(p.amount) FROM payment p
+                  WHERE p.tenant_id = ${ctx.tenantId}::uuid
+                    AND p.status IN ('RECEIVED','DAY_CLOSED')
+                    AND p.received_at::date = ${q.date}::date ${orgIn})::bigint AS amount,
                sum(CASE WHEN b.period = ${period} THEN a.amount ELSE 0 END)::bigint AS current,
                sum(CASE WHEN b.period < ${period} THEN a.amount ELSE 0 END)::bigint AS arrears
         FROM payment p
@@ -685,14 +690,19 @@ export class AnalysisService {
       const writeoffs = await tx.$queryRaw<
         {
           settleNo: string; name: string; amount: bigint;
-          reasonCode: string; effectiveDate: Date; status: string;
+          reasonCode: string; reasonName: string | null;
+          effectiveDate: Date; status: string;
         }[]
       >`
         SELECT sa.settle_no AS "settleNo", sa.name, w.amount,
-               w.reason_code AS "reasonCode", w.effective_date AS "effectiveDate",
+               w.reason_code AS "reasonCode", d.name AS "reasonName",
+               w.effective_date AS "effectiveDate",
                w.status::text AS status
         FROM bad_debt_writeoff w
         JOIN settle_account sa ON sa.tenant_id = w.tenant_id AND sa.id = w.settle_account_id
+        LEFT JOIN sys_dict d
+          ON d.tenant_id = w.tenant_id AND d.category = 'WRITEOFF_REASON'
+          AND d.code = w.reason_code
         WHERE w.tenant_id = ${ctx.tenantId}::uuid
           AND w.effective_date >= ${gte}::date AND w.effective_date < ${lt}::date
         ORDER BY w.effective_date`;

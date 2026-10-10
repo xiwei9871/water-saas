@@ -106,7 +106,9 @@ const seedPayment = async (opts: {
   cashierId: string;
   orgUnitId: string;
   settleAccountId: string;
-  billId: string;
+  billId?: string;
+  /** 多账单分摊——提供时忽略 billId（一笔收款摊到多张账单）。 */
+  allocs?: { billId: string; amount: number }[];
   channel: string;
   amount: number;
   receivedAt: string;
@@ -131,11 +133,14 @@ const seedPayment = async (opts: {
       ],
     )
   ).rows[0];
-  await owner.query(
-    `INSERT INTO payment_alloc (id, tenant_id, payment_id, bill_id, amount, created_at, updated_at)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, now(), now())`,
-    [T14A, row.id, opts.billId, opts.amount],
-  );
+  const allocs = opts.allocs ?? [{ billId: opts.billId!, amount: opts.amount }];
+  for (const a of allocs) {
+    await owner.query(
+      `INSERT INTO payment_alloc (id, tenant_id, payment_id, bill_id, amount, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, now(), now())`,
+      [T14A, row.id, a.billId, a.amount],
+    );
+  }
   return row.id as string;
 };
 
@@ -275,12 +280,26 @@ describe('fixtures', () => {
     await seedBill('A1-sep', acct['A1'], settleAcct['A1'], '202609', 5000);
     // B1: 202610 bill 7000 posted.
     await seedBill('B1-oct', acct['B1'], settleAcct['B1'], '202610', 7000);
+    // A1: 两笔小额 202609 账单——用于多分摊收款（P3）防 payment×alloc 扇出回归。
+    await seedBill('A1-sep2', acct['A1'], settleAcct['A1'], '202609', 2000);
+    await seedBill('A1-sep3', acct['A1'], settleAcct['A1'], '202609', 1000);
 
     // Payment 1: CASH 5000 on 2026-10-06 at ORG_A counter → arrears alloc (202609).
     await seedPayment({
       cashierId: STAFF_ADMIN_A, orgUnitId: ORG_A,
       settleAccountId: settleAcct['A1'], billId: bill['A1-sep'],
       channel: 'CASH', amount: 5000, receivedAt: '2026-10-06T09:00:00Z',
+    });
+    // Payment 3: CASH 3000 on 2026-10-06 → 分摊到 sep2+sep3 两张账单。
+    // 扇出回归：sum(p.amount) 若随 alloc 行重复计数会得到 5000+3000×2。
+    await seedPayment({
+      cashierId: STAFF_ADMIN_A, orgUnitId: ORG_A,
+      settleAccountId: settleAcct['A1'],
+      allocs: [
+        { billId: bill['A1-sep2'], amount: 2000 },
+        { billId: bill['A1-sep3'], amount: 1000 },
+      ],
+      channel: 'CASH', amount: 3000, receivedAt: '2026-10-06T10:00:00Z',
     });
     // Payment 2: ONLINE 3000 on 2026-10-07 at ORG_A2 counter → current alloc.
     await seedPayment({
@@ -361,14 +380,14 @@ describe('A1–A5 queries', () => {
 
   it('A4 payments: date window + channel filter; counter-org scope', async () => {
     const rows = (await get('/reports/query/payments?from=2026-10-01&to=2026-10-31')).body;
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     const online = rows.find((r: { channel: string }) => r.channel === 'ONLINE');
     expect(online).toMatchObject({ amount: '3000', status: 'RECEIVED' });
     expect(online.cashierName).toBe('T14 Scoped');
     expect(online.allocPeriods).toContain('202610');
     // channel filter
     const cash = (await get('/reports/query/payments?from=2026-10-01&to=2026-10-31&channel=CASH')).body;
-    expect(cash).toHaveLength(1);
+    expect(cash).toHaveLength(2);
     // scoped sees only ORG_A2 counter payments.
     const scoped = (await get('/reports/query/payments?from=2026-10-01&to=2026-10-31', scopedToken)).body;
     expect(scoped).toHaveLength(1);
@@ -420,9 +439,10 @@ describe('B1–B3 analysis reports', () => {
   it('B1 ops-daily: collected split current/arrears reconciles with seeded payments', async () => {
     const res = (await get('/reports/ops-daily?date=2026-10-06')).body;
     expect(res.metricVersion).toBe('2026-10.v1');
-    // 当日只有 CASH 5000（分摊到 202609 = 陈欠）
-    expect(res.totals.collected).toBe('5000');
-    expect(res.totals.arrearsCollected).toBe('5000');
+    // 当日两笔 CASH：5000 单分摊 + 3000 跨两单分摊（扇出回归：
+    // collected 必须是 8000，而不是 join 展开后的 5000+3000×2=11000）
+    expect(res.totals.collected).toBe('8000');
+    expect(res.totals.arrearsCollected).toBe('8000');
     expect(res.totals.currentCollected).toBe('0');
     // 欠费总额 = A1 20000 + B1 4000 = 24000
     expect(res.totals.arrearsTotal).toBe('24000');
@@ -438,12 +458,12 @@ describe('B1–B3 analysis reports', () => {
     const t = res.totals;
     // 应收 = A1 20000 + B1 7000
     expect(t.AR_AMOUNT).toBe('27000');
-    // 实收（10 月窗口）= 5000 + 3000
-    expect(t.COLLECTED).toBe('8000');
+    // 实收（10 月窗口）= 5000 + 3000 + 3000
+    expect(t.COLLECTED).toBe('11000');
     // 当期实收 = ONLINE 3000（当期账期内 due_date 前）
     expect(t.CURRENT_COLLECTED).toBe('3000');
-    // 陈欠收取 = CASH 5000（202609 账期）
-    expect(t.ARREARS_COLLECTED).toBe('5000');
+    // 陈欠收取 = CASH 5000 + 3000（均摊到 202609 账期）
+    expect(t.ARREARS_COLLECTED).toBe('8000');
     // 回收率 = 3000/27000 ≈ 0.111
     expect(Number(t.RECOVERY_RATE)).toBeCloseTo(0.1111, 3);
     // 欠费总额 = 20000 + 4000
@@ -459,9 +479,9 @@ describe('B1–B3 analysis reports', () => {
   it('B3 analysis-yearly: trend + totals + empty lists without writeoffs', async () => {
     const res = (await get('/reports/analysis-yearly?year=2026')).body;
     const oct = res.trend.find((r: { period: string }) => r.period === '202610');
-    expect(oct).toMatchObject({ billed: '27000', collected: '8000' });
-    // 年度应收含 202609 账单：27000 + 5000
-    expect(res.totals.AR_AMOUNT).toBe('32000');
+    expect(oct).toMatchObject({ billed: '27000', collected: '11000' });
+    // 年度应收含 202609 账单：27000 + 5000 + 2000 + 1000
+    expect(res.totals.AR_AMOUNT).toBe('35000');
     expect(res.totals.ACCOUNT_COUNT).toBe(2);
     expect(res.totals.BAD_DEBT_WRITEOFF).toBe('0');
     expect(res.lists.topArrears).toHaveLength(2);
