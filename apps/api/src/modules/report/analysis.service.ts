@@ -116,7 +116,7 @@ export class AnalysisService {
       const snap = await tx.$queryRaw<
         { arrears: bigint | null; accounts: number }[]
       >`
-        SELECT (SELECT sum(b.total_amount - COALESCE(a.paid,0))
+        SELECT (SELECT sum(GREATEST(b.total_amount - COALESCE(a.paid,0), 0))
                   FROM bill b
                   LEFT JOIN LATERAL (
                     SELECT sum(pa.amount)::bigint AS paid FROM payment_alloc pa
@@ -298,11 +298,14 @@ export class AnalysisService {
           AND b.status IN ('POSTED','PARTIAL_PAID')
           AND b.bill_kind <> 'REVERSAL' ${waB}`;
       const endOfMonth = w.lt;
+      // 欠费口径与账龄/大盘一致：按账单剩余 ≥0 计（贷项账单是"应退"不是欠费）。
+      // 否则 ARREARS_TOTAL 会与同响应 byAging 合计不一致（实测 Pilot：
+      // -3000 调账账单把 519167 压成 516167）。
       const arrearsEnd = arrearsRows
-        .filter((r) => r.period <= q.period)
+        .filter((r) => r.period <= q.period && r.remaining > 0n)
         .reduce((s, r) => s + r.remaining, 0n);
       const arrearsStart = arrearsRows
-        .filter((r) => r.period < q.period)
+        .filter((r) => r.period < q.period && r.remaining > 0n)
         .reduce((s, r) => s + r.remaining, 0n);
       // 账龄分段（截至月末）：0-3 / 3-6 / 6-12 / 12+ 个月
       const aging = { '0-3': 0n, '3-6': 0n, '6-12': 0n, '12+': 0n };

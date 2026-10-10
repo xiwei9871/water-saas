@@ -58,9 +58,10 @@ interface Sheet {
   rows: Row[];
 }
 
+// 与 common/usage-categories.ts 受控集合一致（旧代码表会漏映射导致导出裸枚举）。
 const USAGE_CATEGORY_LABELS: Record<string, string> = {
-  RES_SHARED: '居民合表', RES_INDIVIDUAL: '居民独户', COMMERCIAL: '商业',
-  INDUSTRIAL: '工业', MONITORING: '监测户', GOV: '机关事业',
+  RES_METERED: '居民户表', RES_SHARED: '居民合表', NON_RES: '非居民',
+  SPECIAL: '特种', MONITORING: '监控表',
 };
 const ACCOUNT_STATUS_LABELS: Record<string, string> = {
   NORMAL: '在册', CLOSED: '销户', SUSPENDED: '暂停',
@@ -69,6 +70,9 @@ const CHANNEL_LABELS: Record<string, string> = {
   CASH: '现金', POS: 'POS刷卡', TRANSFER: '转账',
   ONLINE: '线上缴费', BANK_DEDUCT: '银行代扣',
 };
+const READ_SOURCE_LABELS: Record<string, string> = {
+  WEB: '页面录入', IMPORT: '批量导入', APP: '移动抄表', REMOTE: '远传',
+};
 
 const cents = (v: unknown): number | '' =>
   v === null || v === undefined ? '' : Number(v) / 100;
@@ -76,8 +80,14 @@ const dateOf = (v: unknown): string =>
   v instanceof Date ? v.toISOString().slice(0, 10) : v == null ? '' : String(v).slice(0, 10);
 const timeOf = (v: unknown): string =>
   v instanceof Date ? v.toISOString().slice(0, 16).replace('T', ' ') : v == null ? '' : String(v);
-const label = (m: Record<string, string>) => (v: unknown) =>
-  v == null ? '' : (m[String(v)] ?? String(v));
+/** char(6) 账期 → 'YYYY-MM'；逗号分隔的多值逐段转换（allocPeriods）。 */
+const fmtPeriod = (v: unknown): string =>
+  v == null
+    ? ''
+    : String(v)
+        .split(',')
+        .map((p) => (/^\d{6}$/.test(p) ? `${p.slice(0, 4)}-${p.slice(4)}` : p))
+        .join('、');
 
 /**
  * A1–A5 查询导出（§四）+ F1 统一导出组件。
@@ -123,6 +133,7 @@ export class QueryController {
         ...r,
         usageCategory: USAGE_CATEGORY_LABELS[r.usageCategory] ?? r.usageCategory,
         status: ACCOUNT_STATUS_LABELS[r.status] ?? r.status,
+        lastReadPeriod: fmtPeriod(r.lastReadPeriod),
         openedAt: dateOf(r.openedAt),
       })),
     };
@@ -167,6 +178,15 @@ export class QueryController {
         ...r,
         isEstimated: r.isEstimated ? '估抄' : '实抄',
         usageCategory: USAGE_CATEGORY_LABELS[r.usageCategory] ?? r.usageCategory,
+        period: fmtPeriod(r.period),
+        // readSource 是 string_agg 多值 —— 逐段映射标签
+        readSource:
+          r.readSource == null
+            ? r.readSource
+            : String(r.readSource)
+                .split(',')
+                .map((s) => READ_SOURCE_LABELS[s] ?? s)
+                .join('、'),
       })),
     };
     return this.respond(res, format, 'usage-details', sheet, ctx, {
@@ -207,6 +227,7 @@ export class QueryController {
         adjusted: cents(r.adjusted),
         allocated: cents(r.allocated),
         remaining: cents(r.remaining),
+        period: fmtPeriod(r.period),
       })),
     };
     return this.respond(res, format, 'bill-details', sheet, ctx, {
@@ -253,6 +274,7 @@ export class QueryController {
         channel: CHANNEL_LABELS[r.channel] ?? r.channel,
         amount: cents(r.amount),
         receivedAt: timeOf(r.receivedAt),
+        allocPeriods: fmtPeriod(r.allocPeriods),
       })),
     };
     return this.respond(res, format, 'payments', sheet, ctx, {
@@ -301,6 +323,7 @@ export class QueryController {
         ...r,
         arrearsAmount: cents(r.arrearsAmount),
         writtenOff: cents(r.writtenOff),
+        oldestPeriod: fmtPeriod(r.oldestPeriod),
       })),
     };
     return this.respond(res, format, 'arrears', sheet, ctx, {
