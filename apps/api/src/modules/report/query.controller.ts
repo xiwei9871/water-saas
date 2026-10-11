@@ -73,6 +73,14 @@ const CHANNEL_LABELS: Record<string, string> = {
 const READ_SOURCE_LABELS: Record<string, string> = {
   WEB: '页面录入', IMPORT: '批量导入', APP: '移动抄表', REMOTE: '远传',
 };
+// 与 web billing/common.ts、payment/common.ts 标签同口径
+const BILL_STATUS_LABELS: Record<string, string> = {
+  DRAFT: '草稿', POSTED: '已出账', PARTIAL_PAID: '部分缴费',
+  PAID: '已缴清', REVERSED: '已红冲',
+};
+const PAYMENT_STATUS_LABELS: Record<string, string> = {
+  RECEIVED: '已收款', DAY_CLOSED: '已日结', REVERSED: '已红冲',
+};
 
 const cents = (v: unknown): number | '' =>
   v === null || v === undefined ? '' : Number(v) / 100;
@@ -228,6 +236,7 @@ export class QueryController {
         allocated: cents(r.allocated),
         remaining: cents(r.remaining),
         period: fmtPeriod(r.period),
+        status: BILL_STATUS_LABELS[r.status] ?? r.status,
       })),
     };
     return this.respond(res, format, 'bill-details', sheet, ctx, {
@@ -275,6 +284,7 @@ export class QueryController {
         amount: cents(r.amount),
         receivedAt: timeOf(r.receivedAt),
         allocPeriods: fmtPeriod(r.allocPeriods),
+        status: PAYMENT_STATUS_LABELS[r.status] ?? r.status,
       })),
     };
     return this.respond(res, format, 'payments', sheet, ctx, {
