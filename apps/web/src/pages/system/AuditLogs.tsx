@@ -7,7 +7,7 @@ import {
   Space,
   Table,
   Tag,
-  Tooltip,
+  Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -75,7 +75,7 @@ export default function AuditLogs() {
   const staffName = (id: string | null) => {
     if (!id) return '—';
     const s = staffById.get(id);
-    return s ? `${s.name}（${s.login}）` : `${id.slice(0, 8)}…`;
+    return s ? `${s.name}（${s.login}）` : '—';
   };
 
   // The endpoint returns a page, not a total — allow "next page" exactly
@@ -119,11 +119,15 @@ export default function AuditLogs() {
       title: '对象 ID',
       dataIndex: 'entityId',
       key: 'entityId',
+      width: 300,
       render: (id: string | null) =>
         id ? (
-          <Tooltip title={id}>
-            <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-          </Tooltip>
+          <Typography.Text
+            copyable={{ text: id }}
+            style={{ fontFamily: 'monospace', fontSize: 12 }}
+          >
+            {id}
+          </Typography.Text>
         ) : (
           '—'
         ),

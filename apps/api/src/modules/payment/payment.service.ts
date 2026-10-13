@@ -861,6 +861,25 @@ export class PaymentService {
       select: PAYMENT_ALLOC_SELECT,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
+    // 展示层取值规范：分摊的账单引用要人读（户号 · 账期），不是裸 uuid。
+    const allocBillIds = [...new Set(allocs.map((a) => a.billId))];
+    const allocBills = allocBillIds.length
+      ? await tx.bill.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: allocBillIds } },
+          select: {
+            id: true,
+            period: true,
+            waterAccount: { select: { accountNo: true } },
+          },
+        })
+      : [];
+    const billLabelById = new Map(
+      allocBills.map((b) => [b.id, `${b.waterAccount.accountNo} · ${b.period}`]),
+    );
+    const allocsView = allocs.map((a) => ({
+      ...a,
+      billLabel: billLabelById.get(a.billId) ?? null,
+    }));
     const receipt = await tx.receipt.findFirst({
       where: { tenantId: ctx.tenantId, paymentId: payment.id },
       select: RECEIPT_SELECT,
@@ -886,7 +905,7 @@ export class PaymentService {
         { cashierId: 'cashierName' },
       ),
     );
-    return { ...enriched, allocs, receipt, prepaymentEntries };
+    return { ...enriched, allocs: allocsView, receipt, prepaymentEntries };
   }
 
   /**

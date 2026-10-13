@@ -107,7 +107,7 @@ export default function RemoteDevices() {
   const [bindForm] = Form.useForm<BindingFormValues>();
 
   const sourceName = useCallback(
-    (id: string) => sources.find((s) => s.id === id)?.name ?? `${id.slice(0, 8)}…`,
+    (id: string) => sources.find((s) => s.id === id)?.name ?? '—',
     [sources],
   );
 
@@ -267,7 +267,7 @@ export default function RemoteDevices() {
         render: (_, b) =>
           b.installation
             ? `${b.installation.meter.meterNo} · 户 ${b.installation.waterAccount.accountNo}${b.installation.waterAccount.customer?.name ? ` · ${b.installation.waterAccount.customer.name}` : ''}`
-            : b.installationId.slice(0, 8),
+            : '—',
       },
       { title: '生效自', dataIndex: 'effectiveFrom', width: 170, render: fmtTime },
       {

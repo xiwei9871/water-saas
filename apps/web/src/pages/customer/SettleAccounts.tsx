@@ -32,6 +32,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   ACCOUNT_STATUS_LABELS,
   cleanBody,
   cleanPatch,
@@ -52,7 +53,7 @@ interface SettleFormValues {
 
 const STATUS_OPTIONS = (['NORMAL', 'SUSPENDED', 'CLOSED'] as const).map((s) => ({
   value: s,
-  label: ACCOUNT_STATUS_LABELS[s],
+  label: enumLabel(ACCOUNT_STATUS_LABELS, s),
 }));
 
 /** 结算户：列表 + 名称/状态过滤 + 新建/编辑（含 NORMAL↔SUSPENDED）+ 详情抽屉。 */
@@ -251,7 +252,7 @@ export default function SettleAccounts() {
       title: '用水类别',
       dataIndex: 'usageCategory',
       key: 'usageCategory',
-      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+      render: (v: string) => enumLabel(USAGE_CATEGORY_LABELS, v),
     },
     {
       title: '状态',
@@ -360,7 +361,7 @@ export default function SettleAccounts() {
               <Select
                 options={(['NORMAL', 'SUSPENDED'] as const).map((s) => ({
                   value: s,
-                  label: ACCOUNT_STATUS_LABELS[s],
+                  label: enumLabel(ACCOUNT_STATUS_LABELS, s),
                 }))}
               />
             </Form.Item>
@@ -465,7 +466,7 @@ export default function SettleAccounts() {
                       dataIndex: 'type',
                       width: 100,
                       render: (t: keyof typeof PREPAY_ENTRY_LABELS) => (
-                        <Tag color={PREPAY_ENTRY_COLORS[t]}>{PREPAY_ENTRY_LABELS[t]}</Tag>
+                        <Tag color={PREPAY_ENTRY_COLORS[t]}>{enumLabel(PREPAY_ENTRY_LABELS, t)}</Tag>
                       ),
                     },
                     {

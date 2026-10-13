@@ -38,6 +38,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   fmtCent,
   fmtPeriod,
   newIdemKey,
@@ -378,7 +379,7 @@ export default function Cashier() {
       key: 'billKind',
       width: 95,
       render: (k: OutstandingItem['billKind']) => (
-        <Tag color={BILL_KIND_COLORS[k]}>{BILL_KIND_LABELS[k]}</Tag>
+        <Tag color={BILL_KIND_COLORS[k]}>{enumLabel(BILL_KIND_LABELS, k)}</Tag>
       ),
     },
     {
@@ -500,7 +501,7 @@ export default function Cashier() {
               value={
                 accountInfo(outstanding.waterAccountId)
                   ? `${accountInfo(outstanding.waterAccountId)!.accountNo} · ${accountInfo(outstanding.waterAccountId)!.customerName}`
-                  : outstanding.waterAccountId.slice(0, 8) + '…'
+                  : '—'
               }
               valueStyle={{ fontSize: 16 }}
             />
@@ -581,7 +582,7 @@ export default function Cashier() {
                     disabled={!canWrite}
                     options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                       value: c,
-                      label: PAY_CHANNEL_LABELS[c],
+                      label: enumLabel(PAY_CHANNEL_LABELS, c),
                     }))}
                   />
                 </Form.Item>
@@ -617,7 +618,7 @@ export default function Cashier() {
           type="success"
           showIcon
           style={{ marginTop: 16 }}
-          message={`收款完成：${lastPayment.paymentNo} · ${fmtCent(lastPayment.amount)} · ${PAY_CHANNEL_LABELS[lastPayment.channel]}`}
+          message={`收款完成：${lastPayment.paymentNo} · ${fmtCent(lastPayment.amount)} · ${enumLabel(PAY_CHANNEL_LABELS, lastPayment.channel)}`}
           description={
             <Space direction="vertical" size={4}>
               <Descriptions
@@ -688,7 +689,7 @@ export default function Cashier() {
               onChange={setTopUpChannel}
               options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                 value: c,
-                label: PAY_CHANNEL_LABELS[c],
+                label: enumLabel(PAY_CHANNEL_LABELS, c),
               }))}
             />
           </Form.Item>
@@ -729,7 +730,7 @@ export default function Cashier() {
               onChange={setRefundChannel}
               options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                 value: c,
-                label: PAY_CHANNEL_LABELS[c],
+                label: enumLabel(PAY_CHANNEL_LABELS, c),
               }))}
             />
           </Form.Item>
@@ -775,7 +776,7 @@ export default function Cashier() {
               dataIndex: 'type',
               width: 100,
               render: (t: PrepaymentEntry['type']) => (
-                <Tag color={PREPAY_ENTRY_COLORS[t]}>{PREPAY_ENTRY_LABELS[t]}</Tag>
+                <Tag color={PREPAY_ENTRY_COLORS[t]}>{enumLabel(PREPAY_ENTRY_LABELS, t)}</Tag>
               ),
             },
             {

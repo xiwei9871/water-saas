@@ -33,7 +33,7 @@ import type {
   ExceptionSummary,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtTime } from '../common';
+import { enumLabel, fmtTime } from '../common';
 import { WaterAccount360 } from '../customer/WaterAccount360';
 
 const TYPE_LABELS: Record<string, string> = {
@@ -275,28 +275,28 @@ export default function Exceptions() {
       dataIndex: 'severity',
       width: 80,
       render: (s: ExceptionItem['severity']) => (
-        <Tag color={SEV_COLORS[s]}>{SEV_LABELS[s]}</Tag>
+        <Tag color={SEV_COLORS[s]}>{enumLabel(SEV_LABELS, s)}</Tag>
       ),
     },
     {
       title: '类型',
       dataIndex: 'type',
       width: 130,
-      render: (t: string) => TYPE_LABELS[t] ?? t,
+      render: (t: string) => enumLabel(TYPE_LABELS, t),
     },
     { title: '摘要', dataIndex: 'summary', ellipsis: true },
     {
       title: '锚点',
       dataIndex: 'anchor',
       width: 90,
-      render: (a: string) => ANCHOR_LABELS[a] ?? a,
+      render: (a: string) => enumLabel(ANCHOR_LABELS, a),
     },
     { title: '账期', dataIndex: 'period', width: 80, render: (p: string | null) => p ?? '—' },
     {
       title: '状态',
       width: 90,
       render: (_, r) => (
-        <Tag color={STATUS_COLORS[r.episode.status]}>{STATUS_LABELS[r.episode.status]}</Tag>
+        <Tag color={STATUS_COLORS[r.episode.status]}>{enumLabel(STATUS_LABELS, r.episode.status)}</Tag>
       ),
     },
     {
@@ -441,7 +441,7 @@ export default function Exceptions() {
       </Card>
 
       <Drawer
-        title={detail ? `${TYPE_LABELS[detail.fact.type] ?? detail.fact.type}` : '异常详情'}
+        title={detail ? `${enumLabel(TYPE_LABELS, detail.fact.type)}` : '异常详情'}
         open={!!detail || detailLoading}
         loading={detailLoading}
         width={560}
@@ -460,20 +460,20 @@ export default function Exceptions() {
                 </Typography.Text>
               </Descriptions.Item>
               <Descriptions.Item label="锚点">
-                {ANCHOR_LABELS[detail.fact.anchor] ?? detail.fact.anchor}
+                {enumLabel(ANCHOR_LABELS, detail.fact.anchor)}
                 {detail.fact.anchor === 'TENANT' && (
                   <Typography.Text type="secondary">（无册归属，仅租户级可处理）</Typography.Text>
                 )}
               </Descriptions.Item>
               <Descriptions.Item label="处理状态">
                 {ep ? (
-                  <Tag color={STATUS_COLORS[ep.status]}>{STATUS_LABELS[ep.status]}</Tag>
+                  <Tag color={STATUS_COLORS[ep.status]}>{enumLabel(STATUS_LABELS, ep.status)}</Tag>
                 ) : (
                   <Tag>待同步</Tag>
                 )}
                 {ep?.assigneeId && (
                   <Typography.Text type="secondary">
-                    处理人 {staff.find((s) => s.id === ep.assigneeId)?.name ?? ep.assigneeId.slice(0, 8)}
+                    处理人 {staff.find((s) => s.id === ep.assigneeId)?.name ?? '—'}
                   </Typography.Text>
                 )}
               </Descriptions.Item>
@@ -534,7 +534,7 @@ export default function Exceptions() {
                   items={detail.history.map((h) => ({
                     children: (
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {fmtTime(h.createdAt)} — {STATUS_LABELS[h.status]}
+                        {fmtTime(h.createdAt)} — {enumLabel(STATUS_LABELS, h.status)}
                         {h.resolutionSource ? `（${h.resolutionSource === 'AUTO' ? '自动' : '人工'}）` : ''}
                         {h.note ? ` ${h.note}` : ''}
                       </Typography.Text>

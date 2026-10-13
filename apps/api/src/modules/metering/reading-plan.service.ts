@@ -181,11 +181,74 @@ export class ReadingPlanService {
       });
       if (!plan) return null;
       await this.assertPlanBookInScope(tx, ctx, plan.bookId);
+      const items = await this.embedItemReadings(tx, ctx.tenantId, plan.items, plan.period);
       const [enriched] = await this.embedBookAndReader(tx, ctx, [plan]);
-      return enriched;
+      return { ...enriched, items };
     });
     if (!row) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
     return row;
+  }
+
+  /**
+   * 10/12 报告 §3：计划明细人读化 —— 完成读数显示读数值而非读数 id；
+   * 并补"上一期抄表止度"（该计划表计在本期之前最后一条未被更正的
+   * 表度读数），供抄表员对照突增突减。
+   */
+  private async embedItemReadings<
+    T extends {
+      completedReadingId: string | null;
+      plannedInstallationId: string | null;
+    },
+  >(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    items: T[],
+    planPeriod: string,
+  ) {
+    const completedIds = [
+      ...new Set(
+        items.map((i) => i.completedReadingId).filter((v): v is string => !!v),
+      ),
+    ];
+    const completed = completedIds.length
+      ? await tx.meterReading.findMany({
+          where: { tenantId, id: { in: completedIds } },
+          select: { id: true, readingValue: true },
+        })
+      : [];
+    const cvMap = new Map(completed.map((r) => [r.id, r.readingValue?.toString() ?? null]));
+    const instIds = [
+      ...new Set(
+        items
+          .map((i) => i.plannedInstallationId)
+          .filter((v): v is string => !!v),
+      ),
+    ];
+    const prevRows = instIds.length
+      ? await tx.$queryRaw<{ installation_id: string; reading_value: string | null }[]>`
+          SELECT DISTINCT ON (r.installation_id)
+                 r.installation_id, r.reading_value::text AS reading_value
+            FROM meter_reading r
+           WHERE r.tenant_id = ${tenantId}::uuid
+             AND r.installation_id IN (${Prisma.join(instIds.map((i) => Prisma.sql`${i}::uuid`))})
+             AND r.period < ${planPeriod}
+             AND r.reading_value IS NOT NULL
+             AND NOT EXISTS (
+                   SELECT 1 FROM meter_reading c
+                    WHERE c.tenant_id = r.tenant_id
+                      AND c.supersedes_reading_id = r.id)
+           ORDER BY r.installation_id, r.period DESC, r.created_at DESC`
+      : [];
+    const pvMap = new Map(prevRows.map((r) => [r.installation_id, r.reading_value]));
+    return items.map((i) => ({
+      ...i,
+      completedReadingValue: i.completedReadingId
+        ? (cvMap.get(i.completedReadingId) ?? null)
+        : null,
+      prevReadingValue: i.plannedInstallationId
+        ? (pvMap.get(i.plannedInstallationId) ?? null)
+        : null,
+    }));
   }
 
   /** Paginated plan items (?status= filter); ordered by the snapshot seq_no. */
@@ -197,17 +260,18 @@ export class ReadingPlanService {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const plan = await tx.readingPlan.findFirst({
         where: { tenantId: ctx.tenantId, id: planId },
-        select: { id: true, bookId: true },
+        select: { id: true, bookId: true, period: true },
       });
       if (!plan) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
       await this.assertPlanBookInScope(tx, ctx, plan.bookId);
-      return tx.readingPlanItem.findMany({
+      const items = await tx.readingPlanItem.findMany({
         where: { tenantId: ctx.tenantId, planId, status: q.status },
         select: PLAN_ITEM_SELECT,
         orderBy: { seqNo: 'asc' },
         take: q.take,
         skip: q.skip,
       });
+      return this.embedItemReadings(tx, ctx.tenantId, items, plan.period);
     });
   }
 

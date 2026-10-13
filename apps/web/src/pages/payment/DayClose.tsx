@@ -29,7 +29,12 @@ import type {
   PayChannel,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtCent, fmtDate, fmtTime } from '../common';
+import {
+  enumLabel,
+  fmtCent,
+  fmtDate,
+  fmtTime,
+} from '../common';
 import { StaffLookupSelect } from '../pickers';
 import { PAY_CHANNEL_COLORS, PAY_CHANNEL_LABELS, PAYMENT_STATUS_COLORS, PAYMENT_STATUS_LABELS } from './common';
 
@@ -94,7 +99,7 @@ export default function DayClose() {
 
   const staffName = useCallback(
     (r: { cashierId: string; cashierName?: string | null }) =>
-      r.cashierName ?? `${r.cashierId.slice(0, 8)}…`,
+      r.cashierName ?? '—',
     [],
   );
 
@@ -151,7 +156,7 @@ export default function DayClose() {
       const bucket = b?.[c];
       return (
         <Tag key={c} color={PAY_CHANNEL_COLORS[c]}>
-          {PAY_CHANNEL_LABELS[c]} {bucket ? `${bucket.count}笔 ${fmtCent(bucket.amount)}` : '0笔'}
+          {enumLabel(PAY_CHANNEL_LABELS, c)} {bucket ? `${bucket.count}笔 ${fmtCent(bucket.amount)}` : '0笔'}
         </Tag>
       );
     });
@@ -228,7 +233,7 @@ export default function DayClose() {
       key: 'channel',
       width: 100,
       render: (c: PayChannel) => (
-        <Tag color={PAY_CHANNEL_COLORS[c]}>{PAY_CHANNEL_LABELS[c]}</Tag>
+        <Tag color={PAY_CHANNEL_COLORS[c]}>{enumLabel(PAY_CHANNEL_LABELS, c)}</Tag>
       ),
     },
     {
@@ -250,7 +255,7 @@ export default function DayClose() {
       width: 110,
       render: (s: DayClosePayment['status'], r: DayClosePayment) => (
         <Space size={4}>
-          <Tag color={PAYMENT_STATUS_COLORS[s]}>{PAYMENT_STATUS_LABELS[s]}</Tag>
+          <Tag color={PAYMENT_STATUS_COLORS[s]}>{enumLabel(PAYMENT_STATUS_LABELS, s)}</Tag>
           {r.reversalOfId && <Tag color="red">红冲</Tag>}
         </Space>
       ),
@@ -392,7 +397,7 @@ export default function DayClose() {
                   ? [{
                       key: 'operator',
                       label: '经办人（代结）',
-                      children: detail.createdByName ?? `${detail.createdBy.slice(0, 8)}…`,
+                      children: detail.createdByName ?? '—',
                     }]
                   : []),
                 { key: 'count', label: '笔数', children: detail.totalCount },

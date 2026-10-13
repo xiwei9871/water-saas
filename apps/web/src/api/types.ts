@@ -880,6 +880,8 @@ export interface PaymentAlloc {
   paymentId: string | null;
   prepaymentEntryId: string | null;
   billId: string;
+  /** 账单人读引用（户号 · 账期），服务端内嵌。 */
+  billLabel?: string | null;
   amount: string;
   createdAt: string;
   updatedAt: string;
@@ -1108,8 +1110,10 @@ export interface RecoveryRateReport {
   allocatedInWindow: string;
   /** 当月收款中清偿历史欠费（账期 < period 的账单）部分。 */
   priorPeriodCollected: string;
-  /** 回收率 = allocatedInWindow / billed，≤ 1。 */
+  /** 回收率 = allocatedInWindow / billed，≤ 1；billed<=0 或数据异常时为 null。 */
   rate: string | null;
+  /** 数据异常：窗口内销账 > 应收（不应发生）。发生时 rate 为 null。 */
+  anomaly: { code: string; allocatedInWindow: string; billed: string } | null;
 }
 
 // ---------------------------------------------------------------------------

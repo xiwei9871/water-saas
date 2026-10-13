@@ -453,13 +453,18 @@ export class ReportService {
       // 台账 entry 的 created_at（抵充发生日）；due_date 为空视为不限窗口。
       // 红冲收款产生负分摊，自然净减。历史欠费回收单列：
       //   priorPeriodCollected = 本期收款中分摊到 period < P 账单的部分。
-      const upperPeriod = q.through ?? q.period;
+      // 分子谓词必须与 billed 同集：单月模式 = 本期账单（period = P）；
+      // 截止月模式 = 累计账单（period <= through）。原实现单月模式也用
+      // period <= P，把早期账单的窗口内销账计入本期分子 → 回收率 >100%。
+      const billSetPredicate = q.through === undefined
+        ? Prisma.sql`b.period = ${q.period}`
+        : Prisma.sql`b.period <= ${q.through}`;
       const allocRows = await tx.$queryRaw<
         { in_window: bigint | null; total: bigint | null; prior: bigint | null }[]
       >`
         SELECT
-          sum(CASE WHEN b.period <= ${upperPeriod} THEN a.amount ELSE 0 END)::bigint AS total,
-          sum(CASE WHEN b.period <= ${upperPeriod}
+          sum(CASE WHEN ${billSetPredicate} THEN a.amount ELSE 0 END)::bigint AS total,
+          sum(CASE WHEN ${billSetPredicate}
                     AND (b.due_date IS NULL
                          OR COALESCE(p.received_at, e.created_at, a.created_at)::date <= b.due_date)
                    THEN a.amount ELSE 0 END)::bigint AS in_window,
@@ -483,8 +488,19 @@ export class ReportService {
       const allocatedTotal = allocRows[0]?.total ?? 0n;
       const allocatedInWindow = allocRows[0]?.in_window ?? 0n;
       const priorPeriodCollected = allocRows[0]?.prior ?? 0n;
+      // 数据异常护栏：窗口内销账 > 应收 在修正后的口径下不应发生（分子账单
+      // 集 = 分母账单集，销账 ≤ 账单额）。一旦发生说明数据/分摊异常，
+      // 返回 anomaly 供前端告警，绝不渲染 >100% 的"正常"百分比。
+      const anomaly =
+        billed > 0n && allocatedInWindow > billed
+          ? {
+              code: 'ALLOC_EXCEEDS_BILLED',
+              allocatedInWindow,
+              billed,
+            }
+          : null;
       const rate =
-        billed === 0n
+        billed <= 0n || anomaly
           ? null
           : new Prisma.Decimal(allocatedInWindow.toString())
               .div(new Prisma.Decimal(billed.toString()))
@@ -498,6 +514,7 @@ export class ReportService {
         allocatedInWindow,
         priorPeriodCollected,
         rate,
+        anomaly,
       };
     });
   }

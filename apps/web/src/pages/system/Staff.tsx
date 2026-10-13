@@ -89,7 +89,7 @@ export default function StaffPage() {
   }, [message]);
 
   const orgName = useCallback(
-    (id: string) => orgs.find((o) => o.id === id)?.name ?? id.slice(0, 8),
+    (id: string) => orgs.find((o) => o.id === id)?.name ?? '—',
     [orgs],
   );
 

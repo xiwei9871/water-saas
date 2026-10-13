@@ -184,3 +184,51 @@ test.describe('T 工单/异常', () => {
     }
   });
 });
+
+test.describe('10/12 报告回归', () => {
+  test('抄表计划明细含上期止度 + 完成读数列（值为读数非 id）', async ({ page }) => {
+    await page.goto('/metering/plans');
+    await page.waitForLoadState('networkidle');
+    const detailBtn = page.getByRole('button', { name: /明\s*细/ }).first();
+    await expect(detailBtn).toBeVisible();
+    await detailBtn.click();
+    await page.waitForLoadState('networkidle');
+    const drawer = page.locator('.ant-drawer-open, .ant-modal-open');
+    await expect(drawer).toBeVisible();
+    const headers = await drawer.locator('.ant-table thead').innerText();
+    expect(headers).toContain('上期止度');
+    expect(headers).toContain('完成读数');
+    // 单元格不得出现 uuid 形态
+    const cells = await drawer.locator('.ant-table tbody').innerText();
+    expect(cells).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
+  });
+
+  test('收款详情分摊账单显示人读引用（户号·账期）', async ({ page }) => {
+    await page.goto('/payment/payments');
+    await page.waitForLoadState('networkidle');
+    const detailBtn = page.locator('.ant-table tbody tr').first().getByRole('button');
+    await expect(detailBtn).toBeVisible();
+    await detailBtn.click();
+    await page.waitForLoadState('networkidle');
+    const drawer = page.locator('.ant-drawer-open');
+    await expect(drawer).toBeVisible();
+    const body = await drawer.innerText();
+    // 分摊明细的"账单"列应出现 户号 · 账期 形态或空态
+    const allocTable = drawer.locator('.ant-table').last();
+    if (await allocTable.locator('tbody tr.ant-table-row').count()) {
+      const txt = await allocTable.locator('tbody').innerText();
+      expect(txt).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}/);
+    }
+    expect(body).not.toMatch(/账单 ID/);
+  });
+
+  test('回收率页：响应含 anomaly 字段且历史清收单列', async ({ page }) => {
+    const res = await apiGet(page, '/reports/recovery-rate?period=202609');
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveProperty('anomaly');
+    expect(body).toHaveProperty('priorPeriodCollected');
+    // billed<0 或 anomaly 时 rate 必须为 null，不得渲染 >100%
+    if (Number(body.billed) <= 0 || body.anomaly) expect(body.rate).toBeNull();
+  });
+});

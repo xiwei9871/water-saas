@@ -44,6 +44,7 @@ import type {
 import { useAuth } from '../../auth/AuthContext';
 import { EXCEPTION_CODES, READ_RESULT_TYPES } from '@ws/types';
 import {
+  enumLabel,
   DECIMAL_RULE,
   cleanBody,
   fmtDate,
@@ -85,7 +86,7 @@ interface BatchRowState {
 }
 
 const ITEM_STATUS_OPTIONS = (['PENDING', 'READ', 'NO_READ', 'SKIPPED'] as const).map(
-  (s) => ({ value: s, label: PLAN_ITEM_STATUS_LABELS[s] }),
+  (s) => ({ value: s, label: enumLabel(PLAN_ITEM_STATUS_LABELS, s) }),
 );
 
 /** 可录入的明细状态：待抄 + 未抄见（未抄见允许重抄，服务端同样放行）。 */
@@ -199,14 +200,9 @@ export default function ReadingPlans() {
     };
   }, [rows]);
 
-  const bookLabel = useCallback(
-    (id: string) => `${id.slice(0, 8)}…`,
-    [],
-  );
-  const staffName = useCallback(
-    (id: string | null) => (id ? `${id.slice(0, 8)}…` : '—'),
-    [],
-  );
+  // 册名/抄表员已由 API 内嵌；取不到时按规范显示占位符而非截断 uuid。
+  const bookLabel = useCallback((_id: string) => '—', []);
+  const staffName = useCallback((_id: string | null) => '—', []);
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -308,7 +304,7 @@ export default function ReadingPlans() {
                     ]
                       .filter(Boolean)
                       .join(' · ')
-                  : `${m.waterAccountId.slice(0, 8)}…`,
+                  : '—',
               ]),
             ),
           );
@@ -333,7 +329,7 @@ export default function ReadingPlans() {
   };
 
   const accountLabel = (item: ReadingPlanItem) =>
-    memberLabels.get(item.waterAccountId) ?? `${item.waterAccountId.slice(0, 8)}…`;
+    memberLabels.get(item.waterAccountId) ?? '—';
 
   const filteredItems = useMemo(
     () => (detail?.items ?? []).filter((i) => !itemStatus || i.status === itemStatus),
@@ -522,7 +518,7 @@ export default function ReadingPlans() {
       key: 'status',
       width: 90,
       render: (s: PlanStatus) => (
-        <Tag color={PLAN_STATUS_COLORS[s]}>{PLAN_STATUS_LABELS[s]}</Tag>
+        <Tag color={PLAN_STATUS_COLORS[s]}>{enumLabel(PLAN_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -611,22 +607,24 @@ export default function ReadingPlans() {
       key: 'status',
       width: 90,
       render: (s: PlanItemStatus) => (
-        <Tag color={PLAN_ITEM_STATUS_COLORS[s]}>{PLAN_ITEM_STATUS_LABELS[s]}</Tag>
+        <Tag color={PLAN_ITEM_STATUS_COLORS[s]}>{enumLabel(PLAN_ITEM_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
-      title: '完成读数',
-      dataIndex: 'completedReadingId',
-      key: 'completedReadingId',
-      width: 100,
-      render: (id: string | null) =>
-        id ? (
-          <Tooltip title={id}>
-            <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-          </Tooltip>
-        ) : (
-          '—'
-        ),
+      title: '上期止度(m³)',
+      dataIndex: 'prevReadingValue',
+      key: 'prevReadingValue',
+      width: 105,
+      align: 'right',
+      render: (v: string | null) => v ?? '—',
+    },
+    {
+      title: '完成读数(m³)',
+      dataIndex: 'completedReadingValue',
+      key: 'completedReadingValue',
+      width: 105,
+      align: 'right',
+      render: (v: string | null) => v ?? '—',
     },
     ...(canWrite && detail && WRITABLE_PLAN.includes(detail.status)
       ? [
@@ -680,7 +678,7 @@ export default function ReadingPlans() {
             style={{ width: 110 }}
             options={(['OPEN', 'IN_PROGRESS', 'DONE', 'CLOSED'] as const).map((s) => ({
               value: s,
-              label: PLAN_STATUS_LABELS[s],
+              label: enumLabel(PLAN_STATUS_LABELS, s),
             }))}
             value={status}
             onChange={(v) => {
@@ -780,7 +778,7 @@ export default function ReadingPlans() {
           <>
             <Space wrap style={{ marginBottom: 12 }}>
               <Tag color={PLAN_STATUS_COLORS[detail.status]}>
-                {PLAN_STATUS_LABELS[detail.status]}
+                {enumLabel(PLAN_STATUS_LABELS, detail.status)}
               </Tag>
               {detailProgress && (
                 <>
@@ -846,7 +844,7 @@ export default function ReadingPlans() {
             <Radio.Group
               options={READ_RESULT_TYPES.map((t) => ({
                 value: t,
-                label: RESULT_TYPE_LABELS[t],
+                label: enumLabel(RESULT_TYPE_LABELS, t),
               }))}
               optionType="button"
             />
@@ -869,7 +867,7 @@ export default function ReadingPlans() {
                 <Select
                   options={EXCEPTION_CODES.map((c) => ({
                     value: c,
-                    label: EXCEPTION_CODE_LABELS[c],
+                    label: enumLabel(EXCEPTION_CODE_LABELS, c),
                   }))}
                   placeholder="选择原因"
                 />
@@ -955,7 +953,7 @@ export default function ReadingPlans() {
                   value={batchRows.get(item.id)?.resultType}
                   options={READ_RESULT_TYPES.map((t) => ({
                     value: t,
-                    label: RESULT_TYPE_LABELS[t],
+                    label: enumLabel(RESULT_TYPE_LABELS, t),
                   }))}
                   onChange={(v: ReadResultType) => setBatchRow(item.id, { resultType: v })}
                 />
@@ -978,7 +976,7 @@ export default function ReadingPlans() {
                       value={r.exceptionCode}
                       options={EXCEPTION_CODES.map((c) => ({
                         value: c,
-                        label: EXCEPTION_CODE_LABELS[c],
+                        label: enumLabel(EXCEPTION_CODE_LABELS, c),
                       }))}
                       onChange={(v) => setBatchRow(item.id, { exceptionCode: v })}
                     />

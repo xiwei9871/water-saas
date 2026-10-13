@@ -20,7 +20,6 @@ import {
   Spin,
   Table,
   Tag,
-  Tooltip,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -34,8 +33,10 @@ import type {
   BillStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import { PREPAY_ENTRY_LABELS } from '../payment/common';
 import {
   DECIMAL_RULE,
+  enumLabel,
   fmtCent,
   fmtDate,
   fmtPeriod,
@@ -63,15 +64,6 @@ import {
 interface ReplaceFormValues {
   usageQty: string;
 }
-
-const shortId = (id: string | null | undefined) =>
-  id ? (
-    <Tooltip title={id}>
-      <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-    </Tooltip>
-  ) : (
-    '—'
-  );
 
 /** 可纠正（红冲/换票）的账单：POSTED|PARTIAL_PAID 且非红冲单；
  *  E6 起 PAID 且带预存分摊的账单也可纠正（服务端校验预存腿）。 */
@@ -261,9 +253,7 @@ export default function Bills() {
       key: 'waterAccountId',
       width: 150,
       render: (id: string, r: Bill) => (
-        <Tooltip title={id}>
-          <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
-        </Tooltip>
+        <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? '—'}</span>
       ),
     },
     {
@@ -290,7 +280,7 @@ export default function Bills() {
       key: 'billKind',
       width: 95,
       render: (k: Bill['billKind']) => (
-        <Tag color={BILL_KIND_COLORS[k]}>{BILL_KIND_LABELS[k]}</Tag>
+        <Tag color={BILL_KIND_COLORS[k]}>{enumLabel(BILL_KIND_LABELS, k)}</Tag>
       ),
     },
     {
@@ -314,7 +304,7 @@ export default function Bills() {
       key: 'status',
       width: 95,
       render: (s: BillStatus) => (
-        <Tag color={BILL_STATUS_COLORS[s]}>{BILL_STATUS_LABELS[s]}</Tag>
+        <Tag color={BILL_STATUS_COLORS[s]}>{enumLabel(BILL_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -375,7 +365,7 @@ export default function Bills() {
       key: 'itemType',
       width: 80,
       render: (t: BillItem['itemType']) => (
-        <Tag color={t === 'NORMAL' ? 'blue' : 'orange'}>{BILL_ITEM_TYPE_LABELS[t]}</Tag>
+        <Tag color={t === 'NORMAL' ? 'blue' : 'orange'}>{enumLabel(BILL_ITEM_TYPE_LABELS, t)}</Tag>
       ),
     },
     {
@@ -383,7 +373,7 @@ export default function Bills() {
       key: 'feeItem',
       width: 110,
       render: (_: unknown, r: BillItem) =>
-        r.feeItemName ?? r.feeItemCode ?? shortId(r.feeItemId),
+        r.feeItemName ?? r.feeItemCode ?? '—',
     },
     {
       title: '描述',
@@ -438,7 +428,7 @@ export default function Bills() {
             placeholder="状态"
             style={{ width: 110 }}
             options={(['DRAFT', 'POSTED', 'PARTIAL_PAID', 'PAID', 'REVERSED'] as const).map(
-              (s) => ({ value: s, label: BILL_STATUS_LABELS[s] }),
+              (s) => ({ value: s, label: enumLabel(BILL_STATUS_LABELS, s) }),
             )}
             value={status}
             onChange={(v) => {
@@ -567,7 +557,7 @@ export default function Bills() {
                   label: '状态',
                   children: (
                     <Tag color={BILL_STATUS_COLORS[detail.status]}>
-                      {BILL_STATUS_LABELS[detail.status]}
+                      {enumLabel(BILL_STATUS_LABELS, detail.status)}
                     </Tag>
                   ),
                 },
@@ -576,7 +566,7 @@ export default function Bills() {
                   label: '类型',
                   children: (
                     <Tag color={BILL_KIND_COLORS[detail.billKind]}>
-                      {BILL_KIND_LABELS[detail.billKind]}
+                      {enumLabel(BILL_KIND_LABELS, detail.billKind)}
                     </Tag>
                   ),
                 },
@@ -613,12 +603,12 @@ export default function Bills() {
                   label: '来源',
                   children: (
                     <Space size={4}>
-                      {BILL_SOURCE_TYPE_LABELS[detail.sourceType]}
+                      {enumLabel(BILL_SOURCE_TYPE_LABELS, detail.sourceType)}
                       {detail.sourcePeriod
                         ? detail.sourcePeriodTo
                           ? `（${fmtPeriod(detail.sourcePeriod)} → ${fmtPeriod(detail.sourcePeriodTo)}）`
                           : `（${fmtPeriod(detail.sourcePeriod)}）`
-                        : shortId(detail.sourceId)}
+                        : '—'}
                     </Space>
                   ),
                 },
@@ -627,7 +617,7 @@ export default function Bills() {
                   label: '开账批次',
                   children: detail.billingRunRef
                     ? `${fmtPeriod(detail.billingRunRef.period)} · ${
-                        RUN_TYPE_LABELS[detail.billingRunRef.runType]
+                        enumLabel(RUN_TYPE_LABELS, detail.billingRunRef.runType)
                       }批次 · ${fmtTime(detail.billingRunRef.createdAt)} 创建`
                     : '—',
                 },
@@ -710,8 +700,8 @@ export default function Bills() {
                       key: 'ref',
                       render: (_: unknown, a: BillAlloc) =>
                         a.source === 'PREPAYMENT'
-                          ? `预存抵扣（${a.prepaymentEntryType ?? '流水'}）`
-                          : (a.paymentNo ?? shortId(a.paymentId)),
+                          ? `预存抵扣${a.prepaymentEntryType ? `（${enumLabel(PREPAY_ENTRY_LABELS, a.prepaymentEntryType)}）` : ''}`
+                          : (a.paymentNo ?? '—'),
                     },
                     {
                       title: '时间',

@@ -2,6 +2,7 @@ import { App as AntdApp, Card, Table, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
+import { enumLabel } from '../common';
 
 interface MetricDef {
   code: string;
@@ -54,14 +55,14 @@ export default function MetricDict() {
       dataIndex: 'unit',
       title: '单位',
       width: 80,
-      render: (v: string) => UNIT_LABELS[v] ?? v,
+      render: (v: string) => enumLabel(UNIT_LABELS, v),
     },
     {
       key: 'direction',
       dataIndex: 'direction',
       title: '方向',
       width: 90,
-      render: (v: string) => DIR_LABELS[v] ?? v,
+      render: (v: string) => enumLabel(DIR_LABELS, v),
     },
     {
       key: 'available',

@@ -359,6 +359,9 @@ describe('reading entry — validation + item/plan writeback', () => {
     const itemA = items.find((i: { waterAccountId: string }) => i.waterAccountId === acct['A']);
     expect(itemA.status).toBe('READ');
     expect(itemA.completedReadingId).toBe(reading.id);
+    // 10/12 报告 §3：完成读数列显示读数值而非读数 id；上期止度随项返回。
+    expect(itemA.completedReadingValue).toBe(reading.readingValue);
+    expect(itemA).toHaveProperty('prevReadingValue');
 
     const p = await progress(plans['p1'].id);
     expect(p).toMatchObject({ planStatus: 'IN_PROGRESS', PENDING: 2, READ: 1 });

@@ -19,7 +19,6 @@ import {
   Spin,
   Table,
   Tag,
-  Tooltip,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -33,6 +32,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   cleanBody,
   fmtCent,
   fmtDate,
@@ -92,7 +92,7 @@ function TrustedReadingPicker({
             )
             .map((r) => ({
               value: r.id,
-              label: `${fmtPeriod(r.period)} · 读数 ${r.readingValue ?? '—'} · ${RESULT_TYPE_LABELS[r.resultType]}`,
+              label: `${fmtPeriod(r.period)} · 读数 ${r.readingValue ?? '—'} · ${enumLabel(RESULT_TYPE_LABELS, r.resultType)}`,
             })),
         );
         setFailed(false);
@@ -307,9 +307,7 @@ export default function Reconciliations() {
       key: 'waterAccountId',
       width: 150,
       render: (id: string, r: Reconciliation) => (
-        <Tooltip title={id}>
-          <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
-        </Tooltip>
+        <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? '—'}</span>
       ),
     },
     {
@@ -371,7 +369,7 @@ export default function Reconciliations() {
       key: 'status',
       width: 95,
       render: (s: ReconStatus) => (
-        <Tag color={RECON_STATUS_COLORS[s]}>{RECON_STATUS_LABELS[s]}</Tag>
+        <Tag color={RECON_STATUS_COLORS[s]}>{enumLabel(RECON_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -393,14 +391,6 @@ export default function Reconciliations() {
     },
   ];
 
-  const shortId = (id: string | null) =>
-    id ? (
-      <Tooltip title={id}>
-        <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-      </Tooltip>
-    ) : (
-      '—'
-    );
 
   return (
     <>
@@ -479,7 +469,7 @@ export default function Reconciliations() {
             placeholder="状态"
             style={{ width: 110 }}
             options={(['DRAFT', 'ABSORBED', 'APPLIED', 'MANUAL_REVIEW'] as const).map(
-              (s) => ({ value: s, label: RECON_STATUS_LABELS[s] }),
+              (s) => ({ value: s, label: enumLabel(RECON_STATUS_LABELS, s) }),
             )}
             value={status}
             onChange={(v) => {
@@ -635,7 +625,7 @@ export default function Reconciliations() {
                 label: '状态',
                 children: (
                   <Tag color={RECON_STATUS_COLORS[detail.status]}>
-                    {RECON_STATUS_LABELS[detail.status]}
+                    {enumLabel(RECON_STATUS_LABELS, detail.status)}
                   </Tag>
                 ),
               },
@@ -649,14 +639,14 @@ export default function Reconciliations() {
                 label: '锚点读数',
                 children: detail.anchorReading
                   ? `${detail.anchorReading.readingValue ?? '—'} m³ · ${fmtDate(detail.anchorReading.readDate)}（${fmtPeriod(detail.anchorReading.period)}）`
-                  : shortId(detail.anchorReadingId),
+                  : '—',
               },
               {
                 key: 'actual',
                 label: '实抄读数',
                 children: detail.actualReading
                   ? `${detail.actualReading.readingValue ?? '—'} m³ · ${fmtDate(detail.actualReading.readDate)}（${fmtPeriod(detail.actualReading.period)}）`
-                  : shortId(detail.actualReadingId),
+                  : '—',
               },
               {
                 key: 'actualTotal',
@@ -673,9 +663,7 @@ export default function Reconciliations() {
                 label: '吸收至结算',
                 children: detail.absorbedSettlement
                   ? `结算水量（${fmtPeriod(detail.absorbedSettlement.period)}）`
-                  : (detail.absorbedSettlementId
-                      ? shortId(detail.absorbedSettlementId)
-                      : '—'),
+                  : '—',
               },
               {
                 key: 'correct',

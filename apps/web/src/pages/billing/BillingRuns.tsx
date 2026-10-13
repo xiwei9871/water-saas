@@ -22,7 +22,6 @@ import {
   Spin,
   Table,
   Tag,
-  Tooltip,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -37,7 +36,14 @@ import type {
   RunStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtCent, fmtPeriod, fmtTime, newIdemKey, useWaterAccountLabels } from '../common';
+import {
+  enumLabel,
+  fmtCent,
+  fmtPeriod,
+  fmtTime,
+  newIdemKey,
+  useWaterAccountLabels,
+} from '../common';
 import {
   BILL_KIND_COLORS,
   BILL_KIND_LABELS,
@@ -214,15 +220,11 @@ export default function BillingRuns() {
 
   const billColumns: ColumnsType<Bill> = [
     {
-      title: '账单 ID',
-      dataIndex: 'id',
-      key: 'id',
+      title: '账期',
+      dataIndex: 'period',
+      key: 'period',
       width: 100,
-      render: (id: string) => (
-        <Tooltip title={id}>
-          <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-        </Tooltip>
-      ),
+      render: (p: string) => fmtPeriod(p),
     },
     {
       title: '户号',
@@ -230,9 +232,7 @@ export default function BillingRuns() {
       key: 'waterAccountId',
       width: 150,
       render: (id: string, b: Bill) => (
-        <Tooltip title={id}>
-          <span>{b.accountNo ?? accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
-        </Tooltip>
+        <span>{b.accountNo ?? accountInfo(id)?.accountNo ?? '—'}</span>
       ),
     },
     {
@@ -249,7 +249,7 @@ export default function BillingRuns() {
       key: 'billKind',
       width: 90,
       render: (k: Bill['billKind']) => (
-        <Tag color={BILL_KIND_COLORS[k]}>{BILL_KIND_LABELS[k]}</Tag>
+        <Tag color={BILL_KIND_COLORS[k]}>{enumLabel(BILL_KIND_LABELS, k)}</Tag>
       ),
     },
     {
@@ -273,7 +273,7 @@ export default function BillingRuns() {
       key: 'status',
       width: 90,
       render: (s: Bill['status']) => (
-        <Tag color={BILL_STATUS_COLORS[s]}>{BILL_STATUS_LABELS[s]}</Tag>
+        <Tag color={BILL_STATUS_COLORS[s]}>{enumLabel(BILL_STATUS_LABELS, s)}</Tag>
       ),
     },
   ];
@@ -285,7 +285,7 @@ export default function BillingRuns() {
       dataIndex: 'runType',
       key: 'runType',
       width: 80,
-      render: (t: BillingRun['runType']) => RUN_TYPE_LABELS[t],
+      render: (t: BillingRun['runType']) => enumLabel(RUN_TYPE_LABELS, t),
     },
     {
       title: '状态',
@@ -293,7 +293,7 @@ export default function BillingRuns() {
       key: 'status',
       width: 120,
       render: (s: RunStatus) => (
-        <Tag color={RUN_STATUS_COLORS[s]}>{RUN_STATUS_LABELS[s]}</Tag>
+        <Tag color={RUN_STATUS_COLORS[s]}>{enumLabel(RUN_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -413,7 +413,7 @@ export default function BillingRuns() {
             placeholder="状态"
             style={{ width: 140 }}
             options={(['DRAFT', 'PROCESSING', 'PARTIAL', 'POSTED', 'FAILED'] as const).map(
-              (s) => ({ value: s, label: RUN_STATUS_LABELS[s] }),
+              (s) => ({ value: s, label: enumLabel(RUN_STATUS_LABELS, s) }),
             )}
             value={status}
             onChange={(v) => {
@@ -562,11 +562,11 @@ export default function BillingRuns() {
                   label: '状态',
                   children: (
                     <Tag color={RUN_STATUS_COLORS[detail.status]}>
-                      {RUN_STATUS_LABELS[detail.status]}
+                      {enumLabel(RUN_STATUS_LABELS, detail.status)}
                     </Tag>
                   ),
                 },
-                { key: 'type', label: '类型', children: RUN_TYPE_LABELS[detail.runType] },
+                { key: 'type', label: '类型', children: enumLabel(RUN_TYPE_LABELS, detail.runType) },
                 {
                   key: 'counts',
                   label: '户数（成功/失败/总数）',
@@ -593,15 +593,9 @@ export default function BillingRuns() {
                       title: '用水户',
                       key: 'account',
                       render: (_: unknown, f: RunFailure) =>
-                        f.accountNo ? (
-                          `${f.accountNo}${f.customerName ? ` · ${f.customerName}` : ''}`
-                        ) : (
-                          <Tooltip title={f.settlementId}>
-                            <span style={{ fontFamily: 'monospace' }}>
-                              {f.settlementId.slice(0, 8)}…
-                            </span>
-                          </Tooltip>
-                        ),
+                        f.accountNo
+                          ? `${f.accountNo}${f.customerName ? ` · ${f.customerName}` : ''}`
+                          : '—',
                     },
                     {
                       title: '阶段',

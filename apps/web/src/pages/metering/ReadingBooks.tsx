@@ -36,6 +36,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   cleanBody,
   cleanPatch,
   fmtTime,
@@ -142,12 +143,9 @@ export default function ReadingBooks() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  // 组织/抄表员名称已由 API 内嵌（orgUnitName/readerName），本地 id 切片仅兜底。
-  const orgName = useCallback((id: string) => `${id.slice(0, 8)}…`, []);
-  const staffName = useCallback(
-    (id: string | null) => (id ? `${id.slice(0, 8)}…` : '—'),
-    [],
-  );
+  // 组织/抄表员名称已由 API 内嵌（orgUnitName/readerName）；取不到按规范显 '—'。
+  const orgName = useCallback((_id: string) => '—', []);
+  const staffName = useCallback((_id: string | null) => '—', []);
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -376,12 +374,12 @@ export default function ReadingBooks() {
       render: (_: unknown, r: ReadingBook) => (
         <Space size={4} wrap>
           <Tag>
-            {CADENCE_LABELS[r.cadence ?? 'MONTHLY']}
+            {enumLabel(CADENCE_LABELS, r.cadence ?? 'MONTHLY')}
             {r.cadence === 'BIMONTHLY' && r.anchorPeriod
               ? ` · 锚 ${r.anchorPeriod.slice(0, 4)}-${r.anchorPeriod.slice(4)}`
               : ''}
           </Tag>
-          <Tag color="geekblue">{CHANNEL_LABELS[r.meterChannel ?? 'MECHANICAL']}</Tag>
+          <Tag color="geekblue">{enumLabel(CHANNEL_LABELS, r.meterChannel ?? 'MECHANICAL')}</Tag>
         </Space>
       ),
     },
@@ -440,7 +438,7 @@ export default function ReadingBooks() {
       key: 'accountNo',
       width: 150,
       render: (_: unknown, m: BookMember) =>
-        m.waterAccount?.accountNo ?? `${m.waterAccountId.slice(0, 8)}…`,
+        m.waterAccount?.accountNo ?? '—',
     },
     {
       title: '客户名称',
@@ -618,7 +616,7 @@ export default function ReadingBooks() {
             <Select
               options={(Object.keys(CADENCE_LABELS) as BookCadence[]).map((c) => ({
                 value: c,
-                label: CADENCE_LABELS[c],
+                label: enumLabel(CADENCE_LABELS, c),
               }))}
             />
           </Form.Item>
@@ -644,7 +642,7 @@ export default function ReadingBooks() {
             <Select
               options={(Object.keys(CHANNEL_LABELS) as MeterChannel[]).map((c) => ({
                 value: c,
-                label: CHANNEL_LABELS[c],
+                label: enumLabel(CHANNEL_LABELS, c),
               }))}
             />
           </Form.Item>

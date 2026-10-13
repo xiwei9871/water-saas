@@ -603,6 +603,22 @@ describe('fixtures: payments + close + bills for the money reports', () => {
       amount: 2000,
       receivedAt: '2026-11-03T09:00:00Z',
     });
+    // 10/12 报告 §1 回归：往前期账单（202609，due_date 12-15 → 10 月
+    // 收款仍在其窗口内）——单月分子只许数 period=本期 的销账，历史期
+    // 销账进 priorPeriodCollected，不得抬高本期回收率。
+    await seedBill('billSep', acct['A1'], settleAcct['A1'], '202609', {
+      totalAmount: 5000,
+      sourceId: 'aa13aa13-0000-4000-8000-00000000be11',
+    });
+    await seedPayment('pSep', 9, {
+      cashierId: STAFF_CASHIER1_A,
+      orgUnitId: ORG_A,
+      settleAccountId: settleAcct['A1'],
+      billId: bill['billSep'],
+      channel: 'ONLINE',
+      amount: 1500,
+      receivedAt: '2026-10-10T09:00:00Z',
+    });
   });
 });
 
@@ -644,11 +660,12 @@ describe('GET /reports/collected-monthly', () => {
   it('sums received payments in the month by channel; allocated ≡ collected', async () => {
     const res = (await get('/reports/collected-monthly?period=202610')).body;
     expect(res.period).toBe('202610');
-    expect(res.collected).toBe('10000'); // 4000+2500+1000−1500+800+3200
+    expect(res.collected).toBe('11500'); // 4000+2500+1000−1500+800+3200+1500
     expect(res.byChannel.CASH).toEqual({ count: 4, amount: '6500' });
     expect(res.byChannel.POS).toEqual({ count: 1, amount: '2500' });
     expect(res.byChannel.TRANSFER).toEqual({ count: 1, amount: '1000' });
-    expect(res.allocated).toBe('10000');
+    expect(res.byChannel.ONLINE).toEqual({ count: 1, amount: '1500' });
+    expect(res.allocated).toBe('11500');
     const nov = (await get('/reports/collected-monthly?period=202611')).body;
     expect(nov.collected).toBe('2000');
     expect(nov.allocated).toBe('2000');
@@ -660,26 +677,31 @@ describe('GET /reports/recovery-rate', () => {
     const oct = (await get('/reports/recovery-rate?period=202610')).body;
     // billed=20000; 销账 = 4000+2500+1000−1500+3200 = 9200
     // （p5 的 800 分摊到 DRAFT 账单 → 不进分子；due_date 未设 → 全在窗口内）
+    // pSep 1500 → 202609 账单：单月分子不含（修前会被 ≤P 错误计入），
+    // 进 priorPeriodCollected；collected 含它 → 11500。
     expect(oct).toMatchObject({
       period: '202610',
       through: null,
       billed: '20000',
-      collected: '10000',
+      collected: '11500',
       allocatedTotal: '9200',
       allocatedInWindow: '9200',
-      priorPeriodCollected: '0',
+      priorPeriodCollected: '1500',
       rate: '0.4600',
+      anomaly: null,
     });
-    // cumulative ≤ 202611: billed 20000+7777; alloc 9200+2000 = 11200.
+    // cumulative ≤ 202611: billed 20000+7777+5000=32777;
+    // alloc 9200+2000+1500 = 12700（pSep 在累计口径归属正确）。
     const cum = (await get('/reports/recovery-rate?period=202610&through=202611')).body;
     expect(cum).toMatchObject({
       period: '202610',
       through: '202611',
-      billed: '27777',
-      collected: '12000',
-      allocatedTotal: '11200',
-      allocatedInWindow: '11200',
-      rate: '0.4032',
+      billed: '32777',
+      collected: '13500',
+      allocatedTotal: '12700',
+      allocatedInWindow: '12700',
+      priorPeriodCollected: '1500',
+      rate: '0.3875',
     });
     const zero = (await get('/reports/recovery-rate?period=202612')).body;
     expect(zero).toMatchObject({ billed: '0', collected: '0', rate: null });

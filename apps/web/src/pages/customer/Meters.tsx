@@ -37,6 +37,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   DECIMAL_RULE,
   INSTALLATION_STATUS_LABELS,
   INSTALL_REASON_LABELS,
@@ -101,11 +102,11 @@ interface ReplaceFormValues {
 
 const REASON_OPTIONS = (
   ['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
-).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }));
+).map((r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }));
 
 const REPLACE_REASON_OPTIONS = (
   ['REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
-).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }));
+).map((r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }));
 
 /** 水表管理：设备台账（含受限状态流转）+ 装拆记录（装表/拆表）。 */
 export default function Meters() {
@@ -526,7 +527,7 @@ export default function Meters() {
       dataIndex: 'reason',
       key: 'reason',
       width: 90,
-      render: (r: InstallReason) => INSTALL_REASON_LABELS[r],
+      render: (r: InstallReason) => enumLabel(INSTALL_REASON_LABELS, r),
     },
     {
       title: '状态',
@@ -598,7 +599,7 @@ export default function Meters() {
               style={{ width: 130 }}
               options={(
                 ['AVAILABLE', 'INSTALLED', 'MAINTENANCE', 'RETIRED'] as const
-              ).map((s) => ({ value: s, label: METER_STATUS_LABELS[s] }))}
+              ).map((s) => ({ value: s, label: enumLabel(METER_STATUS_LABELS, s) }))}
               value={statusFilter}
               onChange={(v) => {
                 setStatusFilter(v);
@@ -661,7 +662,7 @@ export default function Meters() {
                 style={{ width: 120 }}
                 options={(['ACTIVE', 'REMOVED'] as const).map((s) => ({
                   value: s,
-                  label: INSTALLATION_STATUS_LABELS[s],
+                  label: enumLabel(INSTALLATION_STATUS_LABELS, s),
                 }))}
                 value={instStatus}
                 onChange={(v) => {
@@ -788,7 +789,7 @@ export default function Meters() {
             <Form.Item name="status" label="状态">
               <Select
                 options={[meterModal.meter.status, ...editTransitions].map(
-                  (s) => ({ value: s, label: METER_STATUS_LABELS[s] }),
+                  (s) => ({ value: s, label: enumLabel(METER_STATUS_LABELS, s) }),
                 )}
               />
             </Form.Item>
@@ -1021,7 +1022,7 @@ export default function Meters() {
                   {
                     title: '原因',
                     dataIndex: 'reason',
-                    render: (r: InstallReason) => INSTALL_REASON_LABELS[r],
+                    render: (r: InstallReason) => enumLabel(INSTALL_REASON_LABELS, r),
                   },
                   {
                     title: '状态',

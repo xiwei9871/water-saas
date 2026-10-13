@@ -18,7 +18,11 @@ import type {
   PrepaymentEntry,
   WaterAccount,
 } from '../../api/types';
-import { fmtCent, fmtTime } from '../common';
+import {
+  enumLabel,
+  fmtCent,
+  fmtTime,
+} from '../common';
 import { PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from './common';
 import {
   CustomerSelect,
@@ -142,7 +146,7 @@ export default function Prepayments() {
       dataIndex: 'type',
       width: 110,
       render: (t: PrepaymentEntry['type']) => (
-        <Tag color={PREPAY_ENTRY_COLORS[t]}>{PREPAY_ENTRY_LABELS[t]}</Tag>
+        <Tag color={PREPAY_ENTRY_COLORS[t]}>{enumLabel(PREPAY_ENTRY_LABELS, t)}</Tag>
       ),
     },
     {

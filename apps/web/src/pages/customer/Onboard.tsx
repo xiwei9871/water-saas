@@ -20,6 +20,7 @@ import { Link } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type { InstallReason, OnboardResult } from '../../api/types';
 import {
+  enumLabel,
   CUST_TYPE_LABELS,
   DECIMAL_RULE,
   INSTALL_REASON_LABELS,
@@ -354,7 +355,7 @@ export default function Onboard() {
                 <Select
                   options={(['PERSONAL', 'ORG'] as const).map((t) => ({
                     value: t,
-                    label: CUST_TYPE_LABELS[t],
+                    label: enumLabel(CUST_TYPE_LABELS, t),
                   }))}
                 />
               </Form.Item>
@@ -505,7 +506,7 @@ export default function Onboard() {
             <Select
               options={(
                 ['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
-              ).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }))}
+              ).map((r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }))}
             />
           </Form.Item>
         </div>

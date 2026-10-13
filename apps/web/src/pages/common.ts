@@ -90,6 +90,23 @@ export const fmtPeriod = (p?: string | null) =>
 export const fmtCent = (v?: string | number | null) =>
   v === null || v === undefined ? '—' : `¥${(Number(v) / 100).toFixed(2)}`;
 
+/**
+ * 枚举码 → 中文标签。缺映射时显示 '—' 并 console.warn（展示层取值
+ * 规范：绝不回退渲染裸英文代码，漏映射要能被听见而不是被看见）。
+ */
+export const enumLabel = (
+  map: Record<string, string>,
+  v?: string | null,
+): string => {
+  if (v === null || v === undefined || v === '') return '—';
+  const hit = map[v];
+  if (hit === undefined) {
+    console.warn(`[enumLabel] 未映射的枚举值: ${v}`);
+    return '—';
+  }
+  return hit;
+};
+
 /** 水表读数等非负 Decimal 输入的表单校验（最多 4 位小数）。 */
 export const DECIMAL_RULE = {
   pattern: /^\d+(\.\d{1,4})?$/,
@@ -202,7 +219,8 @@ export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
     (id: string | null | undefined) => {
       if (!id) return '—';
       const b = briefs.get(id);
-      return b ? `${b.accountNo} · ${b.customerName}` : `${id.slice(0, 8)}…`;
+      // 人读规范：解析不到户号时显示占位符，绝不显示截断 uuid。
+      return b ? `${b.accountNo} · ${b.customerName}` : '—';
     },
     [briefs],
   );
@@ -253,7 +271,7 @@ export const useSettleAccountLabels = (ids: (string | null | undefined)[]) => {
   return useCallback(
     (id: string | null | undefined) => {
       if (!id) return '—';
-      return labels.get(id) ?? `${id.slice(0, 8)}…`;
+      return labels.get(id) ?? '—';
     },
     [labels],
   );

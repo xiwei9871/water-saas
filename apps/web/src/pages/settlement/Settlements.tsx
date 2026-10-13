@@ -40,6 +40,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   DECIMAL_RULE,
   cleanBody,
   fmtDate,
@@ -154,7 +155,7 @@ export default function Settlements() {
         if (noRead && code) {
           const cur = genForm.getFieldValue('estimateReason');
           if (!cur || cur === prefilledReasonRef.current) {
-            const text = `未抄见（${EXCEPTION_CODE_LABELS[code]}），按预估口径结算`;
+            const text = `未抄见（${enumLabel(EXCEPTION_CODE_LABELS, code)}），按预估口径结算`;
             genForm.setFieldValue('estimateReason', text);
             prefilledReasonRef.current = text;
           }
@@ -430,9 +431,7 @@ export default function Settlements() {
       key: 'waterAccountId',
       width: 150,
       render: (id: string, r: ConsumptionSettlement) => (
-        <Tooltip title={id}>
-          <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? `${id.slice(0, 8)}…`}</span>
-        </Tooltip>
+        <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? '—'}</span>
       ),
     },
     {
@@ -457,7 +456,7 @@ export default function Settlements() {
       render: (_: unknown, r: ConsumptionSettlement) =>
         r.isEstimated ? (
           <Tag color="orange">
-            预估{r.estimateMethod ? `（${ESTIMATE_METHOD_LABELS[r.estimateMethod]}）` : ''}
+            预估{r.estimateMethod ? `（${enumLabel(ESTIMATE_METHOD_LABELS, r.estimateMethod)}）` : ''}
           </Tag>
         ) : (
           <Tag color="green">实读</Tag>
@@ -477,7 +476,7 @@ export default function Settlements() {
       key: 'status',
       width: 90,
       render: (s: SettlementStatus) => (
-        <Tag color={SETTLEMENT_STATUS_COLORS[s]}>{SETTLEMENT_STATUS_LABELS[s]}</Tag>
+        <Tag color={SETTLEMENT_STATUS_COLORS[s]}>{enumLabel(SETTLEMENT_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -525,12 +524,7 @@ export default function Settlements() {
       title: '表号',
       key: 'meterNo',
       width: 120,
-      render: (_: unknown, c: ConsumptionComponent) =>
-        c.meterNo ?? (
-          <Tooltip title={c.installationId}>
-            <span style={{ fontFamily: 'monospace' }}>{c.installationId.slice(0, 8)}…</span>
-          </Tooltip>
-        ),
+      render: (_: unknown, c: ConsumptionComponent) => c.meterNo ?? '—',
     },
     {
       title: '来源',
@@ -547,7 +541,7 @@ export default function Settlements() {
             <Tag color="cyan">抄表员估水</Tag>
           </Tooltip>
         ) : (
-          <Tag color={COMPONENT_SOURCE_COLORS[t]}>{COMPONENT_SOURCE_LABELS[t]}</Tag>
+          <Tag color={COMPONENT_SOURCE_COLORS[t]}>{enumLabel(COMPONENT_SOURCE_LABELS, t)}</Tag>
         ),
     },
     {
@@ -647,7 +641,7 @@ export default function Settlements() {
             style={{ width: 100 }}
             options={(['DRAFT', 'FINAL'] as const).map((s) => ({
               value: s,
-              label: SETTLEMENT_STATUS_LABELS[s],
+              label: enumLabel(SETTLEMENT_STATUS_LABELS, s),
             }))}
             value={status}
             onChange={(v) => {
@@ -744,7 +738,7 @@ export default function Settlements() {
                   label: '状态',
                   children: (
                     <Tag color={SETTLEMENT_STATUS_COLORS[detail.status]}>
-                      {SETTLEMENT_STATUS_LABELS[detail.status]}
+                      {enumLabel(SETTLEMENT_STATUS_LABELS, detail.status)}
                     </Tag>
                   ),
                 },
@@ -788,7 +782,7 @@ export default function Settlements() {
                           ? detail.estimateMethod === 'MANUAL' &&
                             detail.components.some((c) => c.sourceReadingId)
                             ? '抄表员预计用量'
-                            : ESTIMATE_METHOD_LABELS[detail.estimateMethod]
+                            : enumLabel(ESTIMATE_METHOD_LABELS, detail.estimateMethod)
                           : '—',
                       },
                       {
@@ -893,7 +887,7 @@ export default function Settlements() {
                   message={
                     preview.suggestedUsage === null
                       ? '无历史实读用量，建议手工填写用量'
-                      : `建议用量 ${preview.suggestedUsage}（${ESTIMATE_METHOD_LABELS[preview.method]}）`
+                      : `建议用量 ${preview.suggestedUsage}（${enumLabel(ESTIMATE_METHOD_LABELS, preview.method)}）`
                   }
                   description={
                     preview.basis.historyUsageQtys.length > 0

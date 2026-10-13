@@ -41,6 +41,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   cleanBody,
   fmtDate,
   fmtTime,
@@ -158,7 +159,7 @@ export default function Tariffs() {
   const feeItemLabel = useCallback(
     (id: string) => {
       const f = feeItems.find((x) => x.id === id);
-      return f ? `${f.name}（${f.code}）` : `${id.slice(0, 8)}…`;
+      return f ? `${f.name}（${f.code}）` : '—';
     },
     [feeItems],
   );
@@ -497,7 +498,7 @@ export default function Tariffs() {
       dataIndex: 'usageCategory',
       key: 'usageCategory',
       width: 110,
-      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+      render: (v: string) => enumLabel(USAGE_CATEGORY_LABELS, v),
     },
     {
       title: '生效区间',
@@ -513,7 +514,7 @@ export default function Tariffs() {
       key: 'status',
       width: 110,
       render: (s: TariffStatus) => (
-        <Tag color={TARIFF_STATUS_COLORS[s]}>{TARIFF_STATUS_LABELS[s]}</Tag>
+        <Tag color={TARIFF_STATUS_COLORS[s]}>{enumLabel(TARIFF_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -588,7 +589,7 @@ export default function Tariffs() {
 
   const feeItemOptions = feeItems.map((f) => ({
     value: f.id,
-    label: `${f.name}（${f.code} · ${CALC_TYPE_LABELS[f.calcType]}）`,
+    label: `${f.name}（${f.code} · ${enumLabel(CALC_TYPE_LABELS, f.calcType)}）`,
   }));
 
   /** 阶梯编辑器 —— create/edit/newVersion 共用（groups Form.List）。 */
@@ -736,7 +737,7 @@ export default function Tariffs() {
             style={{ width: 130 }}
             options={(['DRAFT', 'ACTIVE', 'RETIRED'] as const).map((s) => ({
               value: s,
-              label: TARIFF_STATUS_LABELS[s],
+              label: enumLabel(TARIFF_STATUS_LABELS, s),
             }))}
             value={status}
             onChange={(v) => {
@@ -925,15 +926,14 @@ export default function Tariffs() {
                   key: 'uc',
                   label: '用水类别',
                   children:
-                    USAGE_CATEGORY_LABELS[detail.usageCategory] ??
-                    detail.usageCategory,
+                    enumLabel(USAGE_CATEGORY_LABELS, detail.usageCategory),
                 },
                 {
                   key: 'status',
                   label: '状态',
                   children: (
                     <Tag color={TARIFF_STATUS_COLORS[detail.status]}>
-                      {TARIFF_STATUS_LABELS[detail.status]}
+                      {enumLabel(TARIFF_STATUS_LABELS, detail.status)}
                     </Tag>
                   ),
                 },

@@ -546,6 +546,10 @@ export class AnalysisService {
       const ar0 = ar[0]?.amount ?? 0n;
       const soldQtyNum = Number(soldQty[0]?.qty ?? '0');
       const collectedByOrgMap = new Map(collectedByOrg.map((r) => [r.org, r.collected]));
+      // 回收率护栏：当期实收（窗口内销账）> 本期应收 = 数据异常
+      // （负应收期 ar0<0 由前端专项提示，不算此异常）。
+      const currentCollected = allocSplit[0]?.current ?? 0n;
+      const recoveryAnomaly = ar0 > 0n && currentCollected > ar0;
       const cumAr = await tx.$queryRaw<{ amount: bigint | null }[]>`
         SELECT sum(b.total_amount)::bigint AS amount FROM bill b
         WHERE b.tenant_id = ${ctx.tenantId}::uuid
@@ -564,9 +568,10 @@ export class AnalysisService {
           SOLD_QTY_TARGET_RATE: { value: null, reason: unavailable.get('SOLD_QTY_TARGET_RATE') },
           AR_AMOUNT: ar0,
           COLLECTED: collected[0]?.amount ?? 0n,
-          CURRENT_COLLECTED: allocSplit[0]?.current ?? 0n,
+          CURRENT_COLLECTED: currentCollected,
           ARREARS_COLLECTED: allocSplit[0]?.arrears ?? 0n,
-          RECOVERY_RATE: ratio(allocSplit[0]?.current ?? 0n, ar0),
+          RECOVERY_RATE: recoveryAnomaly ? null : ratio(currentCollected, ar0),
+          RECOVERY_RATE_ANOMALY: recoveryAnomaly,
           ARREARS_RECOVERY_RATE: ratio(allocSplit[0]?.arrears ?? 0n, arrearsStart),
           ARREARS_TOTAL: arrearsEnd,
           ARREARS_RATE: ratio(arrearsEnd, cumAr[0]?.amount ?? 0n),

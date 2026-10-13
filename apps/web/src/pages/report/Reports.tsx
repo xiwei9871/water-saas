@@ -24,7 +24,7 @@ import type {
   RecoveryRateReport,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtCent, fmtPeriod, USAGE_CATEGORY_LABELS } from '../common';
+import { enumLabel, fmtCent, fmtPeriod, USAGE_CATEGORY_LABELS } from '../common';
 import { OrgUnitTreeSelect, ReadingBookSelect } from '../pickers';
 import { PAY_CHANNEL_LABELS } from '../payment/common';
 
@@ -201,12 +201,11 @@ export default function Reports({ kind }: { kind: ReportKind }) {
       title: '收费员',
       key: 'cashier',
       width: 160,
-      render: (_: unknown, r: CashierDailyRow) =>
-        r.name ?? `${r.cashierId.slice(0, 8)}…`,
+      render: (_: unknown, r: CashierDailyRow) => r.name ?? '—',
     },
     ...CHANNELS.map(
       (c): ColumnsType<CashierDailyRow>[number] => ({
-        title: PAY_CHANNEL_LABELS[c],
+        title: enumLabel(PAY_CHANNEL_LABELS, c),
         key: c,
         width: 150,
         align: 'right',
@@ -243,7 +242,7 @@ export default function Reports({ kind }: { kind: ReportKind }) {
       dataIndex: 'channel',
       key: 'channel',
       width: 140,
-      render: (c: PayChannel) => PAY_CHANNEL_LABELS[c],
+      render: (c: PayChannel) => enumLabel(PAY_CHANNEL_LABELS, c),
     },
     { title: '笔数', dataIndex: 'count', key: 'count', width: 100, align: 'right' },
     {
@@ -408,7 +407,7 @@ export default function Reports({ kind }: { kind: ReportKind }) {
                 title: '用水类别',
                 dataIndex: 'category',
                 key: 'category',
-                render: (c: string) => USAGE_CATEGORY_LABELS[c] ?? c,
+                render: (c: string) => enumLabel(USAGE_CATEGORY_LABELS, c),
               },
               { title: '账单数', dataIndex: 'count', key: 'count', width: 120, align: 'right' },
               {
@@ -531,11 +530,15 @@ export default function Reports({ kind }: { kind: ReportKind }) {
               value={recovery?.rate === null || recovery === null || Number(recovery.billed) < 0 ? '—' : `${(Number(recovery.rate) * 100).toFixed(2)}%`}
               valueStyle={{ fontSize: 32 }}
             />
-            {recovery !== null && Number(recovery.billed) < 0 && (
+            {recovery?.anomaly && (
+              <Alert type="error" showIcon message="数据异常：窗口内销账超过应收"
+                description={`窗口内销账 ${fmtCent(recovery.anomaly.allocatedInWindow)} > 应收 ${fmtCent(recovery.anomaly.billed)}，回收率不展示。请核查账单与收款分摊数据。`} />
+            )}
+            {!recovery?.anomaly && recovery !== null && Number(recovery.billed) < 0 && (
               <Alert type="warning" showIcon message="净应收为负，本期回收率不适用"
                 description="本期调减金额大于正常应收。请结合应收、实收金额或截止月累计口径查看，不宜用负比例评价收缴表现。" />
             )}
-            {recovery?.rate === null && recovery !== null && (
+            {!recovery?.anomaly && recovery?.rate === null && recovery !== null && Number(recovery.billed) === 0 && (
               <Tag color="orange">应收为 0，回收率无意义</Tag>
             )}
           </Card>

@@ -25,6 +25,7 @@ import { api, apiErrorText } from '../../api/client';
 import type { Customer, CustomerDetail, WaterAccountRef } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   CUST_TYPE_LABELS,
   USAGE_CATEGORY_LABELS,
   cleanBody,
@@ -196,7 +197,7 @@ export default function Customers() {
       width: 80,
       render: (t: Customer['custType']) => (
         <Tag color={t === 'ORG' ? 'blue' : 'default'}>
-          {CUST_TYPE_LABELS[t]}
+          {enumLabel(CUST_TYPE_LABELS, t)}
         </Tag>
       ),
     },
@@ -257,7 +258,7 @@ export default function Customers() {
       title: '用水类别',
       dataIndex: 'usageCategory',
       key: 'usageCategory',
-      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+      render: (v: string) => enumLabel(USAGE_CATEGORY_LABELS, v),
     },
     {
       title: '状态',
@@ -365,7 +366,7 @@ export default function Customers() {
             <Select
               options={(['PERSONAL', 'ORG'] as const).map((t) => ({
                 value: t,
-                label: CUST_TYPE_LABELS[t],
+                label: enumLabel(CUST_TYPE_LABELS, t),
               }))}
             />
           </Form.Item>
@@ -404,7 +405,7 @@ export default function Customers() {
                 {
                   key: 'type',
                   label: '类型',
-                  children: CUST_TYPE_LABELS[detail.custType],
+                  children: enumLabel(CUST_TYPE_LABELS, detail.custType),
                 },
                 {
                   key: 'id',

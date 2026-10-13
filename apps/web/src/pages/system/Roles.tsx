@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { DataScope, Permission, Role } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import { enumLabel } from '../common';
 
 const SCOPE_LABELS: Record<DataScope, string> = {
   ALL: '全部数据',
@@ -178,7 +179,7 @@ export default function Roles() {
       dataIndex: 'dataScope',
       key: 'dataScope',
       width: 140,
-      render: (s: DataScope) => <Tag>{SCOPE_LABELS[s]}</Tag>,
+      render: (s: DataScope) => <Tag>{enumLabel(SCOPE_LABELS, s)}</Tag>,
     },
     {
       title: '权限',
@@ -300,7 +301,7 @@ export default function Roles() {
             <Select
               options={(['ALL', 'ORG_SUBTREE', 'SELF'] as const).map((s) => ({
                 value: s,
-                label: `${SCOPE_LABELS[s]}（${s}）`,
+                label: `${enumLabel(SCOPE_LABELS, s)}（${s}）`,
               }))}
             />
           </Form.Item>

@@ -41,6 +41,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   DECIMAL_RULE,
   cleanBody,
   fmtDate,
@@ -158,10 +159,6 @@ export default function MeterReadings() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  const staffName = useCallback((id: string | null) => {
-    if (!id) return '—';
-    return `${id.slice(0, 8)}…`;
-  }, []);
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -302,7 +299,7 @@ export default function MeterReadings() {
       key: 'resultType',
       width: 90,
       render: (t: ReadResultType) => (
-        <Tag color={RESULT_TYPE_COLORS[t]}>{RESULT_TYPE_LABELS[t]}</Tag>
+        <Tag color={RESULT_TYPE_COLORS[t]}>{enumLabel(RESULT_TYPE_LABELS, t)}</Tag>
       ),
     },
     {
@@ -313,7 +310,7 @@ export default function MeterReadings() {
         r.resultType === 'NO_READ' ? (
           <Space size={4} wrap>
             <Tag color="orange">
-              {r.exceptionCode ? EXCEPTION_CODE_LABELS[r.exceptionCode] : r.exceptionCode}
+              {r.exceptionCode ? enumLabel(EXCEPTION_CODE_LABELS, r.exceptionCode) : r.exceptionCode}
             </Tag>
             {r.estimateQty != null && (
               <Tooltip title="抄表员预计用量，非表码">
@@ -336,9 +333,9 @@ export default function MeterReadings() {
       width: 100,
       render: (_: unknown, r: MeterReading) => (
         <Tooltip
-          title={r.qcAt ? `质检人 ${(r.qcByName ?? staffName(r.qcBy))} · ${fmtTime(r.qcAt)}` : undefined}
+          title={r.qcAt ? `质检人 ${(r.qcByName ?? '—')} · ${fmtTime(r.qcAt)}` : undefined}
         >
-          <Tag color={QC_STATUS_COLORS[r.qcStatus]}>{QC_STATUS_LABELS[r.qcStatus]}</Tag>
+          <Tag color={QC_STATUS_COLORS[r.qcStatus]}>{enumLabel(QC_STATUS_LABELS, r.qcStatus)}</Tag>
         </Tooltip>
       ),
     },
@@ -347,7 +344,7 @@ export default function MeterReadings() {
       dataIndex: 'source',
       key: 'source',
       width: 90,
-      render: (s: MeterReading['source']) => <Tag>{READ_SOURCE_LABELS[s]}</Tag>,
+      render: (s: MeterReading['source']) => <Tag>{enumLabel(READ_SOURCE_LABELS, s)}</Tag>,
     },
     {
       title: '更正链',
@@ -373,7 +370,7 @@ export default function MeterReadings() {
       dataIndex: 'operatorId',
       key: 'operatorId',
       width: 100,
-      render: (_: unknown, r: MeterReading) => r.operatorName ?? staffName(r.operatorId),
+      render: (_: unknown, r: MeterReading) => r.operatorName ?? '—',
     },
     {
       title: '录入时间',
@@ -509,7 +506,7 @@ export default function MeterReadings() {
             style={{ width: 110 }}
             options={(['ACTUAL', 'REMOTE', 'NO_READ'] as const).map((t) => ({
               value: t,
-              label: RESULT_TYPE_LABELS[t],
+              label: enumLabel(RESULT_TYPE_LABELS, t),
             }))}
             value={resultType}
             onChange={(v) => {
@@ -522,7 +519,7 @@ export default function MeterReadings() {
             placeholder="质检状态"
             style={{ width: 120 }}
             options={(['PENDING', 'PASSED', 'REJECTED', 'MANUAL_REVIEW'] as const).map(
-              (s) => ({ value: s, label: QC_STATUS_LABELS[s] }),
+              (s) => ({ value: s, label: enumLabel(QC_STATUS_LABELS, s) }),
             )}
             value={qcStatus}
             onChange={(v) => {
@@ -585,7 +582,7 @@ export default function MeterReadings() {
             type="info"
             showIcon
             style={{ marginBottom: 16 }}
-            message={`原读数：${supersedeTarget.readingValue ?? '—'}（${RESULT_TYPE_LABELS[supersedeTarget.resultType]} · ${fmtPeriod(supersedeTarget.period)}）`}
+            message={`原读数：${supersedeTarget.readingValue ?? '—'}（${enumLabel(RESULT_TYPE_LABELS, supersedeTarget.resultType)} · ${fmtPeriod(supersedeTarget.period)}）`}
           />
         )}
         <Form form={supersedeForm} layout="vertical">
@@ -688,11 +685,11 @@ export default function MeterReadings() {
                 children: (
                   <Space size={4}>
                     <Tag color={RESULT_TYPE_COLORS[detail.resultType]}>
-                      {RESULT_TYPE_LABELS[detail.resultType]}
+                      {enumLabel(RESULT_TYPE_LABELS, detail.resultType)}
                     </Tag>
                     {detail.resultType === 'NO_READ'
                       ? detail.exceptionCode
-                        ? EXCEPTION_CODE_LABELS[detail.exceptionCode]
+                        ? enumLabel(EXCEPTION_CODE_LABELS, detail.exceptionCode)
                         : '—'
                       : (detail.readingValue ?? '—')}
                   </Space>
@@ -706,17 +703,17 @@ export default function MeterReadings() {
                 children: (
                   <Space size={4}>
                     <Tag color={QC_STATUS_COLORS[detail.qcStatus]}>
-                      {QC_STATUS_LABELS[detail.qcStatus]}
+                      {enumLabel(QC_STATUS_LABELS, detail.qcStatus)}
                     </Tag>
                     {detail.qcAt &&
-                      `${(detail.qcByName ?? staffName(detail.qcBy))} · ${fmtTime(detail.qcAt)}`}
+                      `${(detail.qcByName ?? '—')} · ${fmtTime(detail.qcAt)}`}
                   </Space>
                 ),
               },
               {
                 key: 'source',
                 label: '来源',
-                children: <Tag>{READ_SOURCE_LABELS[detail.source]}</Tag>,
+                children: <Tag>{enumLabel(READ_SOURCE_LABELS, detail.source)}</Tag>,
               },
               {
                 key: 'tech',
@@ -747,7 +744,7 @@ export default function MeterReadings() {
                   </Space>
                 ),
               },
-              { key: 'operator', label: '抄表人', children: detail.operatorName ?? staffName(detail.operatorId) },
+              { key: 'operator', label: '抄表人', children: detail.operatorName ?? '—' },
               { key: 'photo', label: '照片凭证', children: detail.photoRef ?? '—' },
               { key: 'remark', label: '备注', children: detail.remark ?? '—' },
               { key: 'created', label: '录入时间', children: fmtTime(detail.createdAt) },

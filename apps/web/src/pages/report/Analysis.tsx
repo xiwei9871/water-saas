@@ -2,6 +2,7 @@ import { SearchOutlined } from '@ant-design/icons';
 import {
   App as AntdApp,
   Button,
+  Alert,
   Card,
   DatePicker,
   Descriptions,
@@ -14,7 +15,7 @@ import {
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
-import { fmtCent, fmtDate, fmtPeriod, USAGE_CATEGORY_LABELS } from '../common';
+import { enumLabel, fmtCent, fmtDate, fmtPeriod, USAGE_CATEGORY_LABELS } from '../common';
 import { PAY_CHANNEL_LABELS } from '../payment/common';
 
 export type AnalysisKind = 'ops-daily' | 'analysis-monthly' | 'analysis-yearly';
@@ -170,7 +171,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
             key: 'channel',
             dataIndex: 'channel',
             title: '渠道',
-            render: (v) => PAY_CHANNEL_LABELS[v as keyof typeof PAY_CHANNEL_LABELS] ?? v,
+            render: (v) => enumLabel(PAY_CHANNEL_LABELS, v as keyof typeof PAY_CHANNEL_LABELS),
           },
           { key: 'amount', dataIndex: 'amount', title: '实收(元)', align: 'right', render: yuan },
           { key: 'cnt', dataIndex: 'cnt', title: '笔数', align: 'right' },
@@ -205,7 +206,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
             key: 'channel',
             dataIndex: 'channel',
             title: '渠道',
-            render: (v) => PAY_CHANNEL_LABELS[v as keyof typeof PAY_CHANNEL_LABELS] ?? v,
+            render: (v) => enumLabel(PAY_CHANNEL_LABELS, v as keyof typeof PAY_CHANNEL_LABELS),
           },
         ]}
         dataSource={(anomalies.bigReversals ?? []) as Row[]}
@@ -255,6 +256,15 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
   const aging = (data?.byAging ?? {}) as Row;
   return (
     <>
+      {t.RECOVERY_RATE_ANOMALY === true && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="数据异常：当期实收超过本期应收，水费回收率不展示"
+          description="窗口内销账金额大于本期应收，属于不应发生的数据状态。请核查账单与收款分摊数据。"
+        />
+      )}
       <Space size="large" wrap>
         {MONTHLY_METRICS.map((m) => (
           <Stat key={m.key} title={m.title}>
@@ -273,7 +283,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
             key: 'category',
             dataIndex: 'category',
             title: '用水类别',
-            render: (v) => USAGE_CATEGORY_LABELS[v as string] ?? v,
+            render: (v) => enumLabel(USAGE_CATEGORY_LABELS, v as string),
           },
           { key: 'billed', dataIndex: 'billed', title: '应收(元)', align: 'right', render: yuan },
           { key: 'qty', dataIndex: 'qty', title: '售水量(m³)', align: 'right', render: qty },
@@ -324,7 +334,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
             key: 'channel',
             dataIndex: 'channel',
             title: '渠道',
-            render: (v) => PAY_CHANNEL_LABELS[v as keyof typeof PAY_CHANNEL_LABELS] ?? v,
+            render: (v) => enumLabel(PAY_CHANNEL_LABELS, v as keyof typeof PAY_CHANNEL_LABELS),
           },
           { key: 'amount', dataIndex: 'amount', title: '实收(元)', align: 'right', render: yuan },
           { key: 'cnt', dataIndex: 'cnt', title: '笔数', align: 'right' },
@@ -379,7 +389,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
             key: 'channel',
             dataIndex: 'channel',
             title: '渠道',
-            render: (v) => PAY_CHANNEL_LABELS[v as keyof typeof PAY_CHANNEL_LABELS] ?? v,
+            render: (v) => enumLabel(PAY_CHANNEL_LABELS, v as keyof typeof PAY_CHANNEL_LABELS),
           },
         ]}
         dataSource={(lists.reversalList ?? []) as Row[]}
@@ -514,7 +524,7 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
             key: 'channel',
             dataIndex: 'channel',
             title: '渠道',
-            render: (v) => PAY_CHANNEL_LABELS[v as keyof typeof PAY_CHANNEL_LABELS] ?? v,
+            render: (v) => enumLabel(PAY_CHANNEL_LABELS, v as keyof typeof PAY_CHANNEL_LABELS),
           },
           { key: 'amount', dataIndex: 'amount', title: '净额(元)', align: 'right', render: yuan },
           { key: 'cnt', dataIndex: 'cnt', title: '笔数', align: 'right' },

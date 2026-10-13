@@ -26,7 +26,7 @@ import type {
   RemoteSource,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtTime } from '../common';
+import { enumLabel, fmtTime } from '../common';
 
 const STATUS_LABELS: Record<RemoteEventStatus, string> = {
   RECEIVED: '已接收',
@@ -169,7 +169,7 @@ export default function RemoteEvents() {
       dataIndex: 'processingStatus',
       width: 100,
       render: (s: RemoteEventStatus) => (
-        <Tag color={STATUS_COLORS[s]}>{STATUS_LABELS[s] ?? s}</Tag>
+        <Tag color={STATUS_COLORS[s]}>{enumLabel(STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -279,7 +279,7 @@ export default function RemoteEvents() {
             <Descriptions size="small" column={2} bordered>
               <Descriptions.Item label="状态">
                 <Tag color={STATUS_COLORS[detail.processingStatus]}>
-                  {STATUS_LABELS[detail.processingStatus]}
+                  {enumLabel(STATUS_LABELS, detail.processingStatus)}
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="当前问题">{detail.currentIssueCode ?? '—'}</Descriptions.Item>
@@ -293,7 +293,7 @@ export default function RemoteEvents() {
               <Descriptions.Item label="解析绑定">{detail.resolvedBindingId ?? '—'}</Descriptions.Item>
               {detail.reading && (
                 <Descriptions.Item label="生成抄表" span={2}>
-                  {detail.reading.id.slice(0, 8)}… · {detail.reading.readingValue} · QC{' '}
+                  读数 {detail.reading.readingValue} m³ · QC{' '}
                   {detail.reading.qcStatus}
                 </Descriptions.Item>
               )}
@@ -334,8 +334,8 @@ export default function RemoteEvents() {
                   <div>
                     <div>
                       <b>{log.action}</b>
-                      {log.fromStatus && ` ${STATUS_LABELS[log.fromStatus] ?? log.fromStatus}`}
-                      {log.toStatus && ` → ${STATUS_LABELS[log.toStatus] ?? log.toStatus}`}
+                      {log.fromStatus && ` ${enumLabel(STATUS_LABELS, log.fromStatus)}`}
+                      {log.toStatus && ` → ${enumLabel(STATUS_LABELS, log.toStatus)}`}
                       {log.code && <Tag style={{ marginLeft: 6 }}>{log.code}</Tag>}
                     </div>
                     {log.message && <div style={{ color: '#888' }}>{log.message}</div>}

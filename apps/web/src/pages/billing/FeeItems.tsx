@@ -20,7 +20,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { CalcType, FeeItem, FeeItemKind } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { cleanBody, fmtTime, newIdemKey } from '../common';
+import {
+  enumLabel,
+  cleanBody,
+  fmtTime,
+  newIdemKey,
+} from '../common';
 import { CALC_TYPE_LABELS } from './common';
 
 interface CreateFormValues {
@@ -151,7 +156,7 @@ export default function FeeItems() {
       dataIndex: 'calcType',
       key: 'calcType',
       width: 120,
-      render: (t: CalcType) => <Tag color="blue">{CALC_TYPE_LABELS[t]}</Tag>,
+      render: (t: CalcType) => <Tag color="blue">{enumLabel(CALC_TYPE_LABELS, t)}</Tag>,
     },
     {
       title: '类别',
@@ -160,7 +165,7 @@ export default function FeeItems() {
       width: 90,
       render: (k: FeeItemKind | undefined) => (
         <Tag color={k === 'AGENCY' ? 'orange' : 'default'}>
-          {FEE_KIND_LABELS[k ?? 'WATER_FEE']}
+          {enumLabel(FEE_KIND_LABELS, k ?? 'WATER_FEE')}
         </Tag>
       ),
     },
@@ -206,7 +211,7 @@ export default function FeeItems() {
             style={{ width: 130 }}
             options={(['PER_QTY', 'FIXED', 'PERCENT'] as const).map((t) => ({
               value: t,
-              label: CALC_TYPE_LABELS[t],
+              label: enumLabel(CALC_TYPE_LABELS, t),
             }))}
             value={calcType}
             onChange={(v) => {
@@ -285,7 +290,7 @@ export default function FeeItems() {
               disabled={modal?.kind === 'edit'}
               options={(['PER_QTY', 'FIXED', 'PERCENT'] as const).map((t) => ({
                 value: t,
-                label: CALC_TYPE_LABELS[t],
+                label: enumLabel(CALC_TYPE_LABELS, t),
               }))}
             />
           </Form.Item>
@@ -298,7 +303,7 @@ export default function FeeItems() {
             <Select
               options={(['WATER_FEE', 'AGENCY', 'OTHER'] as const).map((k) => ({
                 value: k,
-                label: FEE_KIND_LABELS[k],
+                label: enumLabel(FEE_KIND_LABELS, k),
               }))}
             />
           </Form.Item>

@@ -15,7 +15,6 @@ import {
   Spin,
   Table,
   Tag,
-  Tooltip,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -29,7 +28,12 @@ import type {
   Receipt,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtCent, fmtTime, newIdemKey } from '../common';
+import {
+  enumLabel,
+  fmtCent,
+  fmtTime,
+  newIdemKey,
+} from '../common';
 import { SettleAccountLookupSelect, StaffLookupSelect } from '../pickers';
 import {
   PAY_CHANNEL_COLORS,
@@ -40,14 +44,7 @@ import {
   PREPAY_ENTRY_LABELS,
 } from './common';
 
-const shortId = (id: string | null | undefined) =>
-  id ? (
-    <Tooltip title={id}>
-      <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-    </Tooltip>
-  ) : (
-    '—'
-  );
+
 
 /**
  * 收款记录（Payment）：列表 + 过滤 + 详情抽屉（分摊明细 + 收据）+
@@ -178,10 +175,10 @@ export default function Payments() {
         s === 'PREPAYMENT' ? <Tag color="blue">预存</Tag> : <Tag>现金</Tag>,
     },
     {
-      title: '账单 ID',
-      dataIndex: 'billId',
-      key: 'billId',
-      render: shortId,
+      title: '账单',
+      dataIndex: 'billLabel',
+      key: 'billLabel',
+      render: (v: string | null) => v ?? '—',
     },
     {
       title: '分摊金额',
@@ -209,14 +206,14 @@ export default function Payments() {
       render: (_: unknown, r: Payment) =>
         r.settleNo
           ? `${r.settleNo}${r.settleName ? ` · ${r.settleName}` : ''}`
-          : shortId(r.settleAccountId),
+          : '—',
     },
     {
       title: '收费员',
       dataIndex: 'cashierName',
       key: 'cashierName',
       width: 150,
-      render: (v: string | null, r: Payment) => v ?? shortId(r.cashierId),
+      render: (v: string | null) => v ?? '—',
     },
     {
       title: '渠道',
@@ -224,7 +221,7 @@ export default function Payments() {
       key: 'channel',
       width: 100,
       render: (c: PayChannel) => (
-        <Tag color={PAY_CHANNEL_COLORS[c]}>{PAY_CHANNEL_LABELS[c]}</Tag>
+        <Tag color={PAY_CHANNEL_COLORS[c]}>{enumLabel(PAY_CHANNEL_LABELS, c)}</Tag>
       ),
     },
     {
@@ -246,7 +243,7 @@ export default function Payments() {
       width: 130,
       render: (s: PaymentStatus, r: Payment) => (
         <Space size={4}>
-          <Tag color={PAYMENT_STATUS_COLORS[s]}>{PAYMENT_STATUS_LABELS[s]}</Tag>
+          <Tag color={PAYMENT_STATUS_COLORS[s]}>{enumLabel(PAYMENT_STATUS_LABELS, s)}</Tag>
           {r.reversalOfId && <Tag color="red">红冲单</Tag>}
         </Space>
       ),
@@ -320,7 +317,7 @@ export default function Payments() {
             style={{ width: 120 }}
             options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
               value: c,
-              label: PAY_CHANNEL_LABELS[c],
+              label: enumLabel(PAY_CHANNEL_LABELS, c),
             }))}
             value={channel}
             onChange={(v) => {
@@ -335,7 +332,7 @@ export default function Payments() {
             // REVERSED 是保留态（无迁移路径，红冲以负额新单表达），不提供过滤。
             options={(['RECEIVED', 'DAY_CLOSED'] as const).map((s) => ({
               value: s,
-              label: PAYMENT_STATUS_LABELS[s],
+              label: enumLabel(PAYMENT_STATUS_LABELS, s),
             }))}
             value={status}
             onChange={(v) => {
@@ -389,7 +386,7 @@ export default function Payments() {
                   label: '状态',
                   children: (
                     <Tag color={PAYMENT_STATUS_COLORS[detail.status]}>
-                      {PAYMENT_STATUS_LABELS[detail.status]}
+                      {enumLabel(PAYMENT_STATUS_LABELS, detail.status)}
                     </Tag>
                   ),
                 },
@@ -398,19 +395,19 @@ export default function Payments() {
                   label: '结算户',
                   children: detail.settleNo
                     ? `${detail.settleNo}${detail.settleName ? ` · ${detail.settleName}` : ''}`
-                    : shortId(detail.settleAccountId),
+                    : '—',
                 },
                 {
                   key: 'cashier',
                   label: '收费员',
-                  children: detail.cashierName ?? shortId(detail.cashierId),
+                  children: detail.cashierName ?? '—',
                 },
                 {
                   key: 'channel',
                   label: '渠道',
                   children: (
                     <Tag color={PAY_CHANNEL_COLORS[detail.channel]}>
-                      {PAY_CHANNEL_LABELS[detail.channel]}
+                      {enumLabel(PAY_CHANNEL_LABELS, detail.channel)}
                     </Tag>
                   ),
                 },
@@ -422,14 +419,14 @@ export default function Payments() {
                 {
                   key: 'reversalOf',
                   label: '红冲对象',
-                  children: detail.reversalOfNo ?? (detail.reversalOfId ? shortId(detail.reversalOfId) : '—'),
+                  children: detail.reversalOfNo ?? '—',
                 },
                 {
                   key: 'dayClose',
                   label: '日结单',
                   children: detail.dayCloseDate
                     ? `${detail.dayCloseDate.slice(0, 10)} 日结单`
-                    : shortId(detail.dayCloseId),
+                    : '—',
                 },
                 {
                   key: 'receivedAt',
@@ -469,7 +466,7 @@ export default function Payments() {
                       width: 100,
                       render: (t: string) => (
                         <Tag color={PREPAY_ENTRY_COLORS[t as keyof typeof PREPAY_ENTRY_COLORS]}>
-                          {PREPAY_ENTRY_LABELS[t as keyof typeof PREPAY_ENTRY_LABELS]}
+                          {enumLabel(PREPAY_ENTRY_LABELS, t)}
                         </Tag>
                       ),
                     },
@@ -485,11 +482,7 @@ export default function Payments() {
                       key: 'ref',
                       render: (_: unknown, e: (typeof detail.prepaymentEntries)[number]) => (
                         <Space size={4}>
-                          {e.originTopUpId && (
-                            <Tooltip title={e.originTopUpId}>
-                              <Tag>关联原充值</Tag>
-                            </Tooltip>
-                          )}
+                          {e.originTopUpId && <Tag>关联原充值</Tag>}
                           {e.reason && <span style={{ fontSize: 12 }}>{e.reason}</span>}
                         </Space>
                       ),

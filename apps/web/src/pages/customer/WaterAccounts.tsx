@@ -40,6 +40,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   ACCOUNT_STATUS_LABELS,
   cleanBody,
   DECIMAL_RULE,
@@ -82,7 +83,7 @@ const EVENT_TEXT: Record<
 
 const STATUS_OPTIONS = (['NORMAL', 'SUSPENDED', 'CLOSED'] as const).map((s) => ({
   value: s,
-  label: ACCOUNT_STATUS_LABELS[s],
+  label: enumLabel(ACCOUNT_STATUS_LABELS, s),
 }));
 
 interface CreateFormValues {
@@ -629,7 +630,7 @@ export default function WaterAccounts() {
       width: 150,
       render: (v: string, row) => (
         <>
-          {USAGE_CATEGORY_LABELS[v] ?? v}
+          {enumLabel(USAGE_CATEGORY_LABELS, v)}
           {row.billable === false && (
             <Tag color="blue" style={{ marginLeft: 6 }}>
               不计费
@@ -1244,7 +1245,7 @@ export default function WaterAccounts() {
               allowClear
               options={(
                 ['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
-              ).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }))}
+              ).map((r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }))}
               placeholder="默认新装"
             />
           </Form.Item>
@@ -1344,7 +1345,7 @@ export default function WaterAccounts() {
             <Select
               allowClear
               options={(['REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const).map(
-                (r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }),
+                (r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }),
               )}
               placeholder="默认换表"
             />

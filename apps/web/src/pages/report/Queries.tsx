@@ -14,7 +14,10 @@ import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
+import { BILL_STATUS_LABELS } from '../billing/common';
 import {
+  ACCOUNT_STATUS_LABELS,
+  enumLabel,
   fmtCent,
   fmtDate,
   fmtPeriod,
@@ -26,7 +29,7 @@ import {
   OrgUnitTreeSelect,
   SettleAccountLookupSelect,
 } from '../pickers';
-import { PAY_CHANNEL_LABELS } from '../payment/common';
+import { PAY_CHANNEL_LABELS, PAYMENT_STATUS_LABELS } from '../payment/common';
 
 export type QueryKind =
   | 'accounts'
@@ -282,7 +285,7 @@ const COLUMN_DEFS: Record<QueryKind, ColumnsType<Row>> = {
       key: 'usageCategory',
       dataIndex: 'usageCategory',
       title: '用水类别',
-      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+      render: (v: string) => enumLabel(USAGE_CATEGORY_LABELS, v),
     },
     { key: 'meterNo', dataIndex: 'meterNo', title: '表号' },
     { key: 'caliber', dataIndex: 'caliber', title: '口径' },
@@ -300,8 +303,7 @@ const COLUMN_DEFS: Record<QueryKind, ColumnsType<Row>> = {
       key: 'status',
       dataIndex: 'status',
       title: '状态',
-      render: (v: string) =>
-        ({ NORMAL: '在册', SUSPENDED: '暂停', CLOSED: '销户' })[v] ?? v,
+      render: (v: string) => enumLabel(ACCOUNT_STATUS_LABELS, v),
     },
   ],
   'usage-details': [
@@ -324,7 +326,7 @@ const COLUMN_DEFS: Record<QueryKind, ColumnsType<Row>> = {
       key: 'usageCategory',
       dataIndex: 'usageCategory',
       title: '用水类别',
-      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+      render: (v: string) => enumLabel(USAGE_CATEGORY_LABELS, v),
     },
   ],
   'bill-details': [
@@ -337,7 +339,12 @@ const COLUMN_DEFS: Record<QueryKind, ColumnsType<Row>> = {
     money('adjusted', '调整/减免(元)'),
     money('allocated', '实收(元)'),
     money('remaining', '欠费(元)'),
-    { key: 'status', dataIndex: 'status', title: '状态' },
+    {
+      key: 'status',
+      dataIndex: 'status',
+      title: '状态',
+      render: (v: string) => enumLabel(BILL_STATUS_LABELS, v),
+    },
   ],
   payments: [
     { key: 'paymentNo', dataIndex: 'paymentNo', title: '流水号' },
@@ -354,12 +361,17 @@ const COLUMN_DEFS: Record<QueryKind, ColumnsType<Row>> = {
       key: 'channel',
       dataIndex: 'channel',
       title: '渠道',
-      render: (v: string) => PAY_CHANNEL_LABELS[v as keyof typeof PAY_CHANNEL_LABELS] ?? v,
+      render: (v: string) => enumLabel(PAY_CHANNEL_LABELS, v as keyof typeof PAY_CHANNEL_LABELS),
     },
     { key: 'cashierName', dataIndex: 'cashierName', title: '收费员' },
     money('amount', '金额(元)'),
     { key: 'allocPeriods', dataIndex: 'allocPeriods', title: '对应账期' },
-    { key: 'status', dataIndex: 'status', title: '状态' },
+    {
+      key: 'status',
+      dataIndex: 'status',
+      title: '状态',
+      render: (v: string) => enumLabel(PAYMENT_STATUS_LABELS, v),
+    },
   ],
   arrears: [
     { key: 'settleNo', dataIndex: 'settleNo', title: '结算户号' },

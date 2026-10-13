@@ -16,6 +16,7 @@ import type {
   WaterAccount,
 } from '../api/types';
 import {
+  enumLabel,
   ACCOUNT_STATUS_COLORS,
   ACCOUNT_STATUS_LABELS,
   INSTALLATION_STATUS_COLORS,
@@ -77,7 +78,7 @@ const withSelected = (
   labelCache: Map<string, string>,
 ): Option[] => {
   if (!value || options.some((o) => o.value === value)) return options;
-  const label = labelCache.get(value) ?? `${value.slice(0, 8)}…`;
+  const label = labelCache.get(value) ?? '—';
   return [...options, { value, label }];
 };
 
@@ -332,7 +333,7 @@ export function WaterAccountSelect({
             a.accountNo,
             a.addr,
             a.currentMeterNo ? `表 ${a.currentMeterNo}` : '无在装表',
-            USAGE_CATEGORY_LABELS[a.usageCategory] ?? a.usageCategory,
+            enumLabel(USAGE_CATEGORY_LABELS, a.usageCategory),
           ].join(' · '),
         }));
         setOptions(opts);
@@ -637,8 +638,8 @@ export function BillingRunSelect({
             value: r.id,
             label: [
               `${r.period.slice(0, 4)}-${r.period.slice(4)}`,
-              RUN_TYPE_LABELS[r.runType] ?? r.runType,
-              RUN_STATUS_LABELS[r.status] ?? r.status,
+              enumLabel(RUN_TYPE_LABELS, r.runType),
+              enumLabel(RUN_STATUS_LABELS, r.status),
               `开账${r.successCount}张`,
             ].join(' · '),
           })),
@@ -924,14 +925,14 @@ export function ReadingBookSelect({
 export function AccountStatusTag({ status }: { status: AccountStatus }) {
   return (
     <Tag color={ACCOUNT_STATUS_COLORS[status]}>
-      {ACCOUNT_STATUS_LABELS[status]}
+      {enumLabel(ACCOUNT_STATUS_LABELS, status)}
     </Tag>
   );
 }
 
 export function MeterStatusTag({ status }: { status: MeterStatus }) {
   return (
-    <Tag color={METER_STATUS_COLORS[status]}>{METER_STATUS_LABELS[status]}</Tag>
+    <Tag color={METER_STATUS_COLORS[status]}>{enumLabel(METER_STATUS_LABELS, status)}</Tag>
   );
 }
 
@@ -942,7 +943,7 @@ export function InstallationStatusTag({
 }) {
   return (
     <Tag color={INSTALLATION_STATUS_COLORS[status]}>
-      {INSTALLATION_STATUS_LABELS[status]}
+      {enumLabel(INSTALLATION_STATUS_LABELS, status)}
     </Tag>
   );
 }
