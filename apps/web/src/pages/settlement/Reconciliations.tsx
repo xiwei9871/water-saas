@@ -1,3 +1,4 @@
+import { TaskContextBanner } from '../../components/TaskContextBanner';
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -396,6 +397,7 @@ export default function Reconciliations() {
 
   return (
     <>
+      <TaskContextBanner />
       {driftHints.length > 0 && (
         <Alert
           type="warning"

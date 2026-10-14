@@ -27,6 +27,7 @@ import type {
   PaymentStatus,
   Receipt,
 } from '../../api/types';
+import { TaskContextBanner } from '../../components/TaskContextBanner';
 import { useAuth } from '../../auth/AuthContext';
 import {
   enumLabel,
@@ -286,7 +287,9 @@ export default function Payments() {
   const receipt = detail?.receipt;
 
   return (
-    <Card
+    <>
+      <TaskContextBanner />
+      <Card
       title="收款记录"
       extra={
         <Space wrap>
@@ -550,5 +553,6 @@ export default function Payments() {
         )}
       </Drawer>
     </Card>
+    </>
   );
 }

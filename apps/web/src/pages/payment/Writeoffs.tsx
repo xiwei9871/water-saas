@@ -18,6 +18,7 @@ import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
+import { TaskContextBanner } from '../../components/TaskContextBanner';
 import { useAuth } from '../../auth/AuthContext';
 import { fmtCent, fmtDate } from '../common';
 import { BillingAccountSelect, SettleAccountLookupSelect } from '../pickers';
@@ -161,7 +162,9 @@ export default function Writeoffs() {
   ];
 
   return (
-    <Card title="坏账核销">
+    <>
+      <TaskContextBanner />
+      <Card title="坏账核销">
       <Space style={{ marginBottom: 16 }} wrap>
         <Select
           allowClear
@@ -244,5 +247,6 @@ export default function Writeoffs() {
         </Form>
       </Modal>
     </Card>
+    </>
   );
 }

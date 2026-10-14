@@ -1,3 +1,4 @@
+import { TaskContextBanner } from '../../components/TaskContextBanner';
 import { DownloadOutlined, SearchOutlined } from '@ant-design/icons';
 import {
   App as AntdApp,
@@ -120,7 +121,9 @@ export default function Queries({ kind }: { kind: QueryKind }) {
   const columns: ColumnsType<Row> = COLUMN_DEFS[kind];
 
   return (
-    <Card title={TITLES[kind]}>
+    <>
+      <TaskContextBanner />
+      <Card title={TITLES[kind]}>
       <Form form={form} layout="inline" onFinish={runQuery} style={{ rowGap: 8 }}>
         {kind === 'accounts' && (
           <>
@@ -264,7 +267,8 @@ export default function Queries({ kind }: { kind: QueryKind }) {
         }}
         scroll={{ x: 'max-content' }}
       />
-    </Card>
+      </Card>
+    </>
   );
 }
 

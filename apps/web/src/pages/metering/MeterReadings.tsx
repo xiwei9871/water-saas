@@ -1,3 +1,4 @@
+import { TaskContextBanner } from '../../components/TaskContextBanner';
 import {
   CheckOutlined,
   CloseOutlined,
@@ -187,14 +188,19 @@ export default function MeterReadings() {
         { headers: { 'Idempotency-Key': newIdemKey() } },
       );
       message.success(`质检已${QC_ACTION_TEXT[action].label}`);
-      // 任务书 T10 三段式：确认触发了补差任务 → 明确告知任务已生成并通知了谁。
-      const st = (res.data as { supplementTask?: { deduped: boolean; candidates: { name: string }[] } | null })
-        .supplementTask;
+      // 任务书 T10/§1.8 三段式：有权限者「请从待办领取」，无权限者「已通知××，您无需操作」。
+      const st = (res.data as {
+        supplementTask?: { id: string; deduped: boolean; candidates: { name: string }[] } | null;
+      }).supplementTask;
       if (st) {
-        const names = st.candidates.length ? st.candidates.map((c) => c.name).join('、') : '（暂无具备权限的账号，已告警管理员）';
+        const names = st.candidates.length
+          ? st.candidates.map((c) => c.name).join('、')
+          : '（暂无具备权限的账号，已告警管理员）';
         modal.warning({
           title: '检测到【实抄止度 < 估计止度】，已生成【补差任务】',
-          content: `已${st.deduped ? '沿用既有任务并' : ''}通知具备权限的账号：${names}。结算在该任务完成前将被阻断，完成后自动解锁。`,
+          content: hasPerm('billing:write')
+            ? `该任务在您的待办中心可领取处理${st.deduped ? '（沿用既有任务）' : ''}，候选责任人：${names}。`
+            : `已${st.deduped ? '沿用既有任务并' : ''}通知具备权限的账号：${names}。您无需操作。`,
         });
       }
       await load(page, pageSize);
@@ -453,7 +459,9 @@ export default function MeterReadings() {
   ];
 
   return (
-    <Card
+    <>
+      <TaskContextBanner />
+      <Card
       title="抄表记录 / 质检"
       extra={
         <Space wrap>
@@ -763,5 +771,6 @@ export default function MeterReadings() {
         )}
       </Drawer>
     </Card>
+    </>
   );
 }

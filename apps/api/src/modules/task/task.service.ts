@@ -94,22 +94,24 @@ export class TaskService {
     requiredPerm: string,
     orgUnitId: string | null | undefined,
   ): Promise<{ id: string; name: string }[]> {
-    // 拥有 requiredPerm（或通配 *）的 ACTIVE 员工；角色 data_scope=ALL 的
-    // 不受组织限制，ORG_SUBTREE 需其 org 子树覆盖任务锚点组织。
+    // 拥有 requiredPerm（或通配 * / admin 角色）的 ACTIVE 员工：admin 角色
+    // 在登录时即被授予 '*'（auth.service loadIdentity），但 role_permission
+    // 无绑定行，候选人反查须按同一约定特判，否则管理员永远不会成为候选。
+    // 角色 data_scope=ALL 的不受组织限制，ORG_SUBTREE 需其 org 子树覆盖任务锚点组织。
     const rows = await tx.$queryRaw<
       { id: string; name: string; has_all: boolean; org_unit_id: string }[]
     >`
       SELECT DISTINCT s.id, s.name,
-             bool_or(r.data_scope = 'ALL') AS has_all,
+             bool_or(r.data_scope = 'ALL' OR r.code = 'admin') AS has_all,
              s.org_unit_id
       FROM staff s
       JOIN staff_role sr ON sr.staff_id = s.id AND sr.tenant_id = s.tenant_id
       JOIN role r ON r.id = sr.role_id AND r.tenant_id = s.tenant_id
-      JOIN role_permission rp ON rp.role_id = r.id AND rp.tenant_id = s.tenant_id
-      JOIN permission p ON p.id = rp.permission_id AND p.tenant_id = s.tenant_id
+      LEFT JOIN role_permission rp ON rp.role_id = r.id AND rp.tenant_id = s.tenant_id
+      LEFT JOIN permission p ON p.id = rp.permission_id AND p.tenant_id = s.tenant_id
       WHERE s.tenant_id = ${ctx.tenantId}::uuid
         AND s.status = 'ACTIVE'
-        AND (p.code = ${requiredPerm} OR p.code = '*')
+        AND (p.code = ${requiredPerm} OR p.code = '*' OR r.code = 'admin')
       GROUP BY s.id, s.name, s.org_unit_id`;
     if (!orgUnitId) return rows;
     const out: { id: string; name: string }[] = [];

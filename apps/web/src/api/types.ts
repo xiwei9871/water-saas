@@ -1468,11 +1468,11 @@ export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
   URGENT: '紧急',
 };
 
-/** bizType → 直达路由（{bizId} 占位替换）。与后端 task.types.ts 对齐。 */
+/** bizType → 直达路由（{bizId}/{taskId} 占位替换）。与后端 task.types.ts 对齐。 */
 export const TASK_BIZ_ROUTES: Record<string, string> = {
-  SUPPLEMENT: '/settlement/reconciliations?waterAccountId={bizId}',
-  METER_REVIEW: '/metering/readings',
-  COLLECTION: '/report/query/arrears',
-  REVERSAL_APPROVAL: '/payment/payments',
-  WRITEOFF_APPROVAL: '/payment/writeoffs',
+  SUPPLEMENT: '/settlement/reconciliations?waterAccountId={bizId}&taskId={taskId}',
+  METER_REVIEW: '/metering/readings?taskId={taskId}',
+  COLLECTION: '/report/query/arrears?taskId={taskId}',
+  REVERSAL_APPROVAL: '/payment/payments?taskId={taskId}',
+  WRITEOFF_APPROVAL: '/payment/writeoffs?taskId={taskId}',
 };

@@ -130,7 +130,7 @@ export default function Tasks() {
       message.warning('该任务类型暂无直达页面');
       return;
     }
-    navigate(tpl.replace('{bizId}', t.bizId));
+    navigate(tpl.replace('{bizId}', t.bizId).replace('{taskId}', t.id));
   };
 
   const columns: ColumnsType<TaskItem> = [
