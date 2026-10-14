@@ -467,6 +467,61 @@ describe('T13 COLLECTION + T14 REVERSAL_APPROVAL', () => {
   }, 60_000);
 });
 
+describe('T3 类型-权限映射字典改即生效（§4.2-8）', () => {
+  it('TASK_TYPE_PERM 改 perm → 新建任务候选人随之变化', async () => {
+    // 把 METER_REVIEW 映射从 metering:qc 改为 payment:write —— 应即时生效，
+    // 无需重启（resolveRule 每次直读 sys_dict）。
+    const dict = await owner.sysDict.create({
+      data: {
+        tenantId: T,
+        category: 'TASK_TYPE_PERM',
+        code: 'METER_REVIEW',
+        name: '抄表异常复核(改)',
+        seq: 1,
+        status: 'ACTIVE',
+        value: { perm: 'payment:write', dueDays: 1, priority: 'LOW' },
+      },
+    });
+    try {
+      const a = await onboard('dyn');
+      await seedReading(a, '202601', 300, 'PASSED');
+      const book = await owner.readingBook.create({
+        data: { tenantId: T, bookNo: `BKDYN${RUN}`.slice(0, 38), name: '册dyn', orgUnitId: ORG_A },
+      });
+      await owner.bookMeter.create({
+        data: { tenantId: T, bookId: book.id, waterAccountId: a.waterAccount.id, seqNo: 1 },
+      });
+      const plan = await owner.readingPlan.create({
+        data: { tenantId: T, bookId: book.id, period: '202602', planDate: new Date('2026-02-01'), status: 'OPEN' },
+      });
+      const item = await owner.readingPlanItem.create({
+        data: { tenantId: T, planId: plan.id, waterAccountId: a.waterAccount.id, seqNo: 1 },
+      });
+      const entry = await post('/meter-readings', {
+        planItemId: item.id,
+        resultType: 'ACTUAL',
+        readingValue: '100',
+        readDate: '2026-02-10',
+      });
+      expect(entry.status).toBe(201);
+      expect(entry.body.reviewTasks).toHaveLength(1);
+      const task = await owner.task.findFirstOrThrow({
+        where: { tenantId: T, type: 'METER_REVIEW', id: entry.body.reviewTasks[0].id },
+      });
+      // 映射已生效：perm/优先级/期限按字典值
+      expect(task.requiredPerm).toBe('payment:write');
+      expect(task.priority).toBe('LOW');
+      const cashierTodo = (await get('/tasks?box=todo', tokens.cashier).expect(200)).body.items;
+      expect(cashierTodo.map((t: { id: string }) => t.id)).toContain(task.id);
+      const qcTodo = (await get('/tasks?box=todo', tokens.qc).expect(200)).body.items;
+      expect(qcTodo.map((t: { id: string }) => t.id)).not.toContain(task.id);
+    } finally {
+      // 还原映射，避免影响同租户其他用例
+      await owner.sysDict.delete({ where: { tenantId_id: { tenantId: T, id: dict.id } } });
+    }
+  }, 60_000);
+});
+
 describe('T15 WRITEOFF_APPROVAL', () => {
   it('核销登记 → 审批任务', async () => {
     const a = await onboard('wo');

@@ -389,7 +389,11 @@ export class TaskService {
     });
   }
 
-  async cancel(ctx: TenantCtx, id: string, reason?: string) {
+  async cancel(ctx: TenantCtx, perms: string[] | undefined, id: string, reason?: string) {
+    // 取消是管理动作：仅 iam:write / 管理员可执行，普通候选人不能销任务。
+    if (!this.permSet(perms).has('iam:write')) {
+      throw new ForbiddenException({ code: 'TASK_CANCEL_DENIED' });
+    }
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const flipped = await tx.task.updateMany({
         where: { tenantId: ctx.tenantId, id, status: { in: ['PENDING', 'CLAIMED'] } },

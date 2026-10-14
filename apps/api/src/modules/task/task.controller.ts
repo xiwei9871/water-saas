@@ -81,11 +81,11 @@ export class TaskController {
     return this.svc.complete(currentTenant(), id, note);
   }
 
-  /** POST /tasks/:id/cancel — {reason}：取消任务（管理端 iam:write 守卫在路由层）。 */
+  /** POST /tasks/:id/cancel — {reason}：取消任务（仅 iam:write/管理员）。 */
   @Post(':id/cancel')
-  cancel(@Param('id') id: string, @Body() body: { reason?: string }) {
+  cancel(@Req() req: Request, @Param('id') id: string, @Body() body: { reason?: string }) {
     assertUuid(id, 'id');
     const reason = typeof body?.reason === 'string' ? body.reason.slice(0, 200) : undefined;
-    return this.svc.cancel(currentTenant(), id, reason);
+    return this.svc.cancel(currentTenant(), TaskController.perms(req), id, reason);
   }
 }
