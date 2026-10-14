@@ -47,18 +47,22 @@ test.describe.serial('T19 任务中心', () => {
   test('03 领取 → 完成 生命周期', async ({ page }) => {
     await loginUi(page, 'cd-water', 'cd-water');
     await page.goto('/tasks');
-    // 领取一条待办（选红冲审批，影响面最小）
-    const row = page.locator('tr', { hasText: '红冲审批' }).first();
-    await expect(row).toBeVisible();
-    await row.getByRole('button', { name: '领取' }).click();
+    // 领取任意一条可领待办（前次运行可能已消费掉特定类型，取第一行可用的）
+    const claimBtns = page.getByRole('button', { name: '领取' });
+    await expect(claimBtns.first()).toBeVisible({ timeout: 15_000 });
+    const row = page.locator('tr', { has: claimBtns.first() }).first();
+    const typeText = (await row.locator('td').first().innerText()).trim();
+    await claimBtns.first().click();
     await expect(page.getByText('已领取，开始处理')).toBeVisible();
     await shot(page, '03-claimed');
-    // 完成
-    await row.getByRole('button', { name: '完成' }).click();
+    // 完成（行内 CLAIMED 态按钮；列表刷新后重新定位）
+    const doneBtn = page.getByRole('button', { name: '完成' }).first();
+    await expect(doneBtn).toBeVisible({ timeout: 10_000 });
+    await doneBtn.click();
     await expect(page.getByText('已完成')).toBeVisible();
     // 已办箱可见
     await page.getByRole('tab', { name: '已办' }).click();
-    await expect(page.locator('tr', { hasText: '红冲审批' }).first()).toBeVisible();
+    await expect(page.locator('td', { hasText: typeText }).first()).toBeVisible();
     await shot(page, '03b-done-box');
   });
 
@@ -77,7 +81,7 @@ test.describe.serial('T19 任务中心', () => {
   });
 
   test('05 候选人视角（复核员）', async ({ page }) => {
-    await loginUi(page, 'cd-water', 'cd-water-reviewer');
+    await loginUi(page, 'cd-water', 'cd-water-cbhc');
     await page.goto('/tasks');
     await expect(page.getByRole('main').getByText('待办中心').first()).toBeVisible();
     // 复核员是 SUPPLEMENT/METER_REVIEW 候选人 → 待办里应能看到抄表复核
