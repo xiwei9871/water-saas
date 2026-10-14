@@ -1,16 +1,31 @@
 import { test, expect, measure } from './helpers/test';
 import { load, save } from './helpers/state';
 import { db } from './helpers/db';
-import { button, choose, date, evidence, login, main, month, ready, response, row } from './helpers/ui';
-import { cents, channelLabels, channels, money, transactions } from './helpers/payment';
+import { login } from './helpers/ui';
+import { cents, channels, transactions } from './helpers/payment';
+import type { Page } from '@playwright/test';
 
-// Monthly finance reports are tenant-wide in v0.1.2. Their UI has no account
-// filter. Reconcile pilot categories/accounts and assert no foreign finance
-// before comparing tenant totals; never quietly count pre-existing customers.
-test('Pilot reports: five UI reports reconcile actual dates and billing periods', async ({ page }, info) => {
+// 2026-10-14 整改后：旧五报表 UI 已删除（报表菜单仅剩日报/月报/年报分析页）。
+// 本套件保留 DB↔API 对账价值——直接打报表端点核对后端聚合与 pilot 数据，
+// UI 层覆盖由 analysis 三页 + report-rectify 巡检承担。
+
+/** 从登录态取 token 直接打 API。 */
+async function apiGet(page: Page, path: string) {
+  const base = new URL(page.url()).origin;
+  const token = await page.evaluate(() =>
+    localStorage.getItem('water-saas.accessToken'),
+  );
+  return page.request.get(`${base}/api${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// Monthly finance reports are tenant-wide in v0.1.2. Reconcile pilot
+// categories/accounts and assert no foreign finance before comparing tenant
+// totals; never quietly count pre-existing customers.
+test('Pilot reports: five report APIs reconcile actual dates and billing periods', async ({ page }, info) => {
   test.setTimeout(480_000);
   const s = load();
-  // Completed reports are queried and reconciled again: all report actions are read-only.
   test.skip(!s.stages.billing || !s.stages.payment, 'BLOCKED: billing and payments must finish before report reconciliation');
   const allPayments = transactions(s);
   const accountIds = s.people.map(p => p.waterAccount.id);
@@ -35,16 +50,15 @@ test('Pilot reports: five UI reports reconcile actual dates and billing periods'
   const monthly = [...new Set([...s.periods.slice(0, 2), ...allPayments.map(receivedMonth)])].sort();
   await login(page);
   s.reportChecks ||= [];
-  async function query(kind: string, key: string, configure: () => Promise<void>, assert: (result: any) => Promise<void>) {
+  async function query(kind: string, key: string, params: Record<string, string>, assert: (result: any) => Promise<void>) {
     await test.step(`${kind} ${key}`, async () => measure(page, `report-${kind}-${key}`, async () => {
-      await page.goto('/report/' + kind); await ready(page);
-      await configure();
-      // page initialization has settled; this response is from the real Query click.
-      const result = await response(page, '/reports/' + kind, () => button(main(page), '查询').click(), 'GET');
+      const qs = new URLSearchParams(params).toString();
+      const res = await apiGet(page, `/reports/${kind}?${qs}`);
+      expect(res.ok(), `${kind} ${key} → ${res.status()}`).toBe(true);
+      const result = await res.json();
       await assert(result);
       const record = { kind, key, result, checkedAt: new Date().toISOString() };
       s.reportChecks = s.reportChecks.filter((x: any) => !(x.kind === kind && x.key === key)); s.reportChecks.push(record); save(s);
-      await evidence(page, info, `report-${kind}-${key}`, record);
     }));
   }
   try {
@@ -58,19 +72,14 @@ test('Pilot reports: five UI reports reconcile actual dates and billing periods'
       const items = periodPlans.flatMap((p: any) => p.items);
       const bookItems = new Set(bookPlans.flatMap((p: any) => p.items.map((i: any) => i.id)));
       const readingsTaken = validReadings.filter((r: any) => bookItems.has(r.planItemId) && new Date(r.readDate).toISOString().startsWith(day)).length;
-      await query('meter-daily', `${day}-${book.bookNo}`, async () => {
-        await date(main(page).locator('.ant-picker-input input').first(), day);
-        await choose(page, main(page).getByText('按抄表册过滤（可空）', { exact: true }), `${book.name}（${book.bookNo}）`, book.name);
-      }, async result => {
-        if (!periodPlans.length && !readingsTaken) { expect(result).toEqual([]); await expect(main(page)).toContainText('当日无抄表工作记录'); return; }
+      await query('meter-daily', `${day}-${book.bookNo}`, { date: day, bookId: book.id }, async result => {
+        if (!periodPlans.length && !readingsTaken) { expect(result).toEqual([]); return; }
         expect(result).toHaveLength(1);
         expect(result[0]).toMatchObject({ bookId: book.id, plans: periodPlans.length, total: items.length, read: items.filter((i: any) => i.status === 'READ').length, noRead: items.filter((i: any) => i.status === 'NO_READ').length, pending: items.filter((i: any) => i.status === 'PENDING').length, skipped: items.filter((i: any) => i.status === 'SKIPPED').length, readingsTaken });
-        const display = row(page, book.bookNo); await expect(display).toContainText(book.name);
-        await expect(display.getByRole('cell').last()).toHaveText(String(readingsTaken));
       });
     }
     for (const day of [...new Set(allPayments.map(receivedDate))].sort()) {
-      await query('cashier-daily', day, async () => date(main(page).locator('.ant-picker-input input').first(), day), async result => {
+      await query('cashier-daily', day, { date: day }, async result => {
         const daily = allPayments.filter(p => receivedDate(p) === day);
         expect(result).toHaveLength(new Set(daily.map(p => p.cashierId)).size);
         for (const role of [s.roles.cashier1, s.roles.cashier2]) {
@@ -79,50 +88,39 @@ test('Pilot reports: five UI reports reconcile actual dates and billing periods'
           const closed = s.dayCloses.some((c: any) => c.cashierId === role.id && String(c.closeDate).startsWith(day));
           expect(record).toMatchObject({ total: { count: own.length, amount: String(sum(own)) }, closed });
           for (const channel of channels) { const payments = own.filter(p => p.channel === channel); expect(record.byChannel[channel]).toMatchObject({ count: payments.length, amount: String(sum(payments)) }); }
-          await expect(row(page, role.name)).toContainText(`${own.length} 笔 ${money(sum(own))}`);
-          await expect(row(page, role.name)).toContainText(closed ? '已日结' : '未日结');
         }
       });
     }
     for (const period of monthly) {
       const periodBills = s.bills.filter(b => b.period === period);
       const paid = allPayments.filter(p => receivedMonth(p) === period);
-      await query('ar-monthly', period, async () => date(main(page).getByPlaceholder('请选择月份', { exact: true }), month(period)), async result => {
+      await query('ar-monthly', period, { period }, async result => {
         expect(result.period).toBe(period); expect(cents(result.billed)).toBe(sum(periodBills, 'totalAmount'));
         for (const category of [...new Set(s.people.map(p => p.category))]) {
           const categoryAccounts = new Set(s.people.filter(p => p.category === category).map(p => p.waterAccount.id));
           const bills = periodBills.filter(b => categoryAccounts.has(b.waterAccountId));
           if (!bills.length) { expect(result.byCategory[category]).toBeUndefined(); continue; }
           expect(result.byCategory[category]).toMatchObject({ count: bills.length, amount: String(sum(bills, 'totalAmount')) });
-          await expect(row(page, category)).toContainText(money(sum(bills, 'totalAmount')));
         }
-        await expect(main(page).locator('.ant-descriptions')).toContainText(money(sum(periodBills, 'totalAmount')));
       });
-      await query('collected-monthly', period, async () => date(main(page).getByPlaceholder('请选择月份', { exact: true }), month(period)), async result => {
+      await query('collected-monthly', period, { period }, async result => {
         expect(result.period).toBe(period); expect(cents(result.collected)).toBe(sum(paid));
         expect(cents(result.allocated)).toBe(sum(paid.flatMap(p => p.allocs)));
         expect(result.allocated).toBe(result.collected);
-        for (const channel of channels) { const byChannel = paid.filter(p => p.channel === channel); expect(result.byChannel[channel]).toMatchObject({ count: byChannel.length, amount: String(sum(byChannel)) }); await expect(row(page, channelLabels[channel])).toContainText(money(sum(byChannel))); }
-        await expect(main(page).locator('.ant-descriptions')).toContainText(`实收合计${money(sum(paid))}`);
-        await expect(main(page).locator('.ant-descriptions')).toContainText(`销账合计（对数）${money(sum(paid))}`);
+        for (const channel of channels) { const byChannel = paid.filter(p => p.channel === channel); expect(result.byChannel[channel]).toMatchObject({ count: byChannel.length, amount: String(sum(byChannel)) }); }
       });
-      await query('recovery-rate', period, async () => date(main(page).getByPlaceholder('请选择月份', { exact: true }), month(period)), async result => {
+      await query('recovery-rate', period, { period }, async result => {
         const billed = sum(periodBills, 'totalAmount'); const collected = sum(paid);
         expect(cents(result.billed)).toBe(billed); expect(cents(result.collected)).toBe(collected);
-        if (billed === 0) { expect(result.rate).toBeNull(); await expect(main(page)).toContainText('应收为 0，回收率无意义'); }
-        else { expect(Number(result.rate)).toBeCloseTo(collected / billed, 4); if(billed<0){await expect(main(page)).toContainText('净应收为负，本期回收率不适用');}else{await expect(main(page)).toContainText(`${(Number(result.rate) * 100).toFixed(2)}%`);} }
-        await expect(main(page).locator('.ant-descriptions')).toContainText(money(billed));
-        await expect(main(page).locator('.ant-descriptions')).toContainText(money(collected));
+        if (billed === 0) { expect(result.rate).toBeNull(); }
+        else { expect(Number(result.rate)).toBeCloseTo(collected / billed, 4); }
       });
     }
     const through = monthly[monthly.length - 1];
-    await query('recovery-rate', `cumulative-${through}`, async () => {
-      await date(main(page).getByPlaceholder('请选择月份', { exact: true }), month(s.periods[0]));
-      await date(main(page).getByPlaceholder('截止月（累计口径，可空）', { exact: true }), month(through));
-    }, async result => {
+    await query('recovery-rate', `cumulative-${through}`, { period: s.periods[0], through }, async result => {
       const billed = sum(s.bills.filter(b => b.period <= through), 'totalAmount'); const collected = sum(allPayments.filter(p => receivedMonth(p) <= through));
       expect(result.through).toBe(through); expect(cents(result.billed)).toBe(billed); expect(cents(result.collected)).toBe(collected);
-      expect(Number(result.rate)).toBeCloseTo(collected / billed, 4); await expect(main(page)).toContainText(`${(Number(result.rate) * 100).toFixed(2)}%`);
+      expect(Number(result.rate)).toBeCloseTo(collected / billed, 4);
     });
     s.stages.reports = true; save(s);
   } finally { await info.attach('report-business-results', { body: JSON.stringify({ sourceCounts: { foreignBills: sources.foreignBills, foreignPayments: sources.foreignPayments }, reportChecks: s.reportChecks, unverified: s.unverified }, null, 2), contentType: 'application/json' }); }

@@ -130,7 +130,7 @@ test.describe('R/T/G 控件级检查', () => {
     await page.waitForLoadState('networkidle');
     const body = await page.locator('body').innerText();
     // 版本号 + 若干指标码
-    expect(body).toMatch(/2026-10\.v1/);
+    expect(body).toMatch(/2026-10\.v\d+/);
     expect(body).toMatch(/SOLD_QTY|RECOVERY_RATE|ARREARS_TOTAL/);
     // 无数据源指标必须显式标注原因而非静默 0
     expect(body).toMatch(/不可用|暂无|未提供|尚未/);

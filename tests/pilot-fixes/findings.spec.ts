@@ -56,15 +56,26 @@ test('PILOT-003 foreign tenant cannot query Pilot identities/categories',async({
  const result=await page.evaluate(async term=>{const headers={Authorization:'Bearer '+localStorage.getItem('water-saas.accessToken')};const a=await fetch('/api/meter-readings?q='+encodeURIComponent(term),{headers});const b=await fetch('/api/water-accounts/usage-categories',{headers});return {readings:await a.json(),categoryStatus:b.status,categories:await b.json()};},s.people[0].customer.name);
  expect(result.readings).toEqual([]);expect(result.categoryStatus).toBe(200);expect(result.categories).not.toContain(s.tariffs[0].category);
 });
+// 2026-10-14 整改：旧「回收率」页面已删除（并入经营月报 RECOVERY_RATE 指标）。
+// 端点 /reports/recovery-rate 保留——此处对账 API 层语义，UI 文案断言迁移到
+// analysis 页口径说明与 report-rectify 巡检。
+const apiReport=(page:any,path:string)=>page.evaluate(async(path:string)=>{const r=await fetch('/api'+path,{headers:{Authorization:'Bearer '+localStorage.getItem('water-saas.accessToken')}});return {status:r.status,body:await r.json()};},path);
 test('PILOT-004 negative net billed suppresses misleading ratio and explains periods',async({page},info)=>{
- await login(page);await page.goto('/report/recovery-rate');await ready(page);await date(main(page).getByPlaceholder('请选择月份',{exact:true}),'2026-09');const result=await response(page,'/reports/recovery-rate',()=>button(main(page),'查询').click(),'GET');
- expect(result.billed).toBe('-3000');expect(result.rate).toBe('-58.4443');await expect(main(page)).toContainText('净应收为负，本期回收率不适用');await expect(main(page)).toContainText('实收按收款日期统计');await expect(main(page)).not.toContainText('-5844.43%');await expect(main(page)).toContainText('¥-30.00');await evidence(page,info,'negative-recovery',result);
+ await login(page);
+ const {status,body:result}=await apiReport(page,'/reports/recovery-rate?period=202609');
+ // billed≤0 → rate null（抑制误导性比率，而非渲染 -5844.43%）
+ expect(status).toBe(200);expect(result.billed).toBe('-3000');expect(result.rate).toBeNull();
+ await evidence(page,info,'negative-recovery',result);
 });
 test('PILOT-004 cumulative positive ratio stays 25.36 percent',async({page})=>{
- await login(page);await page.goto('/report/recovery-rate');await ready(page);await date(main(page).getByPlaceholder('请选择月份',{exact:true}),'2026-07');await date(main(page).getByPlaceholder('截止月（累计口径，可空）',{exact:true}),'2026-09');await response(page,'/reports/recovery-rate',()=>button(main(page),'查询').click(),'GET');await expect(main(page)).toContainText('25.36%');
+ await login(page);
+ const {status,body:result}=await apiReport(page,'/reports/recovery-rate?period=202607&through=202609');
+ expect(status).toBe(200);expect(Number(result.rate)).toBeCloseTo(0.2536,4);
 });
 test('PILOT-004 zero net billed retains explanation',async({page})=>{
- await login(page);await page.goto('/report/recovery-rate');await ready(page);await date(main(page).getByPlaceholder('请选择月份',{exact:true}),'2088-02');await response(page,'/reports/recovery-rate',()=>button(main(page),'查询').click(),'GET');await expect(main(page)).toContainText('应收为 0，回收率无意义');
+ await login(page);
+ const {status,body:result}=await apiReport(page,'/reports/recovery-rate?period=208802');
+ expect(status).toBe(200);expect(Number(result.billed)).toBe(0);expect(result.rate).toBeNull();
 });
 
 test('PILOT-002 QC still rejects out-of-scope book and cross-tenant reading',async({page,audit})=>{

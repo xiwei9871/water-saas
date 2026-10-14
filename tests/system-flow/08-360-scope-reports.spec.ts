@@ -1,7 +1,7 @@
 import { test, expect, evidence } from './helpers/test';
 import { load, save } from './helpers/state';
 import { db } from './helpers/db';
-import { login, button, date } from './helpers/ui';
+import { login, button } from './helpers/ui';
 import { apiAs } from './helpers/api';
 
 /**
@@ -155,6 +155,9 @@ test('J8 360 / scope / reports', async ({ page, audit }, info) => {
   await evidence(page, info, 'j8-scope', { listHidden: 'SF-B-001', forbidden: b360.body });
 
   // ---------- reports reconcile (admin) ----------
+  // 2026-10-14 整改：旧五报表 UI 已删除（菜单仅剩日报/月报/年报分析页）。
+  // 报表 API 端点仍在——此处保留 DB↔API 对账，UI 覆盖由 analysis 页与
+  // report-rectify 巡检承担。
   await login(page);
 
   // 应收月报 202607：Σ bill.total_amount (non-REVERSAL, posted+)
@@ -165,15 +168,9 @@ test('J8 360 / scope / reports', async ({ page, audit }, info) => {
       select: { totalAmount: true } });
     return rows.reduce((a: bigint, r: any) => a + r.totalAmount, 0n);
   });
-  await page.goto('/report/ar-monthly');
-  await page.locator('.ant-picker input').first().fill('2026-07');
-  await page.locator('.ant-picker input').first().press('Enter');
-  const arRes = page.waitForResponse((r) =>
-    new URL(r.url()).pathname === '/api/reports/ar-monthly' && r.request().method() === 'GET');
-  await button(page, '查 询').or(button(page, '查询')).click();
-  const ar = await (await arRes).json();
-  expect(String(ar.billed)).toBe(String(billed));
-  await expect(page.getByText(cent(billed)).first()).toBeVisible();
+  const arRes = await admin.get(`/reports/ar-monthly?period=${P1}`);
+  expect(arRes.status).toBe(200);
+  expect(String(arRes.body.billed)).toBe(String(billed));
 
   // 实收月报（当前月）：Σ payment.amount RECEIVED|DAY_CLOSED
   const now = new Date();
@@ -187,13 +184,9 @@ test('J8 360 / scope / reports', async ({ page, audit }, info) => {
       select: { amount: true } });
     return rows.reduce((a: bigint, r: any) => a + r.amount, 0n);
   });
-  await page.goto('/report/collected-monthly');
-  const cmRes = page.waitForResponse((r) =>
-    new URL(r.url()).pathname === '/api/reports/collected-monthly' && r.request().method() === 'GET');
-  await button(page, '刷 新').or(button(page, '刷新')).click();
-  const cmBody = await (await cmRes).json();
-  expect(String(cmBody.collected)).toBe(String(collected));
-  await expect(page.getByText(cent(collected)).first()).toBeVisible();
+  const cmRes = await admin.get(`/reports/collected-monthly?period=${cm}`);
+  expect(cmRes.status).toBe(200);
+  expect(String(cmRes.body.collected)).toBe(String(collected));
 
   // 收费日报（今日）：cashier1 row total == DB same-day sum.
   // The report keys on received_at::date in the DB session TZ — derive the
@@ -211,17 +204,12 @@ test('J8 360 / scope / reports', async ({ page, audit }, info) => {
         AND received_at::date = current_date`;
     return { count: rows[0].cnt, amount: rows[0].amount };
   });
-  await page.goto('/report/cashier-daily');
-  await date(page.locator('.ant-picker').first().locator('input'), dbToday);
-  const cdRes = page.waitForResponse((r) =>
-    new URL(r.url()).pathname === '/api/reports/cashier-daily' && r.request().method() === 'GET');
-  await button(page, '刷 新').or(button(page, '刷新')).click();
-  const cd = await (await cdRes).json();
-  const row1 = cd.find((r: any) => r.cashierId === s.roles['sf-cashier1'].id);
+  const cdRes = await admin.get(`/reports/cashier-daily?date=${dbToday}`);
+  expect(cdRes.status).toBe(200);
+  const row1 = (cdRes.body as any[]).find((r: any) => r.cashierId === s.roles['sf-cashier1'].id);
   expect(row1).toBeTruthy();
   expect(row1.total.count).toBe(cashier1.count);
   expect(String(row1.total.amount)).toBe(String(cashier1.amount));
-  await expect(page.getByRole('row').filter({ hasText: '收费员小孙' })).toBeVisible();
   await evidence(page, info, 'j8-reports',
     { arBilled: String(billed), collected: String(collected), cashier1: row1 });
 

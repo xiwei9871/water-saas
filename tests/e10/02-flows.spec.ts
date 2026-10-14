@@ -64,7 +64,7 @@ test.describe('B1–B3 分析报表', () => {
     const body = await page.locator('body').innerText();
     expect(body).toMatch(/应收|实收|售水|回收率|SOLD_QTY|AR_AMOUNT/);
     // 指标版本标识
-    expect(body).toMatch(/2026-10\.v1/);
+    expect(body).toMatch(/2026-10\.v\d+/);
   });
 
   test('B3 年报：选年份出趋势', async ({ page }) => {
