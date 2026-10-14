@@ -10,6 +10,7 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
   Descriptions,
   Drawer,
   Input,
@@ -63,8 +64,18 @@ const TARGET_PAGE: Record<string, string> = {
   READING_QC_PENDING: '/metering/readings',
   READING_QC_REVIEW: '/metering/readings',
   READING_QC_REJECTED: '/metering/readings',
-  SETTLEMENT_DRIFT: '/settlement/reconciliations',
+  ESTIMATE_STREAK: '/metering/readings',
   PLANNED_NO_READING: '/metering/readings',
+  NO_ACTIVE_METER: '/customer/meters',
+  MULTI_ACTIVE_METER: '/customer/meters',
+  NO_BOOK: '/metering/books',
+  MULTI_BOOK: '/metering/books',
+  REMOTE_EVENT_UNBOUND: '/metering/remote-events',
+  REMOTE_EVENT_WAITING_PLAN: '/metering/remote-events',
+  REMOTE_EVENT_FAILED: '/metering/remote-events',
+  REMOTE_EVENT_CONFLICT: '/metering/remote-events',
+  REMOTE_EVENT_KEY_CONFLICT: '/metering/remote-events',
+  SETTLEMENT_DRIFT: '/settlement/reconciliations',
   PLANNED_NO_SETTLEMENT: '/settlement/list',
   SETTLEMENT_UNFINALIZED: '/settlement/list',
   CLOSED_BALANCE_LEFT: '/customer/settle-accounts',
@@ -454,10 +465,23 @@ export default function Exceptions() {
             )}
             <Descriptions column={1} size="small" bordered>
               <Descriptions.Item label="摘要">{detail.fact.summary}</Descriptions.Item>
-              <Descriptions.Item label="异常键">
-                <Typography.Text code copyable style={{ fontSize: 12 }}>
-                  {detail.fact.key}
-                </Typography.Text>
+              <Descriptions.Item label="业务标识">
+                {enumLabel(TYPE_LABELS, detail.fact.type)} · {detail.fact.summary}
+                <Collapse
+                  ghost
+                  style={{ marginTop: 4 }}
+                  items={[
+                    {
+                      key: 'tech',
+                      label: '技术标识',
+                      children: (
+                        <Typography.Text code copyable style={{ fontSize: 12 }}>
+                          {detail.fact.key}
+                        </Typography.Text>
+                      ),
+                    },
+                  ]}
+                />
               </Descriptions.Item>
               <Descriptions.Item label="锚点">
                 {enumLabel(ANCHOR_LABELS, detail.fact.anchor)}

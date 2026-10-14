@@ -398,6 +398,171 @@ export class AnalysisService {
             WHERE ch.tenant_id = r.tenant_id AND ch.supersedes_reading_id = r.id)
           ${aggOwnPredicate(inScope, Prisma.sql`wa.id`)}`;
 
+      // ---- 2026-10.v2 新增指标 ----
+      // 口径参数（tenant_param 可配，缺省值即推荐值）
+      const kpiParams = await tx.tenantParam.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          key: {
+            in: [
+              'KPI_ZERO_USAGE_MONTHS',
+              'KPI_BILL_TIMELY_DAYS',
+              'KPI_AGED_ARREARS_MONTHS',
+              'KPI_DUN_SUCCESS_DAYS',
+            ],
+          },
+        },
+      });
+      const paramInt = (key: string, dflt: number) => {
+        const raw = kpiParams.find((p) => p.key === key)?.value;
+        const n = typeof raw === 'number' ? raw : Number(raw);
+        return Number.isInteger(n) && n > 0 ? n : dflt;
+      };
+      const zeroUsageMonths = paramInt('KPI_ZERO_USAGE_MONTHS', 3);
+      const billTimelyDays = paramInt('KPI_BILL_TIMELY_DAYS', 10);
+      const agedArrearsMonths = paramInt('KPI_AGED_ARREARS_MONTHS', 12);
+      const dunSuccessDays = paramInt('KPI_DUN_SUCCESS_DAYS', 7);
+
+      // 在册/期初在册/本期销户（客户规模三件套）
+      const waScoped = aggOwnPredicate(inScope, Prisma.sql`w.id`);
+      const monthStartDate = w.gte;
+      const accountStats = await tx.$queryRaw<
+        { active: number; startActive: number; closedInMonth: number }[]
+      >`
+        SELECT (SELECT count(*)::int FROM water_account w
+                  WHERE w.tenant_id = ${ctx.tenantId}::uuid
+                    AND w.status = 'NORMAL' ${waScoped}) AS active,
+               (SELECT count(*)::int FROM water_account w
+                  WHERE w.tenant_id = ${ctx.tenantId}::uuid
+                    AND w.opened_at < ${monthStartDate}::date
+                    AND (w.closed_at IS NULL OR w.closed_at >= ${monthStartDate}::date)
+                    ${waScoped}) AS "startActive",
+               (SELECT count(*)::int FROM water_account w
+                  WHERE w.tenant_id = ${ctx.tenantId}::uuid
+                    AND w.closed_at >= ${monthStartDate}::date
+                    AND w.closed_at < ${w.lt}::date ${waScoped}) AS "closedInMonth"`;
+
+      // 抄表到位率：到表抄见（ACTUAL/REMOTE）的计划项 ÷ 计划项数
+      const arrivalRows = await tx.$queryRaw<{ arrived: number }[]>`
+        SELECT count(DISTINCT i.id)::int AS arrived
+        FROM reading_plan_item i
+        JOIN reading_plan p ON p.tenant_id = i.tenant_id AND p.id = i.plan_id
+        JOIN meter_reading r ON r.tenant_id = i.tenant_id AND r.plan_item_id = i.id
+        WHERE i.tenant_id = ${ctx.tenantId}::uuid AND p.period = ${q.period}
+          AND r.result_type IN ('ACTUAL','REMOTE')
+          AND NOT EXISTS (
+            SELECT 1 FROM meter_reading ch
+            WHERE ch.tenant_id = r.tenant_id AND ch.supersedes_reading_id = r.id)
+          ${aggOwnPredicate(inScope, Prisma.sql`i.water_account_id`)}`;
+
+      // 智能水表覆盖率：在册户中存在生效远传绑定的户数 ÷ 在册户
+      const smartRows = await tx.$queryRaw<{ smart: number }[]>`
+        SELECT count(DISTINCT w.id)::int AS smart
+        FROM water_account w
+        WHERE w.tenant_id = ${ctx.tenantId}::uuid AND w.status = 'NORMAL'
+          AND EXISTS (
+            SELECT 1 FROM remote_device_binding rb
+            JOIN meter_installation mi
+              ON mi.tenant_id = rb.tenant_id AND mi.id = rb.installation_id
+            WHERE rb.tenant_id = w.tenant_id
+              AND mi.water_account_id = w.id
+              AND (rb.effective_to IS NULL OR rb.effective_to > now()))
+          ${waScoped}`;
+
+      // 连续零用水户：在册户近 N 期（含本期）每期均有 FINAL 结算且用量为 0
+      const zeroPeriods = Array.from({ length: zeroUsageMonths }, (_, k) =>
+        shiftPeriod(q.period, -k),
+      );
+      const zeroUsageRows = await tx.$queryRaw<{ zeroStreak: number }[]>`
+        SELECT count(*)::int AS "zeroStreak"
+        FROM water_account w
+        WHERE w.tenant_id = ${ctx.tenantId}::uuid AND w.status = 'NORMAL' ${waScoped}
+          AND NOT EXISTS (
+            SELECT 1 FROM consumption_settlement cs
+            WHERE cs.tenant_id = w.tenant_id AND cs.water_account_id = w.id
+              AND cs.period::text = ANY(ARRAY[${Prisma.join(zeroPeriods)}])
+              AND cs.status = 'FINAL'
+              AND cs.total_usage_qty > 0)
+          AND (SELECT count(DISTINCT cs.period) FROM consumption_settlement cs
+            WHERE cs.tenant_id = w.tenant_id AND cs.water_account_id = w.id
+              AND cs.period::text = ANY(ARRAY[${Prisma.join(zeroPeriods)}])
+              AND cs.status = 'FINAL')
+              = ${zeroUsageMonths}`;
+
+      // 开账及时率：本期账单中 issued_at ≤ 账期月末+N 天
+      const billTimelyRows = await tx.$queryRaw<
+        { timely: number; total: number }[]
+      >`
+        SELECT count(*) FILTER (
+                 WHERE b.issued_at::date <=
+                       ((date_trunc('month', to_date(${q.period}, 'YYYYMM'))
+                         + interval '1 month - 1 day')::date
+                        + ${billTimelyDays}::int))::int AS timely,
+               count(*)::int AS total
+        FROM bill b
+        WHERE b.tenant_id = ${ctx.tenantId}::uuid AND b.period = ${q.period}
+          AND b.bill_kind <> 'REVERSAL' ${waB}`;
+
+      // 计费准确率：本期 NORMAL 账单未被红冲且无 ADJUSTMENT 行 ÷ 本期 NORMAL 账单
+      const billAccRows = await tx.$queryRaw<{ clean: number; total: number }[]>`
+        SELECT count(*) FILTER (
+                 WHERE adj.cnt IS NULL AND b.status <> 'REVERSED')::int AS clean,
+               count(*)::int AS total
+        FROM bill b
+        LEFT JOIN LATERAL (
+          SELECT 1 AS cnt FROM bill_item bi
+          WHERE bi.tenant_id = b.tenant_id AND bi.bill_id = b.id
+            AND bi.item_type = 'ADJUSTMENT' LIMIT 1) adj ON true
+        WHERE b.tenant_id = ${ctx.tenantId}::uuid AND b.period = ${q.period}
+          AND b.bill_kind = 'NORMAL'
+          AND b.status <> 'DRAFT' ${waB}`;
+
+      // 优惠减免率：本期 ADJUSTMENT 负项绝对值 ÷ 本期应收
+      const discountRows = await tx.$queryRaw<{ amount: bigint | null }[]>`
+        SELECT -sum(bi.amount)::bigint AS amount
+        FROM bill_item bi
+        JOIN bill b ON b.tenant_id = bi.tenant_id AND b.id = bi.bill_id
+        WHERE bi.tenant_id = ${ctx.tenantId}::uuid
+          AND b.period = ${q.period}
+          AND b.bill_kind <> 'REVERSAL'
+          AND b.status IN ('POSTED','PARTIAL_PAID','PAID')
+          AND bi.item_type = 'ADJUSTMENT' AND bi.amount < 0
+          ${aggOwnPredicate(inScope, Prisma.sql`b.water_account_id`)}`;
+
+      // 预存余额（预存比率分子）
+      const prepayRows = await tx.$queryRaw<{ balance: bigint | null }[]>`
+        SELECT sum(e.amount)::bigint AS balance
+        FROM prepayment_ledger_entry e
+        JOIN settle_account sa ON sa.tenant_id = e.tenant_id AND sa.id = e.settle_account_id
+        WHERE e.tenant_id = ${ctx.tenantId}::uuid
+          AND sa.status <> 'CLOSED'`;
+
+      // 催缴成功率：本期创建的催缴任务中 N 日内有实收销账 ÷ 本期催缴任务数
+      const dunRows = await tx.$queryRaw<{ success: number; total: number }[]>`
+        SELECT count(*) FILTER (WHERE succ.id IS NOT NULL)::int AS success,
+               count(*)::int AS total
+        FROM task t
+        LEFT JOIN LATERAL (
+          SELECT p.id FROM payment p
+          WHERE p.tenant_id = t.tenant_id AND p.settle_account_id = t.biz_id
+            AND p.status IN ('RECEIVED','DAY_CLOSED') AND p.amount > 0
+            AND p.received_at >= t.created_at
+            AND p.received_at < t.created_at + make_interval(days => ${dunSuccessDays}::int)
+          LIMIT 1) succ ON true
+        WHERE t.tenant_id = ${ctx.tenantId}::uuid AND t.type = 'COLLECTION'
+          AND t.created_at >= ${w.gte} AND t.created_at < ${w.lt}`;
+
+      // 陈欠占比：账龄 > N 月的期末欠费 ÷ 期末欠费
+      const agedArrears = arrearsRows
+        .filter((r) => {
+          if (r.period > q.period || r.remaining <= 0n) return false;
+          const months =
+            (endOfMonth.getUTCFullYear() - parseInt(r.period.slice(0, 4), 10)) * 12 +
+            (endOfMonth.getUTCMonth() + 1 - parseInt(r.period.slice(4), 10));
+          return months > agedArrearsMonths;
+        })
+        .reduce((s, r) => s + r.remaining, 0n);
+
       // ---- 分类汇总 ----
       const byCategory = await tx.$queryRaw<
         { category: string; billed: bigint | null }[]
@@ -583,7 +748,34 @@ export class AnalysisService {
           READ_COVERAGE: ratio(planRead, planTotal),
           ESTIMATE_RATE: ratio(estRows[0]?.est ?? 0, estRows[0]?.total ?? 0),
           READ_TIMELINESS: ratio(timelyRows[0]?.timely ?? 0, timelyRows[0]?.total ?? 0),
-          DUN_SUCCESS_RATE: { value: null, reason: unavailable.get('DUN_SUCCESS_RATE') },
+          READ_ARRIVAL_RATE: ratio(arrivalRows[0]?.arrived ?? 0, planTotal),
+          SMART_METER_RATE: ratio(smartRows[0]?.smart ?? 0, accountStats[0]?.active ?? 0),
+          ZERO_USAGE_STREAK_RATE: {
+            value: ratio(zeroUsageRows[0]?.zeroStreak ?? 0, accountStats[0]?.active ?? 0),
+            param: { zeroUsageMonths },
+          },
+          BILL_TIMELINESS: {
+            value: ratio(billTimelyRows[0]?.timely ?? 0, billTimelyRows[0]?.total ?? 0),
+            param: { billTimelyDays },
+          },
+          BILL_ACCURACY: ratio(billAccRows[0]?.clean ?? 0, billAccRows[0]?.total ?? 0),
+          DISCOUNT_RATE: ratio(discountRows[0]?.amount ?? 0n, ar0),
+          PREPAY_RATE: ratio(prepayRows[0]?.balance ?? 0n, cumAr[0]?.amount ?? 0n),
+          PREPAY_BALANCE: prepayRows[0]?.balance ?? 0n,
+          AGED_ARREARS_RATE: {
+            value: ratio(agedArrears, arrearsEnd),
+            param: { agedArrearsMonths },
+          },
+          CHURN_RATE: ratio(accountStats[0]?.closedInMonth ?? 0, accountStats[0]?.startActive ?? 0),
+          ACCOUNT_COUNT: accountStats[0]?.active ?? 0,
+          AVG_SOLD_PER_ACCOUNT:
+            (accountStats[0]?.active ?? 0) > 0
+              ? soldQtyNum / (accountStats[0]?.active ?? 1)
+              : null,
+          DUN_SUCCESS_RATE: {
+            value: ratio(dunRows[0]?.success ?? 0, dunRows[0]?.total ?? 0),
+            param: { dunSuccessDays },
+          },
         },
         byCategory: byCategory.map((r) => ({
           ...r,

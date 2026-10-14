@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
   Descriptions,
   Drawer,
   Input,
@@ -289,8 +290,9 @@ export default function RemoteEvents() {
               <Descriptions.Item label="采集时间">{fmtTime(detail.collectedAt)}</Descriptions.Item>
               <Descriptions.Item label="接收时间">{fmtTime(detail.receivedAt)}</Descriptions.Item>
               <Descriptions.Item label="厂商质量">{detail.vendorQuality ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="解析设备">{detail.resolvedRemoteDeviceId ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="解析绑定">{detail.resolvedBindingId ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="解析结果" span={2}>
+                {detail.resolvedBindingId ? '已绑定表计安装' : '未解析到绑定'}
+              </Descriptions.Item>
               {detail.reading && (
                 <Descriptions.Item label="生成抄表" span={2}>
                   读数 {detail.reading.readingValue} m³ · QC{' '}
@@ -347,10 +349,61 @@ export default function RemoteEvents() {
               }))}
             />
 
-            <Typography.Title level={5}>Payload</Typography.Title>
-            <pre style={{ fontSize: 12, maxHeight: 240, overflow: 'auto', background: '#f6f6f6', padding: 8 }}>
-              {JSON.stringify(detail.canonicalPayload, null, 2)}
-            </pre>
+            {detail.processingStatus === 'CONFLICT' && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 16 }}
+                message="读数冲突"
+                description={
+                  <div>
+                    设备 {detail.vendorDeviceKey} 上报读数{' '}
+                    <b>{detail.readingValue} m³</b>
+                    {detail.conflictReading
+                      ? `，该计划项已有${
+                          detail.conflictReading.resultType === 'REMOTE' ? '远传' : '人工'
+                        }读数 ${detail.conflictReading.readingValue} m³`
+                      : '，该计划项已有读数'}
+                    {detail.conflictReading &&
+                      `，差值 ${(
+                        Number(detail.readingValue) -
+                        Number(detail.conflictReading.readingValue)
+                      ).toFixed(4).replace(/\.?0+$/, '')} m³`}
+                    。请裁决采用哪一方。
+                  </div>
+                }
+              />
+            )}
+
+            <Collapse
+              ghost
+              style={{ marginTop: 16 }}
+              items={[
+                {
+                  key: 'payload',
+                  label: '技术详情（原始报文）',
+                  children: (
+                    <>
+                      <div style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>
+                        解析设备：{detail.resolvedRemoteDeviceId ?? '—'} · 解析绑定：
+                        {detail.resolvedBindingId ?? '—'}
+                      </div>
+                      <pre
+                        style={{
+                          fontSize: 12,
+                          maxHeight: 240,
+                          overflow: 'auto',
+                          background: '#f6f6f6',
+                          padding: 8,
+                        }}
+                      >
+                        {JSON.stringify(detail.canonicalPayload, null, 2)}
+                      </pre>
+                    </>
+                  ),
+                },
+              ]}
+            />
           </>
         )}
 

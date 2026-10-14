@@ -205,45 +205,35 @@ test('C D E G H I K03 K04 K06 K08 K09 complete UI 12m³ × 3.00 = ¥36.00', asyn
       await expect(drawer).toContainText('现金 1笔 ¥36.00');
     });
     await step('Reports', async () => {
-      for (const kind of ['meter-daily', 'cashier-daily', 'ar-monthly', 'collected-monthly', 'recovery-rate']) {
-        await test.step(kind, async () => {
-          await page.goto('/report/' + kind); await ready(page);
-          if (kind === 'meter-daily') await date(main(page).locator('.ant-picker-input input').first(), `${month}-15`);
-          // cashier-daily 按 received_at::date（库时区 UTC）汇总 —— 用支付实际入账日，
-          // 避免本地跨午夜时（CST 次日）报表查错日期。
-          if (kind === 'cashier-daily')
-            await date(
-              main(page).locator('.ant-picker-input input').first(),
-              new Date(data.Payment.receivedAt).toISOString().slice(0, 10),
-            );
-          if (kind === 'ar-monthly' || kind === 'recovery-rate') await date(main(page).getByPlaceholder('请选择月份', { exact: true }), month);
-          const result = await response(page, '/reports/' + kind, () => button(main(page), '查询').click(), 'GET');
-          data[kind] = result;
-          if (kind === 'meter-daily') {
-            const record = result.find((x: any) => x.bookId === data.Book.id);
-            // 计划账期可能与"今天"不同月（cleanPeriod 顺延）——断言按册快照计数，
-            // readingsTaken（当日 read_date）不做约束。
-            expect(record).toMatchObject({ total: 1, read: 1 });
-            await expect(row(page, bookName)).toContainText(data.Book.bookNo);
-          } else if (kind === 'cashier-daily') {
-            await expect(row(page, '管理员')).toContainText('1 笔 ¥36.00');
-            // 「已日结」与否取决于日结日期口径（服务端本地日）与 received_at::date（UTC 日）
-            // 在跨午夜窗口会分属两天 —— 日结存在性已由 Day close 步骤断言，这里只验金额行。
-            expect(result[0].byChannel.CASH).toMatchObject({ count: 1, amount: '3600' });
-          } else if (kind === 'ar-monthly') {
-            expect(String(result.billed)).toBe('3600'); await expect(row(page, categoryLabel)).toContainText('¥36.00');
-          } else if (kind === 'collected-monthly') {
-            expect(String(result.collected)).toBe('3600'); expect(String(result.allocated)).toBe('3600');
-            await expect(main(page).locator('.ant-descriptions')).toContainText('实收合计¥36.00');
-            await expect(main(page).locator('.ant-descriptions')).toContainText('销账合计（对数）¥36.00');
-            await expect(row(page, '现金')).toContainText('¥36.00');
-          } else {
-            expect(String(result.billed)).toBe('3600'); expect(String(result.collected)).toBe('3600');
-            await expect(main(page)).toContainText('100.00%');
-          }
-          await evidence(page, info, kind, result);
-        });
-      }
+      // 整改后报表 = 日报/月报/年报三张（Analysis 组件，挂载即自动查询）
+      await test.step('ops-daily', async () => {
+        await page.goto('/report/ops-daily'); await ready(page);
+        await date(
+          main(page).locator('.ant-picker-input input').first(),
+          new Date(data.Payment.receivedAt).toISOString().slice(0, 10),
+        );
+        const result = await response(page, '/reports/ops-daily', () => button(main(page), '查询').click(), 'GET');
+        data['ops-daily'] = result;
+        expect(Number(result.totals.collected)).toBe(3600);
+        await expect(main(page)).toContainText('¥36.00');
+        await evidence(page, info, 'ops-daily', result);
+      });
+      await test.step('analysis-monthly', async () => {
+        await page.goto('/report/analysis-monthly'); await ready(page);
+        const result = await response(page, '/reports/analysis-monthly', () => button(main(page), '查询').click(), 'GET');
+        data['analysis-monthly'] = result;
+        expect(String(result.totals.AR_AMOUNT)).toBe('3600');
+        expect(String(result.totals.CURRENT_COLLECTED)).toBe('3600');
+        await expect(main(page)).toContainText('100.00%');
+        await evidence(page, info, 'analysis-monthly', result);
+      });
+      await test.step('analysis-yearly', async () => {
+        await page.goto('/report/analysis-yearly'); await ready(page);
+        const result = await response(page, '/reports/analysis-yearly', () => button(main(page), '查询').click(), 'GET');
+        data['analysis-yearly'] = result;
+        await expect(main(page)).toContainText('¥36.00');
+        await evidence(page, info, 'analysis-yearly', result);
+      });
     });
   } finally {
     await info.attach('happy-path-state', { body: JSON.stringify({ ...data, completed }, null, 2), contentType: 'application/json' });

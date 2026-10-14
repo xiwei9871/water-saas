@@ -94,7 +94,7 @@ test('UAT-004 global Chinese empty date month calendar pagination and modal labe
   await expect.soft(dialog.getByRole('button', { name: '关闭', exact: true })).toBeVisible();
   await calendar.evaluate(async el => { await Promise.all(el.getAnimations({ subtree: true }).map(a => a.finished)); });
   await evidence(page, info, 'locale-calendar', { calendarText: await calendar.innerText() });
-  await page.goto('/report/ar-monthly'); await ready(page);
+  await page.goto('/report/analysis-monthly'); await ready(page);
   await expect.soft(main(page).getByRole('textbox').first()).toHaveAttribute('placeholder', '请选择月份');
   await main(page).getByRole('textbox').first().click();
   await expect.soft(page.locator('.ant-picker-dropdown:visible').getByRole('cell')).toHaveText(

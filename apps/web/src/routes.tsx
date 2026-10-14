@@ -5,6 +5,7 @@ import {
   GoldOutlined,
   PayCircleOutlined,
   ReadOutlined,
+  SearchOutlined,
   SettingOutlined,
   TeamOutlined,
   TransactionOutlined,
@@ -36,7 +37,6 @@ import Writeoffs from './pages/payment/Writeoffs';
 import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
 import Queries from './pages/report/Queries';
-import Reports from './pages/report/Reports';
 import Tasks from './pages/tasks/Tasks';
 import Reconciliations from './pages/settlement/Reconciliations';
 import Settlements from './pages/settlement/Settlements';
@@ -281,47 +281,18 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <FileTextOutlined />,
     perms: ['report:read'],
     children: [
-      // 同一组件按 kind 渲染；key 强制重挂载，路由切换不复用旧查询态。
-      {
-        key: 'report-meter-daily',
-        path: '/report/meter-daily',
-        label: '抄表日报',
-        element: <Reports key="meter-daily" kind="meter-daily" />,
-      },
-      {
-        key: 'report-cashier-daily',
-        path: '/report/cashier-daily',
-        label: '收费日报',
-        element: <Reports key="cashier-daily" kind="cashier-daily" />,
-      },
-      {
-        key: 'report-ar-monthly',
-        path: '/report/ar-monthly',
-        label: '应收月报',
-        element: <Reports key="ar-monthly" kind="ar-monthly" />,
-      },
-      {
-        key: 'report-collected-monthly',
-        path: '/report/collected-monthly',
-        label: '实收月报',
-        element: <Reports key="collected-monthly" kind="collected-monthly" />,
-      },
-      {
-        key: 'report-recovery-rate',
-        path: '/report/recovery-rate',
-        label: '回收率',
-        element: <Reports key="recovery-rate" kind="recovery-rate" />,
-      },
+      // 需求§三：报表 = 日报/月报/年报 3 张（总量+分类+异常明细），
+      // 明细查询与指标字典不属于报表（整改报告 2026-10-14）。
       {
         key: 'report-ops-daily',
         path: '/report/ops-daily',
-        label: '运营日报',
+        label: '日报',
         element: <Analysis key="ops-daily" kind="ops-daily" />,
       },
       {
         key: 'report-analysis-monthly',
         path: '/report/analysis-monthly',
-        label: '经营月报',
+        label: '月报',
         element: <Analysis key="analysis-monthly" kind="analysis-monthly" />,
       },
       {
@@ -330,6 +301,15 @@ export const APP_ROUTES: AppRoute[] = [
         label: '年报',
         element: <Analysis key="analysis-yearly" kind="analysis-yearly" />,
       },
+    ],
+  },
+  {
+    key: 'query',
+    path: '/query',
+    label: '数据查询',
+    icon: <SearchOutlined />,
+    perms: ['report:read'],
+    children: [
       {
         key: 'query-accounts',
         path: '/report/query/accounts',
@@ -360,12 +340,6 @@ export const APP_ROUTES: AppRoute[] = [
         label: '欠费明细查询',
         element: <Queries key="arrears" kind="arrears" />,
       },
-      {
-        key: 'report-metric-dict',
-        path: '/report/metric-dict',
-        label: '指标字典',
-        element: <MetricDict />,
-      },
     ],
   },
   {
@@ -380,6 +354,14 @@ export const APP_ROUTES: AppRoute[] = [
       { key: 'system-roles', path: '/system/roles', label: '角色权限', element: <Roles /> },
       { key: 'system-params', path: '/system/params', label: '租户参数', element: <TenantParams /> },
       { key: 'system-dicts', path: '/system/dicts', label: '字典管理', element: <Dicts /> },
+      {
+        key: 'system-metric-dict',
+        path: '/report/metric-dict',
+        label: '指标字典',
+        element: <MetricDict />,
+        // 报表读者也要看口径，不被系统管理组的 iam:read 继承遮蔽
+        perms: ['report:read'],
+      },
       { key: 'system-audit', path: '/system/audit-logs', label: '操作日志', element: <AuditLogs /> },
     ],
   },

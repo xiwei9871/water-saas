@@ -107,6 +107,93 @@ export const enumLabel = (
   return hit;
 };
 
+/**
+ * 任务上下文 → 中文业务描述（整改 P4：UI 不渲染裸 JSON/英文键/UUID）。
+ * 按任务类型输出「户号 · 账期 · 数值」句式；未识别类型回退到通用
+ * 字段映射；均失败返回 null，由调用方决定是否展示折叠的技术详情。
+ */
+export const taskContextText = (type: string, ctx: unknown): string | null => {
+  if (!ctx || typeof ctx !== 'object') return null;
+  const c = ctx as Record<string, unknown>;
+  const s = (k: string) => (c[k] == null || c[k] === '' ? null : String(c[k]));
+  const yuan = (k: string) => {
+    const v = c[k];
+    return v == null ? null : fmtCent(String(v));
+  };
+  const num = (k: string, unit: string, label: string) =>
+    s(k) == null ? null : `${label} ${s(k)} ${unit}`;
+  const join = (parts: (string | null | false | undefined)[]) =>
+    parts.filter((x): x is string => !!x).join(' · ');
+  let text = '';
+  switch (type) {
+    case 'METER_REVIEW':
+      text = join([
+        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('period') && `账期 ${fmtPeriod(s('period'))}`,
+        num('usageQty', 'm³', '本期用量'),
+        num('avgUsage3', 'm³', '近3期均值'),
+        s('prevReadingValue') && `上期表底 ${s('prevReadingValue')}`,
+        s('readingValue') && `本期读数 ${s('readingValue')}`,
+      ]);
+      break;
+    case 'SUPPLEMENT':
+      text = join([
+        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('period') && `账期 ${fmtPeriod(s('period'))}`,
+        s('estimatedReadingValue') && `估计止度 ${s('estimatedReadingValue')}`,
+        s('actualReadingValue') && `实抄止度 ${s('actualReadingValue')}`,
+        s('diff') && `差值 ${s('diff')}`,
+      ]);
+      break;
+    case 'COLLECTION':
+      text = join([
+        s('settleNo') && `结算户 ${s('settleNo')}`,
+        yuan('arrearsCent') && `欠费 ${yuan('arrearsCent')}`,
+        s('overdueDays') != null && `逾期 ${s('overdueDays')} 天`,
+        yuan('thresholdCent') && `超阈值 ${yuan('thresholdCent')}`,
+        s('overdueBillCount') && `逾期账单 ${s('overdueBillCount')} 笔`,
+      ]);
+      break;
+    case 'REVERSAL_APPROVAL':
+      text = join([
+        s('originalPaymentNo') && `原收款单 ${s('originalPaymentNo')}`,
+        s('reversalPaymentNo') && `红冲收款单 ${s('reversalPaymentNo')}`,
+        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('period') && `账期 ${fmtPeriod(s('period'))}`,
+        yuan('amountCent') && `金额 ${yuan('amountCent')}`,
+        yuan('totalAmountCent') && `金额 ${yuan('totalAmountCent')}`,
+        s('reason') && `原因：${s('reason')}`,
+      ]);
+      break;
+    case 'WRITEOFF_APPROVAL':
+      text = join([
+        s('settleNo') && `结算户 ${s('settleNo')}`,
+        yuan('amountCent') && `核销金额 ${yuan('amountCent')}`,
+        s('reasonName') && `原因：${s('reasonName')}`,
+        s('effectiveDate') && `生效日 ${s('effectiveDate')}`,
+      ]);
+      break;
+    default:
+      break;
+  }
+  if (text) return text;
+  // 通用兜底：已知业务字段逐个翻译，纯技术字段（*Id/UUID）不展示
+  const FIELD_LABELS: Record<string, string> = {
+    waterAccountNo: '户号',
+    settleNo: '结算户',
+    period: '账期',
+    reason: '原因',
+    reasonName: '原因',
+    paymentNo: '收款单号',
+    billNo: '账单号',
+    planPeriod: '计划账期',
+  };
+  const parts = Object.entries(FIELD_LABELS)
+    .filter(([k]) => s(k) != null)
+    .map(([k, label]) => `${label} ${k === 'period' ? fmtPeriod(s(k)) : s(k)}`);
+  return parts.length ? parts.join(' · ') : null;
+};
+
 /** 水表读数等非负 Decimal 输入的表单校验（最多 4 位小数）。 */
 export const DECIMAL_RULE = {
   pattern: /^\d+(\.\d{1,4})?$/,

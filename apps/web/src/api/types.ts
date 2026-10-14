@@ -1242,6 +1242,13 @@ export interface RawRemoteEventDetail extends RawRemoteEvent {
     period: string;
     readingValue: string;
   } | null;
+  /** CONFLICT 时回填：计划项上既有读数（冲突对手方），供摘要对比。 */
+  conflictReading?: {
+    readingValue: string;
+    period: string;
+    qcStatus: string;
+    resultType: string;
+  } | null;
 }
 
 /** POST /remote-sources/:id/events outcome item. */

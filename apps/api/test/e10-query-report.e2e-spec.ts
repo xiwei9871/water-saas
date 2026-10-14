@@ -313,7 +313,7 @@ describe('fixtures', () => {
 describe('C1 metric dictionary', () => {
   it('returns versioned definitions covering the required KPI set', async () => {
     const res = (await get('/reports/metric-dictionary')).body;
-    expect(res.version).toBe('2026-10.v1');
+    expect(res.version).toBe('2026-10.v2');
     expect(res.metrics.length).toBeGreaterThanOrEqual(25);
     const codes = new Set(res.metrics.map((m: { code: string }) => m.code));
     for (const c of [
@@ -321,13 +321,19 @@ describe('C1 metric dictionary', () => {
       'ARREARS_COLLECTED', 'RECOVERY_RATE', 'ARREARS_TOTAL', 'COMPOSITE_PRICE',
       'READ_ACCURACY', 'READ_COVERAGE', 'ESTIMATE_RATE', 'READ_TIMELINESS',
       'BAD_DEBT_WRITEOFF', 'ONLINE_RATE', 'DUN_SUCCESS_RATE',
+      // 整改 P2：补齐的 10 个缺失指标（催缴成功率已有 COLLECTION 任务数据源）
+      'READ_ARRIVAL_RATE', 'SMART_METER_RATE', 'ZERO_USAGE_STREAK_RATE',
+      'BILL_TIMELINESS', 'BILL_ACCURACY', 'DISCOUNT_RATE', 'PREPAY_RATE',
+      'AGED_ARREARS_RATE', 'CHURN_RATE', 'AVG_SOLD_PER_ACCOUNT',
     ]) {
       expect(codes.has(c)).toBe(true);
     }
-    // 数据源未到位指标显式标记而非静默。
+    // 催缴成功率 v2 起可用（task(type=COLLECTION) ⋈ 收款）；售水完成率仍暂缓。
     const dun = res.metrics.find((m: { code: string }) => m.code === 'DUN_SUCCESS_RATE');
-    expect(dun.available).toBe(false);
-    expect(dun.unavailableReason).toBeTruthy();
+    expect(dun.available).toBe(true);
+    const target = res.metrics.find((m: { code: string }) => m.code === 'SOLD_QTY_TARGET_RATE');
+    expect(target.available).toBe(false);
+    expect(target.unavailableReason).toBeTruthy();
   });
 
   it('scoped report:read can read the dictionary; tenant B empty tenant sees it too', async () => {
@@ -438,7 +444,7 @@ describe('F1 xlsx export', () => {
 describe('B1–B3 analysis reports', () => {
   it('B1 ops-daily: collected split current/arrears reconciles with seeded payments', async () => {
     const res = (await get('/reports/ops-daily?date=2026-10-06')).body;
-    expect(res.metricVersion).toBe('2026-10.v1');
+    expect(res.metricVersion).toBe('2026-10.v2');
     // 当日两笔 CASH：5000 单分摊 + 3000 跨两单分摊（扇出回归：
     // collected 必须是 8000，而不是 join 展开后的 5000+3000×2=11000）
     expect(res.totals.collected).toBe('8000');
@@ -472,8 +478,24 @@ describe('B1–B3 analysis reports', () => {
     expect(res.byAging['0-3']).toBe('24000');
     // 异常清单：欠费 TOP 含两户
     expect(res.lists.arrearsList).toHaveLength(2);
+    // 催缴成功率 v2 起可用：本期无 COLLECTION 任务 → 分母 0 → null + 口径参数
+    expect(t.DUN_SUCCESS_RATE.param.dunSuccessDays).toBe(7);
+    // P2 新增指标均有返回（比率型 null=分母为 0，数值型有值）
+    for (const k of [
+      'READ_ARRIVAL_RATE', 'SMART_METER_RATE', 'BILL_TIMELINESS',
+      'BILL_ACCURACY', 'DISCOUNT_RATE', 'PREPAY_RATE', 'AGED_ARREARS_RATE',
+      'CHURN_RATE',
+    ]) {
+      const cell = t[k];
+      expect(cell === null || typeof cell === 'number' ||
+             (cell && typeof cell === 'object' && 'value' in cell)).toBe(true);
+    }
+    expect(t.ZERO_USAGE_STREAK_RATE.param.zeroUsageMonths).toBe(3);
+    expect(t.ACCOUNT_COUNT).toBe(2);
+    // 售水量÷在册户（fixture 售水量可为 0，值为 0 也是合法结果）
+    expect(t.AVG_SOLD_PER_ACCOUNT).not.toBeNull();
     // 无数据指标显式标出
-    expect(t.DUN_SUCCESS_RATE.reason).toBeTruthy();
+    expect(t.SOLD_QTY_TARGET_RATE.reason).toBeTruthy();
   });
 
   it('B3 analysis-yearly: trend + totals + empty lists without writeoffs', async () => {

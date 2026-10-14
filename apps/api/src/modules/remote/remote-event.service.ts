@@ -119,7 +119,36 @@ export class RemoteEventService {
         where: { tenantId: ctx.tenantId, sourceEventId: id },
         select: { id: true, qcStatus: true, period: true, readingValue: true },
       });
-      return { ...event, processLogs: logs, reading };
+      // CONFLICT 摘要：冲突对手方（计划项上的既有读数）——详情页据此渲染
+      // 「远传 vs 人工」对比，而不是把 completedReadingId 留给前端猜。
+      let conflictReading: {
+        readingValue: string;
+        period: string;
+        qcStatus: string;
+        resultType: string;
+      } | null = null;
+      if (event.processingStatus === 'CONFLICT') {
+        const conflictLog = [...logs]
+          .reverse()
+          .find((l) => l.toStatus === 'CONFLICT');
+        const opponentId = (conflictLog?.detail as Record<string, unknown> | null)
+          ?.completedReadingId;
+        if (typeof opponentId === 'string') {
+          const found = await tx.meterReading.findFirst({
+            where: { tenantId: ctx.tenantId, id: opponentId },
+            select: { readingValue: true, period: true, qcStatus: true, resultType: true },
+          });
+          conflictReading = found
+            ? {
+                readingValue: found.readingValue?.toString() ?? '—',
+                period: found.period,
+                qcStatus: found.qcStatus,
+                resultType: found.resultType,
+              }
+            : null;
+        }
+      }
+      return { ...event, processLogs: logs, reading, conflictReading };
     });
   }
 

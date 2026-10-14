@@ -338,7 +338,7 @@ const COLUMN_DEFS: Record<QueryKind, ColumnsType<Row>> = {
     { key: 'customerName', dataIndex: 'customerName', title: '户名' },
     { key: 'period', dataIndex: 'period', title: '账期', render: fmtPeriod },
     { key: 'usageQty', dataIndex: 'usageQty', title: '水量', align: 'right' },
-    { key: 'priceText', dataIndex: 'priceText', title: '单价构成', ellipsis: true },
+    { key: 'priceText', dataIndex: 'priceText', title: '费用构成', ellipsis: true },
     money('totalAmount', '应收(元)'),
     money('adjusted', '调整/减免(元)'),
     money('allocated', '实收(元)'),

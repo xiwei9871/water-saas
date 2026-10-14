@@ -12,6 +12,7 @@ import {
   Badge,
   Button,
   Card,
+  Collapse,
   Descriptions,
   Drawer,
   Space,
@@ -32,7 +33,7 @@ import {
   type TaskItem,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { enumLabel, fmtTime } from '../common';
+import { enumLabel, fmtTime, taskContextText } from '../common';
 
 const PRIORITY_COLOR: Record<string, string> = {
   LOW: 'default',
@@ -319,9 +320,22 @@ export default function Tasks() {
               </Descriptions.Item>
               {detail.context && (
                 <Descriptions.Item label="业务上下文">
-                  <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                    {JSON.stringify(detail.context, null, 2)}
-                  </pre>
+                  {taskContextText(detail.type, detail.context) ?? '—'}
+                  <Collapse
+                    ghost
+                    style={{ marginTop: 4 }}
+                    items={[
+                      {
+                        key: 'tech',
+                        label: '技术详情',
+                        children: (
+                          <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                            {JSON.stringify(detail.context, null, 2)}
+                          </pre>
+                        ),
+                      },
+                    ]}
+                  />
                 </Descriptions.Item>
               )}
               <Descriptions.Item label="创建时间">{fmtTime(detail.createdAt)}</Descriptions.Item>

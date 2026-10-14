@@ -37,6 +37,8 @@ const qty = (v: unknown) =>
 interface MetricCell {
   value: unknown;
   reason?: string;
+  /** 口径参数快照（如连续零用水 N 期），悬停提示 */
+  param?: Record<string, number>;
 }
 
 const metricText = (m: MetricCell | unknown, fmt: (v: unknown) => string) => {
@@ -47,6 +49,17 @@ const metricText = (m: MetricCell | unknown, fmt: (v: unknown) => string) => {
         <Tag color="default">暂无数据</Tag>
       </Tooltip>
     );
+  }
+  if (cell && typeof cell === 'object' && 'value' in cell) {
+    const p = cell.param;
+    const text = fmt(cell.value);
+    if (p) {
+      const hint = Object.entries(p)
+        .map(([k, v]) => `${k}=${v}`)
+        .join('，');
+      return <Tooltip title={`口径参数：${hint}`}>{text}</Tooltip>;
+    }
+    return text;
   }
   return fmt(m);
 };
@@ -247,6 +260,19 @@ const MONTHLY_METRICS: { key: string; title: string; fmt: (v: unknown) => string
   { key: 'READ_COVERAGE', title: '抄见率', fmt: pct },
   { key: 'ESTIMATE_RATE', title: '估抄率', fmt: pct },
   { key: 'READ_TIMELINESS', title: '抄表及时率', fmt: pct },
+  { key: 'READ_ARRIVAL_RATE', title: '抄表到位率', fmt: pct },
+  { key: 'SMART_METER_RATE', title: '智能水表覆盖率', fmt: pct },
+  { key: 'ZERO_USAGE_STREAK_RATE', title: '连续零用水户占比', fmt: pct },
+  { key: 'BILL_TIMELINESS', title: '开账及时率', fmt: pct },
+  { key: 'BILL_ACCURACY', title: '计费准确率', fmt: pct },
+  { key: 'DISCOUNT_RATE', title: '优惠减免率', fmt: pct },
+  { key: 'PREPAY_RATE', title: '预存比率', fmt: pct },
+  { key: 'PREPAY_BALANCE', title: '预存余额(元)', fmt: yuan },
+  { key: 'AGED_ARREARS_RATE', title: '陈欠占比', fmt: pct },
+  { key: 'CHURN_RATE', title: '客户流失率', fmt: pct },
+  { key: 'ACCOUNT_COUNT', title: '在册户数', fmt: (v) => (v == null ? '—' : String(v)) },
+  { key: 'AVG_SOLD_PER_ACCOUNT', title: '人均售水量(m³)', fmt: qty },
+  { key: 'DUN_SUCCESS_RATE', title: '催缴成功率', fmt: pct },
 ];
 
 function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {

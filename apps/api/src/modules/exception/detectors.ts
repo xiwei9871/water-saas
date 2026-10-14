@@ -228,10 +228,12 @@ async function detectRemoteStatus(
       processing_status: string;
       remote_source_id: string;
       water_account_id: string | null;
+      external_event_key: string;
+      vendor_device_key: string;
     }[]
   >`
     SELECT e.id::text, e.processing_status::text, e.remote_source_id::text,
-           i.water_account_id::text
+           i.water_account_id::text, e.external_event_key, e.vendor_device_key
     FROM raw_remote_event e
     LEFT JOIN remote_device_binding b
       ON b.tenant_id = e.tenant_id
@@ -254,7 +256,7 @@ async function detectRemoteStatus(
       waterAccountId: unbound ? undefined : (r.water_account_id ?? undefined),
       remoteSourceId: unbound ? r.remote_source_id : undefined,
       anchorRef: { kind: 'remote-event', id: r.id },
-      summary: `远传事件 ${r.id.slice(0, 8)} 状态 ${r.processing_status}`,
+      summary: `远传事件 ${r.external_event_key || r.vendor_device_key}（设备 ${r.vendor_device_key}）状态 ${r.processing_status}`,
     });
   });
 }
@@ -269,9 +271,17 @@ async function detectEventKeyConflict(
   tenantId: string,
 ): Promise<AnomalyFact[]> {
   const rows = await tx.$queryRaw<
-    { id: string; remote_source_id: string; current_issue_at: Date; occurrences: bigint }[]
+    {
+      id: string;
+      remote_source_id: string;
+      current_issue_at: Date;
+      occurrences: bigint;
+      external_event_key: string;
+      vendor_device_key: string;
+    }[]
   >`
     SELECT e.id::text, e.remote_source_id::text, e.current_issue_at,
+           e.external_event_key, e.vendor_device_key,
            (SELECT count(*) FROM remote_event_process_log l
             WHERE l.tenant_id = e.tenant_id AND l.remote_event_id = e.id
               AND l.code = 'EVENT_KEY_CONFLICT') AS occurrences
@@ -285,7 +295,7 @@ async function detectEventKeyConflict(
       type: A.REMOTE_EVENT_KEY_CONFLICT,
       remoteSourceId: r.remote_source_id,
       anchorRef: { kind: 'remote-event', id: r.id },
-      summary: `远传事件 ${r.id.slice(0, 8)} event key 冲突 @${r.current_issue_at.toISOString()} (#${r.occurrences})`,
+      summary: `远传事件 ${r.external_event_key || r.vendor_device_key}（设备 ${r.vendor_device_key}）事件键冲突 @${r.current_issue_at.toISOString()}（第 ${r.occurrences} 次）`,
     }),
   );
 }

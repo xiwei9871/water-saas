@@ -22,7 +22,7 @@ export interface MetricDef {
   unavailableReason?: string;
 }
 
-export const METRIC_DICT_VERSION = '2026-10.v1';
+export const METRIC_DICT_VERSION = '2026-10.v2';
 
 export const METRIC_DICT: MetricDef[] = [
   {
@@ -171,6 +171,96 @@ export const METRIC_DICT: MetricDef[] = [
     available: true,
   },
   {
+    code: 'READ_ARRIVAL_RATE',
+    name: '抄表到位率',
+    formula: '本期到表抄见（ACTUAL/REMOTE 未更正读数）的计划项 ÷ 本期计划项数',
+    source: 'meter_reading(result_type∈ACTUAL/REMOTE) ⋈ reading_plan_item',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'SMART_METER_RATE',
+    name: '智能水表覆盖率',
+    formula: '在册户中装有生效远传绑定的表计的户数 ÷ 在册户数',
+    source: 'remote_device_binding ⋈ meter_installation ⋈ water_account',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'ZERO_USAGE_STREAK_RATE',
+    name: '连续零用水户占比',
+    formula: '连续 N 期 FINAL 结算用量均为 0 的在册户 ÷ 在册户数（N=tenant_param.KPI_ZERO_USAGE_MONTHS，默认 3）',
+    source: 'consumption_settlement ⋈ water_account；N 取 tenant_param',
+    unit: 'ratio',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'BILL_TIMELINESS',
+    name: '开账及时率',
+    formula: '账期 P 账单中 issued_at ≤ P 月末+N 天的笔数 ÷ 本期账单笔数（N=tenant_param.KPI_BILL_TIMELY_DAYS，默认 10）',
+    source: 'bill(issued_at, period)；N 取 tenant_param',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'BILL_ACCURACY',
+    name: '计费准确率',
+    formula: '本期 NORMAL 账单中未被红冲且无调账行的笔数 ÷ 本期 NORMAL 账单笔数',
+    source: 'bill(status≠REVERSED) − bill_item(item_type=ADJUSTMENT)',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'DISCOUNT_RATE',
+    name: '优惠减免率',
+    formula: '本期 ADJUSTMENT 负项绝对值合计 ÷ 本期应收总额',
+    source: 'bill_item(item_type=ADJUSTMENT, amount<0) ÷ AR_AMOUNT',
+    unit: 'ratio',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'PREPAY_RATE',
+    name: '预存比率',
+    formula: '预存余额合计 ÷ 累计应收总额',
+    source: 'prepayment_ledger_entry ÷ Σ bill.total_amount（累计）',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'AGED_ARREARS_RATE',
+    name: '陈欠占比',
+    formula: '账龄超 N 月的期末欠费 ÷ 期末欠费总额（N=tenant_param.KPI_AGED_ARREARS_MONTHS，默认 12）',
+    source: 'bill ⋈ payment_alloc（账龄分段）；N 取 tenant_param',
+    unit: 'ratio',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'CHURN_RATE',
+    name: '客户流失率',
+    formula: '本期销户数 ÷ 期初在册户数（期初：opened_at<期初 且 未销户）',
+    source: 'water_account(opened_at, closed_at)',
+    unit: 'ratio',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'AVG_SOLD_PER_ACCOUNT',
+    name: '人均售水量',
+    formula: '本期售水量 ÷ 期末在册户数',
+    source: 'SOLD_QTY ÷ ACCOUNT_COUNT',
+    unit: 'm3',
+    direction: 'info',
+    available: true,
+  },
+  {
     code: 'ACCOUNT_COUNT',
     name: '在册户数',
     formula: 'status=NORMAL 用水户数（期末时点）',
@@ -245,12 +335,11 @@ export const METRIC_DICT: MetricDef[] = [
   {
     code: 'DUN_SUCCESS_RATE',
     name: '催缴成功率',
-    formula: '催缴后 N 日内收回欠费户数 ÷ 催缴户数',
-    source: '催缴记录（功能未建）',
+    formula: '本期创建的催缴任务中，创建后 N 日内对应结算户有实收销账的任务数 ÷ 本期催缴任务数（N=tenant_param.KPI_DUN_SUCCESS_DAYS，默认 7）',
+    source: 'task(type=COLLECTION) ⋈ payment/settle_account；N 取 tenant_param',
     unit: 'ratio',
     direction: 'higher-better',
-    available: false,
-    unavailableReason: '催缴登记功能未建，无数据源',
+    available: true,
   },
   {
     code: 'PREPAY_BALANCE',

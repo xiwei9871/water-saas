@@ -17,40 +17,37 @@ const { Sider, Header, Content } = Layout;
 
 type MenuItem = Required<MenuProps>['items'][number];
 
-/** T2: 顶层菜单组 → 异常域。徽标计数来自 GET /exceptions/badge。 */
-const DOMAIN_OF_MENU: Record<string, string> = {
-  '/metering': 'metering',
-  '/settlement': 'settlement',
-  '/billing': 'billing',
-  '/customer': 'customer',
-  '/payment': 'billing',
-};
-
-/** Route tree → AntD menu items, filtered by permission. */
+/** Route tree → AntD menu items, filtered by permission.
+ *  异常徽标按处置页（byPage）挂到叶子子栏目，父组显示后代合计；
+ *  徽标跟在文字后面内联渲染，不再包住文字造成遮挡。 */
 const toMenuItems = (
   routes: AppRoute[],
   hasPerm: (...codes: string[]) => boolean,
-  badge?: Record<string, number>,
+  badge?: { total: number; byPage: Record<string, number> },
 ): MenuItem[] =>
   routes
     .filter((r) => !r.perms || hasPerm(...r.perms))
     .map((r) => {
-      const domain = DOMAIN_OF_MENU[r.path];
-      const count = domain ? (badge?.[domain] ?? 0) : 0;
-      const isExceptionRoot = r.path === '/exceptions';
-      const n = isExceptionRoot ? (badge?.total ?? 0) : count;
+      const leafCount = (path: string): number =>
+        path === '/exceptions' ? (badge?.total ?? 0) : (badge?.byPage?.[path] ?? 0);
+      const subtreeCount = (node: AppRoute): number =>
+        (leafCount(node.path) || 0) +
+        (node.children ?? []).reduce((s, c) => s + subtreeCount(c), 0);
+      const n = subtreeCount(r);
+      const label =
+        n > 0 ? (
+          <span>
+            {r.label}
+            <Badge count={n} size="small" style={{ marginLeft: 8 }} />
+          </span>
+        ) : (
+          r.label
+        );
       return {
         key: r.path,
         icon: r.icon,
-        label:
-          n > 0 ? (
-            <Badge count={n} size="small" offset={[8, 0]}>
-              {r.label}
-            </Badge>
-          ) : (
-            r.label
-          ),
-        children: r.children ? toMenuItems(r.children, hasPerm) : undefined,
+        label,
+        children: r.children ? toMenuItems(r.children, hasPerm, badge) : undefined,
       };
     });
 
@@ -72,7 +69,11 @@ export default function AdminLayout() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  const [badge, setBadge] = useState<{ total: number; byDomain: Record<string, number> } | null>(null);
+  const [badge, setBadge] = useState<{
+    total: number;
+    byDomain: Record<string, number>;
+    byPage?: Record<string, number>;
+  } | null>(null);
   const [taskBadge, setTaskBadge] = useState<{ todo: number; escalated: number; alerts: number } | null>(null);
 
   useEffect(() => {
@@ -81,7 +82,9 @@ export default function AdminLayout() {
     const load = () => {
       if (hasPerm('exception:read')) {
         api
-          .get<{ total: number; byDomain: Record<string, number> }>('/exceptions/badge')
+          .get<{ total: number; byDomain: Record<string, number>; byPage?: Record<string, number> }>(
+            '/exceptions/badge',
+          )
           .then((r) => {
             if (!stopped) setBadge(r.data);
           })
@@ -103,7 +106,12 @@ export default function AdminLayout() {
   }, [user, hasPerm]);
 
   const items = useMemo(
-    () => toMenuItems(APP_ROUTES, hasPerm, badge?.byDomain ? { ...badge.byDomain, total: badge.total } : undefined),
+    () =>
+      toMenuItems(
+        APP_ROUTES,
+        hasPerm,
+        badge ? { total: badge.total, byPage: badge.byPage ?? {} } : undefined,
+      ),
     [hasPerm, badge],
   );
 

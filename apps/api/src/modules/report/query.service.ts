@@ -252,7 +252,15 @@ export class QueryService {
                b.bill_kind::text AS "billKind", b.status::text AS status,
                b.is_estimated AS "isEstimated",
                cs.total_usage_qty::text AS "usageQty",
-               (SELECT string_agg(fi.name || ' ' || bi.amount::text, ' + ')
+               (SELECT string_agg(
+                     COALESCE(fi.name, '费用项') || ' ¥'
+                       || to_char(bi.amount / 100.0, 'FM9999999990.00') ||
+                     CASE WHEN bi.qty IS NOT NULL AND bi.unit_price IS NOT NULL
+                          THEN '（¥' || to_char(bi.unit_price / 100.0, 'FM9999999990.0000')
+                               || '/m³ × ' || trim(to_char(bi.qty, 'FM9999999990.####'))
+                               || ' m³）'
+                          ELSE '' END,
+                     ' + ')
                   FROM bill_item bi
                   LEFT JOIN fee_item fi ON fi.tenant_id = bi.tenant_id AND fi.id = bi.fee_item_id
                   WHERE bi.tenant_id = b.tenant_id AND bi.bill_id = b.id

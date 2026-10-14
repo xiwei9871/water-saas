@@ -172,6 +172,29 @@ export class ExceptionService {
       UNPAID_BILL_OVERDUE: 'billing',
       CLOSED_BALANCE_LEFT: 'customer',
     };
+    // 处置页映射 —— 与前端 Exceptions 页「去处理」跳转目标保持一致；
+    // 菜单徽标按此聚合到子栏目（P3 下钻要求）。
+    const PAGE: Record<string, string> = {
+      READING_QC_PENDING: '/metering/readings',
+      READING_QC_REVIEW: '/metering/readings',
+      READING_QC_REJECTED: '/metering/readings',
+      ESTIMATE_STREAK: '/metering/readings',
+      PLANNED_NO_READING: '/metering/readings',
+      NO_ACTIVE_METER: '/customer/meters',
+      MULTI_ACTIVE_METER: '/customer/meters',
+      NO_BOOK: '/metering/books',
+      MULTI_BOOK: '/metering/books',
+      REMOTE_EVENT_UNBOUND: '/metering/remote-events',
+      REMOTE_EVENT_WAITING_PLAN: '/metering/remote-events',
+      REMOTE_EVENT_FAILED: '/metering/remote-events',
+      REMOTE_EVENT_CONFLICT: '/metering/remote-events',
+      REMOTE_EVENT_KEY_CONFLICT: '/metering/remote-events',
+      SETTLEMENT_DRIFT: '/settlement/reconciliations',
+      PLANNED_NO_SETTLEMENT: '/settlement/list',
+      SETTLEMENT_UNFINALIZED: '/settlement/list',
+      UNPAID_BILL_OVERDUE: '/billing/bills',
+      CLOSED_BALANCE_LEFT: '/customer/settle-accounts',
+    };
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const facts = await filterVisible(tx, ctx, await detectAll(tx, ctx.tenantId));
       const episodes = await tx.workItem.findMany({
@@ -184,6 +207,7 @@ export class ExceptionService {
       });
       const epByKey = new Map(episodes.map((e) => [e.anomalyKey, e.status]));
       const byDomain: Record<string, number> = {};
+      const byPage: Record<string, number> = {};
       let total = 0;
       for (const f of facts) {
         const s = epByKey.get(f.key) ?? 'OPEN';
@@ -191,8 +215,10 @@ export class ExceptionService {
         total++;
         const d = DOMAIN[f.type] ?? 'other';
         byDomain[d] = (byDomain[d] ?? 0) + 1;
+        const page = PAGE[f.type];
+        if (page) byPage[page] = (byPage[page] ?? 0) + 1;
       }
-      return { total, byDomain, asOf: new Date().toISOString() };
+      return { total, byDomain, byPage, asOf: new Date().toISOString() };
     });
   }
 
