@@ -38,3 +38,4 @@ scripts/pilot/lib/*.d.ts
 scripts/pilot/lib/**/*.js
 scripts/pilot/lib/**/*.js.map
 scripts/pilot/lib/**/*.d.ts
+artifacts/t19/
