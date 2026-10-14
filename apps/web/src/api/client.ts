@@ -332,6 +332,9 @@ const CODE_LABELS: Record<string, string> = {
 /** Human-readable Chinese text for any thrown value. */
 export const apiErrorText = (err: unknown): string => {
   const e = toApiError(err);
+  // 任务书 §1.8 三段式阻断：409 载荷已含任务标题与候选责任人，优先展示
+  // 服务端 message，CODE_LABELS 只作缺 message 时的兜底翻译。
+  if (e.code === 'SETTLEMENT_BLOCKED_BY_TASK' && e.message) return e.message;
   return CODE_LABELS[e.code] ?? e.message ?? e.code;
 };
 
