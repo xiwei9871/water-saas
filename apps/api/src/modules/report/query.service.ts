@@ -256,7 +256,7 @@ export class QueryService {
                      COALESCE(fi.name, '费用项') || ' ¥'
                        || to_char(bi.amount / 100.0, 'FM9999999990.00') ||
                      CASE WHEN bi.qty IS NOT NULL AND bi.unit_price IS NOT NULL
-                          THEN '（¥' || to_char(bi.unit_price / 100.0, 'FM9999999990.0000')
+                          THEN '（¥' || to_char(bi.unit_price, 'FM9999999990.00')
                                || '/m³ × ' || trim(to_char(bi.qty, 'FM9999999990.####'))
                                || ' m³）'
                           ELSE '' END,
