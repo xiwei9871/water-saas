@@ -99,7 +99,7 @@ const WRITABLE_PLAN: PlanStatus[] = ['OPEN', 'IN_PROGRESS'];
  * （明细行内抄表录入 + 批量录入）。
  */
 export default function ReadingPlans() {
-  const { message } = AntdApp.useApp();
+  const { message, modal } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
   const canIamRead = hasPerm('iam:read');
@@ -370,7 +370,7 @@ export default function ReadingPlans() {
     if (!entryItem || !drawerPlanId) return;
     setEntrySaving(true);
     try {
-      await api.post(
+      const res = await api.post(
         '/meter-readings',
         cleanBody({
           planItemId: entryItem.id,
@@ -390,6 +390,9 @@ export default function ReadingPlans() {
         { headers: { 'Idempotency-Key': entryIdemKey } },
       );
       message.success('抄表记录已录入');
+      showReviewTaskNotice(
+        (res.data as { reviewTasks?: { reason: string }[] }).reviewTasks,
+      );
       setEntryItem(null);
       await loadDetail(drawerPlanId);
       await load(page, pageSize);
@@ -403,6 +406,15 @@ export default function ReadingPlans() {
   };
 
   // ---- 批量录入 ----
+
+  /** 任务书 T10 三段式：录入触发复核任务 → 告知已生成任务并通知质检人员。 */
+  const showReviewTaskNotice = (tasks?: { reason: string }[]) => {
+    if (!tasks?.length) return;
+    modal.warning({
+      title: `检测到 ${tasks.length} 条读数异常，已生成【抄表异常复核】任务`,
+      content: `原因：${[...new Set(tasks.map((t) => t.reason))].join('；')}。已通知具备质检权限的账号，复核通过后方可用于结算。`,
+    });
+  };
 
   const openBatch = () => {
     const map = new Map<string, BatchRowState>();
@@ -464,12 +476,12 @@ export default function ReadingPlans() {
     }
     setBatchSaving(true);
     try {
-      const res = await api.post<{ created: number }>(
-        '/meter-readings',
-        { items },
-        { headers: { 'Idempotency-Key': batchIdemKey } },
-      );
+      const res = await api.post<{
+        created: number;
+        reviewTasks?: { reason: string }[];
+      }>('/meter-readings', { items }, { headers: { 'Idempotency-Key': batchIdemKey } });
       message.success(`已批量录入 ${res.data.created} 条抄表记录`);
+      showReviewTaskNotice(res.data.reviewTasks);
       setBatchOpen(false);
       await loadDetail(drawerPlanId);
       await load(page, pageSize);

@@ -181,7 +181,9 @@ export default function Reconciliations() {
   const [rows, setRows] = useState<Reconciliation[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterCustomerId, setFilterCustomerId] = useState<string | undefined>(undefined);
-  const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
+  const [waterAccountId, setWaterAccountId] = useState<string | undefined>(
+    () => new URLSearchParams(window.location.search).get('waterAccountId') ?? undefined,
+  );
   const [status, setStatus] = useState<ReconStatus | undefined>(undefined);
   const [period, setPeriod] = useState<dayjs.Dayjs | null>(null);
   const [page, setPage] = useState(1);

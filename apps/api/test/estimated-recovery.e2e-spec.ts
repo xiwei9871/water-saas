@@ -113,8 +113,13 @@ describe('estimated dial is never a rollover anchor', () => {
       const { a } = await fixture(maxDial);
       const response = await post('/consumption-settlements', { waterAccountId: a.waterAccount.id, period: '202701' });
       expect(response.status).toBe(409);
-      expect(response.body.code).toBe('ESTIMATE_RECOVERY_REQUIRES_RECONCILIATION');
+      // 任务书 T6/T9：估水回退 → 补差任务落库（独立事务，阻断回滚不影响）+ 结算被阻断。
+      expect(response.body.code).toBe('SETTLEMENT_BLOCKED_BY_TASK');
+      expect(response.body.tasks[0]).toMatchObject({ type: 'SUPPLEMENT' });
       expect(await owner.consumptionSettlement.count({ where: { tenantId, waterAccountId: a.waterAccount.id, period: '202701' } })).toBe(0);
+      const task = await owner.task.findFirstOrThrow({ where: { tenantId, type: 'SUPPLEMENT', bizId: a.waterAccount.id } });
+      expect(task.status).toBe('PENDING');
+      expect(task.requiredPerm).toBe('billing:write');
     }, 60_000);
   }
 });

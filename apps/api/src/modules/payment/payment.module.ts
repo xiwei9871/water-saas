@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { TaskModule } from '../task/task.module.js';
 import { PrepaymentModule } from '../prepayment/prepayment.module.js';
 import { AccountOutstandingController } from './account-outstanding.controller.js';
 import { DayCloseController } from './day-close.controller.js';
@@ -28,7 +29,7 @@ import { WriteoffController } from './writeoff.controller.js';
  * no circularity.
  */
 @Module({
-  imports: [PrepaymentModule],
+  imports: [PrepaymentModule, TaskModule],
   controllers: [
     PaymentController,
     AccountOutstandingController,

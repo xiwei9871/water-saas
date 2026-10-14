@@ -17,6 +17,7 @@ import {
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
+import { TaskService } from '../task/task.service.js';
 
 const assertDate = (v: unknown, field: string): string => {
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
@@ -44,7 +45,10 @@ const assertDate = (v: unknown, field: string): string => {
 // 抢先匹配（控制器注册顺序），故挂独立前缀。
 @Controller('writeoffs')
 export class WriteoffController {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly tasks: TaskService,
+  ) {}
 
   @Get()
   @AnyPermissions('payment:read', 'report:read')
@@ -177,7 +181,7 @@ export class WriteoffController {
         });
         if (!bill) throw new NotFoundException({ code: 'BILL_NOT_FOUND' });
       }
-      return tx.badDebtWriteoff.create({
+      const created = await tx.badDebtWriteoff.create({
         data: {
           tenantId: ctx.tenantId,
           settleAccountId,
@@ -191,6 +195,32 @@ export class WriteoffController {
           updatedBy: ctx.staffId,
         },
       });
+      // 任务书 T15：核销发起 → 审批任务（billing:write 候选，事后复核制）。
+      const settleNo = await tx.settleAccount.findUnique({
+        where: { tenantId_id: { tenantId: ctx.tenantId, id: settleAccountId } },
+        select: { settleNo: true },
+      });
+      await this.tasks.createTask(tx, ctx, {
+        type: 'WRITEOFF_APPROVAL',
+        title: `核销审批：结算户 ${settleNo?.settleNo ?? settleAccountId} ¥${(Number(body.amount) / 100).toFixed(2)}`,
+        bizType: 'badDebtWriteoff',
+        bizId: created.id,
+        bizLabel: settleNo?.settleNo ?? null,
+        reason: `坏账核销登记（原因：${reason.name}）`,
+        context: {
+          writeoffId: created.id,
+          settleAccountId,
+          settleNo: settleNo?.settleNo ?? null,
+          amountCent: String(body.amount),
+          reasonCode: reason.code,
+          reasonName: reason.name,
+          waterAccountId: waterAccountId ?? null,
+          billId: billId ?? null,
+          effectiveDate: body.effectiveDate,
+        },
+        orgUnitId: null,
+      });
+      return created;
     });
   }
 

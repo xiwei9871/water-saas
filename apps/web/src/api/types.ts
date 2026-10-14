@@ -1409,3 +1409,70 @@ export type ExceptionSummary = {
   todayCleared: number;
   asOf: string;
 };
+
+// ---------------------------------------------------------------------------
+// 任务中心（任务驱动机制 V1.0）
+// ---------------------------------------------------------------------------
+
+export type TaskStatus = 'PENDING' | 'CLAIMED' | 'DONE' | 'CANCELLED';
+export type TaskPriority = 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+
+export type TaskItem = {
+  id: string;
+  type: string;
+  typeName?: string;
+  title: string;
+  bizType: string;
+  bizId: string;
+  bizLabel: string | null;
+  reason: string;
+  context: Record<string, unknown> | null;
+  requiredPerm: string;
+  orgUnitId: string | null;
+  assigneeId: string | null;
+  assigneeName?: string | null;
+  completedByName?: string | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  dueAt: string | null;
+  sourceTaskId: string | null;
+  candidateCount: number;
+  escalatedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  canClaim?: boolean;
+  candidates?: { id: string; name: string }[];
+};
+
+export type TaskBadge = { todo: number; escalated: number; alerts: number };
+
+export const TASK_TYPE_LABELS: Record<string, string> = {
+  SUPPLEMENT: '补差任务',
+  METER_REVIEW: '抄表异常复核',
+  COLLECTION: '催缴任务',
+  REVERSAL_APPROVAL: '红冲审批',
+  WRITEOFF_APPROVAL: '核销审批',
+};
+
+export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
+  PENDING: '待处理',
+  CLAIMED: '处理中',
+  DONE: '已完成',
+  CANCELLED: '已取消',
+};
+
+export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
+  LOW: '低',
+  NORMAL: '普通',
+  HIGH: '高',
+  URGENT: '紧急',
+};
+
+/** bizType → 直达路由（{bizId} 占位替换）。与后端 task.types.ts 对齐。 */
+export const TASK_BIZ_ROUTES: Record<string, string> = {
+  SUPPLEMENT: '/settlement/reconciliations?waterAccountId={bizId}',
+  METER_REVIEW: '/metering/readings',
+  COLLECTION: '/report/query/arrears',
+  REVERSAL_APPROVAL: '/payment/payments',
+  WRITEOFF_APPROVAL: '/payment/writeoffs',
+};

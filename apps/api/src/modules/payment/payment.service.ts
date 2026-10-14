@@ -15,6 +15,7 @@ import {
   outOfScopeSettleAccountIds,
 } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
 import {
   embedSettleIdentity,
   embedStaffNames,
@@ -174,6 +175,7 @@ export class PaymentService {
     private readonly prisma: TenantPrismaService,
     private readonly seq: SequenceService,
     private readonly prepay: PrepaymentService,
+    private readonly tasks: TaskService,
   ) {}
 
   list(
@@ -398,7 +400,70 @@ export class PaymentService {
       select: PAYMENT_ALLOC_SELECT,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
+    // 任务书 T13：收款后仍欠费超限 → 自动建催缴任务（payment:write 候选）。
+    // 幂等去重由 task_open_dedupe 保证——清完前重复收款不会刷屏。
+    await this.detectCollectionTask(tx, ctx, body.settleAccountId, payment.orgUnitId);
     return { ...payment, allocs, receipt };
+  }
+
+  /**
+   * 催缴检测：结算户剩余欠费（未结清账单净额）> TASK_RULE.COLLECTION
+   * .amountThreshold 分，或存在逾期 > overdueDays 天的账单 → 建任务。
+   */
+  private async detectCollectionTask(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    settleAccountId: string,
+    orgUnitId: string | null,
+  ) {
+    const rule = await tx.sysDict.findFirst({
+      where: { tenantId: ctx.tenantId, category: 'TASK_RULE', code: 'COLLECTION', status: 'ACTIVE' },
+      select: { value: true },
+    });
+    const v = (rule?.value ?? {}) as { amountThreshold?: number; overdueDays?: number };
+    const threshold = BigInt(v.amountThreshold ?? 100000);
+    const overdueDays = v.overdueDays ?? 30;
+    const rows = await tx.$queryRaw<{ arrears: bigint; overdue: bigint; settle_no: string | null }[]>`
+      SELECT COALESCE(sum(GREATEST(b.total_amount - COALESCE(a.paid,0),0)),0) AS arrears,
+             count(*) FILTER (WHERE b.due_date < CURRENT_DATE - (${overdueDays} || ' days')::interval
+                              AND b.total_amount - COALESCE(a.paid,0) > 0) AS overdue,
+             (SELECT s.settle_no FROM settle_account s
+               WHERE s.tenant_id = ${ctx.tenantId}::uuid AND s.id = ${settleAccountId}::uuid) AS settle_no
+      FROM bill b
+      LEFT JOIN (SELECT bill_id, sum(pa.amount) AS paid FROM payment_alloc pa
+                  JOIN payment p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+                  WHERE pa.tenant_id = ${ctx.tenantId}::uuid
+                    AND p.status IN ('RECEIVED','DAY_CLOSED')
+                  GROUP BY bill_id) a ON a.bill_id = b.id
+      WHERE b.tenant_id = ${ctx.tenantId}::uuid
+        AND b.settle_account_id = ${settleAccountId}::uuid
+        AND b.bill_kind <> 'REVERSAL'
+        AND b.status IN ('POSTED','PARTIAL_PAID')`;
+    const { arrears, overdue, settle_no } = rows[0] ?? { arrears: 0n, overdue: 0n, settle_no: null };
+    const overAmount = arrears > threshold;
+    const overDays = overdue > 0n;
+    if (!overAmount && !overDays) return;
+    const reason = [
+      overAmount ? `欠费 ¥${(Number(arrears) / 100).toFixed(2)} 超阈值` : null,
+      overDays ? `${overdue} 笔逾期超 ${overdueDays} 天` : null,
+    ].filter(Boolean).join('；');
+    await this.tasks.createTask(tx, ctx, {
+      type: 'COLLECTION',
+      title: `催缴：结算户 ${settle_no ?? settleAccountId} 欠费超限`,
+      bizType: 'settleAccount',
+      bizId: settleAccountId,
+      bizLabel: settle_no ?? null,
+      reason,
+      context: {
+        settleAccountId,
+        settleNo: settle_no,
+        arrearsCent: arrears.toString(),
+        overdueBillCount: overdue.toString(),
+        thresholdCent: threshold.toString(),
+        overdueDays,
+      },
+      orgUnitId,
+    });
   }
 
   /**
@@ -792,6 +857,25 @@ export class PaymentService {
     await tx.receipt.updateMany({
       where: { tenantId: ctx.tenantId, paymentId: id, voidFlag: false },
       data: { voidFlag: true, updatedBy: ctx.staffId },
+    });
+    // 任务书 T14：红冲发起 → 审批任务（billing:write 候选，事后复核制）。
+    const reversalReason = (req.body as { reason?: string } | undefined)?.reason;
+    await this.tasks.createTask(tx, ctx, {
+      type: 'REVERSAL_APPROVAL',
+      title: `红冲审批：收款 ${original.paymentNo} 红冲复核`,
+      bizType: 'payment',
+      bizId: reversal.id,
+      bizLabel: paymentNo,
+      reason: reversalReason ? `红冲原因：${reversalReason}` : '发起红冲需审批',
+      context: {
+        reversalPaymentId: reversal.id,
+        reversalPaymentNo: paymentNo,
+        originalPaymentId: original.id,
+        originalPaymentNo: original.paymentNo,
+        amountCent: original.amount.toString(),
+        reason: reversalReason ?? null,
+      },
+      orgUnitId: original.orgUnitId,
     });
 
     // Bills recover outstanding: Σ allocs after the negative mirrors.

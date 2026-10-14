@@ -30,7 +30,11 @@ interface DictItem {
   name: string;
   seq: number;
   status: 'ACTIVE' | 'DISABLED';
+  value?: object | null;
 }
+
+/** 这些类别的字典项携带 JSON value（任务权限映射/触发规则）。 */
+const TASK_VALUE_CATEGORIES = new Set(['TASK_TYPE_PERM', 'TASK_RULE']);
 
 /** G4 统一字典管理 —— 报表筛选类别与业务原因码的租户级配置。
  *  停用保留行（历史单据已引用），code 创建后不可改。 */
@@ -73,11 +77,21 @@ export default function Dicts() {
 
   const save = async () => {
     const v = await form.validateFields();
+    let value: object | undefined;
+    if (TASK_VALUE_CATEGORIES.has(category) && v.value !== undefined && `${v.value}`.trim() !== '') {
+      try {
+        value = JSON.parse(v.value);
+      } catch {
+        message.error('value 必须是合法 JSON');
+        return;
+      }
+    }
     try {
       if (modal.editing) {
         await api.patch(`/iam/dicts/${modal.editing.id}`, {
           name: v.name,
           seq: v.seq ?? 0,
+          ...(value !== undefined ? { value } : {}),
         });
         message.success('已更新');
       } else {
@@ -86,6 +100,7 @@ export default function Dicts() {
           code: v.code,
           name: v.name,
           seq: v.seq ?? 0,
+          ...(value !== undefined ? { value } : {}),
         });
         message.success('已新增');
       }
@@ -133,7 +148,12 @@ export default function Dicts() {
                   size="small"
                   onClick={() => {
                     setModal({ open: true, editing: r });
-                    form.setFieldsValue({ code: r.code, name: r.name, seq: r.seq });
+                    form.setFieldsValue({
+                      code: r.code,
+                      name: r.name,
+                      seq: r.seq,
+                      value: r.value != null ? JSON.stringify(r.value) : undefined,
+                    });
                   }}
                 >
                   编辑
@@ -206,6 +226,20 @@ export default function Dicts() {
           <Form.Item name="seq" label="排序">
             <InputNumber min={0} style={{ width: 120 }} />
           </Form.Item>
+          {TASK_VALUE_CATEGORIES.has(category) && (
+            <Form.Item
+              name="value"
+              label="规则值（JSON）"
+              rules={[{ required: true, message: '必填' }]}
+              extra={
+                category === 'TASK_TYPE_PERM'
+                  ? '如 {"perm":"billing:write","dueDays":3,"priority":"HIGH"}'
+                  : '如 {"amountThreshold":100000,"overdueDays":30}'
+              }
+            >
+              <Input.TextArea rows={3} style={{ fontFamily: 'monospace' }} />
+            </Form.Item>
+          )}
         </Form>
       </Modal>
     </Card>

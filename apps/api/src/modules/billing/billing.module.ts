@@ -8,6 +8,7 @@ import { BillingRunService } from './billing-run.service.js';
 import { FeeItemController } from './fee-item.controller.js';
 import { FeeItemService } from './fee-item.service.js';
 import { ReconciliationController } from './reconciliation.controller.js';
+import { TaskModule } from '../task/task.module.js';
 import { ReconciliationService } from './reconciliation.service.js';
 import { TariffPlanController } from './tariff-plan.controller.js';
 import { TariffPlanService } from './tariff-plan.service.js';
@@ -27,7 +28,7 @@ import { TariffPlanService } from './tariff-plan.service.js';
  * CommonModule.
  */
 @Module({
-  imports: [PrepaymentModule],
+  imports: [PrepaymentModule, TaskModule],
   controllers: [
     FeeItemController,
     TariffPlanController,

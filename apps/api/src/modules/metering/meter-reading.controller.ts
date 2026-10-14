@@ -236,8 +236,8 @@ export class MeterReadingController {
         ctx,
         { key, method: 'POST', route: req.path, body, responseStatus: 201 },
         async (tx) => {
-          const readings = await this.svc.createBatchTx(tx, ctx, inputs);
-          return { created: readings.length, readings };
+          const { readings, reviewTasks } = await this.svc.createBatchTx(tx, ctx, inputs);
+          return { created: readings.length, readings, reviewTasks };
         },
       );
     }
@@ -247,7 +247,10 @@ export class MeterReadingController {
       this.idem,
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
-      async (tx) => (await this.svc.createBatchTx(tx, ctx, [input]))[0],
+      async (tx) => {
+        const { readings, reviewTasks } = await this.svc.createBatchTx(tx, ctx, [input]);
+        return { ...readings[0], reviewTasks };
+      },
     );
   }
 
@@ -324,8 +327,8 @@ export class MeterReadingController {
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
       async (tx) => {
-        const readings = await this.svc.importTx(tx, ctx, inputs, preFailed);
-        return { created: readings.length, readings };
+        const { readings, reviewTasks } = await this.svc.importTx(tx, ctx, inputs, preFailed);
+        return { created: readings.length, readings, reviewTasks };
       },
     );
   }

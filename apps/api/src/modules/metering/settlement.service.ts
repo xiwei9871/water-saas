@@ -19,6 +19,8 @@ import {
 } from '../../common/account-scope.js';
 import { embedAccountIdentity } from '../../common/account-identity.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
+import { SETTLEMENT_BLOCKING_TYPES } from '../task/task.types.js';
 
 export const SETTLEMENT_SELECT = {
   id: true,
@@ -244,7 +246,10 @@ interface DialCheckpoint {
  */
 @Injectable()
 export class SettlementService {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly tasks: TaskService,
+  ) {}
 
   async list(
     ctx: TenantCtx,
@@ -375,6 +380,10 @@ export class SettlementService {
       });
     }
 
+    // 任务书 T9：该户存在未完成补差任务 → 阻断结算（任务完成/核销应用后自动解锁）。
+    await this.throwIfBlockedByTask(tx, ctx, body.waterAccountId);
+    const anchor = await this.accountTaskAnchor(tx, ctx, body.waterAccountId);
+
     const { start, end } = periodBounds(body.period);
     // Installations contributing to the period: lifetime intersects
     // [start,end) — still ACTIVE, or REMOVED during/after the period (an
@@ -443,14 +452,29 @@ export class SettlementService {
       // An estimated end is not a physical dial: maxDial cannot turn an
       // over-estimate into a rollover. Correct billed estimates first.
       if (checkpoint?.sourceType === 'ESTIMATE' && actualEnd?.lt(prev)) {
-        throw new ConflictException({
-          code: 'ESTIMATE_RECOVERY_REQUIRES_RECONCILIATION',
-          waterAccountId: body.waterAccountId,
-          installationId: inst.id,
-          period: body.period,
-          estimatedReadingValue: prev.toString(),
-          actualReadingValue: actualEnd.toString(),
+        // 任务书 T6/T9：检测「实抄止度 < 估计止度」→ 自动建补差任务（幂等）
+        // 并阻断结算。核销应用后 prevChain 用真实读数替换估计 checkpoint，
+        // 该分支不再命中——完成解锁无需状态翻转。
+        // 注意：本事务随阻断 409 回滚，任务必须在独立事务中提交。
+        const task = await this.tasks.createTaskStandalone(ctx, {
+          type: 'SUPPLEMENT',
+          title: `补差：户 ${anchor.accountNo} 的 ${body.period} 期估水需校正`,
+          bizType: 'waterAccount',
+          bizId: body.waterAccountId,
+          bizLabel: anchor.accountNo,
+          reason: `实抄止度 ${actualEnd.toString()} < 估计止度 ${prev.toString()}`,
+          context: {
+            waterAccountId: body.waterAccountId,
+            waterAccountNo: anchor.accountNo,
+            period: body.period,
+            installationId: inst.id,
+            estimatedReadingValue: prev.toString(),
+            actualReadingValue: actualEnd.toString(),
+            diff: actualEnd.minus(prev).toString(),
+          },
+          orgUnitId: anchor.orgUnitId,
         });
+        await this.throwIfBlockedByTask(tx, ctx, body.waterAccountId, task);
       }
       if (removedInPeriod && inst.finalReading !== null) {
         // 拆表 final_reading is the end-of-life dial fact — it wins over any
@@ -1001,6 +1025,52 @@ export class SettlementService {
       components: namedComponents(r.id),
       consecutiveEstimates: streaks.get(r.id) ?? 0,
     }));
+  }
+
+  /**
+   * 任务锚点：户号（人读标签）+ 数据范围组织（首个覆盖册 org）。
+   * 册缺失时 org=null → 候选人不受组织限制（ALL/任意组织但有权限者）。
+   */
+  private async accountTaskAnchor(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+  ): Promise<{ accountNo: string; orgUnitId: string | null }> {
+    const rows = await tx.$queryRaw<{ account_no: string; org: string | null }[]>`
+      SELECT wa.account_no,
+             (SELECT rb.org_unit_id FROM book_meter bm
+                JOIN reading_book rb ON rb.id = bm.book_id AND rb.tenant_id = bm.tenant_id
+               WHERE bm.tenant_id = wa.tenant_id AND bm.water_account_id = wa.id
+               ORDER BY bm.created_at ASC LIMIT 1) AS org
+      FROM water_account wa
+      WHERE wa.tenant_id = ${ctx.tenantId}::uuid AND wa.id = ${waterAccountId}::uuid`;
+    return { accountNo: rows[0]?.account_no ?? waterAccountId, orgUnitId: rows[0]?.org ?? null };
+  }
+
+  /**
+   * 任务书 §1.8 三段式阻断：存在未完成任务 → 409，载荷带任务与候选责任人
+   * 姓名（有权限者看「请前往处理」，无权限者看「已指派给…」由前端按 canClaim 分流）。
+   */
+  private async throwIfBlockedByTask(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+    justCreated?: { candidates: { id: string; name: string }[] },
+  ) {
+    const blocking = await this.tasks.openTasksForBiz(
+      tx, ctx, SETTLEMENT_BLOCKING_TYPES, 'waterAccount', waterAccountId,
+    );
+    if (blocking.length === 0) return;
+    const first = blocking[0];
+    const candidates =
+      justCreated?.candidates ??
+      (await this.tasks.resolveCandidates(tx, ctx, first.requiredPerm, first.orgUnitId));
+    throw new ConflictException({
+      code: 'SETTLEMENT_BLOCKED_BY_TASK',
+      message: `该户存在未完成的【补差任务】（候选责任人：${candidates.map((c) => c.name).join('、') || '暂无具备权限的账号'}），完成后自动解锁。`,
+      tasks: blocking.map((t) => ({ id: t.id, type: t.type, title: t.title })),
+      candidates: candidates.map((c) => ({ id: c.id, name: c.name })),
+    });
   }
 
   /** Streak math lives in common/estimate-streak.ts (E9 shares it). */

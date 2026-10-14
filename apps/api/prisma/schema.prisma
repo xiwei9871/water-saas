@@ -1482,6 +1482,72 @@ enum ResolutionSource {
 }
 
 // ---------------------------------------------------------------------------
+// 任务驱动机制（任务书 V1.0）— Task = 业务节点自动生成的行动项。
+// 与 work_item 的区别：work_item 记录异常 episode 的处理状态（ack/ignore），
+// task 是「需要下一步操作」的指派闭环：检测→建任务→按权限指派→领取→完成→解锁。
+// ---------------------------------------------------------------------------
+
+/// Action task auto-created by domain triggers (supplement/review/collection/
+/// approvals). type→requiredPerm mapping lives in sys_dict TASK_TYPE_PERM —
+/// candidates are permission-derived, never hard-coded job titles.
+/// At most ONE open task per (tenant,type,bizType,bizId) — enforced by the
+/// partial unique index `task_open_dedupe` in the hand-written migration;
+/// a DONE/CANCELLED task frees the key so the same biz can re-trigger later.
+model Task {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  // String, not enum: new task types must not require a migration.
+  type           String
+  title          String
+  bizType        String       @map("biz_type")
+  bizId          String       @map("biz_id") @db.Uuid
+  // Human-readable business reference (户号/单号·账期) — display layer never
+  // falls back to bizId.
+  bizLabel       String?      @map("biz_label")
+  reason         String
+  context        Json?        @db.JsonB
+  requiredPerm   String       @map("required_perm")
+  // Anchor org for candidate data-scope filtering (book/cashier org).
+  orgUnitId      String?      @map("org_unit_id") @db.Uuid
+  assigneeId     String?      @map("assignee_id") @db.Uuid
+  status         TaskStatus   @default(PENDING)
+  priority       TaskPriority @default(NORMAL)
+  dueAt          DateTime?    @map("due_at")
+  sourceTaskId   String?      @map("source_task_id") @db.Uuid
+  // Snapshot at creation: 0 → admin alert (no qualified assignee).
+  candidateCount Int          @default(0) @map("candidate_count")
+  escalatedAt    DateTime?    @map("escalated_at")
+  completedAt    DateTime?    @map("completed_at")
+  completedBy    String?      @map("completed_by") @db.Uuid
+  cancelledAt    DateTime?    @map("cancelled_at")
+  cancelReason   String?      @map("cancel_reason")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  createdBy      String?      @map("created_by") @db.Uuid
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  updatedBy      String?      @map("updated_by") @db.Uuid
+
+  @@index([tenantId, status, type])
+  @@index([tenantId, assigneeId, status])
+  @@index([tenantId, bizType, bizId])
+  @@index([tenantId, dueAt])
+  @@map("task")
+}
+
+enum TaskStatus {
+  PENDING
+  CLAIMED
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+// ---------------------------------------------------------------------------
 // E10 查询导出 / 报表支撑 — G4 统一字典 + G2 坏账核销登记
 // ---------------------------------------------------------------------------
 

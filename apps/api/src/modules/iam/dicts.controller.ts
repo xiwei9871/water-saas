@@ -35,6 +35,8 @@ export const DICT_CATEGORIES = [
   { code: 'WRITEOFF_REASON', name: '坏账核销原因' },
   { code: 'LOSS_REASON', name: '销户/流失原因' },
   { code: 'ADJUST_TYPE', name: '调整/减免类型' },
+  { code: 'TASK_TYPE_PERM', name: '任务类型权限映射' },
+  { code: 'TASK_RULE', name: '任务触发规则' },
 ] as const;
 
 const CATEGORY_CODES = new Set<string>(DICT_CATEGORIES.map((c) => c.code));

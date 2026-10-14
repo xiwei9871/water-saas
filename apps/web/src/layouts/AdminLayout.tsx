@@ -1,4 +1,4 @@
-import { LogoutOutlined, UserOutlined } from '@ant-design/icons';
+import { BellOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
 import { Badge, Button, Layout, Menu, Space, Spin, Tag } from 'antd';
 import type { MenuProps } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
@@ -73,17 +73,27 @@ export default function AdminLayout() {
   const navigate = useNavigate();
 
   const [badge, setBadge] = useState<{ total: number; byDomain: Record<string, number> } | null>(null);
+  const [taskBadge, setTaskBadge] = useState<{ todo: number; escalated: number; alerts: number } | null>(null);
 
   useEffect(() => {
-    if (!user || !hasPerm('exception:read')) return;
+    if (!user) return;
     let stopped = false;
-    const load = () =>
+    const load = () => {
+      if (hasPerm('exception:read')) {
+        api
+          .get<{ total: number; byDomain: Record<string, number> }>('/exceptions/badge')
+          .then((r) => {
+            if (!stopped) setBadge(r.data);
+          })
+          .catch(() => undefined);
+      }
       api
-        .get<{ total: number; byDomain: Record<string, number> }>('/exceptions/badge')
+        .get<{ todo: number; escalated: number; alerts: number }>('/tasks/badge')
         .then((r) => {
-          if (!stopped) setBadge(r.data);
+          if (!stopped) setTaskBadge(r.data);
         })
         .catch(() => undefined);
+    };
     void load();
     const t = setInterval(() => void load(), 60_000);
     return () => {
@@ -157,6 +167,17 @@ export default function AdminLayout() {
         >
           <span style={{ fontSize: 15, fontWeight: 500 }}>供水营收管理系统</span>
           <Space size="middle">
+            <Badge
+              count={(taskBadge?.todo ?? 0) + (taskBadge?.alerts ?? 0)}
+              size="small"
+              title="待办任务"
+            >
+              <Button
+                type="text"
+                icon={<BellOutlined style={{ fontSize: 18 }} />}
+                onClick={() => navigate('/tasks')}
+              />
+            </Badge>
             {tenantCode && <Tag color="blue">{tenantCode}</Tag>}
             <span>
               <UserOutlined style={{ marginRight: 6 }} />

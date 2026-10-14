@@ -9,6 +9,7 @@ import {
   TeamOutlined,
   TransactionOutlined,
 } from '@ant-design/icons';
+
 import type { ReactNode } from 'react';
 import Workbench from './pages/Workbench';
 import BillingRuns from './pages/billing/BillingRuns';
@@ -36,6 +37,7 @@ import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
 import Queries from './pages/report/Queries';
 import Reports from './pages/report/Reports';
+import Tasks from './pages/tasks/Tasks';
 import Reconciliations from './pages/settlement/Reconciliations';
 import Settlements from './pages/settlement/Settlements';
 import AuditLogs from './pages/system/AuditLogs';
@@ -81,6 +83,13 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <AlertOutlined />,
     perms: ['exception:read'],
     element: <Exceptions />,
+  },
+  {
+    key: 'tasks',
+    path: '/tasks',
+    label: '待办中心',
+    icon: <FileTextOutlined />,
+    element: <Tasks />,
   },
   {
     key: 'customer',

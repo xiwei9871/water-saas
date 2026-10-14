@@ -19,6 +19,7 @@ import { PrepaymentModule } from './modules/prepayment/prepayment.module.js';
 import { RemoteModule } from './modules/remote/remote.module.js';
 import { ReportModule } from './modules/report/report.module.js';
 import { ExceptionModule } from './modules/exception/exception.module.js';
+import { TaskModule } from './modules/task/task.module.js';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { ExceptionModule } from './modules/exception/exception.module.js';
     PaymentModule,
     ReportModule,
     ExceptionModule,
+    TaskModule,
     DashboardModule,
     IntegrationModule,
   ],

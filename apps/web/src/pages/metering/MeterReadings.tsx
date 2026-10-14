@@ -181,12 +181,22 @@ export default function MeterReadings() {
   const doQc = async (reading: MeterReading, action: QcAction) => {
     setActing(reading.id);
     try {
-      await api.post(
+      const res = await api.post(
         `/meter-readings/${reading.id}/qc`,
         { action },
         { headers: { 'Idempotency-Key': newIdemKey() } },
       );
       message.success(`质检已${QC_ACTION_TEXT[action].label}`);
+      // 任务书 T10 三段式：确认触发了补差任务 → 明确告知任务已生成并通知了谁。
+      const st = (res.data as { supplementTask?: { deduped: boolean; candidates: { name: string }[] } | null })
+        .supplementTask;
+      if (st) {
+        const names = st.candidates.length ? st.candidates.map((c) => c.name).join('、') : '（暂无具备权限的账号，已告警管理员）';
+        modal.warning({
+          title: '检测到【实抄止度 < 估计止度】，已生成【补差任务】',
+          content: `已${st.deduped ? '沿用既有任务并' : ''}通知具备权限的账号：${names}。结算在该任务完成前将被阻断，完成后自动解锁。`,
+        });
+      }
       await load(page, pageSize);
     } catch (err) {
       message.error(apiErrorText(err));

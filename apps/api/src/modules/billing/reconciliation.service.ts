@@ -23,6 +23,7 @@ import {
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import { BILL_SELECT } from './bill.service.js';
 import {
@@ -161,6 +162,7 @@ export class ReconciliationService {
   constructor(
     private readonly prisma: TenantPrismaService,
     private readonly prepay: PrepaymentService,
+    private readonly tasks: TaskService,
   ) {}
 
   list(
@@ -767,6 +769,11 @@ export class ReconciliationService {
       postedChargeCent,
       adjustmentAmountCent,
     });
+    // 任务书 T9 级联：核销（补差）应用即视为补差完成 → 自动关闭该户补差任务，
+    // prevChain 换用真实读数后结算自然解锁。
+    await this.tasks.autoCompleteByBiz(
+      tx, ctx, 'SUPPLEMENT', 'waterAccount', account.id, '核销应用自动完成',
+    );
     // Compare with the latest effective quantities, not only the frozen
     // settlements: a zero-money revision may restore an earlier estimate.
     const priorAdjustments = await tx.bill.findMany({

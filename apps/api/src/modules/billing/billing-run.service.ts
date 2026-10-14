@@ -15,6 +15,8 @@ import {
 } from '../../common/idempotency.service.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
+import { SETTLEMENT_BLOCKING_TYPES } from '../task/task.types.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import { embedAccountIdentity } from '../../common/account-identity.js';
 import { BILL_SELECT, type BillRow } from './bill.service.js';
@@ -188,6 +190,7 @@ export class BillingRunService {
     private readonly prisma: TenantPrismaService,
     private readonly prepay: PrepaymentService,
     private readonly idem: IdempotencyService,
+    private readonly tasks: TaskService,
   ) {}
 
   list(
@@ -473,7 +476,23 @@ export class BillingRunService {
     // run's denominator — skipped, never a failure and never "success"
     // counted against the billable population.
     let skipped = 0;
+    // 任务书 T16：存在未完成补差任务的户 → 出账阻断（记 failure 让运行结果
+    // 明账显示，而非静默跳过——批次其余户不受影响）。
+    const blockedAccounts = new Set(
+      (await this.tasks.openTasksForBiz(tx, ctx, SETTLEMENT_BLOCKING_TYPES, 'waterAccount')).map(
+        (t) => t.bizId,
+      ),
+    );
     for (const s of slice) {
+      if (blockedAccounts.has(s.waterAccountId)) {
+        failures.push({
+          settlementId: s.id,
+          stage: 'generate',
+          code: 'SETTLEMENT_BLOCKED_BY_TASK',
+          message: '该户存在未完成的补差任务，完成后方可出账',
+        });
+        continue;
+      }
       const acc = snapshot.accountFacts.get(s.waterAccountId);
       if (!acc) {
         failures.push({

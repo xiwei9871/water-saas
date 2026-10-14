@@ -17,6 +17,7 @@ import {
   outOfScopeAccountIds,
 } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import {
   computeBill,
@@ -109,6 +110,7 @@ export class BillService {
   constructor(
     private readonly prisma: TenantPrismaService,
     private readonly prepay: PrepaymentService,
+    private readonly tasks: TaskService,
   ) {}
 
   list(
@@ -311,6 +313,29 @@ export class BillService {
         createdBy: ctx.staffId,
         updatedBy: ctx.staffId,
       })),
+    });
+    // 任务书 T14：账单红冲同样纳入审批任务（billing:write 候选）。
+    const acctNo = await tx.waterAccount.findUnique({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id: original.waterAccountId } },
+      select: { accountNo: true },
+    });
+    const billLabel = `${acctNo?.accountNo ?? original.waterAccountId} · ${original.period}`;
+    await this.tasks.createTask(tx, ctx, {
+      type: 'REVERSAL_APPROVAL',
+      title: `红冲审批：账单 ${billLabel} 红冲复核`,
+      bizType: 'bill',
+      bizId: reversal.id,
+      bizLabel: billLabel,
+      reason: '发起账单红冲需审批',
+      context: {
+        reversalBillId: reversal.id,
+        originalBillId: original.id,
+        waterAccountId: original.waterAccountId,
+        waterAccountNo: acctNo?.accountNo ?? null,
+        period: original.period,
+        totalAmountCent: original.totalAmount.toString(),
+      },
+      orgUnitId: null,
     });
     return this.withItems(tx, ctx, reversal);
   }
