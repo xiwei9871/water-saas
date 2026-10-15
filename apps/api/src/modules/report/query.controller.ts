@@ -1,17 +1,26 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
+  Post,
   Query,
+  Req,
   Res,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import * as XLSX from 'xlsx';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 import { QueryService, EXPORT_ROW_CAP } from './query.service.js';
+import { UnifiedQueryService, type UnifiedQuery } from './unified.service.js';
+import {
+  THEME_LABELS,
+  PERIOD_SPAN_MAX,
+  type FieldTheme,
+} from './unified-fields.js';
 
 const assertPeriod = (v: unknown, field = 'period'): string => {
   if (typeof v !== 'string' || !/^\d{6}$/.test(v)) {
@@ -81,6 +90,9 @@ const BILL_STATUS_LABELS: Record<string, string> = {
 const PAYMENT_STATUS_LABELS: Record<string, string> = {
   RECEIVED: '已收款', DAY_CLOSED: '已日结', REVERSED: '已红冲',
 };
+const BILL_KIND_LABELS: Record<string, string> = {
+  NORMAL: '正常账单', ADJUSTMENT: '调账', REPLACEMENT: '换单',
+};
 
 const cents = (v: unknown): number | '' =>
   v === null || v === undefined ? '' : Number(v) / 100;
@@ -107,6 +119,7 @@ export class QueryController {
   constructor(
     private readonly svc: QueryService,
     private readonly prisma: TenantPrismaService,
+    private readonly unified: UnifiedQueryService,
   ) {}
 
   @Get('accounts')
@@ -339,6 +352,200 @@ export class QueryController {
     return this.respond(res, format, 'arrears', sheet, ctx, {
       filter: 'arrears', ...q,
     }, rows);
+  }
+
+  /**
+   * 统一数据查询（2026-10-15 设计方案）——字段池元数据。
+   * 返回按权限过滤后的主题分组，前端据此渲染勾选面板。
+   */
+  @Get('unified/fields')
+  @Permissions('report:read')
+  unifiedFields(@Req() req: Request) {
+    const perms = (req.user as { perms?: string[] } | undefined)?.perms ?? [];
+    const pool = this.unified.fieldPool(perms);
+    const themes = (Object.keys(THEME_LABELS) as FieldTheme[]).map((t) => ({
+      theme: t,
+      label: THEME_LABELS[t],
+      fields: pool
+        .filter((f) => f.theme === t)
+        .map((f) => ({ key: f.key, label: f.label, grain: f.grain })),
+    }));
+    return { themes, periodSpanMax: PERIOD_SPAN_MAX };
+  }
+
+  /**
+   * POST /reports/query/unified —— 统一查询执行。
+   * 行=用水户；periods 内账期级字段按账期取值；欠费累计按截至
+   * periodTo 快照。账期跨度 ≤ PERIOD_SPAN_MAX。
+   */
+  @Post('unified')
+  @Permissions('report:read')
+  async unifiedQuery(@Body() body: UnifiedQuery, @Req() req: Request) {
+    const perms = (req.user as { perms?: string[] } | undefined)?.perms ?? [];
+    const q = this.assertUnified(body);
+    return this.unified.unified(currentTenant(), q, perms);
+  }
+
+  /**
+   * POST /reports/query/unified/export —— 导出当前勾选字段的透视结果
+   * （服务端拼列：固定列 + 账期×账期级字段 + 累计列），行数受
+   * EXPORT_ROW_CAP 限制并写 audit_log。
+   */
+  @Post('unified/export')
+  @Permissions('report:read')
+  async unifiedExport(
+    @Body() body: UnifiedQuery,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const ctx = currentTenant();
+    const perms = (req.user as { perms?: string[] } | undefined)?.perms ?? [];
+    const q = this.assertUnified({ ...body, take: EXPORT_ROW_CAP, skip: 0 });
+    const data = await this.unified.unified(ctx, q, perms);
+    if (data.rows.length > EXPORT_ROW_CAP) {
+      throw new BadRequestException({
+        code: 'EXPORT_TOO_LARGE',
+        cap: EXPORT_ROW_CAP,
+      });
+    }
+    const accountFields = data.fields.filter((f) => f.grain === 'account');
+    const periodFields = data.fields.filter((f) => f.grain === 'period');
+    const cumFields = data.fields.filter((f) => f.grain === 'cumulative');
+    const headers = [
+      ...accountFields.map((f) => ({ key: `f_${f.key}`, title: f.label })),
+      ...data.periods.flatMap((p) =>
+        periodFields.map((f) => ({
+          key: `p_${p}_${f.key}`,
+          title: `${p.slice(0, 4)}-${p.slice(4)} ${f.label}`,
+        })),
+      ),
+      ...cumFields.map((f) => ({ key: `c_${f.key}`, title: f.label })),
+    ];
+    const render = (key: string, v: unknown): unknown => {
+      if (v === null || v === undefined) return '';
+      switch (key) {
+        case 'usageCategory':
+          return USAGE_CATEGORY_LABELS[String(v)] ?? v;
+        case 'accountStatus':
+          return ACCOUNT_STATUS_LABELS[String(v)] ?? v;
+        case 'billStatus':
+          return String(v)
+            .split('、')
+            .map((s) => BILL_STATUS_LABELS[s] ?? s)
+            .join('、');
+        case 'billKind':
+          return String(v)
+            .split('、')
+            .map((s) => BILL_KIND_LABELS[s] ?? s)
+            .join('、');
+        case 'channels':
+          return String(v)
+            .split('、')
+            .map((s) => ({ ...CHANNEL_LABELS, PREPAY: '预存抵扣' })[s] ?? s)
+            .join('、');
+        case 'readSource':
+          return String(v)
+            .split(',')
+            .map((s) => READ_SOURCE_LABELS[s] ?? s)
+            .join('、');
+        case 'isEstimated':
+          return v === true || v === 'true' ? '估抄' : '实抄';
+        case 'totalAmount':
+        case 'allocated':
+        case 'remaining':
+        case 'collectedAmount':
+        case 'arrearsAmount':
+        case 'writtenOff':
+          return cents(v);
+        case 'oldestPeriod':
+          return fmtPeriod(v);
+        case 'openedAt':
+        case 'closedAt':
+        case 'lastPaidAt':
+          return dateOf(v);
+        default:
+          return v;
+      }
+    };
+    const rows = data.rows.map((r) => {
+      const out: Row = {};
+      for (const f of accountFields) out[`f_${f.key}`] = render(f.key, r.fixed[f.key]);
+      for (const p of data.periods) {
+        for (const f of periodFields) {
+          out[`p_${p}_${f.key}`] = render(f.key, r.periods[p]?.[f.key]);
+        }
+      }
+      for (const f of cumFields) out[`c_${f.key}`] = render(f.key, r.cumulative[f.key]);
+      return out;
+    });
+    const aoa = [
+      headers.map((h) => h.title),
+      ...rows.map((r) => headers.map((h) => r[h.key] ?? '')),
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Sheet1');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    try {
+      await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+        tx.auditLog.create({
+          data: {
+            tenantId: ctx.tenantId,
+            staffId: ctx.staffId,
+            action: 'EXPORT /reports/query/unified',
+            entity: 'report',
+            after: {
+              params: { ...q, waterAccountIds: undefined },
+              rowCount: rows.length,
+            } as never,
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+        }),
+      );
+    } catch (err) {
+      console.error('export audit write failed', err);
+    }
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="export-unified-${new Date().toISOString().slice(0, 10)}.xlsx"`,
+    );
+    res.send(buf);
+  }
+
+  /** 统一查询入参校验（账期格式/跨度/对象 id 列表）。 */
+  private assertUnified(body: UnifiedQuery): UnifiedQuery {
+    const q = body ?? ({} as UnifiedQuery);
+    const periodFrom = assertPeriod(required(q.periodFrom, 'periodFrom'), 'periodFrom');
+    const periodTo = assertPeriod(required(q.periodTo, 'periodTo'), 'periodTo');
+    if (periodTo < periodFrom) {
+      throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'periodTo' });
+    }
+    const ids = (v: string[] | undefined, field: string) =>
+      v === undefined
+        ? undefined
+        : v.map((x) => assertUuid(x, field));
+    if (!Array.isArray(q.fields) || q.fields.length === 0) {
+      throw new BadRequestException({ code: 'REPORT_PARAM_REQUIRED', field: 'fields' });
+    }
+    return {
+      ...q,
+      periodFrom,
+      periodTo,
+      waterAccountIds: ids(q.waterAccountIds, 'waterAccountIds'),
+      settleAccountIds: ids(q.settleAccountIds, 'settleAccountIds'),
+      customerIds: ids(q.customerIds, 'customerIds'),
+      bookIds: ids(q.bookIds, 'bookIds'),
+      orgUnitId:
+        q.orgUnitId !== undefined ? assertUuid(q.orgUnitId, 'orgUnitId') : undefined,
+      arrearsMin: q.arrearsMin !== undefined ? num(q.arrearsMin, 'arrearsMin') : undefined,
+      agingMin: q.agingMin !== undefined ? num(q.agingMin, 'agingMin') : undefined,
+      take: q.take !== undefined ? num(q.take, 'take') : undefined,
+      skip: q.skip !== undefined ? num(q.skip, 'skip') : undefined,
+    };
   }
 
   /**

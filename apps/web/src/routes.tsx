@@ -36,7 +36,7 @@ import Prepayments from './pages/payment/Prepayments';
 import Writeoffs from './pages/payment/Writeoffs';
 import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
-import Queries from './pages/report/Queries';
+import UnifiedQuery from './pages/report/UnifiedQuery';
 import Tasks from './pages/tasks/Tasks';
 import Reconciliations from './pages/settlement/Reconciliations';
 import Settlements from './pages/settlement/Settlements';
@@ -311,34 +311,10 @@ export const APP_ROUTES: AppRoute[] = [
     perms: ['report:read'],
     children: [
       {
-        key: 'query-accounts',
-        path: '/report/query/accounts',
-        label: '用户档案查询',
-        element: <Queries key="accounts" kind="accounts" />,
-      },
-      {
-        key: 'query-usage',
-        path: '/report/query/usage-details',
-        label: '水量明细查询',
-        element: <Queries key="usage-details" kind="usage-details" />,
-      },
-      {
-        key: 'query-bills',
-        path: '/report/query/bill-details',
-        label: '账单明细查询',
-        element: <Queries key="bill-details" kind="bill-details" />,
-      },
-      {
-        key: 'query-payments',
-        path: '/report/query/payments',
-        label: '收款流水查询',
-        element: <Queries key="payments" kind="payments" />,
-      },
-      {
-        key: 'query-arrears',
-        path: '/report/query/arrears',
-        label: '欠费明细查询',
-        element: <Queries key="arrears" kind="arrears" />,
+        key: 'query-unified',
+        path: '/report/query/unified',
+        label: '统一查询',
+        element: <UnifiedQuery />,
       },
     ],
   },

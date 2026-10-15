@@ -21,15 +21,23 @@ test.beforeEach(async ({ page }) => {
   await loginAsAdmin(page);
 });
 
-test.describe('A1–A5 查询 + F1 导出', () => {
-  test('A1 用户档案查询：查询出数 + 导出 xlsx + 审计留痕', async ({ page }) => {
-    await page.goto('/report/query/accounts');
+test.describe('统一数据查询 + F1 导出', () => {
+  /** 勾选字段工具：按 checkbox label 文本勾选。 */
+  const checkField = async (page: import('@playwright/test').Page, label: string) => {
+    await page.locator('.ant-checkbox-wrapper', { hasText: label }).first().click();
+  };
+
+  test('档案字段：查询出数 + 导出 xlsx + 审计留痕', async ({ page }) => {
+    await page.goto('/report/query/unified');
+    await page.waitForResponse((r) => r.url().includes('unified/fields'));
+    await checkField(page, '地址');
+    await checkField(page, '用水类别');
     await page.getByRole('button', { name: /查\s*询/ }).click();
-    await page.waitForLoadState('networkidle');
-    // 表格渲染（有数据则断言列头人读化）
+    await page.waitForResponse((r) => r.url().includes('/reports/query/unified') && !r.url().includes('fields'));
+    // 表格渲染（户号/户名为固定身份列）
     await expect(page.locator('.ant-table')).toBeVisible();
     const headers = await page.locator('.ant-table thead').innerText();
-    expect(headers).toMatch(/户号|客户|地址|类别/);
+    expect(headers).toMatch(/户号|户名|地址|类别/);
 
     // F1: 导出触发真实 xlsx 下载
     const [download] = await Promise.all([
@@ -42,17 +50,20 @@ test.describe('A1–A5 查询 + F1 导出', () => {
     const audit = await apiGet(page, '/iam/audit-logs?take=20');
     expect(audit.status()).toBe(200);
     const logs = (await audit.json()) as { action?: string; path?: string; summary?: string }[];
-    const hit = logs.some((l) => JSON.stringify(l).includes('export') || JSON.stringify(l).includes('xlsx') || JSON.stringify(l).includes('accounts'));
+    const hit = logs.some((l) => JSON.stringify(l).includes('export') || JSON.stringify(l).includes('xlsx') || JSON.stringify(l).includes('unified'));
     expect(hit, '导出未写入 audit_log').toBeTruthy();
   });
 
-  test('A4 收款流水查询：按账期/日期范围查询', async ({ page }) => {
-    await page.goto('/report/query/payments');
+  test('收费字段：多期横展出渠道/金额列', async ({ page }) => {
+    await page.goto('/report/query/unified');
+    await page.waitForResponse((r) => r.url().includes('unified/fields'));
+    await checkField(page, '实收金额');
+    await checkField(page, '缴费渠道');
     await page.getByRole('button', { name: /查\s*询/ }).click();
-    await page.waitForLoadState('networkidle');
+    await page.waitForResponse((r) => r.url().includes('/reports/query/unified') && !r.url().includes('fields'));
     await expect(page.locator('.ant-table')).toBeVisible();
     const headers = await page.locator('.ant-table thead').innerText();
-    expect(headers).toMatch(/结算户|收款|渠道|金额/);
+    expect(headers).toMatch(/实收金额|缴费渠道/);
   });
 });
 
@@ -154,12 +165,15 @@ test.describe('G2 坏账核销', () => {
     await expect(page.locator('tr', { hasText: /已撤销/ }).first()).toBeVisible();
   });
 
-  test('A5 欠费明细含 writtenOff 列', async ({ page }) => {
-    await page.goto('/report/query/arrears');
+  test('欠费字段：累计列含欠费金额/核销', async ({ page }) => {
+    await page.goto('/report/query/unified');
+    await page.waitForResponse((r) => r.url().includes('unified/fields'));
+    await page.locator('.ant-checkbox-wrapper', { hasText: '欠费金额' }).first().click();
+    await page.locator('.ant-checkbox-wrapper', { hasText: '已核销' }).first().click();
     await page.getByRole('button', { name: /查\s*询/ }).click();
-    await page.waitForLoadState('networkidle');
+    await page.waitForResponse((r) => r.url().includes('/reports/query/unified') && !r.url().includes('fields'));
     const headers = await page.locator('.ant-table thead').innerText();
-    expect(headers).toMatch(/核销|writtenOff|欠费/);
+    expect(headers).toMatch(/欠费金额|已核销/);
   });
 });
 

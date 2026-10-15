@@ -1479,7 +1479,7 @@ export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
 export const TASK_BIZ_ROUTES: Record<string, string> = {
   SUPPLEMENT: '/settlement/reconciliations?waterAccountId={bizId}&taskId={taskId}',
   METER_REVIEW: '/metering/readings?taskId={taskId}',
-  COLLECTION: '/report/query/arrears?taskId={taskId}',
+  COLLECTION: '/report/query/unified?taskId={taskId}',
   REVERSAL_APPROVAL: '/payment/payments?taskId={taskId}',
   WRITEOFF_APPROVAL: '/payment/writeoffs?taskId={taskId}',
 };

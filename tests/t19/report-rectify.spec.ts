@@ -35,17 +35,13 @@ test.describe('整改验收 P1 菜单归集', () => {
     await shot(page, 'r01-report-menu-3items');
   });
 
-  test('数据查询为独立顶级菜单含五个查询页', async ({ page }) => {
+  test('数据查询为独立顶级菜单含统一查询页', async ({ page }) => {
     await loginUi(page, TENANT, 'cd-water');
     const labels = await submenuLabels(page, '数据查询');
-    for (const want of [
-      '用户档案查询',
-      '水量明细查询',
-      '账单明细查询',
-      '收款流水查询',
-      '欠费明细查询',
-    ]) {
-      expect(labels.some((l) => l.replace(/\s+/g, '').includes(want))).toBe(true);
+    // 2026-10-15 统一化：五查询合并为「统一查询」单页
+    expect(labels.some((l) => l.replace(/\s+/g, '').includes('统一查询'))).toBe(true);
+    for (const gone of ['用户档案查询', '水量明细查询', '账单明细查询', '收款流水查询', '欠费明细查询']) {
+      expect(labels.some((l) => l.includes(gone))).toBe(false);
     }
     await shot(page, 'r02-data-query-menu');
   });
@@ -139,21 +135,17 @@ test.describe('整改验收 P3/P4 异常与可读性', () => {
     await shot(page, 'r08-task-context-readable');
   });
 
-  test('账单明细「费用构成」列显示 ¥ 元格式', async ({ page }) => {
+  test('统一查询「单价构成」列显示 ¥ 元格式', async ({ page }) => {
     await loginUi(page, TENANT, 'cd-water');
-    await page.goto('/report/query/bill-details');
-    // 账期为必填：直接在月份输入框键入
-    await page.getByPlaceholder('请选择月份').click();
-    await page.keyboard.type('2026-10');
-    await page.keyboard.press('Enter');
+    await page.goto('/report/query/unified');
+    await page.waitForResponse((r) => r.url().includes('unified/fields'));
+    // 勾选账单主题字段（单价构成含 ¥ 元格式）
+    await page.locator('.ant-checkbox-wrapper', { hasText: '单价构成' }).click();
     const resp = page.waitForResponse((r) =>
-      r.url().includes('/reports/query/bill-details'),
+      r.url().includes('/reports/query/unified') && !r.url().includes('fields'),
     );
     await page.getByRole('button', { name: /查\s*询/ }).click();
     await resp;
-    await expect(
-      page.getByText('费用构成', { exact: true }).first(),
-    ).toBeVisible();
     const cell = page
       .locator('.ant-table-tbody td')
       .filter({ hasText: '¥' })

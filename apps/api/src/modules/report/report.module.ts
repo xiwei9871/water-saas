@@ -4,6 +4,7 @@ import { QueryController } from './query.controller.js';
 import { QueryService } from './query.service.js';
 import { ReportService } from './report.service.js';
 import { ReportsController } from './reports.controller.js';
+import { UnifiedQueryService } from './unified.service.js';
 
 /**
  * Report module （报表） — read-only aggregate projections (Task 13,
@@ -19,6 +20,6 @@ import { ReportsController } from './reports.controller.js';
  */
 @Module({
   controllers: [ReportsController, QueryController],
-  providers: [ReportService, QueryService, AnalysisService],
+  providers: [ReportService, QueryService, AnalysisService, UnifiedQueryService],
 })
 export class ReportModule {}
