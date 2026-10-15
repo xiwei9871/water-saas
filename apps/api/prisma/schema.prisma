@@ -1604,3 +1604,21 @@ model BadDebtWriteoff {
   @@index([tenantId, effectiveDate])
   @@map("bad_debt_writeoff")
 }
+
+/**
+ * 数据查询·个人模板（阶段三）：保存「筛选条件+勾选字段+账期」快照，
+ * 仅创建者本人可见/可删。payload 为 UnifiedQuery 请求体（含字段顺序）。
+ */
+model ReportQueryTemplate {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  staffId   String   @map("staff_id") @db.Uuid
+  name      String
+  payload   Json     @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, staffId, name])
+  @@index([tenantId, staffId])
+  @@map("report_query_template")
+}

@@ -408,3 +408,41 @@ describe('POST /reports/query/unified', () => {
     expect(audit.rows[0].action).toBe('EXPORT /reports/query/unified');
   });
 });
+
+describe('查询模板（阶段三·个人范围）', () => {
+  const del = (path: string, token = adminToken, status = 200) =>
+    request(app.getHttpServer()).delete(path).set(auth(token)).expect(status);
+
+  it('保存→列表→同名覆盖→他人不可见/不可删→校验→删除', async () => {
+    const name = `月报模板${RUN}`;
+    const created = await post('/reports/query/unified/templates', {
+      name,
+      payload: { objectKind: 'all', periodFrom: '202701', periodTo: '202703', fields: ['usageQty'] },
+    }).expect(201);
+    const tplId = created.body.id as string;
+
+    const list = await get('/reports/query/unified/templates');
+    expect(list.body.some((t: { id: string }) => t.id === tplId)).toBe(true);
+
+    // 同名 upsert 覆盖 payload，id 不变
+    const upd = await post('/reports/query/unified/templates', {
+      name,
+      payload: { fields: ['usageQty', 'totalAmount'] },
+    }).expect(201);
+    expect(upd.body.id).toBe(tplId);
+    expect(upd.body.payload.fields).toEqual(['usageQty', 'totalAmount']);
+
+    // 其他员工的模板列表/删除均不可达
+    const others = await get('/reports/query/unified/templates', rptToken);
+    expect(others.body.some((t: { id: string }) => t.id === tplId)).toBe(false);
+    await del(`/reports/query/unified/templates/${tplId}`, rptToken, 404);
+
+    // 入参校验
+    await post('/reports/query/unified/templates', { name: '', payload: {} }).expect(400);
+    await post('/reports/query/unified/templates', { name: 'x', payload: [] }).expect(400);
+
+    await del(`/reports/query/unified/templates/${tplId}`);
+    const after = await get('/reports/query/unified/templates');
+    expect(after.body.some((t: { id: string }) => t.id === tplId)).toBe(false);
+  });
+});

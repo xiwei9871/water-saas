@@ -1,5 +1,10 @@
 import { TaskContextBanner } from '../../components/TaskContextBanner';
-import { DownloadOutlined, SearchOutlined } from '@ant-design/icons';
+import {
+  ArrowDownOutlined,
+  ArrowUpOutlined,
+  DownloadOutlined,
+  SearchOutlined,
+} from '@ant-design/icons';
 import {
   App as AntdApp,
   Button,
@@ -7,11 +12,14 @@ import {
   Checkbox,
   DatePicker,
   Form,
+  Input,
   InputNumber,
+  Modal,
   Radio,
   Select,
   Space,
   Table,
+  Tag,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -59,6 +67,13 @@ interface UnifiedResp {
   deniedFields: string[];
 }
 interface WaOption { id: string; accountNo: string; customer: { name: string }; addr: string }
+/** 个人查询模板（阶段三）——payload 存「表单值+objectKind+fields顺序」。 */
+interface QueryTemplate {
+  id: string;
+  name: string;
+  payload: Record<string, unknown>;
+  updatedAt: string;
+}
 
 const BILL_KIND_LABELS: Record<string, string> = {
   NORMAL: '正常账单', ADJUSTMENT: '调账', REPLACEMENT: '换单',
@@ -162,6 +177,19 @@ export default function UnifiedQuery() {
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [queried, setQueried] = useState(false);
+  const [templates, setTemplates] = useState<QueryTemplate[]>([]);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [innerKw, setInnerKw] = useState('');
+
+  const loadTemplates = async () => {
+    try {
+      const res = await api.get<QueryTemplate[]>('/reports/query/unified/templates');
+      setTemplates(res.data);
+    } catch {
+      /* 模板加载失败不阻断查询 */
+    }
+  };
 
   useEffect(() => {
     void (async () => {
@@ -174,10 +202,105 @@ export default function UnifiedQuery() {
       } catch (err) {
         message.error(apiErrorText(err));
       }
+      void loadTemplates();
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message]);
 
   const allKeys = useMemo(() => themes.flatMap((t) => t.fields.map((f) => f.key)), [themes]);
+  const labelOf = useMemo(() => {
+    const m = new Map(themes.flatMap((t) => t.fields.map((f) => [f.key, f.label] as const)));
+    return (k: string) => m.get(k) ?? k;
+  }, [themes]);
+
+  /** 勾选变化保持既有顺序（新勾的追加尾部），列序=勾选序。 */
+  const mergeChecked = (next: string[]) =>
+    setChecked((prev) => [
+      ...prev.filter((k) => next.includes(k)),
+      ...next.filter((k) => !prev.includes(k)),
+    ]);
+
+  const moveField = (i: number, d: -1 | 1) =>
+    setChecked((prev) => {
+      const j = i + d;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+
+  /** 当前表单状态 → 模板 payload（账期存 YYYYMM 字符串）。 */
+  const buildTemplatePayload = (): Record<string, unknown> => {
+    const v = form.getFieldsValue() as Record<string, unknown>;
+    return {
+      objectKind,
+      waterAccountIds: v.waterAccountIds,
+      settleAccountId: v.settleAccountId,
+      customerId: v.customerId,
+      bookId: v.bookId,
+      orgUnitId: v.orgUnitId,
+      periodFrom: (v.periodFrom as Dayjs | undefined)?.format('YYYYMM'),
+      periodTo: (v.periodTo as Dayjs | undefined)?.format('YYYYMM'),
+      usageCategories: v.usageCategories,
+      statuses: v.statuses,
+      estimated: v.estimated,
+      arrearsMin: v.arrearsMin,
+      agingMin: v.agingMin,
+      fields: checked,
+    };
+  };
+
+  const applyTemplate = (t: QueryTemplate) => {
+    const p = t.payload;
+    setObjectKind((p.objectKind as ObjectKind) ?? 'all');
+    form.setFieldsValue({
+      waterAccountIds: p.waterAccountIds,
+      settleAccountId: p.settleAccountId,
+      customerId: p.customerId,
+      bookId: p.bookId,
+      orgUnitId: p.orgUnitId,
+      periodFrom: typeof p.periodFrom === 'string' ? dayjs(`${p.periodFrom}01`) : null,
+      periodTo: typeof p.periodTo === 'string' ? dayjs(`${p.periodTo}01`) : null,
+      usageCategories: p.usageCategories,
+      statuses: p.statuses,
+      estimated: p.estimated,
+      arrearsMin: p.arrearsMin,
+      agingMin: p.agingMin,
+    });
+    // 模板里已下线/无权限的字段按键池剔除
+    setChecked(((p.fields as string[]) ?? []).filter((k) => allKeys.includes(k)));
+    message.success(`已应用模板「${t.name}」，点击查询执行`);
+  };
+
+  const saveTemplate = async () => {
+    const name = saveName.trim();
+    if (!name) {
+      message.warning('请输入模板名称');
+      return;
+    }
+    try {
+      await api.post('/reports/query/unified/templates', {
+        name,
+        payload: buildTemplatePayload(),
+      });
+      message.success(`模板「${name}」已保存`);
+      setSaveOpen(false);
+      setSaveName('');
+      void loadTemplates();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
+
+  const deleteTemplate = async (t: QueryTemplate) => {
+    try {
+      await api.delete(`/reports/query/unified/templates/${t.id}`);
+      message.success(`模板「${t.name}」已删除`);
+      void loadTemplates();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
 
   const buildBody = (skip = 0, take?: number) => {
     const v = form.getFieldsValue() as Record<string, unknown>;
@@ -254,18 +377,34 @@ export default function UnifiedQuery() {
     }
   };
 
+  const accountCols = respFields.filter((f) => f.grain === 'account');
+  const periodCols = respFields.filter((f) => f.grain === 'period');
+  const cumCols = respFields.filter((f) => f.grain === 'cumulative');
+
   const flatRows = rows.map((r) => {
     const out: Record<string, unknown> = { waterAccountId: r.waterAccountId, ...r.fixed };
     for (const p of respPeriods) {
       for (const [k, v] of Object.entries(r.periods[p] ?? {})) out[`${p}_${k}`] = v;
     }
     Object.assign(out, r.cumulative);
+    // 结果内筛选的检索串：按渲染后文本匹配（中文标签/金额格式均可命中）
+    const hay = [
+      ...accountCols.map((f) => renderCell(f.key, r.fixed[f.key])),
+      ...respPeriods.flatMap((p) =>
+        periodCols.map((f) => renderCell(f.key, r.periods[p]?.[f.key])),
+      ),
+      ...cumCols.map((f) => renderCell(f.key, r.cumulative[f.key])),
+    ]
+      .map((x) => (typeof x === 'string' ? x : ''))
+      .join(' ');
+    out.__hay = hay;
     return out;
   });
 
-  const accountCols = respFields.filter((f) => f.grain === 'account');
-  const periodCols = respFields.filter((f) => f.grain === 'period');
-  const cumCols = respFields.filter((f) => f.grain === 'cumulative');
+  const kw = innerKw.trim();
+  const shownRows = kw
+    ? flatRows.filter((r) => (r.__hay as string).includes(kw))
+    : flatRows;
   const columns: ColumnsType<Record<string, unknown>> = [
     ...accountCols.map((f, i) => ({
       title: f.label,
@@ -297,7 +436,39 @@ export default function UnifiedQuery() {
   return (
     <>
       <TaskContextBanner />
-      <Card title="统一数据查询" size="small" style={{ marginBottom: 12 }}>
+      <Card
+        title="统一数据查询"
+        size="small"
+        style={{ marginBottom: 12 }}
+        extra={
+          <Space size={4}>
+            <Select
+              size="small"
+              placeholder="我的模板"
+              style={{ minWidth: 140 }}
+              options={templates.map((t) => ({ value: t.id, label: t.name }))}
+              onChange={(id) => {
+                const t = templates.find((x) => x.id === id);
+                if (t) applyTemplate(t);
+              }}
+              allowClear
+              onClear={() => undefined}
+            />
+            <Button size="small" onClick={() => setSaveOpen(true)}>存为模板</Button>
+            <Select
+              size="small"
+              placeholder="删除模板"
+              style={{ minWidth: 110 }}
+              options={templates.map((t) => ({ value: t.id, label: `✕ ${t.name}` }))}
+              onChange={(id) => {
+                const t = templates.find((x) => x.id === id);
+                if (t) void deleteTemplate(t);
+              }}
+              value={null as never}
+            />
+          </Space>
+        }
+      >
         <Form
           form={form}
           layout="inline"
@@ -438,11 +609,49 @@ export default function UnifiedQuery() {
                     .filter((f) => !['accountNo', 'customerName'].includes(f.key))
                     .map((f) => ({ label: f.label, value: f.key }))}
                   value={checked}
-                  onChange={(v) => setChecked(v as string[])}
+                  onChange={(v) => mergeChecked(v as string[])}
                 />
               </div>
             );
           })}
+          {checked.length > 0 && (
+            <div>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                已选 {checked.length} 项（顺序即列顺序）：
+              </Typography.Text>
+              <Space wrap size={4} style={{ marginTop: 4 }}>
+                {checked.map((k, i) => (
+                  <Tag
+                    key={k}
+                    closable
+                    onClose={(e) => {
+                      e.preventDefault();
+                      setChecked((prev) => prev.filter((x) => x !== k));
+                    }}
+                    style={{ marginInlineEnd: 0 }}
+                  >
+                    {labelOf(k)}
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<ArrowUpOutlined />}
+                      disabled={i === 0}
+                      onClick={() => moveField(i, -1)}
+                      style={{ width: 18, height: 18, minWidth: 0 }}
+                    />
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<ArrowDownOutlined />}
+                      disabled={i === checked.length - 1}
+                      onClick={() => moveField(i, 1)}
+                      style={{ width: 18, height: 18, minWidth: 0 }}
+                    />
+                  </Tag>
+                ))}
+              </Space>
+            </div>
+          )}
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             户号、户名始终显示；账期级字段按账期横向展开（最多 {spanMax} 期）；欠费类为截至「账期止」的累计值。
           </Typography.Text>
@@ -450,24 +659,38 @@ export default function UnifiedQuery() {
       </Card>
 
       <Card
-        title={queried ? `查询结果（共 ${total} 户）` : '查询结果'}
+        title={
+          queried
+            ? `查询结果（共 ${total} 户${kw ? `，页内筛选命中 ${shownRows.length}` : ''}）`
+            : '查询结果'
+        }
         size="small"
         extra={
-          <Button
-            icon={<DownloadOutlined />}
-            onClick={() => void exportXlsx()}
-            loading={exporting}
-            disabled={!queried}
-          >
-            导出 Excel
-          </Button>
+          <Space>
+            <Input
+              allowClear
+              size="small"
+              placeholder="页内筛选（当前页）"
+              style={{ width: 170 }}
+              value={innerKw}
+              onChange={(e) => setInnerKw(e.target.value)}
+            />
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={() => void exportXlsx()}
+              loading={exporting}
+              disabled={!queried}
+            >
+              导出 Excel
+            </Button>
+          </Space>
         }
       >
         <Table
           rowKey="waterAccountId"
           size="small"
           loading={loading}
-          dataSource={flatRows}
+          dataSource={shownRows}
           columns={columns}
           scroll={{ x: 'max-content' }}
           pagination={{
@@ -481,6 +704,27 @@ export default function UnifiedQuery() {
           locale={{ emptyText: queried ? '无符合条件的数据' : '设置条件并勾选字段后点击查询' }}
         />
       </Card>
+
+      <Modal
+        title="存为查询模板"
+        open={saveOpen}
+        onOk={() => void saveTemplate()}
+        onCancel={() => setSaveOpen(false)}
+        okText="保存"
+        cancelText="取消"
+        destroyOnHidden
+      >
+        <Input
+          placeholder="模板名称（同名覆盖）"
+          value={saveName}
+          maxLength={50}
+          onChange={(e) => setSaveName(e.target.value)}
+          onPressEnter={() => void saveTemplate()}
+        />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          保存当前查询对象、账期、档案筛选与勾选字段顺序，仅本人可见。
+        </Typography.Text>
+      </Modal>
     </>
   );
 }

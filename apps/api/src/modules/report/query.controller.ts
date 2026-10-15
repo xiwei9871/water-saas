@@ -2,7 +2,10 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
+  NotFoundException,
+  Param,
   Post,
   Query,
   Req,
@@ -514,6 +517,73 @@ export class QueryController {
       `attachment; filename="export-unified-${new Date().toISOString().slice(0, 10)}.xlsx"`,
     );
     res.send(buf);
+  }
+
+  /**
+   * 查询模板（阶段三·个人范围）——GET 列出本人模板；
+   * POST {name, payload} 按名 upsert 覆盖；DELETE 仅删本人。
+   * payload 存 UnifiedQuery 请求体（含字段顺序），应用时字段权限
+   * 由 unified/fields + unified 端点再过滤，模板不放大权限。
+   */
+  @Get('unified/templates')
+  @Permissions('report:read')
+  async unifiedTemplates() {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      tx.reportQueryTemplate.findMany({
+        where: { staffId: ctx.staffId },
+        orderBy: { updatedAt: 'desc' },
+        take: 100,
+      }),
+    );
+  }
+
+  @Post('unified/templates')
+  @Permissions('report:read')
+  async unifiedTemplateSave(
+    @Body() body: { name?: string; payload?: Record<string, unknown> },
+  ) {
+    const ctx = currentTenant();
+    const name = body?.name?.trim();
+    if (!name || name.length > 50) {
+      throw new BadRequestException({ code: 'TEMPLATE_NAME_INVALID' });
+    }
+    if (!body?.payload || typeof body.payload !== 'object' || Array.isArray(body.payload)) {
+      throw new BadRequestException({ code: 'TEMPLATE_PAYLOAD_INVALID' });
+    }
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      tx.reportQueryTemplate.upsert({
+        where: {
+          tenantId_staffId_name: {
+            tenantId: ctx.tenantId,
+            staffId: ctx.staffId,
+            name,
+          },
+        },
+        create: {
+          tenantId: ctx.tenantId,
+          staffId: ctx.staffId,
+          name,
+          payload: body.payload as never,
+        },
+        update: { payload: body.payload as never },
+      }),
+    );
+  }
+
+  @Delete('unified/templates/:id')
+  @Permissions('report:read')
+  async unifiedTemplateDelete(@Param('id') id: string) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const deleted = await tx.reportQueryTemplate.deleteMany({
+        where: { id: assertUuid(id, 'id'), staffId: ctx.staffId },
+      });
+      if (deleted.count === 0) {
+        throw new NotFoundException({ code: 'TEMPLATE_NOT_FOUND' });
+      }
+      return { ok: true };
+    });
   }
 
   /** 统一查询入参校验（账期格式/跨度/对象 id 列表）。 */
