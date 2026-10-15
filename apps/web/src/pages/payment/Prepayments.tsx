@@ -159,12 +159,14 @@ export default function Prepayments() {
     { title: '原因', dataIndex: 'reason', render: (v: string | null) => v ?? '—' },
     {
       title: '结算户',
-      dataIndex: 'settleAccountId',
+      dataIndex: 'settleNo',
       width: 180,
-      render: (v: string) =>
-        balance && v === balance.settleAccount.id
-          ? `${balance.settleAccount.name}（${balance.settleAccount.settleNo}）`
-          : v,
+      render: (_: string, r: PrepaymentEntry) =>
+        r.settleNo
+          ? `${r.settleName ?? ''}（${r.settleNo}）`
+          : balance && r.settleAccountId === balance.settleAccount.id
+            ? `${balance.settleAccount.name}（${balance.settleAccount.settleNo}）`
+            : r.settleAccountId,
     },
   ];
 

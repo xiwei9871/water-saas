@@ -891,6 +891,9 @@ export interface PaymentAlloc {
 export interface PrepaymentEntry {
   id: string;
   settleAccountId: string;
+  /** entries 列表附带结算户可读标识（settleNo + 户名），免渲染裸 UUID。 */
+  settleNo?: string | null;
+  settleName?: string | null;
   type: 'TOP_UP' | 'APPLY' | 'REFUND' | 'REVERSAL';
   amount: string;
   paymentId: string | null;
