@@ -12,7 +12,7 @@ import {
 } from '@ant-design/icons';
 
 import type { ReactNode } from 'react';
-import Workbench from './pages/Workbench';
+import Home from './pages/Home';
 import BillingRuns from './pages/billing/BillingRuns';
 import Bills from './pages/billing/Bills';
 import FeeItems from './pages/billing/FeeItems';
@@ -40,6 +40,9 @@ import Writeoffs from './pages/payment/Writeoffs';
 import InstallApplications from './pages/install/Applications';
 import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
+import MetricQuery from './pages/report/MetricQuery';
+import OpsMonthly from './pages/report/OpsMonthly';
+import OpsYearly from './pages/report/OpsYearly';
 import UnifiedQuery from './pages/report/UnifiedQuery';
 import Tasks from './pages/tasks/Tasks';
 import Reconciliations from './pages/settlement/Reconciliations';
@@ -78,7 +81,7 @@ export const APP_ROUTES: AppRoute[] = [
     path: '/',
     label: '工作台',
     icon: <DashboardOutlined />,
-    element: <Workbench />,
+    element: <Home />,
   },
   {
     key: 'exceptions',
@@ -332,13 +335,13 @@ export const APP_ROUTES: AppRoute[] = [
         key: 'report-analysis-monthly',
         path: '/report/analysis-monthly',
         label: '月报',
-        element: <Analysis key="analysis-monthly" kind="analysis-monthly" />,
+        element: <OpsMonthly />,
       },
       {
         key: 'report-analysis-yearly',
         path: '/report/analysis-yearly',
         label: '年报',
-        element: <Analysis key="analysis-yearly" kind="analysis-yearly" />,
+        element: <OpsYearly />,
       },
     ],
   },
@@ -354,6 +357,12 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/report/query/unified',
         label: '统一查询',
         element: <UnifiedQuery />,
+      },
+      {
+        key: 'query-metrics',
+        path: '/report/query/metrics',
+        label: '指标查询',
+        element: <MetricQuery />,
       },
     ],
   },

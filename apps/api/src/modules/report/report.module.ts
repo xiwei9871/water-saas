@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { OpsReportService } from './ops-report.service.js';
 import { AnalysisService } from './analysis.service.js';
 import { QueryController } from './query.controller.js';
 import { QueryService } from './query.service.js';
@@ -20,6 +21,6 @@ import { UnifiedQueryService } from './unified.service.js';
  */
 @Module({
   controllers: [ReportsController, QueryController],
-  providers: [ReportService, QueryService, AnalysisService, UnifiedQueryService],
+  providers: [ReportService, QueryService, AnalysisService, UnifiedQueryService, OpsReportService],
 })
 export class ReportModule {}

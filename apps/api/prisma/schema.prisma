@@ -1652,6 +1652,21 @@ model ReportQueryTemplate {
   @@map("report_query_template")
 }
 
+/// 员工个人偏好（H2 驾驶舱个人视图等 per-staff JSON 配置）。
+model StaffPref {
+  tenantId  String   @map("tenant_id") @db.Uuid
+  staffId   String   @map("staff_id") @db.Uuid
+  key       String
+  value     Json     @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@id([tenantId, staffId, key])
+  @@map("staff_pref")
+}
+
 // ---------------------------------------------------------------------------
 // G 缺口补齐（docs/GAP_ANALYSIS_2026-10.md）
 // ---------------------------------------------------------------------------

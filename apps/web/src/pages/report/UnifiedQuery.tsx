@@ -9,6 +9,7 @@ import {
   App as AntdApp,
   Button,
   Card,
+  Tabs,
   Checkbox,
   DatePicker,
   Form,
@@ -26,6 +27,7 @@ import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
+import SummaryPanel from './SummaryPanel';
 import { BILL_STATUS_LABELS } from '../billing/common';
 import { READ_SOURCE_LABELS } from '../metering/common';
 import { PAY_CHANNEL_LABELS } from '../payment/common';
@@ -161,7 +163,7 @@ const renderCell = (key: string, v: unknown): React.ReactNode => {
   }
 };
 
-export default function UnifiedQuery() {
+function DetailQuery() {
   const { message } = AntdApp.useApp();
   const [form] = Form.useForm();
   const [themes, setThemes] = useState<FieldTheme[]>([]);
@@ -726,5 +728,21 @@ export default function UnifiedQuery() {
         </Typography.Text>
       </Modal>
     </>
+  );
+}
+
+
+/**
+ * 统一数据查询（修订稿 Q1）—— 明细 / 汇总双模式同入口切换：
+ * 明细 = 户×账期横向透视（≤12 期）；汇总 = 年度聚合 + 同比 + 维度。
+ */
+export default function UnifiedQuery() {
+  return (
+    <Tabs
+      items={[
+        { key: 'detail', label: '明细查询', children: <DetailQuery /> },
+        { key: 'summary', label: '汇总趋势', children: <SummaryPanel /> },
+      ]}
+    />
   );
 }

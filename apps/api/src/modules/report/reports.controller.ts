@@ -2,12 +2,19 @@ import {
   BadRequestException,
   Controller,
   Get,
+  Param,
   Query,
+  Req,
+  Res,
 } from '@nestjs/common';
+import type { Request, Response } from 'express';
+import * as XLSX from 'xlsx';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { assertUuid } from '../../common/uuid.js';
 import { AnalysisService } from './analysis.service.js';
+import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { OpsReportService } from './ops-report.service.js';
 import { ReportService } from './report.service.js';
 
 /** period is char(6) YYYYMM — same guard as billing/metering controllers. */
@@ -54,7 +61,46 @@ export class ReportsController {
   constructor(
     private readonly svc: ReportService,
     private readonly analysis: AnalysisService,
+    private readonly ops: OpsReportService,
+    private readonly prisma: TenantPrismaService,
   ) {}
+
+  /** 导出落审计 + xlsx 发送（与 query.controller 同一约定）。 */
+  private async sendXlsx(
+    res: Response,
+    action: string,
+    aoa: (string | number | null)[][],
+    filename: string,
+    auditAfter: Record<string, unknown>,
+  ) {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Sheet1');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    const ctx = currentTenant();
+    try {
+      await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+        tx.auditLog.create({
+          data: {
+            tenantId: ctx.tenantId,
+            staffId: ctx.staffId,
+            action,
+            entity: 'report',
+            after: auditAfter as never,
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+        }),
+      );
+    } catch (err) {
+      console.error('export audit write failed', err);
+    }
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(buf);
+  }
 
   /**
    * GET /reports/meter-daily?date=YYYY-MM-DD[&bookId][&orgUnitId] —
@@ -188,5 +234,237 @@ export class ReportsController {
       throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'year' });
     }
     return this.analysis.analysisYearly(currentTenant(), { year: y });
+  }
+
+  /**
+   * GET /reports/ops-monthly?period=YYYYMM[&orgUnitId] — 规范月报（修订稿
+   * R4/R7）：六大类 21 指标 × 本期/上年同期/同比/本年累计/累计增减，
+   * 标题区含公司名称（tenant_param company.name ?? tenant.name）与
+   * 填报单位（组织层级）。orgUnitId 按子树∩数据范围收敛。
+   */
+  @Get('ops-monthly')
+  @Permissions('report:read')
+  opsMonthly(@Query('period') period?: string, @Query('orgUnitId') orgUnitId?: string) {
+    return this.ops.opsMonthly(currentTenant(), {
+      period: assertPeriod(required(period, 'period')),
+      orgUnitId: orgUnitId ? assertUuid(orgUnitId, 'orgUnitId') : undefined,
+    });
+  }
+
+  /**
+   * GET /reports/ops-yearly?year=YYYY[&orgUnitId][&columns=a,b] — 规范
+   * 年度汇总表（R5）：12 行分月 + 合计行；columns 为可勾选列键
+   * （soldQty/waterFee/collected/recoveryRate/compositePrice/arrearsTotal）。
+   */
+  @Get('ops-yearly')
+  @Permissions('report:read')
+  opsYearly(
+    @Query('year') year?: string,
+    @Query('orgUnitId') orgUnitId?: string,
+    @Query('columns') columns?: string,
+  ) {
+    const y = required(year, 'year');
+    if (!/^\d{4}$/.test(y)) {
+      throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'year' });
+    }
+    return this.ops.opsYearly(currentTenant(), {
+      year: y,
+      orgUnitId: orgUnitId ? assertUuid(orgUnitId, 'orgUnitId') : undefined,
+      columns: columns?.split(',').map((s) => s.trim()).filter(Boolean),
+    });
+  }
+
+  /**
+   * GET /reports/summary-trend?groupBy=ALL|ORG|CATEGORY&years=N[&endYear]
+   * —— Q1 汇总趋势：年度汇总行 + 相邻年同比，维度=全公司/片区/用水类别。
+   */
+  @Get('summary-trend')
+  @Permissions('report:read')
+  summaryTrend(
+    @Query('groupBy') groupBy?: string,
+    @Query('years') years?: string,
+    @Query('endYear') endYear?: string,
+  ) {
+    const gb = (groupBy ?? 'ALL').toUpperCase();
+    if (!['ALL', 'ORG', 'CATEGORY'].includes(gb)) {
+      throw new BadRequestException({ code: 'GROUP_BY_INVALID', value: groupBy });
+    }
+    const y = years === undefined ? undefined : parseInt(years, 10);
+    if (years !== undefined && (!Number.isFinite(y) || (y as number) < 1)) {
+      throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'years' });
+    }
+    const ey = endYear === undefined ? undefined : parseInt(endYear, 10);
+    if (endYear !== undefined && (!Number.isFinite(ey) || (ey as number) < 2000)) {
+      throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'endYear' });
+    }
+    return this.ops.unifiedSummary(currentTenant(), {
+      groupBy: gb as 'ALL' | 'ORG' | 'CATEGORY',
+      years: y,
+      endYear: ey,
+    });
+  }
+
+  /**
+   * GET /reports/metric-search?q= —— Q2 指标查询：按名/编码/公式搜索
+   * 字典条目（定义/公式/周期/单位/方向/可用性）。
+   */
+  @Get('metric-search')
+  @Permissions('report:read')
+  metricSearch(@Query('q') q?: string) {
+    return this.ops.metricSearch(q);
+  }
+
+  /**
+   * GET /reports/metrics/:code/detail?periods=N[&endPeriod=YYYYMM] ——
+   * 指标当前值 + 近 N 期趋势（与月报同源 metricsWindow）。
+   */
+  /**
+   * GET /reports/cockpit[?orgUnitId][&periods=N] —— H1 经营驾驶舱五区
+   * 聚合：KPI 卡（同比/环比）、当日实时、近 N 月趋势、预警、片区排名。
+   */
+  @Get('cockpit')
+  @Permissions('report:read')
+  cockpit(@Query('orgUnitId') orgUnitId?: string, @Query('periods') periods?: string) {
+    const n = periods === undefined ? undefined : parseInt(periods, 10);
+    if (periods !== undefined && (!Number.isFinite(n) || (n as number) < 1)) {
+      throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'periods' });
+    }
+    return this.ops.cockpit(currentTenant(), {
+      orgUnitId: orgUnitId ? assertUuid(orgUnitId, 'orgUnitId') : undefined,
+      periods: n,
+    });
+  }
+
+  @Get('metrics/:code/detail')
+  @Permissions('report:read')
+  metricDetail(
+    @Param('code') code: string,
+    @Query('periods') periods?: string,
+    @Query('endPeriod') endPeriod?: string,
+  ) {
+    const n = periods === undefined ? undefined : parseInt(periods, 10);
+    if (periods !== undefined && (!Number.isFinite(n) || (n as number) < 1)) {
+      throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'periods' });
+    }
+    return this.ops.metricDetail(currentTenant(), code.toUpperCase(), {
+      periods: n,
+      endPeriod: endPeriod ? assertPeriod(endPeriod, 'endPeriod') : undefined,
+    });
+  }
+
+  /** GET /reports/ops-monthly/export —— 规范月报 xlsx（四要素版式）。 */
+  @Get('ops-monthly/export')
+  @Permissions('report:read')
+  async opsMonthlyExport(
+    @Query('period') period: string | undefined,
+    @Query('orgUnitId') orgUnitId: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+    @Req() _req: Request,
+  ) {
+    const data = await this.ops.opsMonthly(currentTenant(), {
+      period: assertPeriod(required(period, 'period')),
+      orgUnitId: orgUnitId ? assertUuid(orgUnitId, 'orgUnitId') : undefined,
+    });
+    const { meta } = data;
+    const aoa: (string | number | null)[][] = [
+      [meta.companyName],
+      [`营销经营月报表`],
+      [`统计周期：${meta.periodLabel}　填报单位：${meta.companyName}${meta.orgLabel === '全公司' ? '' : ' · ' + meta.orgLabel}　金额单位：${meta.unit}　报表期：${meta.periodLabel}`],
+      [],
+      ['序号', '指标名称', '单位', '本月数', '上年同月', '同比增减(%)', '本年累计', '上年同期累计', '累计增减(%)'],
+    ];
+    for (const s of data.sections) {
+      aoa.push([s.name]);
+      for (const r of s.rows) {
+        aoa.push([
+          r.seq, r.name, r.unit,
+          r.current, r.prevYear, r.yoyPct,
+          r.cum, r.prevCum, r.cumYoyPct,
+        ]);
+      }
+    }
+    aoa.push([]);
+    aoa.push([`编制人：${meta.preparedBy}`, '复核人：', '负责人：', `编制日期：${meta.preparedAt}`]);
+    await this.sendXlsx(res, 'EXPORT /reports/ops-monthly', aoa,
+      `ops-monthly-${data.period}.xlsx`, { period: data.period, orgUnitId });
+  }
+
+  /** GET /reports/ops-yearly/export —— 年度分月汇总表 xlsx。 */
+  @Get('ops-yearly/export')
+  @Permissions('report:read')
+  async opsYearlyExport(
+    @Query('year') year: string | undefined,
+    @Query('orgUnitId') orgUnitId: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+    @Req() _req: Request,
+  ) {
+    const y = required(year, 'year');
+    if (!/^\d{4}$/.test(y)) {
+      throw new BadRequestException({ code: 'PERIOD_INVALID', field: 'year' });
+    }
+    const data = await this.ops.opsYearly(currentTenant(), {
+      year: y,
+      orgUnitId: orgUnitId ? assertUuid(orgUnitId, 'orgUnitId') : undefined,
+    });
+    const { meta } = data;
+    const COLS: Record<string, string> = {
+      soldQty: '售水量 (m³)', waterFee: '售水收入 (元)', collected: '实收水费 (元)',
+      recoveryRate: '水费回收率 (%)', compositePrice: '综合单价 (元/m³)', arrearsTotal: '欠费余额 (元)',
+    };
+    const cols = data.columns;
+    const aoa: (string | number | null)[][] = [
+      [meta.companyName],
+      ['营销经营年度汇总表'],
+      [`统计周期：${meta.periodLabel}　填报单位：${meta.companyName}${meta.orgLabel === '全公司' ? '' : ' · ' + meta.orgLabel}　金额单位：${meta.unit}　报表期：${meta.periodLabel}`],
+      [],
+      ['月份', ...cols.map((c) => COLS[c] ?? c)],
+      ...data.rows.map((r) => [
+        r.month as string,
+        ...cols.map((c) => (r as Record<string, unknown>)[c] as number | null ?? null),
+      ]),
+      [],
+      [`编制人：${meta.preparedBy}`, '复核人：', '负责人：', `编制日期：${meta.preparedAt}`],
+    ];
+    await this.sendXlsx(res, 'EXPORT /reports/ops-yearly', aoa,
+      `ops-yearly-${y}.xlsx`, { year: y, orgUnitId });
+  }
+
+  /** GET /reports/summary-trend/export —— 汇总趋势 xlsx（Q1 导出项）。 */
+  @Get('summary-trend/export')
+  @Permissions('report:read')
+  async summaryTrendExport(
+    @Query('groupBy') groupBy: string | undefined,
+    @Query('years') years: string | undefined,
+    @Query('endYear') endYear: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+    @Req() _req: Request,
+  ) {
+    const gb = (groupBy ?? 'ALL').toUpperCase();
+    if (!['ALL', 'ORG', 'CATEGORY'].includes(gb)) {
+      throw new BadRequestException({ code: 'GROUP_BY_INVALID', value: groupBy });
+    }
+    const data = await this.ops.unifiedSummary(currentTenant(), {
+      groupBy: gb as 'ALL' | 'ORG' | 'CATEGORY',
+      years: years === undefined ? undefined : parseInt(years, 10),
+      endYear: endYear === undefined ? undefined : parseInt(endYear, 10),
+    });
+    const aoa: (string | number | null)[][] = [
+      ['年度汇总趋势表'],
+      [`维度：${gb === 'ALL' ? '全公司' : gb === 'ORG' ? '片区' : '用水类别'}　年度：${data.years.join('~')}`],
+      [],
+    ];
+    if (gb === 'ALL') {
+      aoa.push(['年度', '售水量(m³)', '售水收入(元)', '应收(元)', '实收(元)', '回收率(%)', '综合单价(元/m³)', '欠费余额(元)', '在册户数', '售水量同比(%)', '收入同比(%)', '实收同比(%)']);
+      for (const r of data.rows as { year: number; soldQty: number; waterFee: number; arAmount: number; collected: number; recoveryRate: number | null; compositePrice: number | null; arrearsTotal: number; accountCount: number; yoy: Record<string, number | null> }[]) {
+        aoa.push([r.year, r.soldQty, r.waterFee, r.arAmount, r.collected, r.recoveryRate, r.compositePrice, r.arrearsTotal, r.accountCount, r.yoy.soldQty, r.yoy.waterFee, r.yoy.collected]);
+      }
+    } else {
+      aoa.push(['分组', '年度', '售水量(m³)', '应收(元)', '实收(元)', '综合单价(元/m³)', '售水量同比(%)', '应收同比(%)', '实收同比(%)']);
+      for (const r of data.rows as { group: string; year: number; soldQty: number; arAmount: number; collected: number; compositePrice: number | null; yoy: Record<string, number | null> }[]) {
+        aoa.push([r.group, r.year, r.soldQty, r.arAmount, r.collected, r.compositePrice, r.yoy.soldQty, r.yoy.arAmount, r.yoy.collected]);
+      }
+    }
+    await this.sendXlsx(res, 'EXPORT /reports/summary-trend', aoa,
+      `summary-trend-${gb}.xlsx`, { groupBy: gb, years, endYear });
   }
 }
