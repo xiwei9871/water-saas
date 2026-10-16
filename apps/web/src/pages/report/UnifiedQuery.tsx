@@ -213,10 +213,10 @@ export default function UnifiedQuery() {
     return (k: string) => m.get(k) ?? k;
   }, [themes]);
 
-  /** 勾选变化保持既有顺序（新勾的追加尾部），列序=勾选序。 */
-  const mergeChecked = (next: string[]) =>
+  /** 主题内勾选变化：保留其它主题既有顺序，本主题仍勾选的按原序、新勾的追加尾部。 */
+  const mergeThemeChecked = (themeKeys: string[], next: string[]) =>
     setChecked((prev) => [
-      ...prev.filter((k) => next.includes(k)),
+      ...prev.filter((k) => !themeKeys.includes(k) || next.includes(k)),
       ...next.filter((k) => !prev.includes(k)),
     ]);
 
@@ -609,7 +609,7 @@ export default function UnifiedQuery() {
                     .filter((f) => !['accountNo', 'customerName'].includes(f.key))
                     .map((f) => ({ label: f.label, value: f.key }))}
                   value={checked}
-                  onChange={(v) => mergeChecked(v as string[])}
+                  onChange={(v) => mergeThemeChecked(keys, v as string[])}
                 />
               </div>
             );

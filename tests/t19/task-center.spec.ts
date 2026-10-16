@@ -35,7 +35,8 @@ test.describe.serial('T19 任务中心', () => {
     const drawer = page.locator('.ant-drawer-open');
     await expect(drawer.getByText('候选责任人')).toBeVisible();
     await expect(drawer.getByText('业务上下文')).toBeVisible();
-    await expect(drawer.getByText('Pilot复核员')).toBeVisible();
+    // 候选人为持 metering:qc 权限的 ACTIVE 账号（Pilot复核员已停用，不再入选）
+    await expect(drawer.getByText(/综合核查1|管理员/)).toBeVisible();
     await shot(page, '02-detail-drawer');
     // 业务直达
     await drawer.getByRole('button', { name: '前往业务页处理' }).click();
@@ -71,12 +72,33 @@ test.describe.serial('T19 任务中心', () => {
     await page.goto('/tasks');
     await page.getByRole('tab', { name: '待指派告警' }).click();
     await shot(page, '04-alert-box');
-    // 回到待办，按类型筛选催缴
+    // 回到待办，按类型筛选——取当前真实存在的一种类型验证过滤效果
+    // （催缴等类型随演示数据消耗可能为空，用 API 先取一个现存类型）
     await page.getByRole('tab', { name: '我的待办' }).click();
-    await page.getByRole('button', { name: '催缴任务', exact: true }).click();
-    await expect(page.locator('td', { hasText: '催缴任务' }).first()).toBeVisible();
+    const token = await page.evaluate(() => localStorage.getItem('water-saas.accessToken'));
+    const base = process.env.T19_BASE_URL ?? 'http://192.168.3.185:5185';
+    const tasks = await (
+      await page.request.get(`${base}/api/tasks?take=50`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    ).json();
+    const typeLabel = (t: string) =>
+      ({ METER_REVIEW: '抄表异常复核', SUPPLEMENT: '补差任务', COLLECTION: '催缴任务',
+        REVERSAL_APPROVAL: '红冲审批', WRITEOFF_APPROVAL: '核销审批' })[t] ?? t;
+    const present = (tasks.items ?? []).map((t: { type: string }) => t.type);
+    const pick = (present as string[]).find((t) => t === 'COLLECTION') ?? present[0];
+    const label = typeLabel(pick);
+    const filtered = page.waitForResponse(
+      (r) => r.url().includes('/api/tasks') && r.url().includes('type='),
+    );
+    await page.getByRole('button', { name: label, exact: true }).click();
+    await filtered;
+    await expect(page.locator('td', { hasText: label }).first()).toBeVisible();
     const tableText = await page.locator('table').innerText();
-    expect(tableText).not.toContain('红冲审批');
+    // 过滤后只能看到该类型（其他类型标签不出现）
+    for (const other of ['补差任务', '抄表异常复核', '催缴任务', '红冲审批', '核销审批']) {
+      if (other !== label) expect(tableText).not.toContain(other);
+    }
     await shot(page, '04b-filter-collection');
   });
 

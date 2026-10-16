@@ -16,8 +16,12 @@ async function pickUnsettledPeriod(request: import('@playwright/test').APIReques
   const res = await request.get(`${BASE()}/api/consumption-settlements?waterAccountId=${WA2}&take=200`, {
     headers: { Authorization: `Bearer ${token}` },
   });
+  const body = await res.json();
+  // 列表返回裸数组（非分页包装）
   const used = new Set(
-    ((await res.json()).items ?? []).map((s: { period: string }) => s.period),
+    (Array.isArray(body) ? body : (body.items ?? [])).map(
+      (s: { period: string }) => s.period,
+    ),
   );
   for (let ym = 2027 * 100 + 7; ym <= 202912; ym++) {
     const m = ym % 100;
@@ -38,9 +42,15 @@ test.describe.serial('T19 §4.3 实演取证', () => {
     const wa2 = '84a43afa-c3e7-4f30-9732-87c3b46cc616';
     const book2 = 'dc5c45e2-301c-4441-ab4b-22557f989fae';
     let period = '';
-    // 必须落在 (202612 估抄锚点, 下一结算 202706] 区间内才有「实抄<估抄」语义；
-    // 202701/202702 是仅剩的未消耗账期，重跑耗尽后需重建演示账期
-    for (const p of ['202701', '202702']) {
+    // 补差触发：该读数期之前的最近结算分量须为 ESTIMATE 且实抄<其止度。
+    // 演示户锚点已重建为 202805(ESTIMATE=400)，从 202806 起线性扫描，
+    // 第一个可生成计划项且未读的账期即用（已消耗账期自动跳过）。
+    const candidates: string[] = [];
+    for (let y = 2028; y <= 2030; y++) {
+      const m0 = y === 2028 ? 6 : 1;
+      for (let m = m0; m <= 12; m++) candidates.push(`${y}${String(m).padStart(2, '0')}`);
+    }
+    for (const p of candidates) {
       const gen = await request.post(`${base}/api/reading-plans/generate`, {
         headers,
         data: { bookId: book2, period: p, planDate: `${p.slice(0, 4)}-${p.slice(4)}-01` },
@@ -84,13 +94,15 @@ test.describe.serial('T19 §4.3 实演取证', () => {
   test('08 补差任务详情：候选人含 admin', async ({ page }) => {
     await loginUi(page, 'cd-water', 'cd-water');
     await page.goto('/tasks');
+    // 待办积压较多时新任务可能排在第 2 页——先按类型过滤再定位
+    await page.getByRole('button', { name: '补差任务', exact: true }).click();
     const row = page.locator('tr', { hasText: '补差任务' }).filter({ hasText: 'A202610000002' }).first();
     await expect(row).toBeVisible();
     await row.getByRole('button', { name: '详情' }).click();
     const drawer = page.locator('.ant-drawer-open');
     await expect(drawer.getByText('候选责任人')).toBeVisible();
     await expect(drawer.getByText(/管理员/)).toBeVisible();
-    await expect(drawer.getByText(/估计止度|实抄止度/)).toBeVisible();
+    await expect(drawer.getByText(/估计止度|实抄止度/).first()).toBeVisible();
     await shot(page, '08-supplement-detail');
     // biz 直达 → 页顶任务上下文横幅（T8）
     await drawer.getByRole('button', { name: '前往业务页处理' }).click();
@@ -141,20 +153,31 @@ test.describe.serial('T19 §4.3 实演取证', () => {
   test('10 chaobiaohecha1 候选视角待办可见 + 领取后 admin 侧消失', async ({ page }) => {
     await loginUi(page, 'cd-water', 'cd-water-cbhc');
     await page.goto('/tasks');
+    // 待办积压时补差任务可能不在首页——先按类型过滤
+    await page.getByRole('button', { name: '补差任务', exact: true }).click();
     const row = page.locator('tr', { hasText: '补差任务' }).filter({ hasText: 'A202610000002' }).first();
     await expect(row).toBeVisible({ timeout: 15_000 });
     await shot(page, '10-cbhc-todo');
-    // §4.2-3：候选人之一领取
-    const claimBtn = row.getByRole('button', { name: '领取' });
-    if (await claimBtn.isVisible()) {
-      await claimBtn.click();
-      await expect(page.getByText(/已领取|领取成功/)).toBeVisible({ timeout: 10_000 });
-      await shot(page, '10b-cbhc-claimed');
+    // §4.2-3：候选人之一领取——多次实演会留下多条 A2 补差，全部领取
+    for (let i = 0; i < 10; i++) {
+      const claimable = page
+        .locator('tr', { hasText: '补差任务' })
+        .filter({ hasText: 'A202610000002' })
+        .filter({ hasText: '待处理' })
+        .first();
+      if (!(await claimable.isVisible().catch(() => false))) break;
+      const btn = claimable.getByRole('button', { name: '领取' });
+      if (!(await btn.isVisible().catch(() => false))) break;
+      await btn.click();
+      await expect(page.getByText(/已领取|领取成功/).first()).toBeVisible({ timeout: 10_000 });
+      await page.waitForTimeout(400);
     }
+    await shot(page, '10b-cbhc-claimed');
     // 领取后切回 admin 视角：该任务不再出现在其待办（先清会话再登出切换）
     await page.evaluate(() => localStorage.clear());
     await loginUi(page, 'cd-water', 'cd-water');
     await page.goto('/tasks');
+    await page.getByRole('button', { name: '补差任务', exact: true }).click();
     await page.waitForTimeout(800);
     const adminRow = page
       .locator('tr', { hasText: '补差任务' })
@@ -181,7 +204,7 @@ test.describe.serial('T19 §4.3 实演取证', () => {
     // test 10 领取的补差任务由 cbhc 自己完成 —— 「完成后自动解锁」的第二种闭环证据
     const cbhcToken = (
       await request.post(`${base}/api/auth/login`, {
-        data: { tenantCode: 'cd-water', login: 'chaobiaohecha1', password: 'Cbhc@T19demo' },
+        data: { tenantCode: 'cd-water', login: 'chaobiaohecha1', password: '123456' },
       })
     ).json() as Promise<{ accessToken: string }>;
     const cbhcH = { Authorization: `Bearer ${(await cbhcToken).accessToken}` };

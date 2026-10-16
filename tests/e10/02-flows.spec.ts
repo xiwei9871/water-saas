@@ -65,6 +65,40 @@ test.describe('统一数据查询 + F1 导出', () => {
     const headers = await page.locator('.ant-table thead').innerText();
     expect(headers).toMatch(/实收金额|缴费渠道/);
   });
+
+  test('阶段三：模板存取应用 + 字段排序 + 页内筛选', async ({ page }) => {
+    await page.goto('/report/query/unified');
+    await page.waitForResponse((r) => r.url().includes('unified/fields'));
+    await checkField(page, '地址');
+    // 存为模板
+    await page.getByRole('button', { name: '存为模板' }).click();
+    await page.locator('.ant-modal input').fill('E10冒烟模板');
+    await page.locator('.ant-modal').getByRole('button', { name: /保\s*存/ }).click();
+    await expect(page.getByText(/已保存/)).toBeVisible();
+    // 打乱勾选后再应用模板还原
+    await checkField(page, '用水类别');
+    await page.locator('.ant-select', { hasText: '我的模板' }).click();
+    await page.locator('.ant-select-item-option', { hasText: 'E10冒烟模板' }).click();
+    await expect(page.getByText(/已应用模板/)).toBeVisible();
+    // 已选字段 Tag 列存在（含排序按钮）
+    await expect(page.getByText(/已选 \d+ 项/)).toBeVisible();
+    const tagCount = await page.locator('.ant-tag').count();
+    expect(tagCount).toBeGreaterThan(0);
+    // 排序按钮：首项上移禁用、下移可用
+    const firstTag = page.locator('.ant-tag:has(button)').first();
+    await expect(firstTag.locator('button').nth(0)).toBeDisabled();
+    await expect(firstTag.locator('button').nth(1)).toBeEnabled();
+    // 页内筛选
+    await page.getByRole('button', { name: /查\s*询/ }).click();
+    await page.waitForResponse((r) => r.url().includes('/reports/query/unified') && !r.url().includes('fields'));
+    await page.getByPlaceholder('页内筛选（当前页）').fill('不可能命中的词');
+    await page.waitForTimeout(400);
+    await expect(page.getByText(/页内筛选命中 0/)).toBeVisible();
+    // 清理模板
+    await page.locator('.ant-select', { hasText: '删除模板' }).click();
+    await page.locator('.ant-select-item-option', { hasText: 'E10冒烟模板' }).click();
+    await expect(page.getByText(/已删除/)).toBeVisible();
+  });
 });
 
 test.describe('B1–B3 分析报表', () => {
