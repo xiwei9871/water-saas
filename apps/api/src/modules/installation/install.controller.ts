@@ -4,6 +4,7 @@ import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
+import { assertUsageCategory } from '../../common/usage-categories.js';
 import { InstallService, type CreateApplyBody } from './install.service.js';
 import { parseOnboardWire, type OnboardWireBody } from '../customer/onboard-wire.js';
 
@@ -62,6 +63,7 @@ export class InstallController {
     if (!body?.applicantName?.trim() || !body?.addr?.trim() || !body?.usageCategory?.trim()) {
       throw new BadRequestException({ code: 'APPLY_BODY_INVALID' });
     }
+    assertUsageCategory(body.usageCategory);
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) => this.svc.createTx(tx, ctx, body));
   }

@@ -274,7 +274,7 @@ describe('S1 报装', () => {
   it('新建申请 → SUBMITTED + INSTALL_REVIEW 任务', async () => {
     const res = await post('/install/applications', {
       applicantName: '报装测试户', contactPhone: '13800000000',
-      addr: 'TG 新址 9 号', usageCategory: 'RESIDENTIAL', caliberReq: 'DN15',
+      addr: 'TG 新址 9 号', usageCategory: 'RES_METERED', caliberReq: 'DN15',
     }).expect(201);
     appId = res.body.id;
     expect(res.body.applyNo).toMatch(/^BZ\d+/);

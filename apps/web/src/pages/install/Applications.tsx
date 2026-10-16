@@ -20,7 +20,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { CustomerSelect, ReadingBookSelect, MeterSelect } from '../pickers';
-import { fmtDate } from '../common';
+import { fmtDate, USAGE_CATEGORY_OPTIONS } from '../common';
 
 type ApplyStatus = 'SUBMITTED' | 'SURVEYED' | 'APPROVED' | 'INSTALLING' | 'COMPLETED' | 'REJECTED' | 'CANCELLED';
 
@@ -66,14 +66,6 @@ const NEXT_ACTIONS: Partial<Record<ApplyStatus, { to: ApplyStatus; label: string
   ],
   INSTALLING: [{ to: 'CANCELLED', label: '取消' }],
 };
-
-const USAGE_CATEGORIES = [
-  { value: 'RESIDENTIAL', label: '居民生活' },
-  { value: 'COMMERCIAL', label: '商业经营' },
-  { value: 'INDUSTRIAL', label: '工业生产' },
-  { value: 'INSTITUTION', label: '行政事业' },
-  { value: 'SPECIAL', label: '特种用水' },
-];
 
 /** S1 报装管理（独立域）：申请→勘察→审批→装表→归档立户。 */
 export default function InstallApplications() {
@@ -165,7 +157,7 @@ export default function InstallApplications() {
     { title: '申请号', dataIndex: 'applyNo', width: 150 },
     { title: '申请人', dataIndex: 'applicantName', width: 120 },
     { title: '联系电话', dataIndex: 'contactPhone', width: 120, render: (v: string | null) => v ?? '—' },
-    { title: '用水性质', dataIndex: 'usageCategory', width: 100, render: (v: string) => USAGE_CATEGORIES.find((c) => c.value === v)?.label ?? v },
+    { title: '用水性质', dataIndex: 'usageCategory', width: 100, render: (v: string) => USAGE_CATEGORY_OPTIONS.find((c) => c.value === v)?.label ?? v },
     { title: '地址', dataIndex: 'addr', ellipsis: true },
     { title: '申请口径', dataIndex: 'caliberReq', width: 90, render: (v: string | null) => v ?? '—' },
     { title: '状态', dataIndex: 'status', width: 90, render: (s: ApplyStatus) => <Tag color={STATUS_COLORS[s]}>{STATUS_LABELS[s]}</Tag> },
@@ -212,7 +204,7 @@ export default function InstallApplications() {
       <Table rowKey="id" size="small" columns={cols} dataSource={rows} loading={loading} pagination={false} />
 
       <Modal title="新建报装申请" open={createOpen} onOk={() => void create()} onCancel={() => setCreateOpen(false)} destroyOnHidden>
-        <Form form={form} layout="vertical" initialValues={{ custType: 'PERSONAL', usageCategory: 'RESIDENTIAL' }}>
+        <Form form={form} layout="vertical" initialValues={{ custType: 'PERSONAL', usageCategory: 'RES_METERED' }}>
           <Form.Item name="applicantName" label="申请人名称" rules={[{ required: true }]}>
             <Input maxLength={60} />
           </Form.Item>
@@ -229,7 +221,7 @@ export default function InstallApplications() {
           </Form.Item>
           <Space>
             <Form.Item name="usageCategory" label="用水性质" rules={[{ required: true }]}>
-              <Select style={{ width: 160 }} options={USAGE_CATEGORIES} />
+              <Select style={{ width: 160 }} options={USAGE_CATEGORY_OPTIONS} />
             </Form.Item>
             <Form.Item name="caliberReq" label="申请口径">
               <Select allowClear style={{ width: 140 }} options={['DN15', 'DN20', 'DN25', 'DN40', 'DN50', 'DN100'].map((v) => ({ value: v, label: v }))} />
@@ -288,7 +280,7 @@ export default function InstallApplications() {
             <Descriptions.Item label="申请人">{detail.applicantName}</Descriptions.Item>
             <Descriptions.Item label="联系电话">{detail.contactPhone ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="地址">{detail.addr}</Descriptions.Item>
-            <Descriptions.Item label="用水性质">{USAGE_CATEGORIES.find((c) => c.value === detail.usageCategory)?.label ?? detail.usageCategory}</Descriptions.Item>
+            <Descriptions.Item label="用水性质">{USAGE_CATEGORY_OPTIONS.find((c) => c.value === detail.usageCategory)?.label ?? detail.usageCategory}</Descriptions.Item>
             <Descriptions.Item label="状态"><Tag color={STATUS_COLORS[detail.status]}>{STATUS_LABELS[detail.status]}</Tag></Descriptions.Item>
             {detail.surveyNote && <Descriptions.Item label="勘察备注">{detail.surveyNote}</Descriptions.Item>}
             {detail.installNote && <Descriptions.Item label="装表备注">{detail.installNote}</Descriptions.Item>}
