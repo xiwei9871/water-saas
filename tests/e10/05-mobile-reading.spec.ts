@@ -66,8 +66,11 @@ test.describe('抄表工作台 H5', () => {
       .first()
       .click();
 
-    // 待抄队列出现，当前户卡展示标签字段（item 接口现已带回户号/客户名）
-    await expect(page.getByText('待抄队列')).toBeVisible();
+    // 待抄队列卡片仅 ≥2 待抄项时渲染（单项时当前户卡即唯一展示）
+    if (items.length > 1) {
+      await expect(page.getByText('待抄队列')).toBeVisible();
+    }
+    await expect(page.getByPlaceholder('输入本期读数')).toBeVisible();
     if (item.accountNo) {
       await expect(page.getByText(item.accountNo).first()).toBeVisible();
     }
