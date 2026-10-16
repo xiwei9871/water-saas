@@ -6,7 +6,7 @@ import {
 } from '../../common/account-aggregation-ownership.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
-import { METRIC_DICT } from './metric-dictionary.js';
+import { METRIC_DICT, METRIC_DICT_VERSION } from './metric-dictionary.js';
 
 /**
  * 窗口化经营指标引擎（2026-10-16 修订意见 Q1/Q2/R4/R5/R7/H1 共用内核）。
@@ -55,6 +55,8 @@ export interface ReportMeta {
   orgUnitId: string | null;
   preparedBy: string;
   preparedAt: string;
+  /** 指标口径版本 —— 与指标字典页/日周月年报一致的版本标识。 */
+  metricVersion: string;
 }
 
 const num = (v: string | null | undefined) => (v ? Number(v) : 0);
@@ -145,6 +147,7 @@ export class OpsReportService {
       orgUnitId: orgLabel === '全公司' ? null : orgLabel,
       preparedBy: staff?.name ?? '',
       preparedAt: new Date().toISOString().slice(0, 10),
+      metricVersion: METRIC_DICT_VERSION,
     };
   }
 

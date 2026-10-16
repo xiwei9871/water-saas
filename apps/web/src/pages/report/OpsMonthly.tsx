@@ -36,6 +36,7 @@ interface Meta {
   unit: string;
   preparedBy: string;
   preparedAt: string;
+  metricVersion: string;
 }
 
 interface MetricRow {
@@ -229,7 +230,8 @@ export default function OpsMonthly() {
               <Typography.Text type="secondary">
                 统计周期：{data.meta.periodLabel}　填报单位：{data.meta.companyName}
                 {data.meta.orgLabel !== '全公司' ? ` · ${data.meta.orgLabel}` : ''}　金额单位：
-                {data.meta.unit}　报表期：{data.meta.periodLabel}
+                {data.meta.unit}　报表期：{data.meta.periodLabel}　指标口径版本{' '}
+                {data.meta.metricVersion}
               </Typography.Text>
             </Card>
 
