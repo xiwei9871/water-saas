@@ -356,13 +356,26 @@ export class PaymentService {
         updatedBy: ctx.staffId,
       })),
     });
-    const receiptNo = await this.seq.nextFormatted(
-      tx,
-      ctx.tenantId,
-      'receipt_no',
-      'R',
-      ctx.staffId,
-    );
+    // G5 票据台账：收费员有已领用号段时占用 next_no，否则退回全局序号。
+    const book = await tx.receiptBook.findFirst({
+      where: { tenantId: ctx.tenantId, status: 'ISSUED', issuedTo: ctx.staffId },
+      orderBy: { issuedAt: 'asc' },
+    });
+    let receiptNo: string;
+    if (book && book.nextNo <= book.rangeEnd) {
+      const pad = String(book.rangeEnd).length;
+      receiptNo = `${book.prefix}${String(book.nextNo).padStart(pad, '0')}`;
+      await tx.receiptBook.update({
+        where: { id: book.id },
+        data: {
+          nextNo: { increment: 1 },
+          ...(book.nextNo >= book.rangeEnd ? { status: 'EXHAUSTED' } : {}),
+          updatedBy: ctx.staffId,
+        },
+      });
+    } else {
+      receiptNo = await this.seq.nextFormatted(tx, ctx.tenantId, 'receipt_no', 'R', ctx.staffId);
+    }
     const receipt = await tx.receipt.create({
       data: {
         tenantId: ctx.tenantId,

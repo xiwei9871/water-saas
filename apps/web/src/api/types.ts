@@ -1462,6 +1462,8 @@ export const TASK_TYPE_LABELS: Record<string, string> = {
   COLLECTION: '催缴任务',
   REVERSAL_APPROVAL: '红冲审批',
   WRITEOFF_APPROVAL: '核销审批',
+  INSTALL_REVIEW: '报装审批',
+  RECON_HANDLE: '对账差异处理',
 };
 
 export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {

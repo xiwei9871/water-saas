@@ -4,7 +4,11 @@ import { PrepaymentModule } from '../prepayment/prepayment.module.js';
 import { AccountOutstandingController } from './account-outstanding.controller.js';
 import { DayCloseController } from './day-close.controller.js';
 import { DayCloseService } from './day-close.service.js';
+import { NoticeController } from './notice.controller.js';
 import { PaymentController } from './payment.controller.js';
+import { ReconController } from './recon.controller.js';
+import { ReconService } from './recon.service.js';
+import { ReceiptDocController } from './receipt-doc.controller.js';
 import { PaymentService } from './payment.service.js';
 import { ReceiptController } from './receipt.controller.js';
 import { WriteoffController } from './writeoff.controller.js';
@@ -31,12 +35,17 @@ import { WriteoffController } from './writeoff.controller.js';
 @Module({
   imports: [PrepaymentModule, TaskModule],
   controllers: [
+    // Literal sub-paths must precede PaymentController: its @Get(':id')
+    // would otherwise swallow /payments/recon|collection-notices|receipt-books|invoices.
+    ReconController,
+    NoticeController,
+    ReceiptDocController,
     PaymentController,
     AccountOutstandingController,
     ReceiptController,
     DayCloseController,
     WriteoffController,
   ],
-  providers: [PaymentService, DayCloseService],
+  providers: [PaymentService, DayCloseService, ReconService],
 })
 export class PaymentModule {}

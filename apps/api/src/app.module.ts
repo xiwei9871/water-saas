@@ -12,6 +12,7 @@ import { BillingModule } from './modules/billing/billing.module.js';
 import { CustomerModule } from './modules/customer/customer.module.js';
 import { DashboardModule } from './modules/dashboard/dashboard.module.js';
 import { IamModule } from './modules/iam/iam.module.js';
+import { InstallModule } from './modules/installation/install.module.js';
 import { IntegrationModule } from './modules/integration/integration.module.js';
 import { MeteringModule } from './modules/metering/metering.module.js';
 import { PaymentModule } from './modules/payment/payment.module.js';
@@ -36,6 +37,7 @@ import { TaskModule } from './modules/task/task.module.js';
     TaskModule,
     DashboardModule,
     IntegrationModule,
+    InstallModule,
   ],
   controllers: [AppController],
   providers: [

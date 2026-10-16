@@ -253,6 +253,35 @@ enum ReceiptType {
   RECEIPT
 }
 
+enum ReconMatchStatus {
+  MATCHED
+  AMOUNT_MISMATCH
+  NOT_FOUND
+  STATUS_MISMATCH
+}
+
+enum ReceiptBookStatus {
+  STOCK
+  ISSUED
+  EXHAUSTED
+  RETIRED
+}
+
+enum InvoiceStatus {
+  ISSUED
+  VOID
+}
+
+enum InstallApplyStatus {
+  SUBMITTED
+  SURVEYED
+  APPROVED
+  INSTALLING
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
 enum DayCloseStatus {
   POSTED
 }
@@ -1621,4 +1650,152 @@ model ReportQueryTemplate {
   @@unique([tenantId, staffId, name])
   @@index([tenantId, staffId])
   @@map("report_query_template")
+}
+
+// ---------------------------------------------------------------------------
+// G 缺口补齐（docs/GAP_ANALYSIS_2026-10.md）
+// ---------------------------------------------------------------------------
+
+/// G3 渠道对账批次：银行/三方通道流水文件导入核账（mock 通道可生成对账单）。
+model ChannelReconBatch {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  channel       String
+  fileName      String?  @map("file_name")
+  bizDateFrom   DateTime? @map("biz_date_from") @db.Date
+  bizDateTo     DateTime? @map("biz_date_to") @db.Date
+  totalRows     Int      @default(0) @map("total_rows")
+  matched       Int      @default(0)
+  mismatched    Int      @default(0)
+  missingInFile Int      @default(0) @map("missing_in_file")
+  taskId        String?  @map("task_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at")
+  createdBy     String?  @map("created_by") @db.Uuid
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  updatedBy     String?  @map("updated_by") @db.Uuid
+
+  rows ChannelReconRow[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, createdAt])
+  @@map("channel_recon_batch")
+}
+
+model ChannelReconRow {
+  id          String           @id @default(uuid()) @db.Uuid
+  tenantId    String           @map("tenant_id") @db.Uuid
+  batchId     String           @map("batch_id") @db.Uuid
+  rowNo       Int              @map("row_no")
+  channelRef  String           @map("channel_ref")
+  amount      BigInt
+  paidAt      DateTime?        @map("paid_at")
+  matchStatus ReconMatchStatus @map("match_status")
+  paymentId   String?          @map("payment_id") @db.Uuid
+  note        String?
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  batch ChannelReconBatch @relation(fields: [tenantId, batchId], references: [tenantId, id], onDelete: Cascade)
+
+  @@index([tenantId, batchId])
+  @@map("channel_recon_row")
+}
+
+/// G4 催缴通知单：欠费户打印/留痕；bills 快照列出明细（应收/账期）。
+model CollectionNotice {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  noticeNo        String    @map("notice_no")
+  waterAccountId  String    @map("water_account_id") @db.Uuid
+  settleAccountId String    @map("settle_account_id") @db.Uuid
+  periodFrom      String    @map("period_from") @db.Char(6)
+  periodTo        String    @map("period_to") @db.Char(6)
+  amountDue       BigInt    @map("amount_due")
+  billCount       Int       @map("bill_count")
+  bills           Json      @db.JsonB
+  printCount      Int       @default(0) @map("print_count")
+  lastPrintedAt   DateTime? @map("last_printed_at")
+  taskId          String?   @map("task_id") @db.Uuid
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by") @db.Uuid
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  updatedBy       String?   @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, noticeNo])
+  @@index([tenantId, waterAccountId])
+  @@map("collection_notice")
+}
+
+/// G5 收据号段台账：领用后收款自动占用 next_no。
+model ReceiptBook {
+  id         String            @id @default(uuid()) @db.Uuid
+  tenantId   String            @map("tenant_id") @db.Uuid
+  bookNo     String            @map("book_no")
+  prefix     String            @default("S")
+  rangeStart Int               @map("range_start")
+  rangeEnd   Int               @map("range_end")
+  nextNo     Int               @map("next_no")
+  status     ReceiptBookStatus @default(STOCK)
+  issuedTo   String?           @map("issued_to") @db.Uuid
+  issuedAt   DateTime?         @map("issued_at")
+  createdAt  DateTime          @default(now()) @map("created_at")
+  createdBy  String?           @map("created_by") @db.Uuid
+  updatedAt  DateTime          @updatedAt @map("updated_at")
+  updatedBy  String?           @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, bookNo])
+  @@unique([tenantId, id])
+  @@index([tenantId, issuedTo, status])
+  @@map("receipt_book")
+}
+
+/// G5 发票登记台账（不接税控，登记/作废留痕）。
+model InvoiceRegistry {
+  id             String        @id @default(uuid()) @db.Uuid
+  tenantId       String        @map("tenant_id") @db.Uuid
+  invoiceNo      String        @map("invoice_no")
+  waterAccountId String?       @map("water_account_id") @db.Uuid
+  paymentId      String?       @map("payment_id") @db.Uuid
+  billId         String?       @map("bill_id") @db.Uuid
+  amount         BigInt
+  status         InvoiceStatus @default(ISSUED)
+  remark         String?
+  voidedAt       DateTime?     @map("voided_at")
+  voidedBy       String?       @map("voided_by") @db.Uuid
+  createdAt      DateTime      @default(now()) @map("created_at")
+  createdBy      String?       @map("created_by") @db.Uuid
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  updatedBy      String?       @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, invoiceNo])
+  @@index([tenantId, waterAccountId])
+  @@map("invoice_registry")
+}
+
+/// S1 报装申请（独立域）：申请→勘察→审批→装表→归档（归档调立户向导）。
+model InstallApplication {
+  id             String             @id @default(uuid()) @db.Uuid
+  tenantId       String             @map("tenant_id") @db.Uuid
+  applyNo        String             @map("apply_no")
+  applicantName  String             @map("applicant_name")
+  custType       String             @default("PERSONAL") @map("cust_type")
+  contactPhone   String?            @map("contact_phone")
+  addr           String
+  usageCategory  String             @map("usage_category")
+  caliberReq     String?            @map("caliber_req")
+  remark         String?
+  status         InstallApplyStatus @default(SUBMITTED)
+  orgUnitId      String?            @map("org_unit_id") @db.Uuid
+  surveyNote     String?            @map("survey_note")
+  installNote    String?            @map("install_note")
+  rejectReason   String?            @map("reject_reason")
+  waterAccountId String?            @map("water_account_id") @db.Uuid
+  createdAt      DateTime           @default(now()) @map("created_at")
+  createdBy      String?            @map("created_by") @db.Uuid
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  updatedBy      String?            @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, applyNo])
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@map("install_application")
 }

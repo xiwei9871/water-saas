@@ -20,6 +20,7 @@ import {
   Spin,
   Table,
   Tag,
+  Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -95,6 +96,38 @@ export default function Bills() {
 
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [penaltyOpen, setPenaltyOpen] = useState(false);
+  const [penaltyCfg, setPenaltyCfg] = useState<{ enabled: boolean; dailyRate: number; capRatio: number } | null>(null);
+  const [penaltyAsOf, setPenaltyAsOf] = useState<dayjs.Dayjs | null>(null);
+  const [penaltyResult, setPenaltyResult] = useState<string | null>(null);
+
+  const openPenalty = async () => {
+    setPenaltyResult(null);
+    try {
+      const res = await api.get<{ enabled: boolean; dailyRate: number; capRatio: number }>(
+        '/billing/penalties/config',
+      );
+      setPenaltyCfg(res.data);
+      setPenaltyOpen(true);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
+
+  const runPenalty = async () => {
+    try {
+      const res = await api.post<{ scanned: number; accrued: number; totalPenalty: string }>(
+        '/billing/penalties/accrue',
+        { asOfDate: penaltyAsOf?.format('YYYY-MM-DD') },
+      );
+      setPenaltyResult(
+        `扫描 ${res.data.scanned} 笔在收账单，计提 ${res.data.accrued} 笔，违约金合计 ${fmtCent(res.data.totalPenalty)}`,
+      );
+      void load(page, pageSize);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
   const [billCtx, setBillCtx] = useState<{
     settle: { householdSizeSnapshot: number | null } | null;
     plan: { baseHousehold: number | null; perPersonQty: string | null } | null;
@@ -472,6 +505,9 @@ export default function Bills() {
           <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
             刷新
           </Button>
+          {hasPerm('billing:write') && (
+            <Button onClick={() => void openPenalty()}>违约金计提</Button>
+          )}
         </Space>
       }
     >
@@ -733,6 +769,29 @@ export default function Bills() {
           </>
         )}
       </Drawer>
+
+      {/* G1 违约金计提：口径在 系统管理→租户参数 billing.penalty */}
+      <Modal
+        title="违约金计提"
+        open={penaltyOpen}
+        onCancel={() => setPenaltyOpen(false)}
+        footer={null}
+        destroyOnHidden
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          {penaltyCfg && (
+            <Typography.Text type={penaltyCfg.enabled ? undefined : 'warning'}>
+              当前口径：{penaltyCfg.enabled ? `启用，日费率 ${(penaltyCfg.dailyRate * 100).toFixed(3)}%，封顶 ${(penaltyCfg.capRatio * 100).toFixed(0)}% 本金` : '未启用（租户参数 billing.penalty.enabled=false）'}
+            </Typography.Text>
+          )}
+          <Space>
+            <Typography.Text>计提截止日</Typography.Text>
+            <DatePicker value={penaltyAsOf} onChange={setPenaltyAsOf} placeholder="缺省为今日" />
+            <Button type="primary" onClick={() => void runPenalty()}>执行计提</Button>
+          </Space>
+          {penaltyResult && <Typography.Text>{penaltyResult}</Typography.Text>}
+        </Space>
+      </Modal>
     </Card>
   );
 }

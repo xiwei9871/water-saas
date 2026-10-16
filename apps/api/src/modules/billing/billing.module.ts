@@ -7,6 +7,8 @@ import { BillingRunController } from './billing-run.controller.js';
 import { BillingRunService } from './billing-run.service.js';
 import { FeeItemController } from './fee-item.controller.js';
 import { FeeItemService } from './fee-item.service.js';
+import { PenaltyController } from './penalty.controller.js';
+import { PenaltyService } from './penalty.service.js';
 import { ReconciliationController } from './reconciliation.controller.js';
 import { TaskModule } from '../task/task.module.js';
 import { ReconciliationService } from './reconciliation.service.js';
@@ -35,6 +37,7 @@ import { TariffPlanService } from './tariff-plan.service.js';
     BillingRunController,
     BillController,
     ReconciliationController,
+    PenaltyController,
   ],
   providers: [
     FeeItemService,
@@ -42,6 +45,7 @@ import { TariffPlanService } from './tariff-plan.service.js';
     BillingRunService,
     BillService,
     ReconciliationService,
+    PenaltyService,
     BillingFinancePort,
   ],
   exports: [BillingFinancePort],

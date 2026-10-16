@@ -30,10 +30,14 @@ import RemoteDevices from './pages/metering/RemoteDevices';
 import RemoteEvents from './pages/metering/RemoteEvents';
 import RemoteSources from './pages/metering/RemoteSources';
 import Cashier from './pages/payment/Cashier';
+import CollectionNotices from './pages/payment/CollectionNotices';
 import DayClose from './pages/payment/DayClose';
 import Payments from './pages/payment/Payments';
 import Prepayments from './pages/payment/Prepayments';
+import ReceiptDocs from './pages/payment/ReceiptDocs';
+import Recon from './pages/payment/Recon';
 import Writeoffs from './pages/payment/Writeoffs';
+import InstallApplications from './pages/install/Applications';
 import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
 import UnifiedQuery from './pages/report/UnifiedQuery';
@@ -271,6 +275,41 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/payment/writeoffs',
         label: '坏账核销',
         element: <Writeoffs />,
+      },
+      {
+        key: 'payment-notices',
+        path: '/payment/collection-notices',
+        label: '催缴通知',
+        element: <CollectionNotices />,
+      },
+      {
+        key: 'payment-recon',
+        path: '/payment/recon',
+        label: '渠道对账',
+        element: <Recon />,
+      },
+      {
+        key: 'payment-receipt-docs',
+        path: '/payment/receipt-docs',
+        label: '票据台账',
+        element: <ReceiptDocs />,
+      },
+    ],
+  },
+  // S1 报装管理：独立于营销菜单组的业扩域（申请→勘察→审批→装表→归档）。
+  {
+    key: 'install',
+    path: '/install',
+    label: '报装管理',
+    icon: <FileTextOutlined />,
+    perms: ['install:read'],
+    children: [
+      {
+        key: 'install-applications',
+        path: '/install/applications',
+        label: '报装申请',
+        perms: ['install:read'],
+        element: <InstallApplications />,
       },
     ],
   },

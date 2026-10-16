@@ -49,6 +49,18 @@ export const TASK_TYPES: TaskTypeDef[] = [
     fallbackPerm: 'billing:write',
     bizRoute: '/payment/writeoffs?focusId={bizId}',
   },
+  {
+    code: 'INSTALL_REVIEW',
+    name: '报装审批',
+    fallbackPerm: 'install:write',
+    bizRoute: '/install/applications?focusId={bizId}',
+  },
+  {
+    code: 'RECON_HANDLE',
+    name: '对账差异处理',
+    fallbackPerm: 'payment:write',
+    bizRoute: '/payment/recon?focusId={bizId}',
+  },
 ];
 
 export const TASK_TYPE_CODES = TASK_TYPES.map((t) => t.code);
