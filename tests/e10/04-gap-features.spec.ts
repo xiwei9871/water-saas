@@ -29,13 +29,10 @@ test.describe('S1 报装管理（独立域）', () => {
 
     await page.getByRole('button', { name: '新建申请' }).click();
     const modal = page.locator('.ant-modal');
+    // custType=个人 / usageCategory=居民生活 均有默认值，无需点开下拉
     await modal.getByLabel('申请人名称').fill(`PW-报装户${Date.now() % 100000}`);
-    await modal.locator('#custType, .ant-select').first().click();
-    await page.locator('.ant-select-item', { hasText: '居民生活' }).first().click();
     await modal.getByLabel('联系电话').fill('13900001111');
     await modal.getByLabel('安装地址').fill('PW 测试路 88 号');
-    await modal.locator('#usageCategory').click();
-    await page.locator('.ant-select-item', { hasText: '居民生活' }).last().click();
     await modal.getByRole('button', { name: /确\s*定|OK/ }).click();
     await page.waitForResponse((r) => r.url().includes('/install/applications') && r.request().method() === 'POST');
 
@@ -58,9 +55,10 @@ test.describe('S1 报装管理（独立域）', () => {
     await page.waitForResponse((r) => r.url().includes('/archive'));
     await expect(row).toContainText('已归档');
 
-    // 详情抽屉回写户号
+    // 详情抽屉回写户号（展示 accountNo 而非裸 UUID）
     await row.getByRole('button', { name: '详情' }).click();
-    await expect(page.locator('.ant-drawer')).toContainText(/户号|A\d{12}/);
+    await expect(page.locator('.ant-drawer')).toContainText('已归档户号');
+    await expect(page.locator('.ant-drawer')).toContainText(/A\d{12}/);
   });
 });
 
@@ -73,7 +71,7 @@ test.describe('G3 渠道对账（mock）', () => {
     expect(content).toBeTruthy();
 
     await page.locator('textarea').fill(content);
-    await page.getByRole('button', { name: '核账' }).click();
+    await page.getByRole('button', { name: /核\s*账/ }).click();
     await page.waitForResponse((r) => r.url().includes('/payments/recon') && r.request().method() === 'POST');
     await expect(page.locator('.ant-table')).toContainText(/\d+/);
     // 打开首个批次明细
@@ -96,7 +94,7 @@ test.describe('G5 票据台账', () => {
     await page.waitForResponse((r) => r.url().includes('receipt-books') && r.request().method() === 'POST');
 
     const row = page.locator('.ant-table-row', { hasText: no }).first();
-    await expect(row).toContainText('库存');
+    await expect(row).toContainText('在库');
     await row.getByRole('button', { name: '领用' }).click();
     await page.locator('.ant-modal').getByRole('button', { name: /确\s*定|OK/ }).click();
     await expect(row).toContainText('已领用');
@@ -134,7 +132,7 @@ test.describe('G4 催缴通知单 + G1 违约金', () => {
     await expect(row).toBeVisible();
     await row.getByRole('button', { name: /打印/ }).click();
     await expect(page.locator('.ant-modal')).toContainText(/催缴|欠费/);
-    await page.locator('.ant-modal').getByRole('button', { name: /关\s*闭|取\s*消/ }).first().click();
+    await page.locator('.ant-modal .ant-modal-close').click();
 
     // 违约金计提弹窗：口径文案展示（未启用也给提示）
     await page.goto('/billing/bills');

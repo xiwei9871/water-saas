@@ -46,7 +46,13 @@ export class InstallController {
         where: { tenantId: ctx.tenantId, id: assertUuid(id, 'id') },
       });
       if (!app) throw new BadRequestException({ code: 'APPLY_NOT_FOUND' });
-      return app;
+      const wa = app.waterAccountId
+        ? await tx.waterAccount.findFirst({
+            where: { tenantId: ctx.tenantId, id: app.waterAccountId },
+            select: { accountNo: true },
+          })
+        : null;
+      return { ...app, waterAccountNo: wa?.accountNo ?? null };
     });
   }
 

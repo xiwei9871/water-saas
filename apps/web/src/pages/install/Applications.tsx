@@ -39,6 +39,7 @@ interface Apply {
   installNote: string | null;
   rejectReason: string | null;
   waterAccountId: string | null;
+  waterAccountNo?: string | null;
   createdAt: string;
 }
 
@@ -291,7 +292,7 @@ export default function InstallApplications() {
             {detail.surveyNote && <Descriptions.Item label="勘察备注">{detail.surveyNote}</Descriptions.Item>}
             {detail.installNote && <Descriptions.Item label="装表备注">{detail.installNote}</Descriptions.Item>}
             {detail.rejectReason && <Descriptions.Item label="驳回原因">{detail.rejectReason}</Descriptions.Item>}
-            {detail.waterAccountId && <Descriptions.Item label="已归档户号">{detail.waterAccountId}</Descriptions.Item>}
+            {detail.waterAccountId && <Descriptions.Item label="已归档户号">{detail.waterAccountNo ?? detail.waterAccountId}</Descriptions.Item>}
             <Descriptions.Item label="备注">{detail.remark ?? '—'}</Descriptions.Item>
           </Descriptions>
         )}
