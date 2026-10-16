@@ -26,16 +26,26 @@ export class InstallController {
   @Permissions('install:read')
   list(@Query('status') status?: string, @Query('take') take?: string) {
     const ctx = currentTenant();
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.installApplication.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.installApplication.findMany({
         where: {
           tenantId: ctx.tenantId,
           ...(status && STATUSES.has(status) ? { status: status as InstallApplyStatus } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: Math.min(parseInt(take ?? '50', 10) || 50, 200),
-      }),
-    );
+      });
+      const waIds = rows.map((r) => r.waterAccountId).filter((v): v is string => !!v);
+      const was = await tx.waterAccount.findMany({
+        where: { tenantId: ctx.tenantId, id: { in: waIds } },
+        select: { id: true, accountNo: true },
+      });
+      const noOf = new Map(was.map((w) => [w.id, w.accountNo]));
+      return rows.map((r) => ({
+        ...r,
+        waterAccountNo: r.waterAccountId ? (noOf.get(r.waterAccountId) ?? null) : null,
+      }));
+    });
   }
 
   @Get(':id')
