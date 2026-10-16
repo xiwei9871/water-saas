@@ -37,7 +37,7 @@ test.describe('S1 报装管理（独立域）', () => {
     await page.waitForResponse((r) => r.url().includes('/install/applications') && r.request().method() === 'POST');
 
     const row = page.locator('.ant-table-row', { hasText: 'PW 测试路 88 号' }).first();
-    await expect(row).toContainText('待勘察');
+    await expect(row).toContainText('已提交');
 
     // SUBMITTED → SURVEYED → APPROVED → INSTALLING
     for (const label of ['勘察完成', '审批通过', '开始装表']) {
@@ -56,7 +56,7 @@ test.describe('S1 报装管理（独立域）', () => {
     await expect(row).toContainText('已归档');
 
     // 详情抽屉回写户号（展示 accountNo 而非裸 UUID）
-    await row.getByRole('button', { name: '详情' }).click();
+    await row.getByRole('button', { name: /详\s*情/ }).click();
     await expect(page.locator('.ant-drawer')).toContainText('已归档户号');
     await expect(page.locator('.ant-drawer')).toContainText(/A\d{12}/);
   });
@@ -65,17 +65,23 @@ test.describe('S1 报装管理（独立域）', () => {
 test.describe('G3 渠道对账（mock）', () => {
   test('生成模拟对账单→粘贴核账→批次差异计数', async ({ page }) => {
     await page.goto('/payment/recon');
+    // 选有流水的渠道（CASH）再生成模拟对账单——BANK_DEDUCT 在 pilot 无收款会得到空表
+    await page.locator('.ant-form .ant-select').first().click();
+    await page.locator('.ant-select-item', { hasText: '现金' }).click();
     await page.getByRole('button', { name: '生成模拟对账单' }).click();
     const res = await page.waitForResponse((r) => r.url().includes('mock-statement'));
-    const { content } = await res.json();
-    expect(content).toBeTruthy();
+    const { content, rows } = await res.json();
+    expect(rows).toBeGreaterThan(0);
 
     await page.locator('textarea').fill(content);
-    await page.getByRole('button', { name: /核\s*账/ }).click();
-    await page.waitForResponse((r) => r.url().includes('/payments/recon') && r.request().method() === 'POST');
+    const [postRes] = await Promise.all([
+      page.waitForResponse((r) => r.url().includes('/payments/recon') && r.request().method() === 'POST'),
+      page.getByRole('button', { name: /核\s*账/ }).click(),
+    ]);
+    expect(postRes.status(), JSON.stringify(await postRes.json().catch(() => null))).toBe(201);
     await expect(page.locator('.ant-table')).toContainText(/\d+/);
     // 打开首个批次明细
-    await page.locator('.ant-table-row').first().getByRole('button', { name: '明细' }).click();
+    await page.locator('.ant-table-row').first().getByRole('button', { name: /明\s*细/ }).click();
     await expect(page.locator('.ant-drawer, .ant-modal')).toBeVisible();
   });
 });
@@ -95,7 +101,7 @@ test.describe('G5 票据台账', () => {
 
     const row = page.locator('.ant-table-row', { hasText: no }).first();
     await expect(row).toContainText('在库');
-    await row.getByRole('button', { name: '领用' }).click();
+    await row.getByRole('button', { name: /领\s*用/ }).click();
     await page.locator('.ant-modal').getByRole('button', { name: /确\s*定|OK/ }).click();
     await expect(row).toContainText('已领用');
 
@@ -107,7 +113,7 @@ test.describe('G5 票据台账', () => {
     await inv.getByLabel(/金额/).fill('100');
     await inv.getByRole('button', { name: /确\s*定|OK/ }).click();
     const invRow = page.locator('.ant-table-row', { hasText: `INV-${no}` });
-    await invRow.getByRole('button', { name: '作废' }).click();
+    await invRow.getByRole('button', { name: /作\s*废/ }).click();
     await page.locator('.ant-popconfirm').getByRole('button', { name: /确\s*定|OK/ }).click();
     await expect(invRow).toContainText('已作废');
   });

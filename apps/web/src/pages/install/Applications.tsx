@@ -146,6 +146,7 @@ export default function InstallApplications() {
           addr: app.addr,
         },
         meterId: v.meterId || undefined,
+        meter: v.meterId ? undefined : { caliber: app.caliberReq || 'DN15', brand: '报装新表' },
         installation: {
           initialReading: v.initialReading,
           reason: 'NEW',
