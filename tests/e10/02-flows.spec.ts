@@ -96,7 +96,7 @@ test.describe('统一数据查询 + F1 导出', () => {
     await expect(page.getByText(/页内筛选命中 0/)).toBeVisible();
     // 清理模板
     await page.locator('.ant-select', { hasText: '删除模板' }).click();
-    await page.locator('.ant-select-item-option', { hasText: 'E10冒烟模板' }).click();
+    await page.getByTitle('✕ E10冒烟模板').click();
     await expect(page.getByText(/已删除/)).toBeVisible();
   });
 });
