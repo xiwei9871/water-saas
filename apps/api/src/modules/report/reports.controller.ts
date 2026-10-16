@@ -373,13 +373,17 @@ export class ReportsController {
       [],
       ['序号', '指标名称', '单位', '本月数', '上年同月', '同比增减(%)', '本年累计', '上年同期累计', '累计增减(%)'],
     ];
+    // N6 存档报表固定单位：金额列（行单位=元）按 meta.unit 换算。
+    const wan = meta.unit === '万元' ? 1e4 : 1;
+    const mv = (rowUnit: string, v: number | null) =>
+      v === null ? null : rowUnit === '元' ? v / wan : v;
     for (const s of data.sections) {
       aoa.push([s.name]);
       for (const r of s.rows) {
         aoa.push([
           r.seq, r.name, r.unit,
-          r.current, r.prevYear, r.yoyPct,
-          r.cum, r.prevCum, r.cumYoyPct,
+          mv(r.unit, r.current), mv(r.unit, r.prevYear), r.yoyPct,
+          mv(r.unit, r.cum), mv(r.unit, r.prevCum), r.cumYoyPct,
         ]);
       }
     }
@@ -407,6 +411,7 @@ export class ReportsController {
       orgUnitId: orgUnitId ? assertUuid(orgUnitId, 'orgUnitId') : undefined,
     });
     const { meta } = data;
+    const MONEY_COLS = new Set(['waterFee', 'collected', 'arAmount', 'arrearsTotal', 'prepayBalance']);
     const COLS: Record<string, string> = {
       soldQty: '售水量 (m³)', waterFee: '售水收入 (元)', collected: '实收水费 (元)',
       recoveryRate: '水费回收率 (%)', compositePrice: '综合单价 (元/m³)', arrearsTotal: '欠费余额 (元)',
@@ -420,7 +425,12 @@ export class ReportsController {
       ['月份', ...cols.map((c) => COLS[c] ?? c)],
       ...data.rows.map((r) => [
         r.month as string,
-        ...cols.map((c) => (r as Record<string, unknown>)[c] as number | null ?? null),
+        ...cols.map((c) => {
+          const v = (r as Record<string, unknown>)[c] as number | null;
+          // 金额列按 meta.amountUnit 换算（万元/元）
+          if (v === null) return null;
+          return MONEY_COLS.has(c) && meta.unit === '万元' ? v / 1e4 : v;
+        }),
       ]),
       [],
       [`编制人：${meta.preparedBy}`, '复核人：', '负责人：', `编制日期：${meta.preparedAt}`],

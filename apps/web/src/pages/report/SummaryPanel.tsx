@@ -14,6 +14,7 @@ import { DownloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { api, apiErrorText } from '../../api/client';
 import TrendChart from '../../components/TrendChart';
 import { USAGE_CATEGORY_OPTIONS } from '../common';
+import { columnScale } from '../../utils/numfmt';
 
 type GroupBy = 'ALL' | 'ORG' | 'CATEGORY';
 
@@ -63,15 +64,26 @@ export default function SummaryPanel() {
 
   useEffect(() => { void load(); }, [load]);
 
+  // N6 整列统一单位：金额列按列内最大值选 元/万元/亿元，表头标注
+  const moneyCol = (title: string, key: string) => {
+    const sc = columnScale((data?.rows ?? []).map(
+      (r) => (r as unknown as Record<string, number | null>)[key],
+    ));
+    return {
+      title: sc.label === '元' ? title : title.replace('(元)', `(${sc.label})`),
+      dataIndex: key, align: 'right' as const,
+      render: (v: number | null) => sc.cell(v),
+    };
+  };
   const allCols = [
     { title: '年度', dataIndex: 'year', width: 70 },
     { title: '售水量(m³)', dataIndex: 'soldQty', align: 'right' as const, render: (v: number) => fmt(v, 0) },
-    { title: '售水收入(元)', dataIndex: 'waterFee', align: 'right' as const, render: (v: number) => fmt(v) },
-    { title: '应收(元)', dataIndex: 'arAmount', align: 'right' as const, render: (v: number) => fmt(v) },
-    { title: '实收(元)', dataIndex: 'collected', align: 'right' as const, render: (v: number) => fmt(v) },
+    moneyCol('售水收入(元)', 'waterFee'),
+    moneyCol('应收(元)', 'arAmount'),
+    moneyCol('实收(元)', 'collected'),
     { title: '回收率', dataIndex: 'recoveryRate', align: 'right' as const, render: (v: number | null) => (v === null ? '—' : `${v.toFixed(2)}%`) },
     { title: '综合单价', dataIndex: 'compositePrice', align: 'right' as const, render: (v: number | null) => fmt(v) },
-    { title: '欠费余额(元)', dataIndex: 'arrearsTotal', align: 'right' as const, render: (v: number) => fmt(v) },
+    moneyCol('欠费余额(元)', 'arrearsTotal'),
     { title: '在册户数', dataIndex: 'accountCount', align: 'right' as const, render: (v: number) => fmt(v, 0) },
     { title: '售水量同比', dataIndex: ['yoy', 'soldQty'], align: 'right' as const, render: (v: number | null) => fmtPct(v) },
     { title: '实收同比', dataIndex: ['yoy', 'collected'], align: 'right' as const, render: (v: number | null) => fmtPct(v) },
@@ -80,8 +92,8 @@ export default function SummaryPanel() {
     { title: '分组', dataIndex: 'group', width: 120, render: (v: string) => CAT_LABELS[v] ?? v },
     { title: '年度', dataIndex: 'year', width: 70 },
     { title: '售水量(m³)', dataIndex: 'soldQty', align: 'right' as const, render: (v: number) => fmt(v, 0) },
-    { title: '应收(元)', dataIndex: 'arAmount', align: 'right' as const, render: (v: number) => fmt(v) },
-    { title: '实收(元)', dataIndex: 'collected', align: 'right' as const, render: (v: number) => fmt(v) },
+    moneyCol('应收(元)', 'arAmount'),
+    moneyCol('实收(元)', 'collected'),
     { title: '综合单价', dataIndex: 'compositePrice', align: 'right' as const, render: (v: number | null) => fmt(v) },
     { title: '售水量同比', dataIndex: ['yoy', 'soldQty'], align: 'right' as const, render: (v: number | null) => fmtPct(v) },
     { title: '实收同比', dataIndex: ['yoy', 'collected'], align: 'right' as const, render: (v: number | null) => fmtPct(v) },

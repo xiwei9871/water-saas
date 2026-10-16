@@ -12,6 +12,7 @@ import {
   Space,
   Spin,
   Statistic,
+  Tooltip,
   Table,
   Typography,
 } from 'antd';
@@ -26,6 +27,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import TrendChart from '../../components/TrendChart';
+import { abbrevParts } from '../../utils/numfmt';
 
 interface OrgRow { id: string; name: string }
 
@@ -172,15 +174,23 @@ export default function OpsMonthly() {
   };
 
   type TableRow = Partial<MetricRow> & { key: string; section?: boolean };
+  // N6 存档报表固定单位：meta.unit（元/万元），行内「元」单位按系数换算
+  const mScale = data?.meta.unit === '万元' ? 1e4 : 1;
+  const cellNum = (v: number | null | undefined, r: TableRow) =>
+    fmt(
+      v !== null && v !== undefined && r.unit === '元' ? v / mScale : v,
+      r.unit === '%' || r.unit === '元/m³' || mScale > 1 ? 2 : 0,
+    );
   const tableCols: ColumnsType<TableRow> = [
     { title: '序号', dataIndex: 'seq', width: 56 },
     { title: '指标名称', dataIndex: 'name', width: 170 },
-    { title: '单位', dataIndex: 'unit', width: 70 },
-    { title: '本月数', dataIndex: 'current', align: 'right' as const, render: (v: number | null, r: TableRow) => fmt(v, r.unit === '%' || r.unit === '元/m³' ? 2 : 0) },
-    { title: '上年同月', dataIndex: 'prevYear', align: 'right' as const, render: (v: number | null, r: TableRow) => fmt(v, r.unit === '%' || r.unit === '元/m³' ? 2 : 0) },
+    { title: '单位', dataIndex: 'unit', width: 70,
+      render: (u: string) => (u === '元' && mScale > 1 ? '万元' : u) },
+    { title: '本月数', dataIndex: 'current', align: 'right' as const, render: cellNum },
+    { title: '上年同月', dataIndex: 'prevYear', align: 'right' as const, render: cellNum },
     { title: '同比增减(%)', dataIndex: 'yoyPct', align: 'right' as const, render: (v: number | null) => fmt(v) },
-    { title: '本年累计', dataIndex: 'cum', align: 'right' as const, render: (v: number | null, r: TableRow) => fmt(v, r.unit === '%' ? 2 : 0) },
-    { title: '上年同期累计', dataIndex: 'prevCum', align: 'right' as const, render: (v: number | null, r: TableRow) => fmt(v, r.unit === '%' ? 2 : 0) },
+    { title: '本年累计', dataIndex: 'cum', align: 'right' as const, render: cellNum },
+    { title: '上年同期累计', dataIndex: 'prevCum', align: 'right' as const, render: cellNum },
     { title: '累计增减(%)', dataIndex: 'cumYoyPct', align: 'right' as const, render: (v: number | null) => fmt(v) },
   ];
 
@@ -237,23 +247,28 @@ export default function OpsMonthly() {
 
             {/* 顶层 KPI 卡（本期 vs 上年同期） */}
             <Row gutter={[8, 8]} style={{ marginBottom: 8 }}>
-              {topCards.map((r) => (
+              {topCards.map((r) => {
+                // N5 卡片逐值自适应：万/亿缩写，悬停见千分位完整值
+                const ab = abbrevParts(r.current);
+                return (
                 <Col key={r.key} flex="1 1 160px">
                   <Card size="small">
-                    <Statistic
-                      title={r.name}
-                      value={r.current ?? undefined}
-                      precision={2}
-                      suffix={r.unit === '元' ? ' 元' : r.unit}
-                      valueStyle={{ fontSize: 20 }}
-                    />
+                    <Tooltip title={`${ab.full} ${r.unit}`}>
+                      <Statistic
+                        title={r.name}
+                        value={ab.text === '—' ? undefined : ab.text}
+                        suffix={`${ab.unit}${r.unit === '元' ? ' 元' : r.unit}`}
+                        valueStyle={{ fontSize: 20 }}
+                      />
+                    </Tooltip>
                     <Typography.Text type={r.yoyPct !== null && r.yoyPct < 0 ? 'danger' : 'success'} style={{ fontSize: 12 }}>
                       同比 {r.yoyPct === null ? '—' : `${r.yoyPct >= 0 ? '+' : ''}${fmt(r.yoyPct)}%`}
                       {r.yoyPct !== null && (r.yoyPct >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />)}
                     </Typography.Text>
                   </Card>
                 </Col>
-              ))}
+                );
+              })}
             </Row>
 
             {view === 'chart' && (

@@ -38,6 +38,8 @@ const COL_LABELS: Record<string, string> = {
   compositePrice: '综合单价 (元/m³)',
   arrearsTotal: '欠费余额 (元)',
 };
+/** 金额列 —— 存档报表固定单位（元/万元）换算作用于这些列。 */
+const MONEY_COLS = new Set(['waterFee', 'collected', 'arrearsTotal']);
 const ALL_COLS = Object.keys(COL_LABELS);
 const DEFAULT_COLS = ['soldQty', 'waterFee', 'collected', 'recoveryRate'];
 
@@ -94,16 +96,24 @@ export default function OpsYearly() {
   const totalRow = (data?.rows ?? []).find((r) => r.month === '全年合计 / 平均');
 
   const tableCols = useMemo(
-    () => [
-      { title: '月份', dataIndex: 'month', width: 110, fixed: 'left' as const },
-      ...cols.map((c) => ({
-        title: COL_LABELS[c],
-        dataIndex: c,
-        align: 'right' as const,
-        render: (v: number | null) => fmt(v),
-      })),
-    ],
-    [cols],
+    () => {
+      // N6：金额列按 meta.unit（元/万元）统一换算 + 表头标注
+      const scale = data?.meta.unit === '万元' ? 1e4 : 1;
+      return [
+        { title: '月份', dataIndex: 'month', width: 110, fixed: 'left' as const },
+        ...cols.map((c) => ({
+          title:
+            MONEY_COLS.has(c) && scale > 1
+              ? COL_LABELS[c].replace('(元)', '(万元)')
+              : COL_LABELS[c],
+          dataIndex: c,
+          align: 'right' as const,
+          render: (v: number | null) =>
+            fmt(v !== null && MONEY_COLS.has(c) ? v / scale : v),
+        })),
+      ];
+    },
+    [cols, data],
   );
 
   const exportXlsx = () => {

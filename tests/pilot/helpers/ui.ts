@@ -4,7 +4,7 @@ export {ready} from '../../uat/helpers/auth';
 export async function login(page:Page,login='admin',password='admin123'){
  await page.goto('/login');await page.evaluate(()=>localStorage.clear());await page.reload();
  await page.getByLabel('租户代码').fill('cd-water');await page.getByLabel('账号',{exact:true}).fill(login);await page.getByLabel('密码',{exact:true}).fill(password);
- await page.getByRole('button',{name:/登\s*录/}).click();await expect(page.getByRole('heading',{name:'工作台'})).toBeVisible();
+ await page.getByRole('button',{name:/登\s*录/}).click();await expect(page.getByRole('heading',{name:/经营驾驶舱|工作台/})).toBeVisible();
 }
 export async function choose(page:Page,control:Locator,label:string|RegExp,search?:string){
  const container=control.locator('xpath=ancestor-or-self::*[contains(concat(" ", normalize-space(@class), " "), " ant-select ")][1]');

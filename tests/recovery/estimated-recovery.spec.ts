@@ -44,7 +44,7 @@ test('Chrome: paid over-estimate → Chinese guidance → adjustment → zero cu
   await page.getByLabel('账号', { exact: true }).fill('admin');
   await page.getByLabel('密码', { exact: true }).fill('recovery-pass');
   await button(page, '登录').click();
-  await expect(page.getByRole('heading', { name: '工作台' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /经营驾驶舱|工作台/ })).toBeVisible();
 
   async function openGenerate(period: string) {
     await page.goto('/settlement/list'); await ready(page);

@@ -26,7 +26,10 @@ const toMenuItems = (
   badge?: { total: number; byPage: Record<string, number> },
 ): MenuItem[] =>
   routes
-    .filter((r) => !r.perms || hasPerm(...r.perms))
+    .filter((r) => {
+      const gate = r.menuPerms ?? r.perms;
+      return !gate || hasPerm(...gate);
+    })
     .map((r) => {
       const leafCount = (path: string): number =>
         path === '/exceptions' ? (badge?.total ?? 0) : (badge?.byPage?.[path] ?? 0);

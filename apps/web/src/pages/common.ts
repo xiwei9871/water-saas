@@ -11,6 +11,7 @@ import type {
   WaterAccount,
 } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { fmtMoney } from '../utils/numfmt';
 
 /** 跨页面共享的枚举中文标签 / 颜色 / 小工具。 */
 
@@ -86,9 +87,8 @@ export const fmtDate = (iso?: string | null) =>
 export const fmtPeriod = (p?: string | null) =>
   p && /^\d{6}$/.test(p) ? `${p.slice(0, 4)}-${p.slice(4)}` : (p ?? '—');
 
-/** 金额分 → 元 显示（BigInt 列序列化为字符串）。 */
-export const fmtCent = (v?: string | number | null) =>
-  v === null || v === undefined ? '—' : `¥${(Number(v) / 100).toFixed(2)}`;
+/** 金额分 → 元 显示（BigInt 列序列化为字符串）。¥ + 千分位 + 两位小数。 */
+export const fmtCent = (v?: string | number | null) => fmtMoney(v);
 
 /**
  * 枚举码 → 中文标签。缺映射时显示 '—' 并 console.warn（展示层取值

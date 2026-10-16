@@ -1,5 +1,6 @@
 import {
   AlertOutlined,
+  AppstoreOutlined,
   DashboardOutlined,
   FileTextOutlined,
   GoldOutlined,
@@ -13,6 +14,7 @@ import {
 
 import type { ReactNode } from 'react';
 import Home from './pages/Home';
+import Workbench from './pages/Workbench';
 import BillingRuns from './pages/billing/BillingRuns';
 import Bills from './pages/billing/Bills';
 import FeeItems from './pages/billing/FeeItems';
@@ -70,18 +72,35 @@ export interface AppRoute {
   path: string;
   label: string;
   icon?: ReactNode;
+  /** 路由级守卫：PermRoute 拦截。 */
   perms?: string[];
+  /**
+   * 菜单可见性门槛（缺省同 perms）。与 perms 分离的场景：驾驶舱 `/`
+   * 是登录默认落地页，无 report:read 的用户不能 403，要在组件内
+   * 重定向到 /workbench——路由不拦，菜单用 menuPerms 隐藏。
+   */
+  menuPerms?: string[];
   element?: ReactNode;
   children?: AppRoute[];
 }
 
 export const APP_ROUTES: AppRoute[] = [
+  // N1 驾驶舱提级：独立一级菜单 + 登录默认落地页；无 report:read 由
+  // Home 组件内重定向到工作台。
+  {
+    key: 'cockpit',
+    path: '/',
+    label: '经营驾驶舱',
+    icon: <DashboardOutlined />,
+    menuPerms: ['report:read'],
+    element: <Home />,
+  },
   {
     key: 'workbench',
-    path: '/',
+    path: '/workbench',
     label: '工作台',
-    icon: <DashboardOutlined />,
-    element: <Home />,
+    icon: <AppstoreOutlined />,
+    element: <Workbench />,
   },
   {
     key: 'exceptions',
@@ -187,7 +206,7 @@ export const APP_ROUTES: AppRoute[] = [
   {
     key: 'settlement',
     path: '/settlement',
-    label: '结算补差',
+    label: '结算管理',
     icon: <TransactionOutlined />,
     // settlement 列表归 metering，reconciliation 归 billing — 任一可读即显示。
     perms: ['metering:read', 'billing:read'],

@@ -39,6 +39,7 @@ import {
   USAGE_CATEGORY_LABELS,
   USAGE_CATEGORY_OPTIONS,
 } from '../common';
+import { columnScale } from '../../utils/numfmt';
 import {
   CustomerSelect,
   OrgUnitTreeSelect,
@@ -407,6 +408,43 @@ function DetailQuery() {
   const shownRows = kw
     ? flatRows.filter((r) => (r.__hay as string).includes(kw))
     : flatRows;
+
+  // N6 报表/查询表格整列自适应：金额列按列内最大值统一选 元/万元/亿元，
+  // 表头标注单位。行值为分，换算成元后按组内最大绝对值定标。
+  const moneyScale = (vals: unknown[]) =>
+    columnScale(
+      vals.map((v) =>
+        v === null || v === undefined || v === '' ? null : Number(v) / 100,
+      ),
+    );
+  /** 金额列包装：标题带单位标注、单元格按列单位换算。 */
+  const moneyColumn = (
+    f: FieldMeta,
+    title: string,
+    getVal: (row: Record<string, unknown>) => unknown,
+    extra: Record<string, unknown> = {},
+  ) => {
+    if (!MONEY_KEYS.has(f.key)) {
+      return {
+        title, key: f.key, width: 110,
+        render: (_: unknown, row: Record<string, unknown>) => renderCell(f.key, getVal(row)),
+        ...extra,
+      };
+    }
+    const sc = moneyScale(shownRows.map(getVal));
+    return {
+      title: `${title}${sc.label === '元' ? '' : `（${sc.label}）`}`,
+      key: f.key, width: 110,
+      render: (_: unknown, row: Record<string, unknown>) => {
+        const v = getVal(row);
+        return v === null || v === undefined || v === ''
+          ? '—'
+          : sc.cell(Number(v) / 100);
+      },
+      ...extra,
+    };
+  };
+
   const columns: ColumnsType<Record<string, unknown>> = [
     ...accountCols.map((f, i) => ({
       title: f.label,
@@ -417,22 +455,21 @@ function DetailQuery() {
       render: (v: unknown) => renderCell(f.key, v),
     })),
     ...respPeriods.flatMap((p) =>
-      periodCols.map((f) => ({
-        title: `${fmtPeriod(p)} ${f.label}`,
-        key: `${p}_${f.key}`,
-        width: f.key === 'priceText' ? 260 : 110,
-        render: (_: unknown, row: Record<string, unknown>) =>
-          renderCell(f.key, row[`${p}_${f.key}`]),
-      })),
+      periodCols.map((f) =>
+        moneyColumn(
+          f,
+          `${fmtPeriod(p)} ${f.label}`,
+          (row) => row[`${p}_${f.key}`],
+          { key: `${p}_${f.key}`, width: f.key === 'priceText' ? 260 : 110 },
+        ),
+      ),
     ),
-    ...cumCols.map((f) => ({
-      title: f.label,
-      dataIndex: f.key,
-      key: `c_${f.key}`,
-      fixed: 'right' as const,
-      width: 110,
-      render: (v: unknown) => renderCell(f.key, v),
-    })),
+    ...cumCols.map((f) =>
+      moneyColumn(f, f.label, (row) => row[f.key], {
+        key: `c_${f.key}`,
+        fixed: 'right' as const,
+      }),
+    ),
   ];
 
   return (

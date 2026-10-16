@@ -125,9 +125,9 @@ for (const role of ['cashier','reader','reviewer']) test(`UAT-005 ${role} Chines
   });
   expect(rejected.status).toBe(403);
   await evidence(page, info, 'forbidden-' + role, rejected);
-  await page.getByRole('button', { name:'返回工作台' }).click();
+  await page.getByRole('button', { name:'返回首页' }).click();
   await expect(page).toHaveURL('http://127.0.0.1:4173/');
-  await expect(page.getByRole('heading', { name:'工作台' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /经营驾驶舱|工作台/ })).toBeVisible();
 });
 test('UAT-005 unauthenticated denied route still goes to login', async ({ page }) => {
   await page.goto('/system/staff'); await expect(page).toHaveURL(/\/login$/);

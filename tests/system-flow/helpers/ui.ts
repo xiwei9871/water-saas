@@ -27,7 +27,7 @@ export async function login(page: Page, account = 'admin', password = STAFF_PASS
   await page.getByLabel('账号', { exact: true }).fill(account);
   await page.getByLabel('密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: /登\s*录/ }).click();
-  await expect(page.getByRole('heading', { name: '工作台' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /经营驾驶舱|工作台/ })).toBeVisible();
 }
 
 /** antd Select: click the wrapping .ant-select, optionally search, pick the

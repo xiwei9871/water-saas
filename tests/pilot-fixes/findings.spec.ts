@@ -52,7 +52,7 @@ for(const key of ['accountNo','customerName','addr'])test(`PILOT-003 search ${ke
  await page.setViewportSize({width:1024,height:768});expect(await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth)).toBeLessThanOrEqual(2);await evidence(page,info,'search-'+key,result);
 });
 test('PILOT-003 foreign tenant cannot query Pilot identities/categories',async({page})=>{
- await login(page);await page.goto('/login');await page.evaluate(()=>localStorage.clear());await page.reload();await page.getByLabel('租户代码').fill('xh-water');await page.getByLabel('账号',{exact:true}).fill('admin');await page.getByLabel('密码',{exact:true}).fill('admin123');await button(page,'登录').click();await expect(page.getByRole('heading',{name:'工作台'})).toBeVisible();
+ await login(page);await page.goto('/login');await page.evaluate(()=>localStorage.clear());await page.reload();await page.getByLabel('租户代码').fill('xh-water');await page.getByLabel('账号',{exact:true}).fill('admin');await page.getByLabel('密码',{exact:true}).fill('admin123');await button(page,'登录').click();await expect(page.getByRole('heading',{name:/经营驾驶舱|工作台/})).toBeVisible();
  const result=await page.evaluate(async term=>{const headers={Authorization:'Bearer '+localStorage.getItem('water-saas.accessToken')};const a=await fetch('/api/meter-readings?q='+encodeURIComponent(term),{headers});const b=await fetch('/api/water-accounts/usage-categories',{headers});return {readings:await a.json(),categoryStatus:b.status,categories:await b.json()};},s.people[0].customer.name);
  expect(result.readings).toEqual([]);expect(result.categoryStatus).toBe(200);expect(result.categories).not.toContain(s.tariffs[0].category);
 });
@@ -83,5 +83,5 @@ test('PILOT-002 QC still rejects out-of-scope book and cross-tenant reading',asy
  await login(page,'pilot-fix-outside','Pilot12345');audit.allow('/api'+path,403,'POST');
  const call=()=>page.evaluate(async path=>{const r=await fetch('/api'+path,{method:'POST',headers:{Authorization:'Bearer '+localStorage.getItem('water-saas.accessToken'),'Content-Type':'application/json'},body:JSON.stringify({action:'pass'})});return {status:r.status,body:await r.json()};},path);
  expect((await call()).status).toBe(403);
- await page.goto('/login');await page.evaluate(()=>localStorage.clear());await page.reload();await page.getByLabel('租户代码').fill('xh-water');await page.getByLabel('账号',{exact:true}).fill('admin');await page.getByLabel('密码',{exact:true}).fill('admin123');await button(page,'登录').click();await expect(page.getByRole('heading',{name:'工作台'})).toBeVisible();audit.allow('/api'+path,404,'POST');expect((await call()).status).toBe(404);
+ await page.goto('/login');await page.evaluate(()=>localStorage.clear());await page.reload();await page.getByLabel('租户代码').fill('xh-water');await page.getByLabel('账号',{exact:true}).fill('admin');await page.getByLabel('密码',{exact:true}).fill('admin123');await button(page,'登录').click();await expect(page.getByRole('heading',{name:/经营驾驶舱|工作台/})).toBeVisible();audit.allow('/api'+path,404,'POST');expect((await call()).status).toBe(404);
 });

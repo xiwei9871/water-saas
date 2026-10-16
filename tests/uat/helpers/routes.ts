@@ -1,5 +1,5 @@
 export const routes = [
-  ['B01', '/', '工作台'],
+  ['B01', '/', '经营驾驶舱'], ['B01', '/workbench', '工作台'],
   ['B02', '/customer/onboard', '立户向导'], ['B02', '/customer/customers', '客户列表'],
   ['B02', '/customer/water-accounts', '用水户'], ['B02', '/customer/settle-accounts', '结算户'], ['B02', '/customer/meters', '水表管理'],
   ['B03', '/metering/books', '抄表册'], ['B03', '/metering/plans', '抄表计划'], ['B03', '/metering/readings', '抄表记录 / 质检'],

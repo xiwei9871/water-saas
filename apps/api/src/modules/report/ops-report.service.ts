@@ -57,6 +57,11 @@ export interface ReportMeta {
   preparedAt: string;
   /** 指标口径版本 —— 与指标字典页/日周月年报一致的版本标识。 */
   metricVersion: string;
+  /**
+   * 存档报表金额单位（N6）：tenant_param `report.amountUnit`，
+   * '元'（默认）或 '万元'。数据层值恒为元，展示/导出按此换算。
+   */
+  amountUnit: '元' | '万元';
 }
 
 const num = (v: string | null | undefined) => (v ? Number(v) : 0);
@@ -127,9 +132,12 @@ export class OpsReportService {
     ctx: TenantCtx,
     orgLabel: string,
   ): Promise<ReportMeta> {
-    const [param, tenant, staff] = await Promise.all([
+    const [param, unitParam, tenant, staff] = await Promise.all([
       tx.tenantParam.findUnique({
         where: { tenantId_key: { tenantId: ctx.tenantId, key: 'company.name' } },
+      }),
+      tx.tenantParam.findUnique({
+        where: { tenantId_key: { tenantId: ctx.tenantId, key: 'report.amountUnit' } },
       }),
       tx.tenant.findUnique({ where: { id: ctx.tenantId }, select: { name: true } }),
       tx.staff.findUnique({
@@ -148,6 +156,7 @@ export class OpsReportService {
       preparedBy: staff?.name ?? '',
       preparedAt: new Date().toISOString().slice(0, 10),
       metricVersion: METRIC_DICT_VERSION,
+      amountUnit: unitParam?.value === '万元' ? '万元' : '元',
     };
   }
 
@@ -449,7 +458,7 @@ export class OpsReportService {
       rg.prevCum = null;
 
       return {
-        meta: { ...meta, periodLabel: `${q.period.slice(0, 4)} 年 ${+q.period.slice(4)} 月`, unit: '元' },
+        meta: { ...meta, periodLabel: `${q.period.slice(0, 4)} 年 ${+q.period.slice(4)} 月`, unit: meta.amountUnit },
         period: q.period,
         sections: sections.map((s) => ({
           ...s,
@@ -506,7 +515,7 @@ export class OpsReportService {
         arrearsTotal: rows[11]?.arrearsTotal ?? null,
       };
       return {
-        meta: { ...meta, periodLabel: `${year} 年度`, unit: '元' },
+        meta: { ...meta, periodLabel: `${year} 年度`, unit: meta.amountUnit },
         year,
         columns: q.columns ?? [
           'soldQty', 'waterFee', 'collected', 'recoveryRate', 'compositePrice', 'arrearsTotal',

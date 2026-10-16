@@ -42,6 +42,10 @@ const KNOWN_PARAMS: Record<string, { name: string; desc: string }> = {
     name: '公司名称',
     desc: '月报/年报等规范报表标题区自动引用的填报公司全称，如「XX 县自来水有限公司」。',
   },
+  'report.amountUnit': {
+    name: '报表金额单位',
+    desc: '月报/年报等存档报表的金额固定单位："元"（默认）或 "万元"。跨期对比需要单位稳定，不随数值自适应。',
+  },
   max_consecutive_estimates: {
     name: '连续预估上限',
     desc: '同一用水户连续按预估口径结算的次数上限，达到后自动进入异常队列需人工处理。默认 2。',
@@ -62,6 +66,7 @@ const KNOWN_PARAMS: Record<string, { name: string; desc: string }> = {
 
 const prettyValue = (key: string, v: unknown): string => {
   if (key === 'company.name' && typeof v === 'string') return v;
+  if (key === 'report.amountUnit' && typeof v === 'string') return v;
   if (key === 'reconcile_alloc_policy' && typeof v === 'string') {
     return v === 'PROPORTIONAL_TO_SETTLED'
       ? '按已结算量比例分摊'
@@ -126,8 +131,11 @@ export default function TenantParams() {
     try {
       parsed = JSON.parse(values.value);
     } catch {
-      // company.name 是自由文本：非 JSON 输入按字符串原样保存。
-      if (values.key === 'company.name' && values.value.trim() !== '') {
+      // company.name / report.amountUnit 是自由文本：非 JSON 输入按字符串保存。
+      if (
+        (values.key === 'company.name' || values.key === 'report.amountUnit') &&
+        values.value.trim() !== ''
+      ) {
         parsed = values.value.trim();
       } else {
         message.error('参数值不是合法的 JSON，请检查后重试');

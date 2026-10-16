@@ -14,6 +14,7 @@ import {
   Statistic,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import {
@@ -25,6 +26,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { api, apiErrorText } from '../api/client';
 import TrendChart from '../components/TrendChart';
+import { abbrevParts, columnScale, fmtFull, fmtSignedPct } from '../utils/numfmt';
 
 interface OrgRow { id: string; name: string }
 
@@ -64,13 +66,7 @@ interface ViewPref {
   orgUnitId?: string;
 }
 
-const fmt = (v: number | null | undefined) =>
-  v === null || v === undefined
-    ? '—'
-    : v.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
-
-const pctTag = (v: number | null) =>
-  v === null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+const pctTag = fmtSignedPct;
 
 /**
  * 经营驾驶舱（修订稿 H1/H2）—— 登录首页五区：
@@ -137,6 +133,9 @@ export default function Cockpit() {
 
   return (
     <div>
+      <Typography.Title level={4} style={{ marginTop: 0, marginBottom: 8 }}>
+        经营驾驶舱
+      </Typography.Title>
       <Space style={{ marginBottom: 12 }} wrap>
         <Select
           allowClear showSearch optionFilterProp="label" style={{ width: 200 }}
@@ -161,16 +160,18 @@ export default function Cockpit() {
             <Row gutter={[8, 8]}>
               {CARD_DEFS.filter((c) => cards.includes(c.key)).map((c) => {
                 const v = data.cards[c.key];
+                const ab = abbrevParts(v?.value);
                 return (
                   <Col key={c.key} flex="1 1 180px">
                     <Card size="small">
-                      <Statistic
-                        title={c.name}
-                        value={v?.value ?? undefined}
-                        precision={2}
-                        suffix={c.unit}
-                        valueStyle={{ fontSize: 22 }}
-                      />
+                      <Tooltip title={`${ab.full} ${c.unit}`}>
+                        <Statistic
+                          title={c.name}
+                          value={ab.text === '—' ? undefined : ab.text}
+                          suffix={`${ab.unit}${c.unit}`}
+                          valueStyle={{ fontSize: 22 }}
+                        />
+                      </Tooltip>
                       <Space size={12} style={{ fontSize: 12 }}>
                         <Typography.Text type={v?.yoyPct != null && v.yoyPct < 0 ? 'danger' : 'success'}>
                           同比 {pctTag(v?.yoyPct ?? null)}
@@ -191,7 +192,18 @@ export default function Cockpit() {
               <Col xs={24} lg={6}>
                 <Card size="small" title="当日 / 本月实时">
                   <Space direction="vertical" style={{ width: '100%' }} size={12}>
-                    <Statistic title="当日实收" value={data.realtime.todayCollected} precision={2} suffix="元" />
+                    {(() => {
+                      const ab = abbrevParts(data.realtime.todayCollected);
+                      return (
+                        <Tooltip title={`${ab.full} 元`}>
+                          <Statistic
+                            title="当日实收"
+                            value={ab.text === '—' ? undefined : ab.text}
+                            suffix={`${ab.unit}元`}
+                          />
+                        </Tooltip>
+                      );
+                    })()}
                     <div>当日收款 <b>{data.realtime.todayPaymentCount}</b> 笔</div>
                     <div>当日抄录 <b>{data.realtime.todayReadings}</b> 条</div>
                     <div>
@@ -243,9 +255,12 @@ export default function Cockpit() {
                   <Space direction="vertical" style={{ width: '100%' }} size={12}>
                     <div>
                       期末欠费
-                      <Typography.Text strong style={{ fontSize: 20, marginLeft: 8 }}>
-                        {fmt(data.alerts.arrearsTotal)} 元
-                      </Typography.Text>
+                      <Tooltip title={`${fmtFull(data.alerts.arrearsTotal)} 元`}>
+                        <Typography.Text strong style={{ fontSize: 20, marginLeft: 8 }}>
+                          {abbrevParts(data.alerts.arrearsTotal).text}
+                          {abbrevParts(data.alerts.arrearsTotal).unit} 元
+                        </Typography.Text>
+                      </Tooltip>
                     </div>
                     <div>
                       待办任务 <Tag color="orange">{data.alerts.openTasks}</Tag>
@@ -262,16 +277,23 @@ export default function Cockpit() {
 
             {/* ⑤ 底部片区排名 */}
             <Card size="small" title="片区 / 营业所本月实收排名" style={{ marginTop: 8 }}>
-              <Table
-                size="small" rowKey="orgUnitId" pagination={false}
-                dataSource={data.orgRanking.slice(0, 10)}
-                columns={[
-                  { title: '排名', width: 60, render: (_v, _r, i) => i + 1 },
-                  { title: '组织', dataIndex: 'name' },
-                  { title: '本月实收（元）', dataIndex: 'collected', align: 'right',
-                    render: (v: number) => fmt(v) },
-                ]}
-              />
+              {(() => {
+                const ranking = data.orgRanking.slice(0, 10);
+                // N6 整列统一单位：按列最大值选 元/万元/亿元，表头标注。
+                const col = columnScale(ranking.map((r) => r.collected));
+                return (
+                  <Table
+                    size="small" rowKey="orgUnitId" pagination={false}
+                    dataSource={ranking}
+                    columns={[
+                      { title: '排名', width: 60, render: (_v, _r, i) => i + 1 },
+                      { title: '组织', dataIndex: 'name' },
+                      { title: `本月实收（${col.label}）`, dataIndex: 'collected', align: 'right',
+                        render: (v: number) => col.cell(v) },
+                    ]}
+                  />
+                );
+              })()}
             </Card>
           </>
         )}
