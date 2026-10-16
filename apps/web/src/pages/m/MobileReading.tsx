@@ -25,6 +25,12 @@ import {
 } from '@ant-design/icons';
 import { EXCEPTION_CODES } from '@ws/types';
 import { Navigate, useLocation } from 'react-router-dom';
+
+/** crypto.randomUUID 仅在安全上下文可用 —— 内网 http 部署需回退。 */
+const newIdemKey = () =>
+  typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `m-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { cleanBody, enumLabel } from '../common';
@@ -83,7 +89,7 @@ export default function MobileReading() {
   const [remark, setRemark] = useState('');
   const [noReadOpen, setNoReadOpen] = useState(false);
   const [noReadForm] = Form.useForm<{ exceptionCode: string; estimateQty?: string; remark?: string }>();
-  const idemKey = useRef(crypto.randomUUID());
+  const idemKey = useRef(newIdemKey());
 
   const loadPlans = useCallback(async () => {
     setBusy(true);
@@ -158,7 +164,7 @@ export default function MobileReading() {
         } else {
           message.success('已抄录');
         }
-        idemKey.current = crypto.randomUUID();
+        idemKey.current = newIdemKey();
         const next = items.filter((i) => i.id !== current.id);
         setItems(next);
         setCurrentIdx(0);
@@ -168,7 +174,7 @@ export default function MobileReading() {
         setProgress(prog.data);
       } catch (err) {
         message.error(apiErrorText(err));
-        idemKey.current = crypto.randomUUID();
+        idemKey.current = newIdemKey();
       } finally {
         setSubmitting(false);
       }
