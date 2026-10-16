@@ -198,6 +198,7 @@ export class ReadingPlanService {
     T extends {
       completedReadingId: string | null;
       plannedInstallationId: string | null;
+      waterAccountId: string;
     },
   >(
     tx: Prisma.TransactionClient,
@@ -205,6 +206,19 @@ export class ReadingPlanService {
     items: T[],
     planPeriod: string,
   ) {
+    const acctIds = [...new Set(items.map((i) => i.waterAccountId))];
+    const accounts = acctIds.length
+      ? await tx.waterAccount.findMany({
+          where: { tenantId, id: { in: acctIds } },
+          select: {
+            id: true,
+            accountNo: true,
+            addr: true,
+            customer: { select: { name: true } },
+          },
+        })
+      : [];
+    const acctMap = new Map(accounts.map((a) => [a.id, a]));
     const completedIds = [
       ...new Set(
         items.map((i) => i.completedReadingId).filter((v): v is string => !!v),
@@ -240,15 +254,31 @@ export class ReadingPlanService {
            ORDER BY r.installation_id, r.period DESC, r.created_at DESC`
       : [];
     const pvMap = new Map(prevRows.map((r) => [r.installation_id, r.reading_value]));
-    return items.map((i) => ({
-      ...i,
-      completedReadingValue: i.completedReadingId
-        ? (cvMap.get(i.completedReadingId) ?? null)
-        : null,
-      prevReadingValue: i.plannedInstallationId
-        ? (pvMap.get(i.plannedInstallationId) ?? null)
-        : null,
-    }));
+    const insts = instIds.length
+      ? await tx.meterInstallation.findMany({
+          where: { tenantId, id: { in: instIds } },
+          select: { id: true, meter: { select: { meterNo: true } } },
+        })
+      : [];
+    const mnMap = new Map(insts.map((r) => [r.id, r.meter.meterNo]));
+    return items.map((i) => {
+      const acct = acctMap.get(i.waterAccountId);
+      return {
+        ...i,
+        accountNo: acct?.accountNo ?? null,
+        customerName: acct?.customer.name ?? null,
+        addr: acct?.addr ?? null,
+        meterNo: i.plannedInstallationId
+          ? (mnMap.get(i.plannedInstallationId) ?? null)
+          : null,
+        completedReadingValue: i.completedReadingId
+          ? (cvMap.get(i.completedReadingId) ?? null)
+          : null,
+        prevReadingValue: i.plannedInstallationId
+          ? (pvMap.get(i.plannedInstallationId) ?? null)
+          : null,
+      };
+    });
   }
 
   /** Paginated plan items (?status= filter); ordered by the snapshot seq_no. */

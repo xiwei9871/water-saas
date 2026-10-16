@@ -6,6 +6,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import AdminLayout from './layouts/AdminLayout';
 import Login from './pages/Login';
+import MobileReading from './pages/m/MobileReading';
 import Forbidden from './pages/Forbidden';
 import Placeholder from './pages/Placeholder';
 import { APP_ROUTES, leafRoutes } from './routes';
@@ -49,6 +50,8 @@ export default function App() {
           <BrowserRouter>
             <Routes>
               <Route path="/login" element={<Login />} />
+              {/* 移动抄表台 — 裸路由，不进 AdminLayout/菜单，自带登录守卫。 */}
+              <Route path="/m/reading" element={<MobileReading />} />
               <Route element={<AdminLayout />}>
                 {leafRoutes().map((r) => (
                   <Route
