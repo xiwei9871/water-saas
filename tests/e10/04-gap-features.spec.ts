@@ -51,8 +51,11 @@ test.describe('S1 报装管理（独立域）', () => {
     await row.getByRole('button', { name: '归档立户' }).click();
     const arch = page.locator('.ant-modal');
     await arch.getByLabel(/起始读数/).fill('0');
-    await arch.getByRole('button', { name: /确\s*定|OK/ }).click();
-    await page.waitForResponse((r) => r.url().includes('/archive'));
+    const [archRes] = await Promise.all([
+      page.waitForResponse((r) => r.url().includes('/archive') && r.request().method() === 'POST'),
+      arch.getByRole('button', { name: /确\s*定|OK/ }).click(),
+    ]);
+    expect(archRes.status(), JSON.stringify(await archRes.json().catch(() => null))).toBe(201);
     await expect(row).toContainText('已归档');
 
     // 详情抽屉回写户号（展示 accountNo 而非裸 UUID）

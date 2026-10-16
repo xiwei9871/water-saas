@@ -131,35 +131,37 @@ export default function Recon() {
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={12}>
       <Card title="渠道对账" size="small">
-        <Form form={form} layout="inline" onFinish={(v) => void upload(v)} initialValues={{ channel: 'BANK_DEDUCT' }}>
-          <Form.Item name="channel" label="渠道" rules={[{ required: true }]}>
-            <Select style={{ width: 140 }} options={Object.entries(CHANNEL_LABELS).map(([value, label]) => ({ value, label }))} />
-          </Form.Item>
-          <Form.Item name="fileName" label="文件名">
-            <Input style={{ width: 200 }} placeholder="可选" />
-          </Form.Item>
-          <Form.Item>
-            <Upload
-              accept=".csv,.txt"
-              showUploadList={false}
-              beforeUpload={(f) => {
-                void f.text().then((t) => form.setFieldsValue({ content: t, fileName: f.name }));
-                return false;
-              }}
-            >
-              <Button icon={<UploadOutlined />}>选择对账文件</Button>
-            </Upload>
-          </Form.Item>
-          <Form.Item>
-            <Button onClick={() => void mockStatement()}>生成模拟对账单</Button>
-          </Form.Item>
-          <Form.Item>
-            <Button type="primary" htmlType="submit">核账</Button>
+        <Form form={form} onFinish={(v) => void upload(v)} initialValues={{ channel: 'BANK_DEDUCT' }}>
+          <Space wrap>
+            <Form.Item name="channel" label="渠道" rules={[{ required: true }]} style={{ marginBottom: 8 }}>
+              <Select style={{ width: 140 }} options={Object.entries(CHANNEL_LABELS).map(([value, label]) => ({ value, label }))} />
+            </Form.Item>
+            <Form.Item name="fileName" label="文件名" style={{ marginBottom: 8 }}>
+              <Input style={{ width: 200 }} placeholder="可选" />
+            </Form.Item>
+            <Form.Item style={{ marginBottom: 8 }}>
+              <Upload
+                accept=".csv,.txt"
+                showUploadList={false}
+                beforeUpload={(f) => {
+                  void f.text().then((t) => form.setFieldsValue({ content: t, fileName: f.name }));
+                  return false;
+                }}
+              >
+                <Button icon={<UploadOutlined />}>选择对账文件</Button>
+              </Upload>
+            </Form.Item>
+            <Form.Item style={{ marginBottom: 8 }}>
+              <Button onClick={() => void mockStatement()}>生成模拟对账单</Button>
+            </Form.Item>
+            <Form.Item style={{ marginBottom: 8 }}>
+              <Button type="primary" htmlType="submit">核账</Button>
+            </Form.Item>
+          </Space>
+          <Form.Item name="content" style={{ marginBottom: 0 }} rules={[{ required: true, message: '请粘贴或上传对账 CSV' }]}>
+            <Input.TextArea rows={5} placeholder={'CSV 内容：收款单号,金额(元),支付时间\n支持上传文件或直接粘贴'} />
           </Form.Item>
         </Form>
-        <Form.Item name="content" style={{ marginTop: 8, marginBottom: 0 }}>
-          <Input.TextArea rows={5} placeholder={'CSV 内容：收款单号,金额(元),支付时间\n支持上传文件或直接粘贴'} />
-        </Form.Item>
       </Card>
       <Card title="对账批次" size="small">
         <Table rowKey="id" size="small" columns={batchCols} dataSource={batches} loading={loading} pagination={false} />
