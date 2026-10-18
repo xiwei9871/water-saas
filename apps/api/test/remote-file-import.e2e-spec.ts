@@ -103,7 +103,12 @@ afterAll(async () => {
   await owner.end();
 });
 
-const mkPlan = async (period: string, waterAccountId: string, tag: string) => {
+// RC1-2: one account has at most ONE current membership — a second mkPlan
+// call for the same account reuses its book instead of failing on 409.
+const bookByAccount = new Map<string, string>();
+const bookFor = async (waterAccountId: string, tag: string) => {
+  const cached = bookByAccount.get(waterAccountId);
+  if (cached) return cached;
   const book = await request(app.getHttpServer())
     .post('/reading-books')
     .set(auth(adminToken))
@@ -114,11 +119,17 @@ const mkPlan = async (period: string, waterAccountId: string, tag: string) => {
     .set(auth(adminToken))
     .send({ waterAccountId })
     .expect(201);
+  bookByAccount.set(waterAccountId, book.body.id);
+  return book.body.id as string;
+};
+
+const mkPlan = async (period: string, waterAccountId: string, tag: string) => {
+  const bookId = await bookFor(waterAccountId, tag);
   return request(app.getHttpServer())
     .post('/reading-plans/generate')
     .set(auth(adminToken))
     .send({
-      bookId: book.body.id,
+      bookId,
       period,
       planDate: `${period.slice(0, 4)}-${period.slice(4)}-05`,
     })

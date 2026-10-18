@@ -24,7 +24,7 @@ for (const [role, config] of Object.entries(roles)) {
       await page.goto(path); await ready(page);
       await expect(page).toHaveURL('http://127.0.0.1:4173' + path);
       await expect(page.getByRole('main')).toContainText('无权限访问');
-      await expect(page.getByRole('button', { name: '返回工作台' })).toBeVisible();
+      await expect(page.getByRole('button', { name: '返回首页' })).toBeVisible();
     }
     for (const path of config.apis) {
       audit.allow('/api' + path, 403, 'GET');
@@ -48,6 +48,6 @@ for (const [role, config] of Object.entries(roles)) {
 }
 test('J01 admin sees all menu groups', async ({ page }) => {
   await login(page);
-  for (const label of ['客户管理', '抄表管理', '结算补差', '计费管理', '收费管理', '报表', '系统管理'])
+  for (const label of ['客户管理', '抄表管理', '结算管理', '计费管理', '收费管理', '报表', '系统管理'])
     await expect(page.getByRole('menuitem', { name: new RegExp(label) })).toBeVisible();
 });

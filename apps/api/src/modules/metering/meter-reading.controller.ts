@@ -14,7 +14,7 @@ import type { Request } from 'express';
 import { assertDecimal, assertOptionalDate } from '../../common/decimal.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
-import { AnyPermissions, Permissions } from '../../common/permissions.decorator.js';
+import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
@@ -236,8 +236,8 @@ export class MeterReadingController {
         ctx,
         { key, method: 'POST', route: req.path, body, responseStatus: 201 },
         async (tx) => {
-          const readings = await this.svc.createBatchTx(tx, ctx, inputs);
-          return { created: readings.length, readings };
+          const { readings, reviewTasks } = await this.svc.createBatchTx(tx, ctx, inputs);
+          return { created: readings.length, readings, reviewTasks };
         },
       );
     }
@@ -247,7 +247,10 @@ export class MeterReadingController {
       this.idem,
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
-      async (tx) => (await this.svc.createBatchTx(tx, ctx, [input]))[0],
+      async (tx) => {
+        const { readings, reviewTasks } = await this.svc.createBatchTx(tx, ctx, [input]);
+        return { ...readings[0], reviewTasks };
+      },
     );
   }
 
@@ -324,8 +327,8 @@ export class MeterReadingController {
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
       async (tx) => {
-        const readings = await this.svc.importTx(tx, ctx, inputs, preFailed);
-        return { created: readings.length, readings };
+        const { readings, reviewTasks } = await this.svc.importTx(tx, ctx, inputs, preFailed);
+        return { created: readings.length, readings, reviewTasks };
       },
     );
   }
@@ -337,7 +340,9 @@ export class MeterReadingController {
    * records that the read happened, not that it was good.
    */
   @Post(':id/qc')
-  @AnyPermissions('metering:qc', 'metering:write')
+  // Round-2 report §2: 质检是复核动作 —— metering:write（录表）不再放行，
+  // 只有挂 metering:qc 的角色（复核员）能通过/驳回。
+  @Permissions('metering:qc')
   qc(
     @Param('id') id: string,
     @Body() body: { action?: string },

@@ -2,10 +2,12 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
@@ -33,6 +35,8 @@ const assertCloseDate = (v: unknown, field = 'closeDate'): string => {
 
 interface CloseWireBody {
   closeDate?: string;
+  /** optional — proxy-close another cashier's drawer; admin only. */
+  cashierId?: string;
 }
 
 /**
@@ -83,14 +87,26 @@ export class DayCloseController {
    */
   @Post('close')
   @Permissions('payment:write')
-  close(@Body() body: CloseWireBody) {
+  close(@Body() body: CloseWireBody, @Req() req: { user?: { perms?: string[] } }) {
     const parsed = {
       closeDate:
         body?.closeDate === undefined || body.closeDate === null
           ? undefined
           : assertCloseDate(body.closeDate),
+      cashierId:
+        body?.cashierId === undefined || body.cashierId === null
+          ? undefined
+          : assertUuid(body.cashierId, 'cashierId'),
     };
     const ctx = currentTenant();
+    if (parsed.cashierId !== undefined && parsed.cashierId !== ctx.staffId) {
+      if (!(req.user?.perms ?? []).includes('*')) {
+        throw new ForbiddenException({
+          code: 'DAY_CLOSE_PROXY_FORBIDDEN',
+          message: '仅管理员可代其他收费员执行日结',
+        });
+      }
+    }
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       this.svc.closeTx(tx, ctx, parsed),
     );

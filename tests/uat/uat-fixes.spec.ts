@@ -11,7 +11,7 @@ test.beforeAll(async () => {
     const tenant = await p.tenant.findUniqueOrThrow({ where: { code: 'cd-water' } });
     const key = { tenantId: tenant.id, code: 'UAT_LAYOUT_REGRESSION', effectiveFrom: new Date('2026-01-01') };
     await p.tariffPlan.upsert({ where: { tenantId_code_effectiveFrom: key },
-      create: { ...key, name: tariffName, usageCategory: 'UAT_LAYOUT_REGRESSION' }, update: {} });
+      create: { ...key, name: tariffName, usageCategory: 'RES_METERED' }, update: {} });
   });
 });
 
@@ -70,7 +70,7 @@ test('UAT-003 tariff name and date widths with internal table scroll 1024', asyn
 });
 test('Shared header pattern also fits customer meter book and payment lists', async ({ page }, info) => {
   await login(page);
-  for (const [route,title] of [['/customer/customers','客户列表'], ['/customer/meters','水表档案'], ['/metering/books','抄表册'], ['/payment/payments','收款记录']])
+  for (const [route,title] of [['/customer/customers','客户列表'], ['/customer/meters','水表管理'], ['/metering/books','抄表册'], ['/payment/payments','收款记录']])
     await checkHeader(page, info, route, title, 1024);
 });
 test('UAT-004 global Chinese empty date month calendar pagination and modal labels', async ({ page }, info) => {
@@ -94,7 +94,7 @@ test('UAT-004 global Chinese empty date month calendar pagination and modal labe
   await expect.soft(dialog.getByRole('button', { name: '关闭', exact: true })).toBeVisible();
   await calendar.evaluate(async el => { await Promise.all(el.getAnimations({ subtree: true }).map(a => a.finished)); });
   await evidence(page, info, 'locale-calendar', { calendarText: await calendar.innerText() });
-  await page.goto('/report/ar-monthly'); await ready(page);
+  await page.goto('/report/analysis-monthly'); await ready(page);
   await expect.soft(main(page).getByRole('textbox').first()).toHaveAttribute('placeholder', '请选择月份');
   await main(page).getByRole('textbox').first().click();
   await expect.soft(page.locator('.ant-picker-dropdown:visible').getByRole('cell')).toHaveText(
@@ -125,9 +125,9 @@ for (const role of ['cashier','reader','reviewer']) test(`UAT-005 ${role} Chines
   });
   expect(rejected.status).toBe(403);
   await evidence(page, info, 'forbidden-' + role, rejected);
-  await page.getByRole('button', { name:'返回工作台' }).click();
+  await page.getByRole('button', { name:'返回首页' }).click();
   await expect(page).toHaveURL('http://127.0.0.1:4173/');
-  await expect(page.getByRole('heading', { name:'工作台' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /经营驾驶舱|工作台/ })).toBeVisible();
 });
 test('UAT-005 unauthenticated denied route still goes to login', async ({ page }) => {
   await page.goto('/system/staff'); await expect(page).toHaveURL(/\/login$/);

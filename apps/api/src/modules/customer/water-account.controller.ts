@@ -18,48 +18,24 @@ import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
-import type { CustomerBody } from './customer.service.js';
-import type { MeterBody } from './meter.service.js';
-import type { SettleAccountBody } from './settle-account.service.js';
+
 import { CloseAccountUseCase } from './use-cases/close-account.use-case.js';
 import {
   WaterAccountService,
   type EventBody,
-  type OnboardBody,
   type TransferBody,
   type WaterAccountBody,
   type WaterAccountPatchBody,
 } from './water-account.service.js';
 
+import { parseOnboardWire, type OnboardWireBody } from './onboard-wire.js';
+
 const ACCOUNT_STATUSES = new Set(['NORMAL', 'SUSPENDED', 'CLOSED']);
-const CUST_TYPES = new Set(['PERSONAL', 'ORG']);
-const INSTALL_REASONS = new Set(['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK']);
 
 const pageArgs = (take?: string, skip?: string) => ({
   take: Math.min(Math.max(parseInt(take ?? '50', 10) || 50, 1), 200),
   skip: Math.max(parseInt(skip ?? '0', 10) || 0, 0),
 });
-
-interface OnboardWireBody {
-  customer?: CustomerBody;
-  customerId?: string;
-  settleAccount?: SettleAccountBody;
-  settleAccountId?: string;
-  account?: {
-    accountNo?: string;
-    usageCategory?: string;
-    addr?: string;
-    openedAt?: unknown;
-    householdSize?: unknown;
-  };
-  meter?: MeterBody & { maxDial?: unknown };
-  meterId?: string;
-  installation?: {
-    initialReading?: unknown;
-    installedAt?: unknown;
-    reason?: string;
-  };
-}
 
 interface EventWireBody {
   effectiveDate?: unknown;
@@ -80,7 +56,11 @@ export class WaterAccountController {
     private readonly idem: IdempotencyService,
   ) {}
 
-  /** GET /water-accounts — ?customerId= / ?settleAccountId= / ?status= / ?accountNo=. */
+  /**
+   * GET /water-accounts — ?customerId= / ?settleAccountId= / ?status= /
+   * ?accountNo= / ?q= (RC1-4 unified: 户号/客户名/客户号/电话/地址/在装表号).
+   * Rows carry currentMeterNo (ACTIVE install, installedAt desc, id desc).
+   */
   @Get()
   @Permissions('customer:read')
   list(
@@ -88,6 +68,7 @@ export class WaterAccountController {
     @Query('settleAccountId') settleAccountId?: string,
     @Query('status') status?: string,
     @Query('accountNo') accountNo?: string,
+    @Query('q') q?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
@@ -102,6 +83,7 @@ export class WaterAccountController {
       settleAccountId,
       status: status as 'NORMAL' | 'SUSPENDED' | 'CLOSED' | undefined,
       accountNo,
+      q,
     });
   }
 
@@ -191,92 +173,7 @@ export class WaterAccountController {
     @Headers('idempotency-key') key?: string,
   ) {
     // ---- shape validation (deterministic, safe outside the idem fn) ----
-    const isMonitoring = body?.account?.usageCategory === 'MONITORING';
-    const hasCustomer = !!body?.customer;
-    const hasCustomerId = !!body?.customerId;
-    // Monitoring meters hang off the system customer — caller supplies
-    // none, and a supplied one would be silently ignored, so refuse it.
-    if (isMonitoring && (hasCustomer || hasCustomerId)) {
-      throw new BadRequestException({ code: 'MONITORING_NO_CUSTOMER' });
-    }
-    if (!isMonitoring && hasCustomer === hasCustomerId) {
-      throw new BadRequestException({ code: 'ONBOARD_CUSTOMER_XOR' });
-    }
-    if (body.customer && (!body.customer.name || !body.customer.custType)) {
-      throw new BadRequestException({ code: 'CUSTOMER_FIELDS_REQUIRED' });
-    }
-    if (body.customer?.custType && !CUST_TYPES.has(body.customer.custType)) {
-      throw new BadRequestException({ code: 'CUST_TYPE_INVALID' });
-    }
-    // Same ignore-vs-refuse rule for settle accounts: monitoring uses the
-    // internal system settle account, caller input must not be accepted.
-    if (isMonitoring && (body.settleAccount || body.settleAccountId)) {
-      throw new BadRequestException({ code: 'MONITORING_NO_CUSTOMER' });
-    }
-    if (!isMonitoring && body.settleAccount && body.settleAccountId) {
-      throw new BadRequestException({ code: 'ONBOARD_SETTLE_ACCOUNT_XOR' });
-    }
-    if (!isMonitoring && body.settleAccount && !body.settleAccount.name) {
-      throw new BadRequestException({ code: 'SETTLE_ACCOUNT_FIELDS_REQUIRED' });
-    }
-    if (!body.account?.usageCategory || !body.account?.addr) {
-      throw new BadRequestException({ code: 'WATER_ACCOUNT_FIELDS_REQUIRED' });
-    }
-    const hasMeter = !!body?.meter;
-    const hasMeterId = !!body?.meterId;
-    if (hasMeter === hasMeterId) {
-      throw new BadRequestException({ code: 'ONBOARD_METER_XOR' });
-    }
-    if (!body.installation || body.installation.initialReading === undefined) {
-      throw new BadRequestException({ code: 'INSTALLATION_FIELDS_REQUIRED' });
-    }
-    if (
-      body.installation.reason !== undefined &&
-      !INSTALL_REASONS.has(body.installation.reason)
-    ) {
-      throw new BadRequestException({ code: 'INSTALL_REASON_INVALID' });
-    }
-
-    const parsed: OnboardBody = {
-      customer: body.customer,
-      customerId: body.customerId ? assertUuid(body.customerId, 'customerId') : undefined,
-      settleAccount: body.settleAccount,
-      settleAccountId: body.settleAccountId
-        ? assertUuid(body.settleAccountId, 'settleAccountId')
-        : undefined,
-      account: {
-        accountNo: body.account.accountNo,
-        usageCategory: body.account.usageCategory,
-        addr: body.account.addr,
-        openedAt: assertOptionalDate(body.account.openedAt, 'account.openedAt'),
-        householdSize:
-          body.account.householdSize !== undefined
-            ? (() => {
-                const n = Number(body.account.householdSize);
-                if (!Number.isInteger(n) || n < 0) {
-                  throw new BadRequestException({ code: 'INVALID_HOUSEHOLD_SIZE' });
-                }
-                return n;
-              })()
-            : undefined,
-      },
-      meter: body.meter
-        ? {
-            ...body.meter,
-            maxDial:
-              body.meter.maxDial !== undefined
-                ? assertDecimal(body.meter.maxDial, 'meter.maxDial')
-                : undefined,
-          }
-        : undefined,
-      meterId: body.meterId ? assertUuid(body.meterId, 'meterId') : undefined,
-      installation: {
-        initialReading: assertDecimal(body.installation.initialReading, 'installation.initialReading', { min: 0 }),
-        installedAt: assertOptionalDate(body.installation.installedAt, 'installation.installedAt'),
-        reason: body.installation.reason as OnboardBody['installation']['reason'],
-      },
-    };
-
+    const parsed = parseOnboardWire(body);
     const ctx = currentTenant();
     return withOptionalIdem(
       this.prisma,

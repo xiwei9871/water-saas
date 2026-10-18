@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { embedStaffNames } from '../../common/account-identity.js';
 import { SequenceService } from '../../common/sequence.service.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -34,6 +35,8 @@ const PAYMENT_SELECT = {
 interface LedgerRow {
   id: string;
   settle_account_id: string;
+  settle_no?: string;
+  settle_name?: string;
   type: 'TOP_UP' | 'APPLY' | 'REFUND' | 'REVERSAL';
   amount: bigint;
   payment_id: string | null;
@@ -56,6 +59,8 @@ interface DebtRow {
 const mapEntry = (r: LedgerRow) => ({
   id: r.id,
   settleAccountId: r.settle_account_id,
+  settleNo: r.settle_no ?? null,
+  settleName: r.settle_name ?? null,
   type: r.type,
   amount: r.amount.toString(),
   paymentId: r.payment_id,
@@ -502,7 +507,7 @@ export class PrepaymentService {
         settleAccountId: body.settleAccountId,
         cashierId: ctx.staffId,
         orgUnitId: staff.orgUnitId,
-        channel: body.channel as 'CASH' | 'POS' | 'TRANSFER',
+        channel: body.channel as 'CASH' | 'POS' | 'TRANSFER' | 'ONLINE' | 'BANK_DEDUCT',
         amount: body.amount,
         status: 'RECEIVED',
         createdBy: ctx.staffId,
@@ -639,7 +644,7 @@ export class PrepaymentService {
         settleAccountId: body.settleAccountId,
         cashierId: ctx.staffId,
         orgUnitId: staff.orgUnitId,
-        channel: body.channel as 'CASH' | 'POS' | 'TRANSFER',
+        channel: body.channel as 'CASH' | 'POS' | 'TRANSFER' | 'ONLINE' | 'BANK_DEDUCT',
         amount: -body.amount,
         status: 'RECEIVED',
         createdBy: ctx.staffId,
@@ -758,29 +763,35 @@ export class PrepaymentService {
                 ON rp.tenant_id = wa.tenant_id AND rp.id = rpi.plan_id
               JOIN reading_book rb
                 ON rb.tenant_id = wa.tenant_id AND rb.id = rp.book_id
-              WHERE wa.tenant_id = prepayment_ledger_entry.tenant_id
-                AND wa.settle_account_id = prepayment_ledger_entry.settle_account_id
+              WHERE wa.tenant_id = e.tenant_id
+                AND wa.settle_account_id = e.settle_account_id
                 AND rb.org_unit_id <> ALL(${ctx.orgScope}::uuid[])
             )`;
       const rows = await tx.$queryRaw<LedgerRow[]>`
-        SELECT * FROM prepayment_ledger_entry
-        WHERE tenant_id = ${ctx.tenantId}::uuid
+        SELECT e.*, sa.settle_no, sa.name AS settle_name
+        FROM prepayment_ledger_entry e
+        JOIN settle_account sa
+          ON sa.tenant_id = e.tenant_id AND sa.id = e.settle_account_id
+        WHERE e.tenant_id = ${ctx.tenantId}::uuid
           AND (${args.settleAccountId ?? null}::uuid IS NULL
                OR settle_account_id = ${args.settleAccountId ?? null}::uuid)
           AND (${args.type ?? null}::"PrepaymentEntryType" IS NULL
                OR type = ${args.type ?? null}::"PrepaymentEntryType")
           ${scopeFilter}
-        ORDER BY created_at DESC, id DESC
+        ORDER BY e.created_at DESC, e.id DESC
         LIMIT ${args.take} OFFSET ${args.skip}`;
       const count = await tx.$queryRaw<{ n: bigint }[]>`
-        SELECT COUNT(*)::bigint AS n FROM prepayment_ledger_entry
-        WHERE tenant_id = ${ctx.tenantId}::uuid
+        SELECT COUNT(*)::bigint AS n FROM prepayment_ledger_entry e
+        WHERE e.tenant_id = ${ctx.tenantId}::uuid
           AND (${args.settleAccountId ?? null}::uuid IS NULL
                OR settle_account_id = ${args.settleAccountId ?? null}::uuid)
           AND (${args.type ?? null}::"PrepaymentEntryType" IS NULL
                OR type = ${args.type ?? null}::"PrepaymentEntryType")
           ${scopeFilter}`;
-      return { total: Number(count[0]?.n ?? 0n), items: rows.map(mapEntry) };
+      const items = await embedStaffNames(tx, ctx.tenantId, rows.map(mapEntry), {
+        operatorId: 'operatorName',
+      });
+      return { total: Number(count[0]?.n ?? 0n), items };
     });
   }
 

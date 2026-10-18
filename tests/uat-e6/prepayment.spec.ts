@@ -169,8 +169,8 @@ const pickAccount = async (page: Page) => {
   );
   await select(
     page,
-    main(page).getByText('再选水表户', { exact: true }),
-    `${S.acct.waterAccount.accountNo} · RES_METERED · ${S.addr}`,
+    main(page).getByText('再选用水户', { exact: true }),
+    `${S.acct.waterAccount.accountNo} · ${S.addr} · 表 ${S.acct.meter.meterNo} · 居民户表`,
   );
 };
 
@@ -345,7 +345,7 @@ test('S6 水表户过户 — 预存余额不迁移警告', async ({ page }, info
   const modal = page.getByRole('dialog', { name: /过户/ });
   await expect(modal).toContainText('不会随改挂迁移');
   await expect(modal).toContainText('270.00');
-  await expect(modal).toContainText('余额归属结算户而非水表户');
+  await expect(modal).toContainText('余额归属结算户而非用水户');
   await button(modal, '取消').click();
   await evidence(page, info, 's6-transfer-warning');
 });

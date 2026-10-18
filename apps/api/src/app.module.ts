@@ -12,6 +12,7 @@ import { BillingModule } from './modules/billing/billing.module.js';
 import { CustomerModule } from './modules/customer/customer.module.js';
 import { DashboardModule } from './modules/dashboard/dashboard.module.js';
 import { IamModule } from './modules/iam/iam.module.js';
+import { InstallModule } from './modules/installation/install.module.js';
 import { IntegrationModule } from './modules/integration/integration.module.js';
 import { MeteringModule } from './modules/metering/metering.module.js';
 import { PaymentModule } from './modules/payment/payment.module.js';
@@ -19,6 +20,7 @@ import { PrepaymentModule } from './modules/prepayment/prepayment.module.js';
 import { RemoteModule } from './modules/remote/remote.module.js';
 import { ReportModule } from './modules/report/report.module.js';
 import { ExceptionModule } from './modules/exception/exception.module.js';
+import { TaskModule } from './modules/task/task.module.js';
 
 @Module({
   imports: [
@@ -32,8 +34,10 @@ import { ExceptionModule } from './modules/exception/exception.module.js';
     PaymentModule,
     ReportModule,
     ExceptionModule,
+    TaskModule,
     DashboardModule,
     IntegrationModule,
+    InstallModule,
   ],
   controllers: [AppController],
   providers: [

@@ -69,6 +69,12 @@ body {
   width: 100%;
 }
 
+/* RC1-5: freshly-created rows flash a highlight on return to the list. */
+.ws-row-highlight > td {
+  background: #e6f4ff !important;
+  transition: background 1.2s ease;
+}
+
 @media (width < 1280px) {
   .page-content > .ant-card > .ant-card-head > .ant-card-head-wrapper {
     flex-direction: column;

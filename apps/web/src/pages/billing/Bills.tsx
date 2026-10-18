@@ -20,7 +20,7 @@ import {
   Spin,
   Table,
   Tag,
-  Tooltip,
+  Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -34,16 +34,23 @@ import type {
   BillStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import { PREPAY_ENTRY_LABELS } from '../payment/common';
 import {
   DECIMAL_RULE,
+  enumLabel,
   fmtCent,
   fmtDate,
   fmtPeriod,
   fmtTime,
   newIdemKey,
+  useSettleAccountLabels,
   useWaterAccountLabels,
 } from '../common';
-import { CustomerSelect, SettleAccountSelect, WaterAccountSelect } from '../pickers';
+import {
+  BillingAccountSelect,
+  BillingRunSelect,
+  SettleAccountLookupSelect,
+} from '../pickers';
 import {
   BILL_ITEM_TYPE_LABELS,
   BILL_KIND_COLORS,
@@ -51,23 +58,13 @@ import {
   BILL_SOURCE_TYPE_LABELS,
   BILL_STATUS_COLORS,
   BILL_STATUS_LABELS,
+  RUN_TYPE_LABELS,
+  describeBillItem,
 } from './common';
 
 interface ReplaceFormValues {
   usageQty: string;
 }
-
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
-const shortId = (id: string | null | undefined) =>
-  id ? (
-    <Tooltip title={id}>
-      <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-    </Tooltip>
-  ) : (
-    '—'
-  );
 
 /** 可纠正（红冲/换票）的账单：POSTED|PARTIAL_PAID 且非红冲单；
  *  E6 起 PAID 且带预存分摊的账单也可纠正（服务端校验预存腿）。 */
@@ -86,17 +83,12 @@ export default function Bills() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('billing:write');
-  const canCustomerRead = hasPerm('customer:read');
 
   const [rows, setRows] = useState<Bill[]>([]);
   const [loading, setLoading] = useState(false);
-  const [filterCustomerId, setFilterCustomerId] = useState<string | undefined>(undefined);
   const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
-  const [accountIdInput, setAccountIdInput] = useState('');
   const [settleAccountId, setSettleAccountId] = useState<string | undefined>(undefined);
-  const [settleIdInput, setSettleIdInput] = useState('');
-  const [runIdInput, setRunIdInput] = useState('');
-  const [billingRunId, setBillingRunId] = useState('');
+  const [billingRunId, setBillingRunId] = useState<string | undefined>(undefined);
   const [period, setPeriod] = useState<dayjs.Dayjs | null>(null);
   const [status, setStatus] = useState<BillStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
@@ -104,6 +96,38 @@ export default function Bills() {
 
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [penaltyOpen, setPenaltyOpen] = useState(false);
+  const [penaltyCfg, setPenaltyCfg] = useState<{ enabled: boolean; dailyRate: number; capRatio: number } | null>(null);
+  const [penaltyAsOf, setPenaltyAsOf] = useState<dayjs.Dayjs | null>(null);
+  const [penaltyResult, setPenaltyResult] = useState<string | null>(null);
+
+  const openPenalty = async () => {
+    setPenaltyResult(null);
+    try {
+      const res = await api.get<{ enabled: boolean; dailyRate: number; capRatio: number }>(
+        '/billing/penalties/config',
+      );
+      setPenaltyCfg(res.data);
+      setPenaltyOpen(true);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
+
+  const runPenalty = async () => {
+    try {
+      const res = await api.post<{ scanned: number; accrued: number; totalPenalty: string }>(
+        '/billing/penalties/accrue',
+        { asOfDate: penaltyAsOf?.format('YYYY-MM-DD') },
+      );
+      setPenaltyResult(
+        `扫描 ${res.data.scanned} 笔在收账单，计提 ${res.data.accrued} 笔，违约金合计 ${fmtCent(res.data.totalPenalty)}`,
+      );
+      void load(page, pageSize);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
   const [billCtx, setBillCtx] = useState<{
     settle: { householdSizeSnapshot: number | null } | null;
     plan: { baseHousehold: number | null; perPersonQty: string | null } | null;
@@ -115,19 +139,9 @@ export default function Bills() {
   const [acting, setActing] = useState<string | null>(null);
   const [replaceForm] = Form.useForm<ReplaceFormValues>();
 
-  const effectiveAccountId = canCustomerRead
-    ? waterAccountId
-    : UUID_RE.test(accountIdInput.trim())
-      ? accountIdInput.trim()
-      : undefined;
-  const effectiveSettleId = canCustomerRead
-    ? settleAccountId
-    : UUID_RE.test(settleIdInput.trim())
-      ? settleIdInput.trim()
-      : undefined;
-  const effectiveRunId = UUID_RE.test(billingRunId.trim())
-    ? billingRunId.trim()
-    : undefined;
+  const effectiveAccountId = waterAccountId;
+  const effectiveSettleId = settleAccountId;
+  const effectiveRunId = billingRunId;
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -158,7 +172,13 @@ export default function Bills() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  const accountLabel = useWaterAccountLabels(rows.map((r) => r.waterAccountId));
+  const { accountLabel, accountInfo } = useWaterAccountLabels(
+    rows.map((r) => r.waterAccountId),
+  );
+  // 结算户同理水合 —— 只给操作员看短 uuid 没法用。
+  const settleLabel = useSettleAccountLabels(
+    rows.map((r) => r.settleAccountId),
+  );
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -261,22 +281,31 @@ export default function Bills() {
   const columns: ColumnsType<Bill> = [
     { title: '账期', dataIndex: 'period', key: 'period', width: 90, render: fmtPeriod },
     {
-      title: '水表户',
+      title: '户号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
-      width: 140,
-      render: (id: string) => (
-        <Tooltip title={id}>
-          <span>{accountLabel(id)}</span>
-        </Tooltip>
+      width: 150,
+      render: (id: string, r: Bill) => (
+        <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? '—'}</span>
       ),
+    },
+    {
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, r: Bill) =>
+        r.customerName ?? accountInfo(r.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '结算户',
       dataIndex: 'settleAccountId',
       key: 'settleAccountId',
-      width: 110,
-      render: shortId,
+      width: 180,
+      render: (id: string, r: Bill) =>
+        r.settleNo
+          ? `${r.settleNo}${r.settleName ? ` · ${r.settleName}` : ''}`
+          : settleLabel(id),
     },
     {
       title: '类型',
@@ -284,7 +313,7 @@ export default function Bills() {
       key: 'billKind',
       width: 95,
       render: (k: Bill['billKind']) => (
-        <Tag color={BILL_KIND_COLORS[k]}>{BILL_KIND_LABELS[k]}</Tag>
+        <Tag color={BILL_KIND_COLORS[k]}>{enumLabel(BILL_KIND_LABELS, k)}</Tag>
       ),
     },
     {
@@ -308,7 +337,7 @@ export default function Bills() {
       key: 'status',
       width: 95,
       render: (s: BillStatus) => (
-        <Tag color={BILL_STATUS_COLORS[s]}>{BILL_STATUS_LABELS[s]}</Tag>
+        <Tag color={BILL_STATUS_COLORS[s]}>{enumLabel(BILL_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -369,22 +398,22 @@ export default function Bills() {
       key: 'itemType',
       width: 80,
       render: (t: BillItem['itemType']) => (
-        <Tag color={t === 'NORMAL' ? 'blue' : 'orange'}>{BILL_ITEM_TYPE_LABELS[t]}</Tag>
+        <Tag color={t === 'NORMAL' ? 'blue' : 'orange'}>{enumLabel(BILL_ITEM_TYPE_LABELS, t)}</Tag>
       ),
     },
     {
       title: '费用项',
-      dataIndex: 'feeItemId',
-      key: 'feeItemId',
-      width: 100,
-      render: shortId,
+      key: 'feeItem',
+      width: 110,
+      render: (_: unknown, r: BillItem) =>
+        r.feeItemName ?? r.feeItemCode ?? '—',
     },
     {
       title: '描述',
       dataIndex: 'description',
       key: 'description',
       ellipsis: true,
-      render: (v: string | null) => v ?? '—',
+      render: (v: string | null) => describeBillItem(v),
     },
     {
       title: '数量',
@@ -432,7 +461,7 @@ export default function Bills() {
             placeholder="状态"
             style={{ width: 110 }}
             options={(['DRAFT', 'POSTED', 'PARTIAL_PAID', 'PAID', 'REVERSED'] as const).map(
-              (s) => ({ value: s, label: BILL_STATUS_LABELS[s] }),
+              (s) => ({ value: s, label: enumLabel(BILL_STATUS_LABELS, s) }),
             )}
             value={status}
             onChange={(v) => {
@@ -440,75 +469,45 @@ export default function Bills() {
               setPage(1);
             }}
           />
-          {canCustomerRead ? (
-            <>
-              <span style={{ width: 170, display: 'inline-block' }}>
-                <CustomerSelect
-                  value={filterCustomerId}
-                  onChange={(v) => {
-                    setFilterCustomerId(v);
-                    setWaterAccountId(undefined);
-                    setPage(1);
-                  }}
-                  placeholder="先选客户（联动水表户）"
-                />
-              </span>
-              <span style={{ width: 200, display: 'inline-block' }}>
-                <WaterAccountSelect
-                  customerId={filterCustomerId}
-                  value={waterAccountId}
-                  onChange={(v) => {
-                    setWaterAccountId(v);
-                    setPage(1);
-                  }}
-                  placeholder="按水表户过滤"
-                />
-              </span>
-              <span style={{ width: 200, display: 'inline-block' }}>
-                <SettleAccountSelect
-                  value={settleAccountId}
-                  onChange={(v) => {
-                    setSettleAccountId(v);
-                    setPage(1);
-                  }}
-                  placeholder="按结算户过滤"
-                />
-              </span>
-            </>
-          ) : (
-            <>
-              <Input.Search
-                allowClear
-                placeholder="按水表户 ID 过滤"
-                style={{ width: 220 }}
-                value={accountIdInput}
-                onChange={(e) => setAccountIdInput(e.target.value)}
-                onSearch={() => setPage(1)}
-              />
-              <Input.Search
-                allowClear
-                placeholder="按结算户 ID 过滤"
-                style={{ width: 220 }}
-                value={settleIdInput}
-                onChange={(e) => setSettleIdInput(e.target.value)}
-                onSearch={() => setPage(1)}
-              />
-            </>
-          )}
-          <Input.Search
-            allowClear
-            placeholder="按批次 ID 过滤"
-            style={{ width: 220 }}
-            value={runIdInput}
-            onChange={(e) => setRunIdInput(e.target.value)}
-            onSearch={(v) => {
-              setBillingRunId(v);
-              setPage(1);
-            }}
-          />
+          {/* 10/8 报告 §1：全部走搜索选择器（户号/名称模糊），不再出现
+              uuid 输入框；includeClosed 让已销户的历史账单也能筛到。 */}
+          <span style={{ width: 230, display: 'inline-block' }}>
+            <BillingAccountSelect
+              includeClosed
+              value={waterAccountId}
+              onChange={(v) => {
+                setWaterAccountId(v);
+                setPage(1);
+              }}
+              placeholder="按户号/客户名称过滤"
+            />
+          </span>
+          <span style={{ width: 210, display: 'inline-block' }}>
+            <SettleAccountLookupSelect
+              includeClosed
+              value={settleAccountId}
+              onChange={(v) => {
+                setSettleAccountId(v);
+                setPage(1);
+              }}
+              placeholder="按结算户过滤"
+            />
+          </span>
+          <span style={{ width: 260, display: 'inline-block' }}>
+            <BillingRunSelect
+              value={billingRunId}
+              onChange={(v) => {
+                setBillingRunId(v);
+                setPage(1);
+              }}
+            />
+          </span>
           <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
             刷新
           </Button>
+          {hasPerm('billing:write') && (
+            <Button onClick={() => void openPenalty()}>违约金计提</Button>
+          )}
         </Space>
       }
     >
@@ -518,7 +517,7 @@ export default function Bills() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1400 }}
+        scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -532,7 +531,7 @@ export default function Bills() {
       />
 
       {/* 换票重开 */}
-      <Modal
+      <Modal maskClosable={false}
         open={replaceFor !== null}
         title={
           replaceFor
@@ -570,7 +569,11 @@ export default function Bills() {
         width={760}
         title={
           detail
-            ? `账单详情 — ${fmtPeriod(detail.period)} ${accountLabel(detail.waterAccountId)}`
+            ? `账单详情 — ${fmtPeriod(detail.period)} ${
+                detail.accountNo
+                  ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                  : accountLabel(detail.waterAccountId)
+              }`
             : '账单详情'
         }
         onClose={() => setDetail(null)}
@@ -590,7 +593,7 @@ export default function Bills() {
                   label: '状态',
                   children: (
                     <Tag color={BILL_STATUS_COLORS[detail.status]}>
-                      {BILL_STATUS_LABELS[detail.status]}
+                      {enumLabel(BILL_STATUS_LABELS, detail.status)}
                     </Tag>
                   ),
                 },
@@ -599,7 +602,7 @@ export default function Bills() {
                   label: '类型',
                   children: (
                     <Tag color={BILL_KIND_COLORS[detail.billKind]}>
-                      {BILL_KIND_LABELS[detail.billKind]}
+                      {enumLabel(BILL_KIND_LABELS, detail.billKind)}
                     </Tag>
                   ),
                 },
@@ -610,10 +613,18 @@ export default function Bills() {
                 },
                 {
                   key: 'wa',
-                  label: '水表户',
-                  children: accountLabel(detail.waterAccountId),
+                  label: '用水户',
+                  children: detail.accountNo
+                    ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                    : accountLabel(detail.waterAccountId),
                 },
-                { key: 'sa', label: '结算户', children: shortId(detail.settleAccountId) },
+                {
+                  key: 'sa',
+                  label: '结算户',
+                  children: detail.settleNo
+                    ? `${detail.settleNo}${detail.settleName ? ` · ${detail.settleName}` : ''}`
+                    : settleLabel(detail.settleAccountId),
+                },
                 {
                   key: 'est',
                   label: '口径',
@@ -628,20 +639,30 @@ export default function Bills() {
                   label: '来源',
                   children: (
                     <Space size={4}>
-                      {BILL_SOURCE_TYPE_LABELS[detail.sourceType]}
-                      {shortId(detail.sourceId)}
+                      {enumLabel(BILL_SOURCE_TYPE_LABELS, detail.sourceType)}
+                      {detail.sourcePeriod
+                        ? detail.sourcePeriodTo
+                          ? `（${fmtPeriod(detail.sourcePeriod)} → ${fmtPeriod(detail.sourcePeriodTo)}）`
+                          : `（${fmtPeriod(detail.sourcePeriod)}）`
+                        : '—'}
                     </Space>
                   ),
                 },
                 {
                   key: 'run',
                   label: '开账批次',
-                  children: shortId(detail.billingRunId),
+                  children: detail.billingRunRef
+                    ? `${fmtPeriod(detail.billingRunRef.period)} · ${
+                        enumLabel(RUN_TYPE_LABELS, detail.billingRunRef.runType)
+                      }批次 · ${fmtTime(detail.billingRunRef.createdAt)} 创建`
+                    : '—',
                 },
                 {
                   key: 'tariff',
                   label: '资费版本',
-                  children: shortId(detail.tariffPlanId),
+                  children: detail.tariffPlanRef
+                    ? `${detail.tariffPlanRef.name}（${detail.tariffPlanRef.code}）`
+                    : '—',
                 },
                 {
                   key: 'issued',
@@ -715,8 +736,8 @@ export default function Bills() {
                       key: 'ref',
                       render: (_: unknown, a: BillAlloc) =>
                         a.source === 'PREPAYMENT'
-                          ? shortId(a.prepaymentEntryId)
-                          : shortId(a.paymentId),
+                          ? `预存抵扣${a.prepaymentEntryType ? `（${enumLabel(PREPAY_ENTRY_LABELS, a.prepaymentEntryType)}）` : ''}`
+                          : (a.paymentNo ?? '—'),
                     },
                     {
                       title: '时间',
@@ -748,6 +769,29 @@ export default function Bills() {
           </>
         )}
       </Drawer>
+
+      {/* G1 违约金计提：口径在 系统管理→租户参数 billing.penalty */}
+      <Modal
+        title="违约金计提"
+        open={penaltyOpen}
+        onCancel={() => setPenaltyOpen(false)}
+        footer={null}
+        destroyOnHidden
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          {penaltyCfg && (
+            <Typography.Text type={penaltyCfg.enabled ? undefined : 'warning'}>
+              当前口径：{penaltyCfg.enabled ? `启用，日费率 ${(penaltyCfg.dailyRate * 100).toFixed(3)}%，封顶 ${(penaltyCfg.capRatio * 100).toFixed(0)}% 本金` : '未启用（租户参数 billing.penalty.enabled=false）'}
+            </Typography.Text>
+          )}
+          <Space>
+            <Typography.Text>计提截止日</Typography.Text>
+            <DatePicker value={penaltyAsOf} onChange={setPenaltyAsOf} placeholder="缺省为今日" />
+            <Button type="primary" onClick={() => void runPenalty()}>执行计提</Button>
+          </Space>
+          {penaltyResult && <Typography.Text>{penaltyResult}</Typography.Text>}
+        </Space>
+      </Modal>
     </Card>
   );
 }

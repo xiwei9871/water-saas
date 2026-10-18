@@ -62,11 +62,16 @@ const ROLE_ADMIN_A = 'aa11aa11-0000-4000-8000-00000000ad01';
 const ROLE_B_ADMIN = 'bb11bb11-0000-4000-8000-00000000ad01';
 const STAFF_ADMIN_A = 'aa11aa11-0000-4000-8000-0000000a0001';
 const STAFF_B_ADMIN = 'bb11bb11-0000-4000-8000-0000000a0001';
+// Round-2 §7: 复核员（metering:qc）可直接发起补差。
+const ROLE_QC_A = 'aa11aa11-0000-4000-8000-00000000ac01';
+const PERM_QC = 'aa11aa11-0000-4000-8000-00000000e0c1';
+const STAFF_QC_A = 'aa11aa11-0000-4000-8000-00000000ac02';
 
 const owner = new pg.Client({ connectionString: OWNER_URL });
 let app: INestApplication<App>;
 let adminToken = '';
 let tenantBToken = '';
+let qcToken = '';
 
 // ids populated by the sequential suite
 let waterItem = ''; // fee_item WATER-* (PER_QTY)
@@ -266,6 +271,37 @@ beforeAll(async () => {
      ON CONFLICT DO NOTHING`,
     [T11A, STAFF_ADMIN_A, ROLE_ADMIN_A, T11B, STAFF_B_ADMIN, ROLE_B_ADMIN],
   );
+  // metering:qc 复核员 —— Round-2 §7 补差发起权回归。
+  await owner.query(
+    `INSERT INTO role (id, tenant_id, code, name, data_scope, created_at, updated_at)
+     VALUES ($1, $2, 't11-qc', 'T11 QC Reviewer', 'ALL', now(), now())
+     ON CONFLICT DO NOTHING`,
+    [ROLE_QC_A, T11A],
+  );
+  await owner.query(
+    `INSERT INTO permission (id, tenant_id, code, type, created_at, updated_at)
+     VALUES ($1, $2, 'metering:qc', 'ACTION', now(), now())
+     ON CONFLICT DO NOTHING`,
+    [PERM_QC, T11A],
+  );
+  await owner.query(
+    `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
+     VALUES ($1, $2, $3, now(), now())
+     ON CONFLICT DO NOTHING`,
+    [T11A, ROLE_QC_A, PERM_QC],
+  );
+  await owner.query(
+    `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
+     VALUES ($1, $2, $3, 't11-qc', $4, 'T11 QC', 'ACTIVE', now(), now())
+     ON CONFLICT (tenant_id, login) DO NOTHING`,
+    [STAFF_QC_A, T11A, ORG_A, hash],
+  );
+  await owner.query(
+    `INSERT INTO staff_role (tenant_id, staff_id, role_id, created_at, updated_at)
+     VALUES ($1, $2, $3, now(), now())
+     ON CONFLICT DO NOTHING`,
+    [T11A, STAFF_QC_A, ROLE_QC_A],
+  );
 
   // The test DB persists between runs — wipe tenant A's business tables
   // (FK-safe order); iam fixtures above are idempotent and stay.
@@ -310,6 +346,7 @@ beforeAll(async () => {
         .expect(201)
     ).body.accessToken as string;
   adminToken = await login('t11-water', 't11-admin');
+  qcToken = await login('t11-water', 't11-qc');
   tenantBToken = await login('t11-other', 't11b-admin');
 });
 
@@ -1058,5 +1095,72 @@ describe('RC-fix I-1: same-day readings anchor by chronology, never UUID', () =>
       actualReadingId: actualId,
       status: 'ABSORBED',
     });
+  });
+});
+
+describe('Round-2 §7/§8 — 补差待办闭环 + 户号搜索 + 复核员发起', () => {
+  it('account-lookup: 业务权限角色按户号/客户名搜索（无需 customer:read）', async () => {
+    const rows = (await get('/reconciliations/account-lookup')).body as {
+      id: string;
+      accountNo: string;
+      customerName: string;
+    }[];
+    expect(rows.length).toBeGreaterThan(0);
+    const a12 = rows.find((r) => r.id === acct['A12']);
+    expect(a12?.accountNo).toBeTruthy();
+    expect(a12?.customerName).toContain('T11 A12');
+
+    // 客户名子串过滤命中；户号精确子串也命中。
+    const byName = (await get('/reconciliations/account-lookup?q=A12')).body as {
+      id: string;
+    }[];
+    expect(byName.some((r) => r.id === acct['A12'])).toBe(true);
+    // 复核员角色（metering:qc，无 customer:read/billing:read）同样可用。
+    const qcRows = (await get('/reconciliations/account-lookup', qcToken)).body;
+    expect(Array.isArray(qcRows)).toBe(true);
+    expect((qcRows as { id: string }[]).length).toBeGreaterThan(0);
+  });
+
+  it('drift-hints: 已结算读数被修正 → 待办出现；metering:qc 发起补差 → 待办消失', async () => {
+    // A12-r1(202608) 已被 A12-r1s 修正（supersede）且 QC 通过。把它挂到
+    // FINAL 结算 A12-08 的组件上，模拟"已结算读数"。
+    await owner.query(
+      `INSERT INTO consumption_component
+         (id, tenant_id, settlement_id, installation_id, prev_reading_value,
+          end_reading_value, usage_qty, source_type, source_reading_id,
+          created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 1000, 1055, 55, 'READING', $4,
+               now(), now())`,
+      [T11A, settle['A12-08'], inst['A12'], reading['A12-r1']],
+    );
+
+    const hints = (await get('/reconciliations/drift-hints')).body as {
+      readingId: string;
+      waterAccountId: string;
+      accountNo: string;
+      customerName: string;
+      period: string;
+    }[];
+    const hint = hints.find((h) => h.readingId === reading['A12-r1s']);
+    expect(hint).toMatchObject({
+      waterAccountId: acct['A12'],
+      period: '202607', // r1s 是 back-dated 到 07 的更正读数
+    });
+    expect(hint?.accountNo).toBeTruthy();
+    expect(hint?.customerName).toContain('T11 A12');
+
+    // 复核员（metering:qc，无 billing:write）可直接发起补差。
+    const res = await post(
+      '/reconciliations',
+      { waterAccountId: acct['A12'], actualReadingId: reading['A12-r1s'] },
+      qcToken,
+    );
+    expect(res.status).toBe(201);
+    expect(['ABSORBED', 'APPLIED', 'MANUAL_REVIEW']).toContain(res.body.status);
+
+    const after = (await get('/reconciliations/drift-hints')).body as {
+      readingId: string;
+    }[];
+    expect(after.find((h) => h.readingId === reading['A12-r1s'])).toBeUndefined();
   });
 });

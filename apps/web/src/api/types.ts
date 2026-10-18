@@ -11,6 +11,7 @@ import type {
   DayCloseStatus,
   EstimateMethod,
   ExceptionCode,
+  FeeItemKind,
   InstallReason,
   InstallationStatus,
   MeterStatus,
@@ -45,6 +46,7 @@ export type {
   DayCloseStatus,
   EstimateMethod,
   ExceptionCode,
+  FeeItemKind,
   InstallReason,
   InstallationStatus,
   MeterStatus,
@@ -125,6 +127,9 @@ export interface Staff {
   status: StaffStatus;
   createdAt: string;
   updatedAt: string;
+  /** Round-2: current role bindings — the edit form prefills from this.
+   * Carries id (unlike login RoleSummary) so roleIds can be re-submitted. */
+  roles?: { id: string; code: string; name: string }[];
 }
 
 /** GET /iam/roles — rows carry their bound permission CODES in `perms`. */
@@ -241,6 +246,8 @@ export interface WaterAccount {
     name: string;
     status: AccountStatus;
   };
+  /** RC1-4: ACTIVE installation's meter_no (installedAt desc, id desc). */
+  currentMeterNo?: string | null;
 }
 
 /** GET /water-accounts/:id — 在列表行基础上附带当前（展示用）人数。
@@ -316,6 +323,10 @@ export interface Meter {
   maxDial: string | null;
   parentMeterId: string | null;
   status: MeterStatus;
+  /** List-only: account the device is currently mounted on (ACTIVE install). */
+  currentAccountNo?: string | null;
+  /** List-only: name of that account's customer. */
+  currentCustomerName?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -342,7 +353,13 @@ export interface MeterInstallation {
     brand: string | null;
     model: string | null;
   };
-  waterAccount: { id: string; accountNo: string; status: AccountStatus };
+  waterAccount: {
+    id: string;
+    accountNo: string;
+    status: AccountStatus;
+    /** Round-2: customer name travels with 户号 on operator lists. */
+    customer?: { name: string } | null;
+  };
 }
 
 /** POST /water-accounts/onboard response — the whole freshly-built graph. */
@@ -376,7 +393,10 @@ export interface ReadingBook {
   bookNo: string;
   name: string;
   orgUnitId: string;
+  /** 10/8 报告 §3：服务端内嵌人读名称（无 iam:read 也可见）。 */
+  orgUnitName: string | null;
   readerId: string | null;
+  readerName: string | null;
   scheduleDay: number | null;
   cadence: BookCadence;
   /** BIMONTHLY 必填，YYYYMM；MONTHLY 恒为 null。 */
@@ -395,6 +415,8 @@ export interface BookMember {
     accountNo: string;
     addr: string;
     status: AccountStatus;
+    /** Round-2: member rows carry customer name alongside 户号. */
+    customer?: { name: string } | null;
   } | null;
 }
 
@@ -408,10 +430,16 @@ export interface ReadingPlan {
   id: string;
   tenantId: string;
   bookId: string;
+  /** 10/8 报告 §3：服务端内嵌（册号/册名/组织名/抄表员名）。 */
+  bookNo: string | null;
+  bookName: string | null;
+  orgUnitId: string | null;
+  orgUnitName: string | null;
   /** char(6) YYYYMM. */
   period: string;
   planDate: string;
   readerId: string | null;
+  readerName: string | null;
   status: PlanStatus;
   createdAt: string;
   updatedAt: string;
@@ -453,7 +481,7 @@ export interface ReadingPlanProgress {
  * probe): non-null when a newer correction row points at this one.
  */
 export interface MeterReading {
-  account?: { accountNo: string; customerName: string; addr: string };
+  account?: { id: string; accountNo: string; customerName: string; addr: string };
   meterNo?: string;
   operatorName?: string | null;
   qcByName?: string | null;
@@ -471,6 +499,8 @@ export interface MeterReading {
   estimateQty: string | null;
   supersedesReadingId: string | null;
   supersededById: string | null;
+  /** 截至该期该户连续未抄见期数（Round-2 §10：复核警示用）。 */
+  consecutiveNoRead: number;
   qcStatus: QcStatus;
   qcBy: string | null;
   qcAt: string | null;
@@ -501,6 +531,16 @@ export interface ConsumptionComponent {
   usageQty: string;
   sourceType: ComponentSourceType;
   sourceReadingId: string | null;
+  /** 人读引用（9·30 报告 §3）：表号 + 来源读数概要。 */
+  meterNo: string | null;
+  sourceReading: {
+    id: string;
+    period: string;
+    readDate: string;
+    resultType: ReadResultType;
+    readingValue: string | null;
+    estimateQty: string | null;
+  } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -534,6 +574,9 @@ export interface ConsumptionSettlement {
   status: SettlementStatus;
   createdAt: string;
   updatedAt: string;
+  /** 单据内嵌身份 —— 不依赖 customer:read（Round-2 报告 §4）。 */
+  accountNo: string | null;
+  customerName: string | null;
   components: ConsumptionComponent[];
   /** Trailing run of consecutive estimated settlements (per account). */
   consecutiveEstimates: number;
@@ -544,6 +587,39 @@ export interface EstimatePreview {
   suggestedUsage: string | null;
   method: EstimateMethod;
   basis: { window: number; historyUsageQtys: string[] };
+}
+
+/* RC1-3: batch settlement generation (F11) */
+export type SettlementBatchItemStatus =
+  | 'READY'
+  | 'READY_ESTIMATED'
+  | 'GENERATED'
+  | 'GENERATED_ESTIMATED'
+  | 'SKIPPED_EXISTS'
+  | 'FAILED';
+
+export interface SettlementBatchItem {
+  waterAccountId: string;
+  accountNo: string;
+  status: SettlementBatchItemStatus;
+  settlementId?: string;
+  errorCode?: string;
+}
+
+export interface SettlementBatchReport {
+  period: string;
+  bookId?: string;
+  orgUnitId?: string;
+  total: number;
+  counts: {
+    ready: number;
+    readyEstimated: number;
+    generated: number;
+    generatedEstimated: number;
+    skippedExists: number;
+    failed: number;
+  };
+  items: SettlementBatchItem[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -571,6 +647,13 @@ export interface Reconciliation {
   status: ReconStatus;
   createdAt: string;
   updatedAt: string;
+  /** 单据内嵌身份 —— 不依赖 customer:read（Round-2 报告 §4）。 */
+  accountNo: string | null;
+  customerName: string | null;
+  /** 10/8 §8：锚点/实抄读数 + 吸收结算的人读引用。 */
+  anchorReading: { period: string; readDate: string; readingValue: string | null } | null;
+  actualReading: { period: string; readDate: string; readingValue: string | null } | null;
+  absorbedSettlement: { period: string } | null;
 }
 
 /** POST /reconciliations — row + the adjustment bill it minted (if any). */
@@ -589,6 +672,8 @@ export interface FeeItem {
   code: string;
   name: string;
   calcType: CalcType;
+  /** G1: 水费/代收/其他 — 综合单价只计 WATER_FEE。 */
+  kind?: FeeItemKind;
   createdAt: string;
   updatedAt: string;
 }
@@ -642,6 +727,9 @@ export interface RunFailure {
   stage: 'generate' | 'post';
   code: string;
   message?: string;
+  /** Enriched on detail read — human-readable account identity. */
+  accountNo?: string;
+  customerName?: string | null;
 }
 
 /** GET /billing-runs — a period batch row. */
@@ -652,6 +740,8 @@ export interface BillingRun {
   period: string;
   runType: RunType;
   status: RunStatus;
+  /** DRAFT 批次的生成进度：GENERATING（多事务生成中）→ READY。 */
+  generationStatus: 'GENERATING' | 'READY';
   postedAt: string | null;
   totalCount: number;
   successCount: number;
@@ -662,6 +752,16 @@ export interface BillingRun {
 }
 
 /** GET /billing-runs/:id — run + its bills (created order). */
+/** GET /billing-runs/preflight — 开账前覆盖预检（Round-2 §9）。 */
+export interface BillingRunPreflight {
+  period: string;
+  plannedCount: number;
+  willBillCount: number;
+  missingReading: { waterAccountId: string; accountNo: string; customerName: string }[];
+  missingSettlement: { waterAccountId: string; accountNo: string; customerName: string }[];
+  draftSettlement: { waterAccountId: string; accountNo: string; customerName: string }[];
+}
+
 export interface BillingRunDetail extends BillingRun {
   bills: Bill[];
 }
@@ -686,6 +786,11 @@ export interface Bill {
   dueDate: string | null;
   createdAt: string;
   updatedAt: string;
+  /** 单据内嵌身份 —— 不依赖 customer:read（Round-2 报告 §4/§9）。 */
+  accountNo: string | null;
+  customerName: string | null;
+  settleNo: string | null;
+  settleName: string | null;
 }
 
 /** bill_item — qty/unitPrice are decimals, amount is bigint cents. */
@@ -694,6 +799,9 @@ export interface BillItem {
   tenantId: string;
   billId: string;
   feeItemId: string | null;
+  /** 详情内嵌费用项标识（9·30 报告 §1）—— 不展示裸 uuid。 */
+  feeItemCode: string | null;
+  feeItemName: string | null;
   itemType: BillItemType;
   description: string | null;
   /** Decimal(18,4) — string; negated on reversal mirror rows. */
@@ -712,6 +820,9 @@ export interface BillAlloc {
   source: 'PAYMENT' | 'PREPAYMENT';
   paymentId: string | null;
   prepaymentEntryId: string | null;
+  /** 10/8 §8：人读引用 —— 收款单号 / 预存流水类型。 */
+  paymentNo: string | null;
+  prepaymentEntryType: string | null;
   amount: string;
   createdAt: string;
 }
@@ -720,6 +831,13 @@ export interface BillAlloc {
 export interface BillDetail extends Bill {
   items: BillItem[];
   allocs: BillAlloc[];
+  /** 人读引用（9·30 报告 §1）：批次/资费版本/来源单据的可读标识。 */
+  billingRunRef: { period: string; runType: RunType; createdAt: string } | null;
+  tariffPlanRef: { code: string; name: string } | null;
+  /** SETTLEMENT/ORIGINAL_BILL → 该单据账期；RECONCILIATION → fromPeriod。 */
+  sourcePeriod: string | null;
+  /** RECONCILIATION → toPeriod（补差覆盖区间）。 */
+  sourcePeriodTo: string | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -733,6 +851,13 @@ export interface Payment {
   paymentNo: string;
   settleAccountId: string;
   cashierId: string;
+  /** 10/8 报告 §2：内嵌人读身份（无 customer:read / iam:read 也可见）。 */
+  settleNo: string | null;
+  settleName: string | null;
+  cashierName: string | null;
+  /** 红冲对象收款单号；日结日期。 */
+  reversalOfNo: string | null;
+  dayCloseDate: string | null;
   orgUnitId: string;
   channel: PayChannel;
   amount: string;
@@ -755,6 +880,8 @@ export interface PaymentAlloc {
   paymentId: string | null;
   prepaymentEntryId: string | null;
   billId: string;
+  /** 账单人读引用（户号 · 账期），服务端内嵌。 */
+  billLabel?: string | null;
   amount: string;
   createdAt: string;
   updatedAt: string;
@@ -764,6 +891,9 @@ export interface PaymentAlloc {
 export interface PrepaymentEntry {
   id: string;
   settleAccountId: string;
+  /** entries 列表附带结算户可读标识（settleNo + 户名），免渲染裸 UUID。 */
+  settleNo?: string | null;
+  settleName?: string | null;
   type: 'TOP_UP' | 'APPLY' | 'REFUND' | 'REVERSAL';
   amount: string;
   paymentId: string | null;
@@ -772,6 +902,8 @@ export interface PrepaymentEntry {
   reversalOfEntryId: string | null;
   idempotencyKey: string;
   operatorId: string | null;
+  /** 10/8 §8：内嵌操作员姓名（SYSTEM 行为 null）。 */
+  operatorName: string | null;
   reason: string | null;
   createdAt: string;
   createdBy: string;
@@ -835,6 +967,8 @@ export interface CashierDayClose {
   id: string;
   tenantId: string;
   cashierId: string;
+  /** 10/8 报告 §2/§5：内嵌收费员姓名（无 iam:read 也可见）。 */
+  cashierName: string | null;
   orgUnitId: string;
   /** DATE column — ISO string (YYYY-MM-DD). */
   closeDate: string;
@@ -850,6 +984,11 @@ export interface CashierDayClose {
     reversalAmount: string;
   } | null;
   status: DayCloseStatus;
+  /** 代结场景：执行人 ≠ 收费员本人。 */
+  createdBy: string;
+  updatedBy: string;
+  /** 经办人姓名（内嵌，代结时与收费员不同）。 */
+  createdByName: string | null;
   closedAt: string;
   createdAt: string;
   updatedAt: string;
@@ -966,8 +1105,18 @@ export interface RecoveryRateReport {
   period: string;
   through: string | null;
   billed: string;
+  /** 当月现金实收（含历史欠费清偿、红冲净减）——参考口径。 */
   collected: string;
+  /** 本期账单累计销账（含逾期后收回部分）。 */
+  allocatedTotal: string;
+  /** 其中在账单收费窗口（due_date）内销账 —— rate 的分子。 */
+  allocatedInWindow: string;
+  /** 当月收款中清偿历史欠费（账期 < period 的账单）部分。 */
+  priorPeriodCollected: string;
+  /** 回收率 = allocatedInWindow / billed，≤ 1；billed<=0 或数据异常时为 null。 */
   rate: string | null;
+  /** 数据异常：窗口内销账 > 应收（不应发生）。发生时 rate 为 null。 */
+  anomaly: { code: string; allocatedInWindow: string; billed: string } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,7 +1178,11 @@ export interface RemoteDeviceBinding {
     removedAt: string | null;
     status: InstallationStatus;
     meter: { meterNo: string };
-    waterAccount: { accountNo: string };
+    waterAccount: {
+      accountNo: string;
+      /** Round-2: 户号旁带客户名。 */
+      customer?: { name: string } | null;
+    };
   } | null;
 }
 
@@ -1091,6 +1244,13 @@ export interface RawRemoteEventDetail extends RawRemoteEvent {
     qcStatus: string;
     period: string;
     readingValue: string;
+  } | null;
+  /** CONFLICT 时回填：计划项上既有读数（冲突对手方），供摘要对比。 */
+  conflictReading?: {
+    readingValue: string;
+    period: string;
+    qcStatus: string;
+    resultType: string;
   } | null;
 }
 
@@ -1258,4 +1418,73 @@ export type ExceptionSummary = {
   todayAdded: number;
   todayCleared: number;
   asOf: string;
+};
+
+// ---------------------------------------------------------------------------
+// 任务中心（任务驱动机制 V1.0）
+// ---------------------------------------------------------------------------
+
+export type TaskStatus = 'PENDING' | 'CLAIMED' | 'DONE' | 'CANCELLED';
+export type TaskPriority = 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
+
+export type TaskItem = {
+  id: string;
+  type: string;
+  typeName?: string;
+  title: string;
+  bizType: string;
+  bizId: string;
+  bizLabel: string | null;
+  reason: string;
+  context: Record<string, unknown> | null;
+  requiredPerm: string;
+  orgUnitId: string | null;
+  assigneeId: string | null;
+  assigneeName?: string | null;
+  completedByName?: string | null;
+  status: TaskStatus;
+  priority: TaskPriority;
+  dueAt: string | null;
+  sourceTaskId: string | null;
+  candidateCount: number;
+  escalatedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  canClaim?: boolean;
+  candidates?: { id: string; name: string }[];
+};
+
+export type TaskBadge = { todo: number; escalated: number; alerts: number };
+
+export const TASK_TYPE_LABELS: Record<string, string> = {
+  SUPPLEMENT: '补差任务',
+  METER_REVIEW: '抄表异常复核',
+  COLLECTION: '催缴任务',
+  REVERSAL_APPROVAL: '红冲审批',
+  WRITEOFF_APPROVAL: '核销审批',
+  INSTALL_REVIEW: '报装审批',
+  RECON_HANDLE: '对账差异处理',
+};
+
+export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
+  PENDING: '待处理',
+  CLAIMED: '处理中',
+  DONE: '已完成',
+  CANCELLED: '已取消',
+};
+
+export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
+  LOW: '低',
+  NORMAL: '普通',
+  HIGH: '高',
+  URGENT: '紧急',
+};
+
+/** bizType → 直达路由（{bizId}/{taskId} 占位替换）。与后端 task.types.ts 对齐。 */
+export const TASK_BIZ_ROUTES: Record<string, string> = {
+  SUPPLEMENT: '/settlement/reconciliations?waterAccountId={bizId}&taskId={taskId}',
+  METER_REVIEW: '/metering/readings?taskId={taskId}',
+  COLLECTION: '/report/query/unified?taskId={taskId}',
+  REVERSAL_APPROVAL: '/payment/payments?taskId={taskId}',
+  WRITEOFF_APPROVAL: '/payment/writeoffs?taskId={taskId}',
 };

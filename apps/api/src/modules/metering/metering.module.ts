@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { CustomerModule } from '../customer/customer.module.js';
+import { TaskModule } from '../task/task.module.js';
 import { EstimateController } from './estimate.controller.js';
 import { MeterReadingController } from './meter-reading.controller.js';
 import { MeterReadingService } from './meter-reading.service.js';
@@ -23,7 +24,7 @@ import { SettlementService } from './settlement.service.js';
  * TenantPrismaService/IdempotencyService/SequenceService are global.
  */
 @Module({
-  imports: [CustomerModule],
+  imports: [CustomerModule, TaskModule],
   controllers: [
     ReadingBookController,
     ReadingPlanController,

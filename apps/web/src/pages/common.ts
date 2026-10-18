@@ -7,9 +7,11 @@ import type {
   InstallReason,
   InstallationStatus,
   MeterStatus,
+  SettleAccount,
   WaterAccount,
 } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { fmtMoney } from '../utils/numfmt';
 
 /** 跨页面共享的枚举中文标签 / 颜色 / 小工具。 */
 
@@ -21,8 +23,9 @@ export const CUST_TYPE_LABELS: Record<CustType, string> = {
 /** 受控用水类别 —— 与 API 侧 common/usage-categories.ts 的固定集合一致；
  * 服务端 422 INVALID_USAGE_CATEGORY + DB CHECK 双重兜底。 */
 export const USAGE_CATEGORY_LABELS: Record<string, string> = {
-  RES_METERED: '居民（户表）',
-  RES_SHARED: '居民（非户表）',
+  // RC1-6 术语冻结：居民户表/居民合表/非居民/特种/监控表
+  RES_METERED: '居民户表',
+  RES_SHARED: '居民合表',
   NON_RES: '非居民',
   SPECIAL: '特种',
   MONITORING: '监控表',
@@ -84,9 +87,112 @@ export const fmtDate = (iso?: string | null) =>
 export const fmtPeriod = (p?: string | null) =>
   p && /^\d{6}$/.test(p) ? `${p.slice(0, 4)}-${p.slice(4)}` : (p ?? '—');
 
-/** 金额分 → 元 显示（BigInt 列序列化为字符串）。 */
-export const fmtCent = (v?: string | number | null) =>
-  v === null || v === undefined ? '—' : `¥${(Number(v) / 100).toFixed(2)}`;
+/** 金额分 → 元 显示（BigInt 列序列化为字符串）。¥ + 千分位 + 两位小数。 */
+export const fmtCent = (v?: string | number | null) => fmtMoney(v);
+
+/**
+ * 枚举码 → 中文标签。缺映射时显示 '—' 并 console.warn（展示层取值
+ * 规范：绝不回退渲染裸英文代码，漏映射要能被听见而不是被看见）。
+ */
+export const enumLabel = (
+  map: Record<string, string>,
+  v?: string | null,
+): string => {
+  if (v === null || v === undefined || v === '') return '—';
+  const hit = map[v];
+  if (hit === undefined) {
+    console.warn(`[enumLabel] 未映射的枚举值: ${v}`);
+    return '—';
+  }
+  return hit;
+};
+
+/**
+ * 任务上下文 → 中文业务描述（整改 P4：UI 不渲染裸 JSON/英文键/UUID）。
+ * 按任务类型输出「户号 · 账期 · 数值」句式；未识别类型回退到通用
+ * 字段映射；均失败返回 null，由调用方决定是否展示折叠的技术详情。
+ */
+export const taskContextText = (type: string, ctx: unknown): string | null => {
+  if (!ctx || typeof ctx !== 'object') return null;
+  const c = ctx as Record<string, unknown>;
+  const s = (k: string) => (c[k] == null || c[k] === '' ? null : String(c[k]));
+  const yuan = (k: string) => {
+    const v = c[k];
+    return v == null ? null : fmtCent(String(v));
+  };
+  const num = (k: string, unit: string, label: string) =>
+    s(k) == null ? null : `${label} ${s(k)} ${unit}`;
+  const join = (parts: (string | null | false | undefined)[]) =>
+    parts.filter((x): x is string => !!x).join(' · ');
+  let text = '';
+  switch (type) {
+    case 'METER_REVIEW':
+      text = join([
+        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('period') && `账期 ${fmtPeriod(s('period'))}`,
+        num('usageQty', 'm³', '本期用量'),
+        num('avgUsage3', 'm³', '近3期均值'),
+        s('prevReadingValue') && `上期表底 ${s('prevReadingValue')}`,
+        s('readingValue') && `本期读数 ${s('readingValue')}`,
+      ]);
+      break;
+    case 'SUPPLEMENT':
+      text = join([
+        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('period') && `账期 ${fmtPeriod(s('period'))}`,
+        s('estimatedReadingValue') && `估计止度 ${s('estimatedReadingValue')}`,
+        s('actualReadingValue') && `实抄止度 ${s('actualReadingValue')}`,
+        s('diff') && `差值 ${s('diff')}`,
+      ]);
+      break;
+    case 'COLLECTION':
+      text = join([
+        s('settleNo') && `结算户 ${s('settleNo')}`,
+        yuan('arrearsCent') && `欠费 ${yuan('arrearsCent')}`,
+        s('overdueDays') != null && `逾期 ${s('overdueDays')} 天`,
+        yuan('thresholdCent') && `超阈值 ${yuan('thresholdCent')}`,
+        s('overdueBillCount') && `逾期账单 ${s('overdueBillCount')} 笔`,
+      ]);
+      break;
+    case 'REVERSAL_APPROVAL':
+      text = join([
+        s('originalPaymentNo') && `原收款单 ${s('originalPaymentNo')}`,
+        s('reversalPaymentNo') && `红冲收款单 ${s('reversalPaymentNo')}`,
+        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('period') && `账期 ${fmtPeriod(s('period'))}`,
+        yuan('amountCent') && `金额 ${yuan('amountCent')}`,
+        yuan('totalAmountCent') && `金额 ${yuan('totalAmountCent')}`,
+        s('reason') && `原因：${s('reason')}`,
+      ]);
+      break;
+    case 'WRITEOFF_APPROVAL':
+      text = join([
+        s('settleNo') && `结算户 ${s('settleNo')}`,
+        yuan('amountCent') && `核销金额 ${yuan('amountCent')}`,
+        s('reasonName') && `原因：${s('reasonName')}`,
+        s('effectiveDate') && `生效日 ${s('effectiveDate')}`,
+      ]);
+      break;
+    default:
+      break;
+  }
+  if (text) return text;
+  // 通用兜底：已知业务字段逐个翻译，纯技术字段（*Id/UUID）不展示
+  const FIELD_LABELS: Record<string, string> = {
+    waterAccountNo: '户号',
+    settleNo: '结算户',
+    period: '账期',
+    reason: '原因',
+    reasonName: '原因',
+    paymentNo: '收款单号',
+    billNo: '账单号',
+    planPeriod: '计划账期',
+  };
+  const parts = Object.entries(FIELD_LABELS)
+    .filter(([k]) => s(k) != null)
+    .map(([k, label]) => `${label} ${k === 'period' ? fmtPeriod(s(k)) : s(k)}`);
+  return parts.length ? parts.join(' · ') : null;
+};
 
 /** 水表读数等非负 Decimal 输入的表单校验（最多 4 位小数）。 */
 export const DECIMAL_RULE = {
@@ -133,12 +239,87 @@ export const cleanPatch = <T extends Record<string, unknown>>(
   return out;
 };
 
+/** 用水户水合结果：户号与客户名分开，表格里能拆成两列。 */
+export interface WaterAccountBrief {
+  accountNo: string;
+  customerName: string;
+}
+
 /**
- * 水表户 id → 户号 的批量水合 hook：结算/补差等列表只带
- * waterAccountId，逐条 GET /water-accounts/:id 解析成户号展示。
- * 需 customer:read —— 没有权限（或单条失败）时退化为短 uuid 显示。
+ * 用水户 id → {户号, 客户名称} 的批量水合 hook：结算/补差等列表只带
+ * waterAccountId，逐条 GET /water-accounts/:id 解析展示。
+ * 需 customer:read —— 没有权限（或单条失败）时 info 返回 null，
+ * accountLabel 退化为短 uuid。
+ *
+ * 返回两个 accessor：
+ * - accountInfo(id) → WaterAccountBrief | null  —— 表格分列用（户号列 +
+ *   客户名称列分开渲染）；
+ * - accountLabel(id) → '户号 · 客户名称' 单行文本 —— 详情标题、描述位用。
  */
 export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
+  const { hasPerm } = useAuth();
+  const canRead = hasPerm('customer:read');
+  const [briefs, setBriefs] = useState(
+    () => new Map<string, WaterAccountBrief | null>(),
+  );
+  const key = ids
+    .filter((i): i is string => !!i)
+    .sort()
+    .join(',');
+
+  useEffect(() => {
+    if (!canRead) return;
+    const missing = key.split(',').filter((id) => id && !briefs.has(id));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      missing.map((id) =>
+        api
+          .get<WaterAccount>(`/water-accounts/${id}`)
+          .then((r) => r.data)
+          .catch(() => null),
+      ),
+    ).then((res) => {
+      if (cancelled) return;
+      setBriefs((prev) => {
+        const next = new Map(prev);
+        res.forEach((a, i) =>
+          next.set(
+            missing[i],
+            a ? { accountNo: a.accountNo, customerName: a.customer.name } : null,
+          ),
+        );
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, canRead, briefs]);
+
+  const accountInfo = useCallback(
+    (id: string | null | undefined): WaterAccountBrief | null =>
+      id ? (briefs.get(id) ?? null) : null,
+    [briefs],
+  );
+  const accountLabel = useCallback(
+    (id: string | null | undefined) => {
+      if (!id) return '—';
+      const b = briefs.get(id);
+      // 人读规范：解析不到户号时显示占位符，绝不显示截断 uuid。
+      return b ? `${b.accountNo} · ${b.customerName}` : '—';
+    },
+    [briefs],
+  );
+  return { accountInfo, accountLabel };
+};
+
+/**
+ * 结算户 id → '结算户号 · 名称' 的批量水合 hook（账单列表等只带
+ * settleAccountId）。与 useWaterAccountLabels 同样的权限语义：
+ * 需 customer:read，缺失退化为短 uuid。
+ */
+export const useSettleAccountLabels = (ids: (string | null | undefined)[]) => {
   const { hasPerm } = useAuth();
   const canRead = hasPerm('customer:read');
   const [labels, setLabels] = useState(() => new Map<string, string | null>());
@@ -155,7 +336,7 @@ export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
     void Promise.all(
       missing.map((id) =>
         api
-          .get<WaterAccount>(`/water-accounts/${id}`)
+          .get<SettleAccount>(`/settle-accounts/${id}`)
           .then((r) => r.data)
           .catch(() => null),
       ),
@@ -163,7 +344,9 @@ export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
       if (cancelled) return;
       setLabels((prev) => {
         const next = new Map(prev);
-        res.forEach((a, i) => next.set(missing[i], a ? a.accountNo : null));
+        res.forEach((s, i) =>
+          next.set(missing[i], s ? `${s.settleNo} · ${s.name}` : null),
+        );
         return next;
       });
     });
@@ -175,7 +358,7 @@ export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
   return useCallback(
     (id: string | null | undefined) => {
       if (!id) return '—';
-      return labels.get(id) ?? `${id.slice(0, 8)}…`;
+      return labels.get(id) ?? '—';
     },
     [labels],
   );

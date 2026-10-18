@@ -386,12 +386,15 @@ export class ReportService {
 
   /**
    * GET /reports/recovery-rate?period=[&through=] — 回收率.
-   * Without `through`: single-month window — billed for bill.period = P
-   * over collected for received_at in month P. With `through=T`
-   * (T ≥ P): the cumulative variant — billed for bill.period ≤ T over
-   * collected received before the first day of month T+1 (Σ ≤ T on both
-   * sides). rate = collected / billed as a Decimal string at 4dp;
-   * billed = 0 → rate null (undefined ratio, not a fake 0 or ∞).
+   * Round-2 报告 §6 口径：rate = 账单销账额 / 应收 —— 分子只数分摊进
+   * 本期（或 ≤through）账单、且在该账单收费窗口（due_date）内入账的
+   * payment_alloc，天然 ≤100%；当月现金收款中与本期无关的历史欠费
+   * 清偿不再抬高分子。附加字段：
+   *   collected            当月现金实收（口径不变，作参考）
+   *   allocatedTotal       本期账单累计销账（含逾期后收回）
+   *   allocatedInWindow    其中收费窗口内销账（= rate 分子）
+   *   priorPeriodCollected 当月收款中清偿历史欠费（< period 的账单）部分
+   * billed = 0 → rate null（无意义而非假 0/∞）。
    *
    * Scope: TENANT-ONLY. The two sides of the ratio anchor differently —
    * billed follows the bill's water account (AGG_OWN), collected follows
@@ -443,10 +446,63 @@ export class ReportService {
             AND p.received_at < ${window.lt}`;
         collected = payRows[0]?.amount ?? 0n;
       }
+      // Round-2 报告 §6 — 回收率口径改为「本期应收的销账比例」：
+      //   rate = Σ payment_alloc.amount（分摊到 period ≤ P 的账单，且在
+      //          账单收费窗口 due_date 内入账）/ Σ billed。
+      // 付款侧日期取 payment.received_at（现金收款）；预存分摊取
+      // 台账 entry 的 created_at（抵充发生日）；due_date 为空视为不限窗口。
+      // 红冲收款产生负分摊，自然净减。历史欠费回收单列：
+      //   priorPeriodCollected = 本期收款中分摊到 period < P 账单的部分。
+      // 分子谓词必须与 billed 同集：单月模式 = 本期账单（period = P）；
+      // 截止月模式 = 累计账单（period <= through）。原实现单月模式也用
+      // period <= P，把早期账单的窗口内销账计入本期分子 → 回收率 >100%。
+      const billSetPredicate = q.through === undefined
+        ? Prisma.sql`b.period = ${q.period}`
+        : Prisma.sql`b.period <= ${q.through}`;
+      const allocRows = await tx.$queryRaw<
+        { in_window: bigint | null; total: bigint | null; prior: bigint | null }[]
+      >`
+        SELECT
+          sum(CASE WHEN ${billSetPredicate} THEN a.amount ELSE 0 END)::bigint AS total,
+          sum(CASE WHEN ${billSetPredicate}
+                    AND (b.due_date IS NULL
+                         OR COALESCE(p.received_at, e.created_at, a.created_at)::date <= b.due_date)
+                   THEN a.amount ELSE 0 END)::bigint AS in_window,
+          sum(CASE WHEN b.period < ${q.period}
+                    AND COALESCE(p.received_at, e.created_at, a.created_at) >= ${monthWindow(q.period).gte}
+                    AND COALESCE(p.received_at, e.created_at, a.created_at) < ${monthWindow(q.period).lt}
+                   THEN a.amount ELSE 0 END)::bigint AS prior
+        FROM payment_alloc a
+        JOIN bill b ON b.tenant_id = a.tenant_id AND b.id = a.bill_id
+        LEFT JOIN payment p
+          ON p.tenant_id = a.tenant_id AND p.id = a.payment_id
+         AND p.status IN ('RECEIVED', 'DAY_CLOSED')
+        LEFT JOIN prepayment_ledger_entry e
+          ON e.tenant_id = a.tenant_id AND e.id = a.prepayment_entry_id
+         AND e.bill_id = a.bill_id
+        WHERE a.tenant_id = ${ctx.tenantId}::uuid
+          AND (a.payment_id IS NULL OR p.id IS NOT NULL)
+          -- 与 billed 同谓词 —— DRAFT/REVERSED/REVERSAL 账单的分摊不进分子。
+          AND b.bill_kind <> 'REVERSAL'
+          AND b.status IN ('POSTED', 'PARTIAL_PAID', 'PAID')`;
+      const allocatedTotal = allocRows[0]?.total ?? 0n;
+      const allocatedInWindow = allocRows[0]?.in_window ?? 0n;
+      const priorPeriodCollected = allocRows[0]?.prior ?? 0n;
+      // 数据异常护栏：窗口内销账 > 应收 在修正后的口径下不应发生（分子账单
+      // 集 = 分母账单集，销账 ≤ 账单额）。一旦发生说明数据/分摊异常，
+      // 返回 anomaly 供前端告警，绝不渲染 >100% 的"正常"百分比。
+      const anomaly =
+        billed > 0n && allocatedInWindow > billed
+          ? {
+              code: 'ALLOC_EXCEEDS_BILLED',
+              allocatedInWindow,
+              billed,
+            }
+          : null;
       const rate =
-        billed === 0n
+        billed <= 0n || anomaly
           ? null
-          : new Prisma.Decimal(collected.toString())
+          : new Prisma.Decimal(allocatedInWindow.toString())
               .div(new Prisma.Decimal(billed.toString()))
               .toFixed(4);
       return {
@@ -454,7 +510,11 @@ export class ReportService {
         through: q.through ?? null,
         billed,
         collected,
+        allocatedTotal,
+        allocatedInWindow,
+        priorPeriodCollected,
         rate,
+        anomaly,
       };
     });
   }

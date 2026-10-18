@@ -20,6 +20,15 @@ import { assertUuid } from '../../common/uuid.js';
 import { FeeItemService, type FeeItemBody } from './fee-item.service.js';
 
 const CALC_TYPES = new Set(['PER_QTY', 'FIXED', 'PERCENT']);
+const FEE_ITEM_KINDS = new Set(['WATER_FEE', 'AGENCY', 'OTHER']);
+
+const assertKind = (v: unknown): string | undefined => {
+  if (v === undefined) return undefined;
+  if (typeof v !== 'string' || !FEE_ITEM_KINDS.has(v)) {
+    throw new BadRequestException({ code: 'FEE_ITEM_KIND_INVALID', value: v });
+  }
+  return v;
+};
 
 /** ?take default 50, hard-capped at 200; ?skip default 0. */
 const pageArgs = (take?: string, skip?: string) => ({
@@ -86,22 +95,23 @@ export class FeeItemController {
     if (!CALC_TYPES.has(calcType)) {
       throw new BadRequestException({ code: 'CALC_TYPE_INVALID', value: calcType });
     }
+    const kind = assertKind(body.kind);
     const ctx = currentTenant();
     return withOptionalIdem(
       this.prisma,
       this.idem,
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
-      (tx) => this.svc.createTx(tx, ctx, { ...body, code, name, calcType }),
+      (tx) => this.svc.createTx(tx, ctx, { ...body, code, name, calcType, kind }),
     );
   }
 
-  /** PATCH /fee-items/:id — {name} only; code/calcType → 400. */
+  /** PATCH /fee-items/:id — {name, kind}; code/calcType → 400. */
   @Patch(':id')
   @Permissions('billing:write')
   update(
     @Param('id') id: string,
-    @Body() body: { name?: string; code?: string; calcType?: string },
+    @Body() body: { name?: string; kind?: string; code?: string; calcType?: string },
     @Req() req: Request,
   ) {
     assertUuid(id, 'id');
@@ -111,9 +121,10 @@ export class FeeItemController {
     if (body?.name !== undefined && (typeof body.name !== 'string' || !body.name.trim())) {
       throw new BadRequestException({ code: 'FEE_ITEM_NAME_INVALID' });
     }
+    const kind = assertKind(body.kind);
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      this.svc.updateTx(tx, ctx, id, { name: body?.name?.trim() }, req),
+      this.svc.updateTx(tx, ctx, id, { name: body?.name?.trim(), kind }, req),
     );
   }
 }

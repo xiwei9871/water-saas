@@ -3,6 +3,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons';
 import {
   Alert,
@@ -25,24 +26,35 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api, apiErrorText, ApiError } from '../../api/client';
 import type {
   ConsumptionComponent,
   ConsumptionSettlement,
   EstimatePreview,
+  MeterReading,
+  ReadingBook,
+  SettlementBatchItem,
+  SettlementBatchReport,
   SettlementStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   DECIMAL_RULE,
   cleanBody,
+  fmtDate,
   fmtPeriod,
   fmtTime,
   newIdemKey,
   useWaterAccountLabels,
 } from '../common';
-import { CustomerSelect, WaterAccountSelect } from '../pickers';
+import {
+  BillingAccountSelect,
+  CustomerSelect,
+  OrgUnitTreeSelect,
+  WaterAccountSelect,
+} from '../pickers';
 import {
   COMPONENT_SOURCE_COLORS,
   COMPONENT_SOURCE_LABELS,
@@ -50,6 +62,7 @@ import {
   SETTLEMENT_STATUS_COLORS,
   SETTLEMENT_STATUS_LABELS,
 } from './common';
+import { EXCEPTION_CODE_LABELS } from '../metering/common';
 
 interface GenerateFormValues {
   customerId?: string; // 仅级联过滤
@@ -59,7 +72,25 @@ interface GenerateFormValues {
   estimateReason?: string;
 }
 
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+/** RC1-3: 批量生成表单 —— 账期必填，册/营业所二选一或都不填（全范围）。 */
+interface BatchFormValues {
+  period: dayjs.Dayjs;
+  bookId?: string;
+  orgUnitId?: string;
+  estimateReason?: string;
+}
+
+const BATCH_STATUS_META: Record<
+  SettlementBatchItem['status'],
+  { label: string; color: string }
+> = {
+  READY: { label: '可生成', color: 'green' },
+  READY_ESTIMATED: { label: '可生成·预估', color: 'orange' },
+  GENERATED: { label: '已生成', color: 'green' },
+  GENERATED_ESTIMATED: { label: '已生成·预估', color: 'orange' },
+  SKIPPED_EXISTS: { label: '已存在·跳过', color: 'blue' },
+  FAILED: { label: '失败', color: 'red' },
+};
 
 /**
  * 结算水量：列表（账期/账户/状态/预估过滤）+ 详情抽屉（分量 + 预估依据）
@@ -70,13 +101,16 @@ export default function Settlements() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
+  // 终审是复核动作 —— 抄表员只生成草稿，终审归复核员（Round-2 报告 §3）。
+  const canFinalize = hasPerm('metering:qc');
   const canCustomerRead = hasPerm('customer:read');
+  const canIamRead = hasPerm('iam:read');
 
   const [rows, setRows] = useState<ConsumptionSettlement[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterCustomerId, setFilterCustomerId] = useState<string | undefined>(undefined);
   const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
-  const [accountIdInput, setAccountIdInput] = useState(''); // 无 customer:read 的兜底输入
+  const [accountIdInput, setAccountIdInput] = useState<string | undefined>(undefined); // 无 customer:read 的业务侧选户
   const [period, setPeriod] = useState<dayjs.Dayjs | null>(null);
   const [status, setStatus] = useState<SettlementStatus | undefined>(undefined);
   const [isEstimated, setIsEstimated] = useState<boolean | undefined>(undefined);
@@ -92,21 +126,72 @@ export default function Settlements() {
   const [preview, setPreview] = useState<EstimatePreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [genForm] = Form.useForm<GenerateFormValues>();
-  // 账户变化后预览作废 —— 避免把别的账户的建议量当成依据（账期侧在
-  // DatePicker onChange 里同样处理）。setState 走 microtask，不在 effect
-  // 内同步触发级联渲染。
+  // Round-2: 自动预填的「预估原因」文本。账户/账期一变，若字段仍等于自动
+  // 文本则清掉（防止沿用他户原因）；操作员手改过的内容永远保留。
+  const prefilledReasonRef = useRef<string | null>(null);
+  const clearStaleEstimateReason = useCallback(() => {
+    const cur = genForm.getFieldValue('estimateReason');
+    if (prefilledReasonRef.current && cur === prefilledReasonRef.current) {
+      genForm.setFieldValue('estimateReason', undefined);
+    }
+    prefilledReasonRef.current = null;
+  }, [genForm]);
+  // Round-2 §7: 预估原因在选定「户 + 账期」后立即自动预填（不再依赖点
+  // 预览按钮）——拉当期 NO_READ 记录的 exceptionCode 中文标签。字段为空
+  // 或仍是上一条自动文本时才写入；手改过的内容永远保留。
+  const prefillEstimateReason = useCallback(
+    async (accountId: string, period: string) => {
+      try {
+        const rd = await api.get<MeterReading[]>('/meter-readings', {
+          params: {
+            waterAccountId: accountId,
+            period,
+            resultType: 'NO_READ',
+            take: 5,
+          },
+        });
+        const noRead = rd.data.find((r) => r.exceptionCode) ?? rd.data[0];
+        const code = noRead?.exceptionCode;
+        if (noRead && code) {
+          const cur = genForm.getFieldValue('estimateReason');
+          if (!cur || cur === prefilledReasonRef.current) {
+            const text = `未抄见（${enumLabel(EXCEPTION_CODE_LABELS, code)}），按预估口径结算`;
+            genForm.setFieldValue('estimateReason', text);
+            prefilledReasonRef.current = text;
+          }
+        }
+      } catch {
+        // 预填失败不阻塞 —— 操作员仍可手填。
+      }
+    },
+    [genForm],
+  );
+
+  // 账户/账期变化后预览作废 —— 避免把别户别期的建议量当依据；同时尝试
+  // 重新预填预估原因。setState 走 microtask，不在 effect 内同步级联。
   const genAccountId = Form.useWatch('waterAccountId', genForm);
+  const genPeriod = Form.useWatch('period', genForm);
   useEffect(() => {
-    queueMicrotask(() => setPreview(null));
-  }, [genAccountId]);
+    queueMicrotask(() => {
+      setPreview(null);
+      clearStaleEstimateReason();
+      if (genAccountId && genPeriod) {
+        void prefillEstimateReason(genAccountId, genPeriod.format('YYYYMM'));
+      }
+    });
+  }, [genAccountId, genPeriod, clearStaleEstimateReason, prefillEstimateReason]);
 
   const [acting, setActing] = useState<string | null>(null);
 
-  const effectiveAccountId = canCustomerRead
-    ? waterAccountId
-    : UUID_RE.test(accountIdInput.trim())
-      ? accountIdInput.trim()
-      : undefined;
+  // RC1-3 批量生成
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchBooks, setBatchBooks] = useState<ReadingBook[]>([]);
+  const [batchPreview, setBatchPreview] = useState<SettlementBatchReport | null>(null);
+  const [batchResult, setBatchResult] = useState<SettlementBatchReport | null>(null);
+  const [batchBusy, setBatchBusy] = useState<'preview' | 'run' | null>(null);
+  const [batchForm] = Form.useForm<BatchFormValues>();
+
+  const effectiveAccountId = canCustomerRead ? waterAccountId : accountIdInput;
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -136,7 +221,14 @@ export default function Settlements() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  const accountLabel = useWaterAccountLabels(rows.map((r) => r.waterAccountId));
+  const { accountLabel, accountInfo } = useWaterAccountLabels(
+    rows.map((r) => r.waterAccountId),
+  );
+  // 批量 preview/run 结果项也要客户名称 —— 同一 hook、同一缓存。
+  const batchItems = (batchResult ?? batchPreview)?.items ?? [];
+  const { accountInfo: batchAccountInfo } = useWaterAccountLabels(
+    batchItems.map((i) => i.waterAccountId),
+  );
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -177,7 +269,7 @@ export default function Settlements() {
   const doPreview = async () => {
     const values = genForm.getFieldsValue();
     if (!values.waterAccountId || !values.period) {
-      message.warning('请先选择水表户与账期');
+      message.warning('请先选择用水户与账期');
       return;
     }
     setPreviewing(true);
@@ -187,6 +279,11 @@ export default function Settlements() {
         period: values.period.format('YYYYMM'),
       });
       setPreview(res.data);
+      // 兜底再试一次 —— 户/期未变而选中后拉取失败（瞬时网络）的场景。
+      await prefillEstimateReason(
+        values.waterAccountId,
+        values.period.format('YYYYMM'),
+      );
     } catch (err) {
       message.error(apiErrorText(err));
       setPreview(null);
@@ -225,6 +322,101 @@ export default function Settlements() {
     }
   };
 
+  const openBatch = () => {
+    batchForm.resetFields();
+    setBatchPreview(null);
+    setBatchResult(null);
+    setBatchOpen(true);
+    api
+      .get<ReadingBook[]>('/reading-books', { params: { take: 200 } })
+      .then((res) => setBatchBooks(res.data))
+      .catch(() => setBatchBooks([]));
+  };
+
+  const batchPayload = async (): Promise<Record<string, unknown> | null> => {
+    let values: BatchFormValues;
+    try {
+      values = await batchForm.validateFields();
+    } catch {
+      return null;
+    }
+    return cleanBody({
+      period: values.period.format('YYYYMM'),
+      bookId: values.bookId,
+      orgUnitId: values.orgUnitId,
+      estimateReason: values.estimateReason,
+    });
+  };
+
+  const runBatchPreview = async () => {
+    const payload = await batchPayload();
+    if (!payload) return;
+    setBatchBusy('preview');
+    try {
+      const res = await api.post<SettlementBatchReport>(
+        '/consumption-settlements/batch/preview',
+        payload,
+      );
+      setBatchPreview(res.data);
+      setBatchResult(null);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setBatchBusy(null);
+    }
+  };
+
+  const runBatchExecute = async () => {
+    const payload = await batchPayload();
+    if (!payload) return;
+    setBatchBusy('run');
+    try {
+      const res = await api.post<SettlementBatchReport>(
+        '/consumption-settlements/batch',
+        payload,
+      );
+      setBatchResult(res.data);
+      message.success(
+        `批量生成完成：成功 ${res.data.counts.generated + res.data.counts.generatedEstimated} 户，跳过 ${res.data.counts.skippedExists} 户，失败 ${res.data.counts.failed} 户`,
+      );
+      await load(page, pageSize);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setBatchBusy(null);
+    }
+  };
+
+  const batchItemColumns: ColumnsType<SettlementBatchItem> = [
+    { title: '户号', dataIndex: 'accountNo', key: 'accountNo', width: 150 },
+    {
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, i: SettlementBatchItem) =>
+        batchAccountInfo(i.waterAccountId)?.customerName ?? '—',
+    },
+    {
+      title: '结果',
+      dataIndex: 'status',
+      key: 'status',
+      width: 120,
+      render: (s: SettlementBatchItem['status']) => (
+        <Tag color={BATCH_STATUS_META[s].color}>{BATCH_STATUS_META[s].label}</Tag>
+      ),
+    },
+    {
+      title: '说明',
+      dataIndex: 'errorCode',
+      key: 'errorCode',
+      render: (code: string | undefined) =>
+        code ? apiErrorText(new ApiError(code, 0)) : '—',
+    },
+  ];
+
+  const batchShown = batchResult ?? batchPreview;
+
   const columns: ColumnsType<ConsumptionSettlement> = [
     {
       title: '账期',
@@ -234,15 +426,21 @@ export default function Settlements() {
       render: fmtPeriod,
     },
     {
-      title: '水表户',
+      title: '户号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
-      render: (id: string) => (
-        <Tooltip title={id}>
-          <span>{accountLabel(id)}</span>
-        </Tooltip>
+      render: (id: string, r: ConsumptionSettlement) => (
+        <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? '—'}</span>
       ),
+    },
+    {
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, r: ConsumptionSettlement) =>
+        r.customerName ?? accountInfo(r.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '结算水量',
@@ -258,7 +456,7 @@ export default function Settlements() {
       render: (_: unknown, r: ConsumptionSettlement) =>
         r.isEstimated ? (
           <Tag color="orange">
-            预估{r.estimateMethod ? `（${ESTIMATE_METHOD_LABELS[r.estimateMethod]}）` : ''}
+            预估{r.estimateMethod ? `（${enumLabel(ESTIMATE_METHOD_LABELS, r.estimateMethod)}）` : ''}
           </Tag>
         ) : (
           <Tag color="green">实读</Tag>
@@ -278,7 +476,7 @@ export default function Settlements() {
       key: 'status',
       width: 90,
       render: (s: SettlementStatus) => (
-        <Tag color={SETTLEMENT_STATUS_COLORS[s]}>{SETTLEMENT_STATUS_LABELS[s]}</Tag>
+        <Tag color={SETTLEMENT_STATUS_COLORS[s]}>{enumLabel(SETTLEMENT_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -297,7 +495,7 @@ export default function Settlements() {
           <Button size="small" icon={<SearchOutlined />} onClick={() => void openDetail(record)}>
             详情
           </Button>
-          {canWrite && record.status === 'DRAFT' && (
+          {canFinalize && record.status === 'DRAFT' && (
             <Popconfirm
               title={`终审 ${fmtPeriod(record.period)} 结算？`}
               description="终审后不可修改；错误终审通过补差处理。"
@@ -323,15 +521,10 @@ export default function Settlements() {
 
   const componentColumns: ColumnsType<ConsumptionComponent> = [
     {
-      title: '安装记录',
-      dataIndex: 'installationId',
-      key: 'installationId',
-      width: 110,
-      render: (id: string) => (
-        <Tooltip title={id}>
-          <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-        </Tooltip>
-      ),
+      title: '表号',
+      key: 'meterNo',
+      width: 120,
+      render: (_: unknown, c: ConsumptionComponent) => c.meterNo ?? '—',
     },
     {
       title: '来源',
@@ -339,12 +532,16 @@ export default function Settlements() {
       key: 'sourceType',
       width: 110,
       render: (t: ConsumptionComponent['sourceType'], c) =>
-        t === 'ESTIMATE' && c.sourceReadingId ? (
-          <Tooltip title={`抄表员在未抄见时给出的预计用量，来源读数 ${c.sourceReadingId.slice(0, 8)}…`}>
+        t === 'ESTIMATE' && c.sourceReading ? (
+          <Tooltip
+            title={`抄表员在未抄见时给出的预计用量 ${c.sourceReading.estimateQty ?? '—'} m³（${fmtPeriod(
+              c.sourceReading.period,
+            )} · ${fmtDate(c.sourceReading.readDate)}）`}
+          >
             <Tag color="cyan">抄表员估水</Tag>
           </Tooltip>
         ) : (
-          <Tag color={COMPONENT_SOURCE_COLORS[t]}>{COMPONENT_SOURCE_LABELS[t]}</Tag>
+          <Tag color={COMPONENT_SOURCE_COLORS[t]}>{enumLabel(COMPONENT_SOURCE_LABELS, t)}</Tag>
         ),
     },
     {
@@ -371,17 +568,18 @@ export default function Settlements() {
     },
     {
       title: '来源读数',
-      dataIndex: 'sourceReadingId',
-      key: 'sourceReadingId',
-      width: 110,
-      render: (id: string | null) =>
-        id ? (
-          <Tooltip title={id}>
-            <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
+      key: 'sourceReading',
+      width: 170,
+      render: (_: unknown, c: ConsumptionComponent) => {
+        const r = c.sourceReading;
+        if (!r) return '—';
+        const val = r.readingValue ?? r.estimateQty;
+        return (
+          <Tooltip title={`读数ID ${r.id}`}>
+            {val ?? '—'} m³ · {fmtDate(r.readDate)}
           </Tooltip>
-        ) : (
-          '—'
-        ),
+        );
+      },
     },
   ];
 
@@ -411,19 +609,21 @@ export default function Settlements() {
                     setWaterAccountId(v);
                     setPage(1);
                   }}
-                  placeholder="按水表户过滤"
+                  placeholder="按用水户过滤"
                 />
               </span>
             </>
           ) : (
-            <Input.Search
-              allowClear
-              placeholder="按水表户 ID 过滤"
-              style={{ width: 260 }}
-              value={accountIdInput}
-              onChange={(e) => setAccountIdInput(e.target.value)}
-              onSearch={() => setPage(1)}
-            />
+            <span style={{ width: 260, display: 'inline-block' }}>
+              <BillingAccountSelect
+                value={accountIdInput}
+                onChange={(v) => {
+                  setAccountIdInput(v);
+                  setPage(1);
+                }}
+                placeholder="搜索户号/客户名称过滤"
+              />
+            </span>
           )}
           <DatePicker
             picker="month"
@@ -441,7 +641,7 @@ export default function Settlements() {
             style={{ width: 100 }}
             options={(['DRAFT', 'FINAL'] as const).map((s) => ({
               value: s,
-              label: SETTLEMENT_STATUS_LABELS[s],
+              label: enumLabel(SETTLEMENT_STATUS_LABELS, s),
             }))}
             value={status}
             onChange={(v) => {
@@ -473,11 +673,17 @@ export default function Settlements() {
               onClick={() => {
                 genForm.resetFields();
                 setPreview(null);
+                prefilledReasonRef.current = null;
                 setGenIdemKey(newIdemKey());
                 setGenOpen(true);
               }}
             >
               生成结算
+            </Button>
+          )}
+          {canWrite && (
+            <Button icon={<ThunderboltOutlined />} onClick={openBatch}>
+              批量生成
             </Button>
           )}
         </Space>
@@ -489,7 +695,7 @@ export default function Settlements() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1100, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -508,7 +714,11 @@ export default function Settlements() {
         width={720}
         title={
           detail
-            ? `结算详情 — ${accountLabel(detail.waterAccountId)} · ${fmtPeriod(detail.period)}`
+            ? `结算详情 — ${
+                detail.accountNo
+                  ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                  : accountLabel(detail.waterAccountId)
+              } · ${fmtPeriod(detail.period)}`
             : '结算详情'
         }
         onClose={() => setDetail(null)}
@@ -528,14 +738,16 @@ export default function Settlements() {
                   label: '状态',
                   children: (
                     <Tag color={SETTLEMENT_STATUS_COLORS[detail.status]}>
-                      {SETTLEMENT_STATUS_LABELS[detail.status]}
+                      {enumLabel(SETTLEMENT_STATUS_LABELS, detail.status)}
                     </Tag>
                   ),
                 },
                 {
                   key: 'wa',
-                  label: '水表户',
-                  children: accountLabel(detail.waterAccountId),
+                  label: '用水户',
+                  children: detail.accountNo
+                    ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                    : accountLabel(detail.waterAccountId),
                 },
                 {
                   key: 'total',
@@ -570,7 +782,7 @@ export default function Settlements() {
                           ? detail.estimateMethod === 'MANUAL' &&
                             detail.components.some((c) => c.sourceReadingId)
                             ? '抄表员预计用量'
-                            : ESTIMATE_METHOD_LABELS[detail.estimateMethod]
+                            : enumLabel(ESTIMATE_METHOD_LABELS, detail.estimateMethod)
                           : '—',
                       },
                       {
@@ -602,7 +814,7 @@ export default function Settlements() {
       </Drawer>
 
       {/* 生成结算 */}
-      <Modal
+      <Modal maskClosable={false}
         open={genOpen}
         title="生成结算（草稿）"
         okText="生成"
@@ -621,15 +833,15 @@ export default function Settlements() {
         <Form form={genForm} layout="vertical">
           {canCustomerRead ? (
             <>
-              <Form.Item name="customerId" label="客户（仅用于过滤水表户）">
+              <Form.Item name="customerId" label="客户（仅用于过滤用水户）">
                 <CustomerSelect />
               </Form.Item>
               <Form.Item noStyle shouldUpdate={(a, b) => a.customerId !== b.customerId}>
                 {({ getFieldValue }) => (
                   <Form.Item
                     name="waterAccountId"
-                    label="水表户"
-                    rules={[{ required: true, message: '请选择水表户' }]}
+                    label="用水户"
+                    rules={[{ required: true, message: '请选择用水户' }]}
                   >
                     <WaterAccountSelect customerId={getFieldValue('customerId')} />
                   </Form.Item>
@@ -639,14 +851,10 @@ export default function Settlements() {
           ) : (
             <Form.Item
               name="waterAccountId"
-              label="水表户 ID"
-              rules={[
-                { required: true, message: '请输入水表户 ID' },
-                { pattern: UUID_RE, message: 'ID 格式不正确' },
-              ]}
-              extra="无客户查询权限，需直接填写水表户 ID"
+              label="用水户"
+              rules={[{ required: true, message: '请选择用水户' }]}
             >
-              <Input placeholder="水表户 uuid" />
+              <BillingAccountSelect placeholder="搜索户号/客户名称" />
             </Form.Item>
           )}
           <Form.Item
@@ -657,7 +865,10 @@ export default function Settlements() {
             <DatePicker
               picker="month"
               style={{ width: '100%' }}
-              onChange={() => setPreview(null)}
+              onChange={() => {
+                setPreview(null);
+                clearStaleEstimateReason();
+              }}
             />
           </Form.Item>
           <Form.Item label="预估预览">
@@ -676,7 +887,7 @@ export default function Settlements() {
                   message={
                     preview.suggestedUsage === null
                       ? '无历史实读用量，建议手工填写用量'
-                      : `建议用量 ${preview.suggestedUsage}（${ESTIMATE_METHOD_LABELS[preview.method]}）`
+                      : `建议用量 ${preview.suggestedUsage}（${enumLabel(ESTIMATE_METHOD_LABELS, preview.method)}）`
                   }
                   description={
                     preview.basis.historyUsageQtys.length > 0
@@ -703,6 +914,108 @@ export default function Settlements() {
             <Input.TextArea rows={2} placeholder="如：连续两月未抄见，按近三月均量预估" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* RC1-3 批量生成结算 */}
+      <Modal maskClosable={false}
+        open={batchOpen}
+        title="批量生成结算"
+        width={720}
+        footer={[
+          <Button key="close" onClick={() => setBatchOpen(false)}>
+            关闭
+          </Button>,
+          <Button
+            key="preview"
+            icon={<SearchOutlined />}
+            loading={batchBusy === 'preview'}
+            onClick={() => void runBatchPreview()}
+          >
+            预览分类
+          </Button>,
+          <Button
+            key="run"
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            loading={batchBusy === 'run'}
+            onClick={() => void runBatchExecute()}
+          >
+            批量生成
+          </Button>,
+        ]}
+        onCancel={() => setBatchOpen(false)}
+        destroyOnHidden={false}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="服务端按账期筛选候选户（可按抄表册或营业所缩小范围），逐户独立生成：单户失败不影响其他户，重复执行不会重复生成。预估户需填预估原因。"
+        />
+        <Form form={batchForm} layout="vertical">
+          <Form.Item
+            name="period"
+            label="账期"
+            rules={[{ required: true, message: '请选择账期' }]}
+          >
+            <DatePicker picker="month" style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="bookId" label="抄表册（可空，缩小范围）">
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="不选则覆盖全部有安装的户"
+              options={batchBooks.map((b) => ({
+                value: b.id,
+                label: `${b.name}（${b.bookNo}）`,
+              }))}
+            />
+          </Form.Item>
+          {canIamRead && (
+            <Form.Item name="orgUnitId" label="营业所（可空，缩小范围）">
+              <OrgUnitTreeSelect placeholder="按当前册属营业所子树筛选" />
+            </Form.Item>
+          )}
+          <Form.Item
+            name="estimateReason"
+            label="预估原因"
+            extra="存在预估户时必填；不填则预估户标记为失败（ESTIMATE_REASON_REQUIRED）"
+          >
+            <Input.TextArea rows={2} placeholder="如：本月抄表受阻，按近三月均量预估" />
+          </Form.Item>
+        </Form>
+        {batchShown && (
+          <>
+            <Space wrap style={{ marginBottom: 8 }}>
+              <Tag color="blue">候选 {batchShown.total} 户</Tag>
+              {batchResult ? (
+                <>
+                  <Tag color="green">
+                    已生成 {batchShown.counts.generated + batchShown.counts.generatedEstimated}
+                  </Tag>
+                  <Tag color="orange">其中预估 {batchShown.counts.generatedEstimated}</Tag>
+                  <Tag color="blue">已存在跳过 {batchShown.counts.skippedExists}</Tag>
+                  <Tag color="red">失败 {batchShown.counts.failed}</Tag>
+                </>
+              ) : (
+                <>
+                  <Tag color="green">可生成 {batchShown.counts.ready}</Tag>
+                  <Tag color="orange">可生成·预估 {batchShown.counts.readyEstimated}</Tag>
+                  <Tag color="blue">已存在跳过 {batchShown.counts.skippedExists}</Tag>
+                  <Tag color="red">不可生成 {batchShown.counts.failed}</Tag>
+                </>
+              )}
+            </Space>
+            <Table<SettlementBatchItem>
+              rowKey="waterAccountId"
+              size="small"
+              columns={batchItemColumns}
+              dataSource={batchShown.items}
+              pagination={{ pageSize: 10, showSizeChanger: false }}
+            />
+          </>
+        )}
       </Modal>
     </Card>
   );

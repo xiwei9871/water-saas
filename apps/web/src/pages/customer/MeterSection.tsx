@@ -1,7 +1,11 @@
 import { SwapOutlined } from '@ant-design/icons';
 import { Alert, Button, Descriptions, Space, Table } from 'antd';
 import type { AccountInstallation, InstallReason, WaterAccountDetail } from '../../api/types';
-import { fmtDate, INSTALL_REASON_LABELS } from '../common';
+import {
+  enumLabel,
+  fmtDate,
+  INSTALL_REASON_LABELS,
+} from '../common';
 import { InstallationStatusTag } from '../pickers';
 
 export function MeterSection({
@@ -114,7 +118,7 @@ export function MeterSection({
           {
             title: '原因',
             dataIndex: 'reason',
-            render: (r: InstallReason) => INSTALL_REASON_LABELS[r],
+            render: (r: InstallReason) => enumLabel(INSTALL_REASON_LABELS, r),
           },
           {
             title: '状态',

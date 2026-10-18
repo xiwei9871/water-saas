@@ -69,7 +69,7 @@ function InstallationSelect({
       optionFilterProp="label"
       options={opts.map((i) => ({
         value: i.id,
-        label: `${i.meter.meterNo} · 户 ${i.waterAccount.accountNo} · ${i.status === 'ACTIVE' ? '在用' : '已拆'}`,
+        label: `${i.meter.meterNo} · 户 ${i.waterAccount.accountNo}${i.waterAccount.customer?.name ? ` · ${i.waterAccount.customer.name}` : ''} · ${i.status === 'ACTIVE' ? '在用' : '已拆'}`,
       }))}
     />
   );
@@ -107,7 +107,7 @@ export default function RemoteDevices() {
   const [bindForm] = Form.useForm<BindingFormValues>();
 
   const sourceName = useCallback(
-    (id: string) => sources.find((s) => s.id === id)?.name ?? `${id.slice(0, 8)}…`,
+    (id: string) => sources.find((s) => s.id === id)?.name ?? '—',
     [sources],
   );
 
@@ -266,8 +266,8 @@ export default function RemoteDevices() {
         key: 'inst',
         render: (_, b) =>
           b.installation
-            ? `${b.installation.meter.meterNo} · 户 ${b.installation.waterAccount.accountNo}`
-            : b.installationId.slice(0, 8),
+            ? `${b.installation.meter.meterNo} · 户 ${b.installation.waterAccount.accountNo}${b.installation.waterAccount.customer?.name ? ` · ${b.installation.waterAccount.customer.name}` : ''}`
+            : '—',
       },
       { title: '生效自', dataIndex: 'effectiveFrom', width: 170, render: fmtTime },
       {
@@ -388,7 +388,7 @@ export default function RemoteDevices() {
         }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         title={modal?.kind === 'edit' ? '编辑设备' : '登记设备'}
         open={modal !== null}
         onCancel={() => setModal(null)}
@@ -423,6 +423,7 @@ export default function RemoteDevices() {
       </Modal>
 
       <Drawer
+        maskClosable={false}
         title={`设备 ${detail?.vendorDeviceKey ?? ''} — 绑定历史`}
         open={detail !== null}
         onClose={() => setDetail(null)}
@@ -456,7 +457,7 @@ export default function RemoteDevices() {
             )}
           </>
         )}
-        <Modal
+        <Modal maskClosable={false}
           title="新增生效区间绑定"
           open={bindModal}
           onCancel={() => setBindModal(false)}

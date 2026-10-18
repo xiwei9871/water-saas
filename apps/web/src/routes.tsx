@@ -1,15 +1,19 @@
 import {
   AlertOutlined,
+  AppstoreOutlined,
   DashboardOutlined,
   FileTextOutlined,
   GoldOutlined,
   PayCircleOutlined,
   ReadOutlined,
+  SearchOutlined,
   SettingOutlined,
   TeamOutlined,
   TransactionOutlined,
 } from '@ant-design/icons';
+
 import type { ReactNode } from 'react';
+import Home from './pages/Home';
 import Workbench from './pages/Workbench';
 import BillingRuns from './pages/billing/BillingRuns';
 import Bills from './pages/billing/Bills';
@@ -28,12 +32,25 @@ import RemoteDevices from './pages/metering/RemoteDevices';
 import RemoteEvents from './pages/metering/RemoteEvents';
 import RemoteSources from './pages/metering/RemoteSources';
 import Cashier from './pages/payment/Cashier';
+import CollectionNotices from './pages/payment/CollectionNotices';
 import DayClose from './pages/payment/DayClose';
 import Payments from './pages/payment/Payments';
-import Reports from './pages/report/Reports';
+import Prepayments from './pages/payment/Prepayments';
+import ReceiptDocs from './pages/payment/ReceiptDocs';
+import Recon from './pages/payment/Recon';
+import Writeoffs from './pages/payment/Writeoffs';
+import InstallApplications from './pages/install/Applications';
+import Analysis from './pages/report/Analysis';
+import MetricDict from './pages/report/MetricDict';
+import MetricQuery from './pages/report/MetricQuery';
+import OpsMonthly from './pages/report/OpsMonthly';
+import OpsYearly from './pages/report/OpsYearly';
+import UnifiedQuery from './pages/report/UnifiedQuery';
+import Tasks from './pages/tasks/Tasks';
 import Reconciliations from './pages/settlement/Reconciliations';
 import Settlements from './pages/settlement/Settlements';
 import AuditLogs from './pages/system/AuditLogs';
+import Dicts from './pages/system/Dicts';
 import Orgs from './pages/system/Orgs';
 import Roles from './pages/system/Roles';
 import Staff from './pages/system/Staff';
@@ -55,17 +72,34 @@ export interface AppRoute {
   path: string;
   label: string;
   icon?: ReactNode;
+  /** 路由级守卫：PermRoute 拦截。 */
   perms?: string[];
+  /**
+   * 菜单可见性门槛（缺省同 perms）。与 perms 分离的场景：驾驶舱 `/`
+   * 是登录默认落地页，无 report:read 的用户不能 403，要在组件内
+   * 重定向到 /workbench——路由不拦，菜单用 menuPerms 隐藏。
+   */
+  menuPerms?: string[];
   element?: ReactNode;
   children?: AppRoute[];
 }
 
 export const APP_ROUTES: AppRoute[] = [
+  // N1 驾驶舱提级：独立一级菜单 + 登录默认落地页；无 report:read 由
+  // Home 组件内重定向到工作台。
+  {
+    key: 'cockpit',
+    path: '/',
+    label: '经营驾驶舱',
+    icon: <DashboardOutlined />,
+    menuPerms: ['report:read'],
+    element: <Home />,
+  },
   {
     key: 'workbench',
-    path: '/',
+    path: '/workbench',
     label: '工作台',
-    icon: <DashboardOutlined />,
+    icon: <AppstoreOutlined />,
     element: <Workbench />,
   },
   {
@@ -75,6 +109,13 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <AlertOutlined />,
     perms: ['exception:read'],
     element: <Exceptions />,
+  },
+  {
+    key: 'tasks',
+    path: '/tasks',
+    label: '待办中心',
+    icon: <FileTextOutlined />,
+    element: <Tasks />,
   },
   {
     key: 'customer',
@@ -100,7 +141,7 @@ export const APP_ROUTES: AppRoute[] = [
       {
         key: 'customer-water-accounts',
         path: '/customer/water-accounts',
-        label: '水表户',
+        label: '用水户',
         element: <WaterAccounts />,
       },
       {
@@ -112,7 +153,7 @@ export const APP_ROUTES: AppRoute[] = [
       {
         key: 'customer-meters',
         path: '/customer/meters',
-        label: '水表档案',
+        label: '水表管理',
         element: <Meters />,
       },
     ],
@@ -165,7 +206,7 @@ export const APP_ROUTES: AppRoute[] = [
   {
     key: 'settlement',
     path: '/settlement',
-    label: '结算补差',
+    label: '结算管理',
     icon: <TransactionOutlined />,
     // settlement 列表归 metering，reconciliation 归 billing — 任一可读即显示。
     perms: ['metering:read', 'billing:read'],
@@ -240,10 +281,57 @@ export const APP_ROUTES: AppRoute[] = [
         element: <Payments />,
       },
       {
+        key: 'payment-prepayments',
+        path: '/payment/prepayments',
+        label: '预存管理',
+        element: <Prepayments />,
+      },
+      {
         key: 'payment-day-close',
         path: '/payment/day-close',
         label: '收费员日结',
         element: <DayClose />,
+      },
+      {
+        key: 'payment-writeoffs',
+        path: '/payment/writeoffs',
+        label: '坏账核销',
+        element: <Writeoffs />,
+      },
+      {
+        key: 'payment-notices',
+        path: '/payment/collection-notices',
+        label: '催缴通知',
+        element: <CollectionNotices />,
+      },
+      {
+        key: 'payment-recon',
+        path: '/payment/recon',
+        label: '渠道对账',
+        element: <Recon />,
+      },
+      {
+        key: 'payment-receipt-docs',
+        path: '/payment/receipt-docs',
+        label: '票据台账',
+        element: <ReceiptDocs />,
+      },
+    ],
+  },
+  // S1 报装管理：独立于营销菜单组的业扩域（申请→勘察→审批→装表→归档）。
+  {
+    key: 'install',
+    path: '/install',
+    label: '报装管理',
+    icon: <FileTextOutlined />,
+    perms: ['install:read'],
+    children: [
+      {
+        key: 'install-applications',
+        path: '/install/applications',
+        label: '报装申请',
+        perms: ['install:read'],
+        element: <InstallApplications />,
       },
     ],
   },
@@ -254,36 +342,46 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <FileTextOutlined />,
     perms: ['report:read'],
     children: [
-      // 同一组件按 kind 渲染；key 强制重挂载，路由切换不复用旧查询态。
+      // 需求§三：报表 = 日报/月报/年报 3 张（总量+分类+异常明细），
+      // 明细查询与指标字典不属于报表（整改报告 2026-10-14）。
       {
-        key: 'report-meter-daily',
-        path: '/report/meter-daily',
-        label: '抄表日报',
-        element: <Reports key="meter-daily" kind="meter-daily" />,
+        key: 'report-ops-daily',
+        path: '/report/ops-daily',
+        label: '日报',
+        element: <Analysis key="ops-daily" kind="ops-daily" />,
       },
       {
-        key: 'report-cashier-daily',
-        path: '/report/cashier-daily',
-        label: '收费日报',
-        element: <Reports key="cashier-daily" kind="cashier-daily" />,
+        key: 'report-analysis-monthly',
+        path: '/report/analysis-monthly',
+        label: '月报',
+        element: <OpsMonthly />,
       },
       {
-        key: 'report-ar-monthly',
-        path: '/report/ar-monthly',
-        label: '应收月报',
-        element: <Reports key="ar-monthly" kind="ar-monthly" />,
+        key: 'report-analysis-yearly',
+        path: '/report/analysis-yearly',
+        label: '年报',
+        element: <OpsYearly />,
+      },
+    ],
+  },
+  {
+    key: 'query',
+    path: '/query',
+    label: '数据查询',
+    icon: <SearchOutlined />,
+    perms: ['report:read'],
+    children: [
+      {
+        key: 'query-unified',
+        path: '/report/query/unified',
+        label: '统一查询',
+        element: <UnifiedQuery />,
       },
       {
-        key: 'report-collected-monthly',
-        path: '/report/collected-monthly',
-        label: '实收月报',
-        element: <Reports key="collected-monthly" kind="collected-monthly" />,
-      },
-      {
-        key: 'report-recovery-rate',
-        path: '/report/recovery-rate',
-        label: '回收率',
-        element: <Reports key="recovery-rate" kind="recovery-rate" />,
+        key: 'query-metrics',
+        path: '/report/query/metrics',
+        label: '指标查询',
+        element: <MetricQuery />,
       },
     ],
   },
@@ -298,6 +396,15 @@ export const APP_ROUTES: AppRoute[] = [
       { key: 'system-staff', path: '/system/staff', label: '用户管理', element: <Staff /> },
       { key: 'system-roles', path: '/system/roles', label: '角色权限', element: <Roles /> },
       { key: 'system-params', path: '/system/params', label: '租户参数', element: <TenantParams /> },
+      { key: 'system-dicts', path: '/system/dicts', label: '字典管理', element: <Dicts /> },
+      {
+        key: 'system-metric-dict',
+        path: '/report/metric-dict',
+        label: '指标字典',
+        element: <MetricDict />,
+        // 报表读者也要看口径，不被系统管理组的 iam:read 继承遮蔽
+        perms: ['report:read'],
+      },
       { key: 'system-audit', path: '/system/audit-logs', label: '操作日志', element: <AuditLogs /> },
     ],
   },

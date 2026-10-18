@@ -37,13 +37,21 @@ import type {
   TopUpResult,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtCent, fmtPeriod, newIdemKey } from '../common';
-import { CustomerSelect, WaterAccountSelect } from '../pickers';
+import {
+  enumLabel,
+  fmtCent,
+  fmtPeriod,
+  newIdemKey,
+  useSettleAccountLabels,
+  useWaterAccountLabels,
+} from '../common';
+import {
+  BillingAccountSelect,
+  CustomerSelect,
+  WaterAccountSelect,
+} from '../pickers';
 import { BILL_KIND_COLORS, BILL_KIND_LABELS } from '../billing/common';
 import { PAY_CHANNEL_LABELS, PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from './common';
-
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /** 元（最多 2 位小数）→ 整数分；非法输入返回 null。 */
 const yuanToCent = (v: number | null | undefined): number | null =>
@@ -54,7 +62,7 @@ const yuanToCent = (v: number | null | undefined): number | null =>
 const centToYuan = (cent: string): number => Number(cent) / 100;
 
 /**
- * 收费台：选水表户 → 查欠费（outstanding 探针）→ 按账单分摊 →
+ * 收费台：选用水户 → 查欠费（outstanding 探针）→ 按账单分摊 →
  * 提交收款（幂等键随表单打开生成）→ 打印收据。
  * amount = 整数分 = Σ 分摊（服务端同样强校验 PAYMENT_ALLOC_MISMATCH）。
  */
@@ -67,10 +75,14 @@ export default function Cashier() {
 
   const [customerId, setCustomerId] = useState<string | undefined>(undefined);
   const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
-  const [accountIdInput, setAccountIdInput] = useState('');
 
   const [outstanding, setOutstanding] = useState<AccountOutstanding | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // 水合当前户的 户号·客户名称 / 结算户号·名称 —— 收费时操作员必须
+  // 一眼确认"收的是谁的钱"，短 uuid 不行。
+  const { accountInfo } = useWaterAccountLabels([outstanding?.waterAccountId]);
+  const settleLabel = useSettleAccountLabels([outstanding?.settleAccountId]);
 
   /** billId → 分摊金额（元，InputNumber 数值）。 */
   const [allocs, setAllocs] = useState<Record<string, number | null>>({});
@@ -103,11 +115,7 @@ export default function Cashier() {
 
   const fetchSeq = useRef(0);
 
-  const effectiveAccountId = canCustomerRead
-    ? waterAccountId
-    : UUID_RE.test(accountIdInput.trim())
-      ? accountIdInput.trim()
-      : undefined;
+  const effectiveAccountId = waterAccountId;
 
   const loadOutstanding = useCallback(
     async (accountId: string) => {
@@ -371,7 +379,7 @@ export default function Cashier() {
       key: 'billKind',
       width: 95,
       render: (k: OutstandingItem['billKind']) => (
-        <Tag color={BILL_KIND_COLORS[k]}>{BILL_KIND_LABELS[k]}</Tag>
+        <Tag color={BILL_KIND_COLORS[k]}>{enumLabel(BILL_KIND_LABELS, k)}</Tag>
       ),
     },
     {
@@ -441,19 +449,18 @@ export default function Cashier() {
                 customerId={customerId}
                 value={waterAccountId}
                 onChange={(v) => setWaterAccountId(v)}
-                placeholder="再选水表户"
+                placeholder="再选用水户"
               />
             </span>
           </>
         ) : (
-          <Input.Search
-            allowClear
-            placeholder="水表户 ID（uuid）"
-            style={{ width: 320 }}
-            value={accountIdInput}
-            onChange={(e) => setAccountIdInput(e.target.value)}
-            onSearch={() => void 0}
-          />
+          <span className="cashier-picker" style={{ width: 340, display: 'inline-block' }}>
+            <BillingAccountSelect
+              value={waterAccountId}
+              onChange={(v) => setWaterAccountId(v)}
+              placeholder="搜索户号/客户名"
+            />
+          </span>
         )}
         {outstanding && (
           <Button
@@ -490,9 +497,18 @@ export default function Cashier() {
               }}
             />
             <Statistic
+              title="用水户"
+              value={
+                accountInfo(outstanding.waterAccountId)
+                  ? `${accountInfo(outstanding.waterAccountId)!.accountNo} · ${accountInfo(outstanding.waterAccountId)!.customerName}`
+                  : '—'
+              }
+              valueStyle={{ fontSize: 16 }}
+            />
+            <Statistic
               title="结算户"
-              value={outstanding.settleAccountId.slice(0, 8) + '…'}
-              valueStyle={{ fontSize: 16, fontFamily: 'monospace' }}
+              value={settleLabel(outstanding.settleAccountId)}
+              valueStyle={{ fontSize: 16 }}
             />
             <Space>
               {canWrite && (
@@ -564,9 +580,9 @@ export default function Cashier() {
                     value={channel}
                     onChange={setChannel}
                     disabled={!canWrite}
-                    options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+                    options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                       value: c,
-                      label: PAY_CHANNEL_LABELS[c],
+                      label: enumLabel(PAY_CHANNEL_LABELS, c),
                     }))}
                   />
                 </Form.Item>
@@ -602,7 +618,7 @@ export default function Cashier() {
           type="success"
           showIcon
           style={{ marginTop: 16 }}
-          message={`收款完成：${lastPayment.paymentNo} · ${fmtCent(lastPayment.amount)} · ${PAY_CHANNEL_LABELS[lastPayment.channel]}`}
+          message={`收款完成：${lastPayment.paymentNo} · ${fmtCent(lastPayment.amount)} · ${enumLabel(PAY_CHANNEL_LABELS, lastPayment.channel)}`}
           description={
             <Space direction="vertical" size={4}>
               <Descriptions
@@ -640,7 +656,7 @@ export default function Cashier() {
         />
       )}
 
-      <Modal
+      <Modal maskClosable={false}
         title="预存充值"
         open={topUpOpen}
         onCancel={() => setTopUpOpen(false)}
@@ -671,16 +687,16 @@ export default function Cashier() {
               style={{ width: 200 }}
               value={topUpChannel}
               onChange={setTopUpChannel}
-              options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+              options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                 value: c,
-                label: PAY_CHANNEL_LABELS[c],
+                label: enumLabel(PAY_CHANNEL_LABELS, c),
               }))}
             />
           </Form.Item>
         </Form>
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         title="预存退款"
         open={refundOpen}
         onCancel={() => setRefundOpen(false)}
@@ -712,9 +728,9 @@ export default function Cashier() {
               style={{ width: 200 }}
               value={refundChannel}
               onChange={setRefundChannel}
-              options={(['CASH', 'POS', 'TRANSFER'] as const).map((c) => ({
+              options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
                 value: c,
-                label: PAY_CHANNEL_LABELS[c],
+                label: enumLabel(PAY_CHANNEL_LABELS, c),
               }))}
             />
           </Form.Item>
@@ -760,7 +776,7 @@ export default function Cashier() {
               dataIndex: 'type',
               width: 100,
               render: (t: PrepaymentEntry['type']) => (
-                <Tag color={PREPAY_ENTRY_COLORS[t]}>{PREPAY_ENTRY_LABELS[t]}</Tag>
+                <Tag color={PREPAY_ENTRY_COLORS[t]}>{enumLabel(PREPAY_ENTRY_LABELS, t)}</Tag>
               ),
             },
             {
@@ -772,9 +788,10 @@ export default function Cashier() {
             },
             {
               title: '操作人',
-              dataIndex: 'operatorId',
-              width: 90,
-              render: (v: string | null) => v ?? 'SYSTEM',
+              key: 'operatorName',
+              width: 110,
+              render: (_: unknown, e: PrepaymentEntry) =>
+                e.operatorName ?? 'SYSTEM',
             },
             {
               title: '批次/关联',
@@ -782,14 +799,14 @@ export default function Cashier() {
               render: (_: unknown, e: PrepaymentEntry) => (
                 <Space size={4} direction="vertical">
                   {e.originTopUpId && (
-                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                      批次 {e.originTopUpId.slice(0, 8)}…
-                    </span>
+                    <Tooltip title={e.originTopUpId}>
+                      <Tag>关联原充值</Tag>
+                    </Tooltip>
                   )}
                   {e.reversalOfEntryId && (
-                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                      冲正 {e.reversalOfEntryId.slice(0, 8)}…
-                    </span>
+                    <Tooltip title={e.reversalOfEntryId}>
+                      <Tag color="red">冲正流水</Tag>
+                    </Tooltip>
                   )}
                   {e.reason && <span style={{ fontSize: 12 }}>{e.reason}</span>}
                 </Space>

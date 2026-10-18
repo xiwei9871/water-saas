@@ -8,21 +8,33 @@ import { Prisma } from '@prisma/client';
 import { DomainError } from '@ws/billing-core';
 import type { Request } from 'express';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
+import {
+  IdemKeyRace,
+  IdempotencyService,
+  type IdemMeta,
+} from '../../common/idempotency.service.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
+import { SETTLEMENT_BLOCKING_TYPES } from '../task/task.types.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
+import { embedAccountIdentity } from '../../common/account-identity.js';
 import { BILL_SELECT, type BillRow } from './bill.service.js';
 import {
   billDueDays,
   computeBill,
-  feeItemIdMap,
   insertBillItems,
-  loadFeeItems,
+  loadPricingSnapshots,
+  loadYtdBeforeQtyMap,
   lockAccountForUpdate,
   lockPlanForUpdate,
   periodLastDay,
   pickPlan,
+  pricingFingerprint,
   ytdBeforeQty,
+  loadFeeItems,
+  feeItemIdMap,
+  type PricingSnapshot,
 } from './pricing.js';
 
 export const BILLING_RUN_SELECT = {
@@ -31,6 +43,7 @@ export const BILLING_RUN_SELECT = {
   period: true,
   runType: true,
   status: true,
+  generationStatus: true,
   postedAt: true,
   totalCount: true,
   successCount: true,
@@ -84,6 +97,27 @@ interface SettlementRow {
   isEstimated: boolean;
   householdSizeSnapshot: number | null;
 }
+
+/**
+ * TX0 frozen inputs for multi-tx generation (RC1/RC2): everything the
+ * serial loop would read is captured once — settlements, account facts,
+ * YTD ladder cursors, dueDays, per-category pricing + its fingerprint.
+ * Lives in the orchestrator's memory; crash recovery is
+ * discard + re-create, so no durable snapshot storage is needed.
+ */
+interface CreateSnapshot {
+  runId: string;
+  period: string;
+  settlements: SettlementRow[];
+  accountFacts: Map<string, AccountFacts>;
+  ytdByAccount: Map<string, Prisma.Decimal>;
+  dueDays: number;
+  pricing: Map<string, PricingSnapshot>;
+  fingerprint: string;
+}
+
+/** Settlements per bounded generation transaction. */
+const CREATE_BATCH_SIZE = 200;
 
 interface AccountFacts {
   usageCategory: string;
@@ -155,6 +189,8 @@ export class BillingRunService {
   constructor(
     private readonly prisma: TenantPrismaService,
     private readonly prepay: PrepaymentService,
+    private readonly idem: IdempotencyService,
+    private readonly tasks: TaskService,
   ) {}
 
   list(
@@ -184,28 +220,194 @@ export class BillingRunService {
   }
 
   /**
-   * POST /billing-runs — create the DRAFT run + generate DRAFT bills in
-   * ONE transaction. A bill that can't be priced is a per-settlement
-   * failure record, never an abort; unexpected (DB) errors still abort
-   * the whole generation loudly — a bug must not masquerade as an
-   * unbillable account.
+   * GET /billing-runs/preflight?period= — Round-2 报告 §9 开账前置校验:
+   * 把"本期该抄/该结算但没做"的户暴露给操作员，而不是开账后才发现
+   * 少出账。口径 = 本期抄表计划覆盖的户：
+   *   missingReading    有计划项但本期无任何抄表记录
+   *   missingSettlement 有计划项但无结算（读没读都算 —— 未结算即不会出账）
+   *   draftSettlement   有结算但仍是 DRAFT（未终审 → 不会出账）
+   *   willBillCount     本期 FINAL 结算总数（开账将生成账单数）
+   * 只读探针，不阻止创建 —— 缺漏户可能有合理原因（暂停/整月未用水等），
+   * 由操作员确认后照常开账。
    */
-  async createTx(
+  async preflight(ctx: TenantCtx, period: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.$queryRaw<
+        {
+          waterAccountId: string;
+          accountNo: string;
+          customerName: string;
+          read: boolean;
+          settlementStatus: string | null;
+        }[]
+      >`
+        WITH planned AS (
+          SELECT DISTINCT ON (rpi.water_account_id)
+                 rpi.water_account_id, wa.account_no, c.name AS customer_name,
+                 rpi.completed_reading_id
+          FROM reading_plan_item rpi
+          JOIN reading_plan rp
+            ON rp.tenant_id = rpi.tenant_id AND rp.id = rpi.plan_id
+          JOIN water_account wa
+            ON wa.tenant_id = rpi.tenant_id AND wa.id = rpi.water_account_id
+          JOIN customer c
+            ON c.tenant_id = wa.tenant_id AND c.id = wa.customer_id
+          WHERE rpi.tenant_id = ${ctx.tenantId}::uuid AND rp.period = ${period}
+          ORDER BY rpi.water_account_id, rpi.seq_no
+        )
+        SELECT p.water_account_id AS "waterAccountId",
+               p.account_no AS "accountNo",
+               p.customer_name AS "customerName",
+               (p.completed_reading_id IS NOT NULL OR EXISTS (
+                 SELECT 1 FROM meter_reading mr
+                 JOIN meter_installation mi
+                   ON mi.tenant_id = mr.tenant_id AND mi.id = mr.installation_id
+                 WHERE mr.tenant_id = ${ctx.tenantId}::uuid
+                   AND mi.water_account_id = p.water_account_id
+                   AND mr.period = ${period}
+               )) AS "read",
+               cs.status::text AS "settlementStatus"
+        FROM planned p
+        LEFT JOIN consumption_settlement cs
+          ON cs.tenant_id = ${ctx.tenantId}::uuid
+         AND cs.water_account_id = p.water_account_id
+         AND cs.period = ${period}
+        ORDER BY p.account_no`;
+      // UNIQUE(tenant,account,period) → 每户至多一条本期结算行。
+      const missingReading = rows
+        .filter((r) => !r.read)
+        .map((r) => ({
+          waterAccountId: r.waterAccountId,
+          accountNo: r.accountNo,
+          customerName: r.customerName,
+        }));
+      const missingSettlement = rows
+        .filter((r) => r.settlementStatus === null)
+        .map((r) => ({
+          waterAccountId: r.waterAccountId,
+          accountNo: r.accountNo,
+          customerName: r.customerName,
+        }));
+      const draftSettlement = rows
+        .filter((r) => r.settlementStatus === 'DRAFT')
+        .map((r) => ({
+          waterAccountId: r.waterAccountId,
+          accountNo: r.accountNo,
+          customerName: r.customerName,
+        }));
+      const willBill = await tx.consumptionSettlement.count({
+        where: { tenantId: ctx.tenantId, period, status: 'FINAL' },
+      });
+      return {
+        period,
+        plannedCount: rows.length,
+        willBillCount: willBill,
+        missingReading,
+        missingSettlement,
+        draftSettlement,
+      };
+    });
+  }
+
+  /**
+   * POST /billing-runs — multi-transaction create (RC1/RC2 frozen spec):
+   *
+   *   TX0  claimCreateTx   — key claim (if Idempotency-Key) + run row
+   *                          {DRAFT, GENERATING} + immutable CreateSnapshot
+   *   TX1..k generateBatchTx — bounded batches of CREATE_BATCH_SIZE
+   *                          settlements; each tx locks the run FOR
+   *                          UPDATE, re-verifies the pricing fingerprint,
+   *                          generates from the frozen snapshot
+   *   TXN  finalizeCreateTx — recompute committed truth, write counts +
+   *                          failures, GENERATING→READY, key COMPLETED —
+   *                          all in the same commit
+   *
+   * One interactive tx can no longer span the whole period generation
+   * (Prisma's 5s interactive default expires beyond ~800 settlements —
+   * G6 P1 finding). A bill that can't be priced is a per-settlement
+   * failure record, never an abort; unexpected errors still abort the
+   * request loudly — the run is left DRAFT+GENERATING and recovered by
+   * discard + re-create.
+   *
+   * Idempotency: meta carries the full IdemMeta (key/hash/method/route/
+   * responseStatus) — the controller must NOT wrap this in the old
+   * single-tx withOptionalIdem.
+   */
+  async create(
+    ctx: TenantCtx,
+    body: { period: string },
+    meta?: IdemMeta,
+  ): Promise<{ replayed: boolean; status: number; body: unknown }> {
+    type First =
+      | { claim: { kind: 'REPLAY'; status: number; body: unknown } }
+      | { claim: { kind: 'NEW' }; snapshot: CreateSnapshot };
+    let first: First;
+    try {
+      first = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+        const claim = meta
+          ? await this.idem.claimTx(tx, ctx.tenantId, meta)
+          : ({ kind: 'NEW' } as const);
+        if (claim.kind === 'REPLAY') return { claim };
+        const snapshot = await this.claimCreateTx(tx, ctx, body, meta?.key ?? null);
+        return { claim, snapshot };
+      }) as First;
+    } catch (err) {
+      // Insert race on the key row aborted TX0 — re-read the committed
+      // key in a fresh tx (same rule as runWithKey).
+      if (err instanceof IdemKeyRace && meta) {
+        const r = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+          this.idem.replayOrConflict(tx, ctx.tenantId, meta),
+        );
+        return { replayed: r.replayed, status: r.status, body: r.body };
+      }
+      throw err;
+    }
+    if (first.claim.kind === 'REPLAY') {
+      return { replayed: true, status: first.claim.status, body: first.claim.body };
+    }
+    const snapshot = (first as { snapshot: CreateSnapshot }).snapshot;
+
+    const failures: RunFailure[] = [];
+    let skipped = 0;
+    for (let i = 0; i < snapshot.settlements.length; i += CREATE_BATCH_SIZE) {
+      const slice = snapshot.settlements.slice(i, i + CREATE_BATCH_SIZE);
+      const r = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+        this.generateBatchTx(tx, ctx, snapshot, slice),
+      );
+      failures.push(...r.failures);
+      skipped += r.skipped;
+    }
+
+    const runBody = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.finalizeCreateTx(tx, ctx, snapshot, failures, skipped, meta ?? null),
+    );
+    return { replayed: false, status: meta?.responseStatus ?? 201, body: runBody };
+  }
+
+  /**
+   * TX0 — create the DRAFT+GENERATING run, link the claimed key, and
+   * capture the immutable CreateSnapshot (settlements, account facts,
+   * bulk YTD cursors, dueDays, per-category pricing + fingerprint).
+   */
+  private async claimCreateTx(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     body: { period: string },
-  ) {
+    key: string | null,
+  ): Promise<CreateSnapshot> {
     const run = await tx.billingRun.create({
       data: {
         tenantId: ctx.tenantId,
         period: body.period,
         runType: 'MANUAL',
         status: 'DRAFT',
+        generationStatus: 'GENERATING',
         createdBy: ctx.staffId,
         updatedBy: ctx.staffId,
       },
       select: BILLING_RUN_SELECT,
     });
+    if (key) await this.idem.linkRunTx(tx, ctx.tenantId, key, run.id);
 
     const settlements = await tx.consumptionSettlement.findMany({
       where: { tenantId: ctx.tenantId, period: body.period, status: 'FINAL' },
@@ -218,20 +420,80 @@ export class BillingRunService {
       },
       orderBy: [{ waterAccountId: 'asc' }, { id: 'asc' }],
     });
-    const accounts = await this.loadAccountFacts(
+    const accountIds = settlements.map((s) => s.waterAccountId);
+    const accountFacts = await this.loadAccountFacts(tx, ctx, accountIds);
+    const ytdByAccount = await loadYtdBeforeQtyMap(tx, ctx, accountIds, body.period);
+    const dueDays = await billDueDays(tx, ctx);
+    const pricing = await loadPricingSnapshots(
       tx,
       ctx,
-      settlements.map((s) => s.waterAccountId),
+      [...new Set([...accountFacts.values()].map((a) => a.usageCategory))],
+      body.period,
     );
-    const dueDays = await billDueDays(tx, ctx);
+    return {
+      runId: run.id,
+      period: body.period,
+      settlements,
+      accountFacts,
+      ytdByAccount,
+      dueDays,
+      pricing,
+      fingerprint: pricingFingerprint(pricing, dueDays),
+    };
+  }
+
+  /**
+   * Per-batch generation tx: lock the run row (asserts the run is still
+   * DRAFT+GENERATING — a discard between batches aborts loudly), verify
+   * the pricing fingerprint against TX0, then price each settlement
+   * from the FROZEN snapshot. The already-billed probe stays live so
+   * sibling-run races collapse into success.
+   */
+  private async generateBatchTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    snapshot: CreateSnapshot,
+    slice: SettlementRow[],
+  ): Promise<{ failures: RunFailure[]; skipped: number }> {
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM billing_run
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${snapshot.runId}::uuid
+      FOR UPDATE`;
+    if (locked.length === 0) {
+      throw new NotFoundException({ code: 'BILLING_RUN_NOT_FOUND' });
+    }
+    const run = await tx.billingRun.findFirst({
+      where: { tenantId: ctx.tenantId, id: snapshot.runId },
+      select: { status: true, generationStatus: true },
+    });
+    if (run?.status !== 'DRAFT' || run.generationStatus !== 'GENERATING') {
+      throw new ConflictException({ code: 'RUN_GENERATION_ABORTED' });
+    }
+    await this.assertPricingUnchanged(tx, ctx, snapshot);
 
     const failures: RunFailure[] = [];
     // billable=false (MONITORING) settlements are intentionally outside the
     // run's denominator — skipped, never a failure and never "success"
     // counted against the billable population.
     let skipped = 0;
-    for (const s of settlements) {
-      const acc = accounts.get(s.waterAccountId);
+    // 任务书 T16：存在未完成补差任务的户 → 出账阻断（记 failure 让运行结果
+    // 明账显示，而非静默跳过——批次其余户不受影响）。
+    const blockedAccounts = new Set(
+      (await this.tasks.openTasksForBiz(tx, ctx, SETTLEMENT_BLOCKING_TYPES, 'waterAccount')).map(
+        (t) => t.bizId,
+      ),
+    );
+    for (const s of slice) {
+      if (blockedAccounts.has(s.waterAccountId)) {
+        failures.push({
+          settlementId: s.id,
+          stage: 'generate',
+          code: 'SETTLEMENT_BLOCKED_BY_TASK',
+          message: '该户存在未完成的补差任务，完成后方可出账',
+        });
+        continue;
+      }
+      const acc = snapshot.accountFacts.get(s.waterAccountId);
       if (!acc) {
         failures.push({
           settlementId: s.id,
@@ -258,7 +520,7 @@ export class BillingRunService {
       if (existing) continue;
 
       try {
-        await this.generateBillForSettlement(tx, ctx, run.id, body.period, s, acc, dueDays);
+        await this.generateBillFromSnapshot(tx, ctx, snapshot, s, acc);
       } catch (err) {
         // Lost the unique race against a sibling run's insert — the bill
         // now exists, which is exactly "already billed": resolved, not a
@@ -276,26 +538,144 @@ export class BillingRunService {
         throw err; // unexpected — abort generation loudly
       }
     }
+    return { failures, skipped };
+  }
+
+  /**
+   * TXN — finalize: lock + assert + fingerprint re-verify, recompute
+   * committed truth, write counts/failures, GENERATING→READY, and (key
+   * present) complete the idempotency key with the verbatim response —
+   * all atomically in this tx.
+   */
+  private async finalizeCreateTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    snapshot: CreateSnapshot,
+    failures: RunFailure[],
+    skipped: number,
+    meta: IdemMeta | null,
+  ) {
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM billing_run
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${snapshot.runId}::uuid
+      FOR UPDATE`;
+    if (locked.length === 0) {
+      throw new NotFoundException({ code: 'BILLING_RUN_NOT_FOUND' });
+    }
+    const run = await tx.billingRun.findFirst({
+      where: { tenantId: ctx.tenantId, id: snapshot.runId },
+      select: { status: true, generationStatus: true },
+    });
+    if (run?.status !== 'DRAFT' || run.generationStatus !== 'GENERATING') {
+      throw new ConflictException({ code: 'RUN_GENERATION_ABORTED' });
+    }
+    await this.assertPricingUnchanged(tx, ctx, snapshot);
 
     const drafted = await tx.bill.count({
-      where: { tenantId: ctx.tenantId, billingRunId: run.id },
+      where: { tenantId: ctx.tenantId, billingRunId: snapshot.runId },
     });
-    // billing_run has no (tenant,id) unique — the tenant-scoped findFirst
-    // above + RLS are the ownership check; the update keys on the PK.
+    const totalCount = snapshot.settlements.length - skipped;
     const updated = await tx.billingRun.update({
-      where: { id: run.id },
+      where: { id: snapshot.runId },
       data: {
-        totalCount: settlements.length - skipped,
+        totalCount,
         // Already-billed settlements are successes even before posting —
         // their bills exist and will stand posted by their own run.
-        successCount: settlements.length - skipped - failures.length - drafted,
+        successCount: totalCount - failures.length - drafted,
         failedCount: failures.length,
         failedSettlementIds: failures as unknown as Prisma.InputJsonValue,
+        generationStatus: 'READY',
         updatedBy: ctx.staffId,
       },
       select: BILLING_RUN_SELECT,
     });
-    return this.withBills(tx, ctx, updated);
+    const body = await this.withBills(tx, ctx, updated);
+    if (meta) await this.idem.completeTx(tx, ctx.tenantId, meta, body);
+    return body;
+  }
+
+  /**
+   * Pricing drift guard (spec §H): recompute the fingerprint from LIVE
+   * config at every batch/finalize boundary; any drift — tariff swap,
+   * effectiveTo shrink, tier/fee-item edit, dueDays change, or a
+   * FAILURE sentinel appearing/disappearing — aborts the request and
+   * leaves the run GENERATING for discard + re-create. A run never
+   * mixes two pricing inputs.
+   */
+  private async assertPricingUnchanged(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    snapshot: CreateSnapshot,
+  ): Promise<void> {
+    const live = await loadPricingSnapshots(
+      tx,
+      ctx,
+      [...snapshot.pricing.keys()],
+      snapshot.period,
+    );
+    const liveDueDays = await billDueDays(tx, ctx);
+    if (pricingFingerprint(live, liveDueDays) !== snapshot.fingerprint) {
+      throw new ConflictException({ code: 'PRICING_SNAPSHOT_DRIFT' });
+    }
+  }
+
+  /**
+   * Price one settlement from the FROZEN snapshot: typed pricing
+   * resolution (FAILURE → RecordedFailure, same codes the live path
+   * produced), frozen YTD cursor, frozen dueDays. The T8 plan-row lock
+   * is still taken per bill insert — the freeze contract applies to
+   * DRAFT bill persistence too.
+   */
+  private async generateBillFromSnapshot(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    snapshot: CreateSnapshot,
+    s: SettlementRow,
+    acc: AccountFacts,
+  ): Promise<BillRow> {
+    const ps = snapshot.pricing.get(acc.usageCategory);
+    if (!ps || ps.kind === 'FAILURE') {
+      throw new RecordedFailure(
+        ps?.kind === 'FAILURE' ? ps.code : 'TARIFF_NOT_FOUND',
+        ps?.kind === 'FAILURE' ? ps.message : undefined,
+      );
+    }
+    const ytd = snapshot.ytdByAccount.get(s.waterAccountId) ?? new Prisma.Decimal(0);
+    const result = computeBill({
+      usageQty: s.totalUsageQty,
+      ytdBeforeQty: ytd,
+      // The frozen settlement snapshot — historical repricing must not
+      // read the account's current (mutable) household profile.
+      householdSize: s.householdSizeSnapshot,
+      feeItems: ps.feeItems,
+    });
+    const dueDate = new Date(
+      periodLastDay(snapshot.period).getTime() + snapshot.dueDays * 86_400_000,
+    );
+    // T8 freeze contract: lock the plan row before the bill row exists.
+    await lockPlanForUpdate(tx, ctx, ps.planId);
+    const bill = await tx.bill.create({
+      data: {
+        tenantId: ctx.tenantId,
+        billingRunId: snapshot.runId,
+        settleAccountId: acc.settleAccountId,
+        waterAccountId: s.waterAccountId,
+        period: snapshot.period,
+        billKind: 'NORMAL',
+        sourceType: 'SETTLEMENT',
+        sourceId: s.id,
+        tariffPlanId: ps.planId,
+        status: 'DRAFT',
+        isEstimated: s.isEstimated,
+        totalAmount: result.totalAmountCent,
+        dueDate,
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+      select: BILL_SELECT,
+    });
+    await insertBillItems(tx, ctx, bill.id, result.items, ps.feeItemIdByCode);
+    return bill;
   }
 
   /**
@@ -311,12 +691,22 @@ export class BillingRunService {
         where: { tenantId: ctx.tenantId, id },
       });
       if (!run) throw new NotFoundException({ code: 'BILLING_RUN_NOT_FOUND' });
+      // RC1: a run whose generation never finalized is not postable —
+      // discard + re-create is the recovery path, never post mid-create.
+      if (run.generationStatus !== 'READY') {
+        throw new ConflictException({ code: 'RUN_STILL_GENERATING' });
+      }
       if (!allowedFrom.includes(run.status as RunStatus)) {
         throw invalidTransition(run.status, 'PROCESSING');
       }
       req.auditBefore = run;
       const flip = await tx.billingRun.updateMany({
-        where: { tenantId: ctx.tenantId, id, status: { in: allowedFrom } },
+        where: {
+          tenantId: ctx.tenantId,
+          id,
+          status: { in: allowedFrom },
+          generationStatus: 'READY',
+        },
         data: { status: 'PROCESSING', updatedBy: ctx.staffId },
       });
       // Lost the race to a concurrent execution — report the transition,
@@ -424,14 +814,25 @@ export class BillingRunService {
     id: string,
     req: Request,
   ) {
-    const existing = await tx.billingRun.findFirst({
-      where: { tenantId: ctx.tenantId, id },
-    });
+    // G.4 frozen order: lock the run (serializes against an in-flight
+    // generation batch's FOR UPDATE), release the PROCESSING key,
+    // unlink the COMPLETED key, delete the run (RESTRICT catches a
+    // missed link — fail closed), then delete DRAFT documents.
+    const locked = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM billing_run
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${id}::uuid
+      FOR UPDATE`;
+    const existing = locked.length
+      ? await tx.billingRun.findFirst({ where: { tenantId: ctx.tenantId, id } })
+      : null;
     if (!existing) throw new NotFoundException({ code: 'BILLING_RUN_NOT_FOUND' });
     if (existing.status !== 'DRAFT') {
       throw invalidTransition(existing.status, 'DISCARD');
     }
     req.auditBefore = existing;
+
+    await this.idem.releaseProcessingForRunTx(tx, ctx.tenantId, id);
+    await this.idem.unlinkCompletedForRunTx(tx, ctx.tenantId, id);
 
     const removed = await tx.billingRun.deleteMany({
       where: { tenantId: ctx.tenantId, id, status: 'DRAFT' },
@@ -466,7 +867,54 @@ export class BillingRunService {
       select: BILL_SELECT,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
-    return { ...run, bills };
+    // 批次账单行内嵌户号+客户名称 —— 复核岗无 customer:read 也能核对
+    // （Round-2 报告 §9：admin 见名称、复核员只见 uuid 的问题源）。
+    // 失败结算同样带户号/客户名，操作员按业务标识定位而不是抄 uuid。
+    const enriched = await embedAccountIdentity(tx, ctx.tenantId, bills);
+    return {
+      ...run,
+      failedSettlementIds: await this.embedFailureAccounts(
+        tx,
+        ctx,
+        run as { failedSettlementIds?: unknown },
+      ),
+      bills: enriched,
+    };
+  }
+
+  private async embedFailureAccounts(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    run: { failedSettlementIds?: unknown },
+  ) {
+    const raw = run.failedSettlementIds;
+    if (!Array.isArray(raw) || raw.length === 0) return raw;
+    const entries = raw as { settlementId?: string; stage?: string; code?: string; message?: string }[];
+    const ids = [...new Set(entries.map((e) => e.settlementId).filter((v): v is string => !!v))];
+    const settlements = await tx.consumptionSettlement.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: ids } },
+      select: { id: true, waterAccountId: true },
+    });
+    const accounts = await tx.waterAccount.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: { in: [...new Set(settlements.map((s) => s.waterAccountId))] },
+      },
+      select: { id: true, accountNo: true, customer: { select: { name: true } } },
+    });
+    const accountMap = new Map(
+      accounts.map((a) => [
+        a.id,
+        { accountNo: a.accountNo, customerName: a.customer?.name ?? null },
+      ]),
+    );
+    const map = new Map(
+      settlements.map((s) => [s.id, accountMap.get(s.waterAccountId)]),
+    );
+    return entries.map((e) => ({
+      ...e,
+      ...(e.settlementId ? (map.get(e.settlementId) ?? null) : null),
+    }));
   }
 
   private async loadAccountFacts(

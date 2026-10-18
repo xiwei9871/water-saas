@@ -153,6 +153,75 @@ export class ExceptionService {
     });
   }
 
+  /**
+   * T2 导航徽标 — 按业务域分组的 OPEN 工单计数（ignored/resolved 不计）。
+   * 与 list() 同口径（scope 过滤后），前端把域计数映射到左侧菜单组。
+   */
+  async badge(ctx: TenantCtx) {
+    const DOMAIN: Record<string, string> = {
+      NO_ACTIVE_METER: 'metering', MULTI_ACTIVE_METER: 'metering',
+      NO_BOOK: 'metering', MULTI_BOOK: 'metering',
+      READING_QC_REVIEW: 'metering', READING_QC_REJECTED: 'metering',
+      READING_QC_PENDING: 'metering', ESTIMATE_STREAK: 'metering',
+      REMOTE_EVENT_UNBOUND: 'metering', REMOTE_EVENT_WAITING_PLAN: 'metering',
+      REMOTE_EVENT_FAILED: 'metering', REMOTE_EVENT_CONFLICT: 'metering',
+      REMOTE_EVENT_KEY_CONFLICT: 'metering',
+      SETTLEMENT_DRIFT: 'settlement',
+      PLANNED_NO_READING: 'settlement', PLANNED_NO_SETTLEMENT: 'settlement',
+      SETTLEMENT_UNFINALIZED: 'settlement',
+      UNPAID_BILL_OVERDUE: 'billing',
+      CLOSED_BALANCE_LEFT: 'customer',
+    };
+    // 处置页映射 —— 与前端 Exceptions 页「去处理」跳转目标保持一致；
+    // 菜单徽标按此聚合到子栏目（P3 下钻要求）。
+    const PAGE: Record<string, string> = {
+      READING_QC_PENDING: '/metering/readings',
+      READING_QC_REVIEW: '/metering/readings',
+      READING_QC_REJECTED: '/metering/readings',
+      ESTIMATE_STREAK: '/metering/readings',
+      PLANNED_NO_READING: '/metering/readings',
+      NO_ACTIVE_METER: '/customer/meters',
+      MULTI_ACTIVE_METER: '/customer/meters',
+      NO_BOOK: '/metering/books',
+      MULTI_BOOK: '/metering/books',
+      REMOTE_EVENT_UNBOUND: '/metering/remote-events',
+      REMOTE_EVENT_WAITING_PLAN: '/metering/remote-events',
+      REMOTE_EVENT_FAILED: '/metering/remote-events',
+      REMOTE_EVENT_CONFLICT: '/metering/remote-events',
+      REMOTE_EVENT_KEY_CONFLICT: '/metering/remote-events',
+      SETTLEMENT_DRIFT: '/settlement/reconciliations',
+      PLANNED_NO_SETTLEMENT: '/settlement/list',
+      SETTLEMENT_UNFINALIZED: '/settlement/list',
+      UNPAID_BILL_OVERDUE: '/billing/bills',
+      CLOSED_BALANCE_LEFT: '/customer/settle-accounts',
+    };
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const facts = await filterVisible(tx, ctx, await detectAll(tx, ctx.tenantId));
+      const episodes = await tx.workItem.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          anomalyKey: { in: facts.map((f) => f.key) },
+          clearedAt: null,
+        },
+        select: { anomalyKey: true, status: true },
+      });
+      const epByKey = new Map(episodes.map((e) => [e.anomalyKey, e.status]));
+      const byDomain: Record<string, number> = {};
+      const byPage: Record<string, number> = {};
+      let total = 0;
+      for (const f of facts) {
+        const s = epByKey.get(f.key) ?? 'OPEN';
+        if (s === 'IGNORED' || s === 'RESOLVED') continue;
+        total++;
+        const d = DOMAIN[f.type] ?? 'other';
+        byDomain[d] = (byDomain[d] ?? 0) + 1;
+        const page = PAGE[f.type];
+        if (page) byPage[page] = (byPage[page] ?? 0) + 1;
+      }
+      return { total, byDomain, byPage, asOf: new Date().toISOString() };
+    });
+  }
+
   async detail(ctx: TenantCtx, key: string) {
     const parsed = parseKey(key);
     if (!parsed) throw badKey();
@@ -245,19 +314,44 @@ export class ExceptionService {
     return { fact };
   }
 
-  /** fetch active episode or throw — cleared episodes are terminal. */
-  private async activeEpisode(tx: Prisma.TransactionClient, ctx: TenantCtx, key: string) {
+  /**
+   * Lazy episode materialization: facts are detected live, but episodes are
+   * only written by POST /exceptions/refresh. An operator acting on a
+   * still-active fact before any refresh must not dead-end on
+   * EPISODE_CLEARED — gate() already re-evaluated the fact, so the episode
+   * is created here with the same conflict-safe insert as the reconciler.
+   * A cleared episode stays terminal (fresh occurrence = fresh episode).
+   */
+  private async episodeOrCreate(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    key: string,
+    factType: string,
+  ) {
     const ep = await tx.workItem.findFirst({
       where: { tenantId: ctx.tenantId, anomalyKey: key, clearedAt: null },
     });
-    if (!ep) throw new ConflictException({ code: 'EPISODE_CLEARED' });
-    return ep;
+    if (ep) return ep;
+    await tx.$executeRaw`
+      INSERT INTO work_item
+        (id, tenant_id, anomaly_key, anomaly_type, status,
+         created_by, updated_by, created_at, updated_at)
+      VALUES (gen_random_uuid(), ${ctx.tenantId}::uuid, ${key}, ${factType},
+              'OPEN'::"WorkItemStatus", ${ctx.staffId ?? null}::uuid,
+              ${ctx.staffId ?? null}::uuid, now(), now())
+      ON CONFLICT (tenant_id, anomaly_key) WHERE cleared_at IS NULL
+      DO NOTHING`;
+    const created = await tx.workItem.findFirst({
+      where: { tenantId: ctx.tenantId, anomalyKey: key, clearedAt: null },
+    });
+    if (!created) throw new ConflictException({ code: 'EPISODE_CLEARED' });
+    return created;
   }
 
   async ack(ctx: TenantCtx, key: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      await this.gate(tx, ctx, key);
-      const ep = await this.activeEpisode(tx, ctx, key);
+      const { fact } = await this.gate(tx, ctx, key);
+      const ep = await this.episodeOrCreate(tx, ctx, key, fact.type);
       if (ep.status === 'IGNORED') throw new ConflictException({ code: 'WORK_ITEM_FINAL_STATE' });
       if (ep.status === 'ACK') return ep; // idempotent
       return tx.workItem.update({
@@ -270,7 +364,7 @@ export class ExceptionService {
   async assign(ctx: TenantCtx, key: string, assigneeId: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const { fact } = await this.gate(tx, ctx, key);
-      const ep = await this.activeEpisode(tx, ctx, key);
+      const ep = await this.episodeOrCreate(tx, ctx, key, fact.type);
       // assignee must be able to see this anomaly under their own scope
       const who = await staffScopeTx(tx, ctx.tenantId, assigneeId);
       if (!who) throw new BadRequestException({ code: 'ASSIGNEE_NOT_FOUND' });
@@ -287,8 +381,8 @@ export class ExceptionService {
   async ignore(ctx: TenantCtx, key: string, note: string | undefined) {
     if (!note?.trim()) throw new BadRequestException({ code: 'NOTE_REQUIRED', field: 'note' });
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      await this.gate(tx, ctx, key);
-      const ep = await this.activeEpisode(tx, ctx, key);
+      const { fact } = await this.gate(tx, ctx, key);
+      const ep = await this.episodeOrCreate(tx, ctx, key, fact.type);
       if (ep.status === 'IGNORED') return ep; // idempotent
       return tx.workItem.update({
         where: { id: ep.id },
@@ -338,8 +432,8 @@ export class ExceptionService {
   /** unignore: lift suppression while the fact is still active. */
   async unignore(ctx: TenantCtx, key: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      await this.gate(tx, ctx, key);
-      const ep = await this.activeEpisode(tx, ctx, key);
+      const { fact } = await this.gate(tx, ctx, key);
+      const ep = await this.episodeOrCreate(tx, ctx, key, fact.type);
       if (ep.status !== 'IGNORED') throw new ConflictException({ code: 'WORK_ITEM_NOT_IGNORED' });
       return tx.workItem.update({
         where: { id: ep.id },

@@ -134,7 +134,7 @@ async function detectMultiBook(tx: Prisma.TransactionClient, tenantId: string): 
 async function detectReadingQc(
   tx: Prisma.TransactionClient,
   tenantId: string,
-  qcStatus: 'MANUAL_REVIEW' | 'REJECTED',
+  qcStatus: 'MANUAL_REVIEW' | 'REJECTED' | 'PENDING',
   type: string,
   label: string,
 ): Promise<AnomalyFact[]> {
@@ -228,10 +228,12 @@ async function detectRemoteStatus(
       processing_status: string;
       remote_source_id: string;
       water_account_id: string | null;
+      external_event_key: string;
+      vendor_device_key: string;
     }[]
   >`
     SELECT e.id::text, e.processing_status::text, e.remote_source_id::text,
-           i.water_account_id::text
+           i.water_account_id::text, e.external_event_key, e.vendor_device_key
     FROM raw_remote_event e
     LEFT JOIN remote_device_binding b
       ON b.tenant_id = e.tenant_id
@@ -254,7 +256,7 @@ async function detectRemoteStatus(
       waterAccountId: unbound ? undefined : (r.water_account_id ?? undefined),
       remoteSourceId: unbound ? r.remote_source_id : undefined,
       anchorRef: { kind: 'remote-event', id: r.id },
-      summary: `远传事件 ${r.id.slice(0, 8)} 状态 ${r.processing_status}`,
+      summary: `远传事件 ${r.external_event_key || r.vendor_device_key}（设备 ${r.vendor_device_key}）状态 ${r.processing_status}`,
     });
   });
 }
@@ -269,9 +271,17 @@ async function detectEventKeyConflict(
   tenantId: string,
 ): Promise<AnomalyFact[]> {
   const rows = await tx.$queryRaw<
-    { id: string; remote_source_id: string; current_issue_at: Date; occurrences: bigint }[]
+    {
+      id: string;
+      remote_source_id: string;
+      current_issue_at: Date;
+      occurrences: bigint;
+      external_event_key: string;
+      vendor_device_key: string;
+    }[]
   >`
     SELECT e.id::text, e.remote_source_id::text, e.current_issue_at,
+           e.external_event_key, e.vendor_device_key,
            (SELECT count(*) FROM remote_event_process_log l
             WHERE l.tenant_id = e.tenant_id AND l.remote_event_id = e.id
               AND l.code = 'EVENT_KEY_CONFLICT') AS occurrences
@@ -285,7 +295,7 @@ async function detectEventKeyConflict(
       type: A.REMOTE_EVENT_KEY_CONFLICT,
       remoteSourceId: r.remote_source_id,
       anchorRef: { kind: 'remote-event', id: r.id },
-      summary: `远传事件 ${r.id.slice(0, 8)} event key 冲突 @${r.current_issue_at.toISOString()} (#${r.occurrences})`,
+      summary: `远传事件 ${r.external_event_key || r.vendor_device_key}（设备 ${r.vendor_device_key}）事件键冲突 @${r.current_issue_at.toISOString()}（第 ${r.occurrences} 次）`,
     }),
   );
 }
@@ -329,6 +339,177 @@ async function detectUnpaidBillOverdue(
 }
 
 // ---------------------------------------------------------------------------
+// T1 (10·8-9 报告 §7) — 结算/开账/销户侧的待办异常
+// ---------------------------------------------------------------------------
+
+/** 实抄止度低于已出账估止 —— 与 GET /reconciliations/drift-hints 同一事实源：
+ *  PASSED 实抄/远传 R2 取代了仍在喂养 FINAL 结算的 R1，且 R2 尚未锚定补差。 */
+async function detectSettlementDrift(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+): Promise<AnomalyFact[]> {
+  const rows = await tx.$queryRaw<
+    { reading_id: string; water_account_id: string; period: string; account_no: string }[]
+  >`
+    SELECT r2.id::text AS reading_id, wa.id::text AS water_account_id,
+           r2.period, wa.account_no
+    FROM meter_reading r2
+    JOIN meter_reading r1
+      ON r1.tenant_id = r2.tenant_id AND r1.id = r2.supersedes_reading_id
+    JOIN consumption_component cc
+      ON cc.tenant_id = r1.tenant_id AND cc.source_reading_id = r1.id
+    JOIN consumption_settlement cs
+      ON cs.tenant_id = cc.tenant_id AND cs.id = cc.settlement_id
+     AND cs.status = 'FINAL'
+    JOIN meter_installation mi
+      ON mi.tenant_id = r2.tenant_id AND mi.id = r2.installation_id
+    JOIN water_account wa
+      ON wa.tenant_id = mi.tenant_id AND wa.id = mi.water_account_id
+    WHERE r2.tenant_id = ${tenantId}::uuid
+      AND r2.qc_status = 'PASSED'
+      AND r2.result_type IN ('ACTUAL', 'REMOTE')
+      AND NOT EXISTS (
+        SELECT 1 FROM reconciliation rc
+        WHERE rc.tenant_id = r2.tenant_id AND rc.actual_reading_id = r2.id
+      )
+    GROUP BY wa.id, wa.account_no, r2.id, r2.period`;
+  return rows.map((r) =>
+    fact({
+      key: readingKey(r.reading_id, A.SETTLEMENT_DRIFT),
+      type: A.SETTLEMENT_DRIFT,
+      waterAccountId: r.water_account_id,
+      anchorRef: { kind: 'water-account', id: r.water_account_id },
+      period: r.period,
+      summary: `账户 ${r.account_no} 实抄读数已修正但 ${r.period} 期未补差——请到「补差管理」处理`,
+    }),
+  );
+}
+
+/**
+ * 开账前置检查三态：OPEN 计划中 ≤ 当前账期的计划项，逐项判：
+ *   PENDING/NO_READ → PLANNED_NO_READING（缺读数）
+ *   READ 但无结算    → PLANNED_NO_SETTLEMENT（缺结算）
+ *   READ 但结算 DRAFT → SETTLEMENT_UNFINALIZED（未终审，不会出账）
+ * 一户一条（wa key 去重），period 取该户最新的欠账计划期。
+ */
+async function detectPlanCoverage(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+): Promise<AnomalyFact[]> {
+  const rows = await tx.$queryRaw<
+    {
+      water_account_id: string;
+      account_no: string;
+      period: string;
+      item_status: string;
+      settlement_status: string | null;
+    }[]
+  >`
+    SELECT i.water_account_id::text, wa.account_no, p.period,
+           i.status::text AS item_status, cs.status::text AS settlement_status
+    FROM reading_plan_item i
+    JOIN reading_plan p
+      ON p.tenant_id = i.tenant_id AND p.id = i.plan_id
+     AND p.status = 'OPEN'
+    JOIN water_account wa
+      ON wa.tenant_id = i.tenant_id AND wa.id = i.water_account_id
+     AND wa.status <> 'CLOSED' AND wa.billable
+    LEFT JOIN consumption_settlement cs
+      ON cs.tenant_id = i.tenant_id
+     AND cs.water_account_id = i.water_account_id
+     AND cs.period = p.period
+    WHERE i.tenant_id = ${tenantId}::uuid
+      AND p.period <= to_char(now() AT TIME ZONE 'UTC', 'YYYYMM')
+      AND (
+        i.status IN ('PENDING', 'NO_READ')
+        OR (i.status = 'READ' AND (cs.id IS NULL OR cs.status = 'DRAFT'))
+      )
+    ORDER BY i.water_account_id, p.period DESC`;
+  const byAccount = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) {
+    // 一户多期欠账时只报最新一期 —— 处理动作相同，避免刷屏。
+    if (!byAccount.has(r.water_account_id)) byAccount.set(r.water_account_id, r);
+  }
+  const TYPE_OF: Record<string, string> = {
+    PENDING: A.PLANNED_NO_READING,
+    NO_READ: A.PLANNED_NO_READING,
+    READ: A.PLANNED_NO_SETTLEMENT,
+  };
+  const REASON: Record<string, string> = {
+    PENDING: '本期尚未抄表',
+    NO_READ: '本期标记未抄见',
+    READ: '本期已抄但未生成结算（可能因读数未质检）',
+  };
+  return [...byAccount.values()].map((r) => {
+    const type =
+      r.item_status === 'READ' && r.settlement_status === 'DRAFT'
+        ? A.SETTLEMENT_UNFINALIZED
+        : TYPE_OF[r.item_status] ?? A.PLANNED_NO_READING;
+    const reason =
+      type === A.SETTLEMENT_UNFINALIZED
+        ? '结算仍为草稿（未终审），开账不会出账'
+        : (REASON[r.item_status] ?? '计划项未完成');
+    return fact({
+      key: waKey(r.water_account_id, type),
+      type,
+      waterAccountId: r.water_account_id,
+      anchorRef: { kind: 'water-account', id: r.water_account_id },
+      period: r.period,
+      summary: `账户 ${r.account_no} ${r.period} 期：${reason}`,
+    });
+  });
+}
+
+/** 销户残留：已 CLOSED 用水户名下仍有未清应收或结算户预存余额。 */
+async function detectClosedBalance(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+): Promise<AnomalyFact[]> {
+  const rows = await tx.$queryRaw<
+    {
+      water_account_id: string;
+      account_no: string;
+      unpaid: bigint;
+      prepay: bigint;
+    }[]
+  >`
+    SELECT wa.id::text AS water_account_id, wa.account_no,
+           COALESCE((
+             SELECT sum(b.total_amount - COALESCE(a.paid, 0))
+             FROM bill b
+             LEFT JOIN LATERAL (
+               SELECT sum(pa.amount) AS paid FROM payment_alloc pa
+               WHERE pa.tenant_id = b.tenant_id AND pa.bill_id = b.id
+             ) a ON true
+             WHERE b.tenant_id = wa.tenant_id
+               AND b.water_account_id = wa.id
+               AND b.status IN ('POSTED', 'PARTIAL_PAID')
+           ), 0)::bigint AS unpaid,
+           COALESCE((
+             SELECT sum(e.amount) FROM prepayment_ledger_entry e
+             WHERE e.tenant_id = wa.tenant_id
+               AND e.settle_account_id = wa.settle_account_id
+           ), 0)::bigint AS prepay
+    FROM water_account wa
+    WHERE wa.tenant_id = ${tenantId}::uuid
+      AND wa.status = 'CLOSED'`;
+  return rows
+    .filter((r) => r.unpaid !== 0n || r.prepay !== 0n)
+    .map((r) => {
+      const parts: string[] = [];
+      if (r.unpaid !== 0n) parts.push(`未清应收 ${Number(r.unpaid) / 100} 元`);
+      if (r.prepay !== 0n) parts.push(`预存余额 ${Number(r.prepay) / 100} 元`);
+      return fact({
+        key: waKey(r.water_account_id, A.CLOSED_BALANCE_LEFT),
+        type: A.CLOSED_BALANCE_LEFT,
+        waterAccountId: r.water_account_id,
+        anchorRef: { kind: 'water-account', id: r.water_account_id },
+        summary: `账户 ${r.account_no} 已销户但仍有${parts.join('、')}——请按销户预检路径清理`,
+      });
+    });
+}
+
+// ---------------------------------------------------------------------------
 
 /** All detectors — one pass, facts are scope-agnostic (filtering later). */
 export async function detectAll(
@@ -342,10 +523,14 @@ export async function detectAll(
     detectMultiBook(tx, tenantId),
     detectReadingQc(tx, tenantId, 'MANUAL_REVIEW', A.READING_QC_REVIEW, '待人工复核'),
     detectReadingQc(tx, tenantId, 'REJECTED', A.READING_QC_REJECTED, 'QC 驳回'),
+    detectReadingQc(tx, tenantId, 'PENDING', A.READING_QC_PENDING, '待质检'),
     detectEstimateStreak(tx, tenantId),
     detectRemoteStatus(tx, tenantId),
     detectEventKeyConflict(tx, tenantId),
     detectUnpaidBillOverdue(tx, tenantId),
+    detectSettlementDrift(tx, tenantId),
+    detectPlanCoverage(tx, tenantId),
+    detectClosedBalance(tx, tenantId),
   ]);
   return groups.flat();
 }

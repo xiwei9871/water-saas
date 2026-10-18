@@ -11,7 +11,7 @@ export default function Forbidden() {
       subTitle="你当前账号没有访问此页面的权限。"
       extra={
         <Button type="primary" onClick={() => navigate('/', { replace: true })}>
-          返回工作台
+          返回首页
         </Button>
       }
     />

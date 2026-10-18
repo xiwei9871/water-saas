@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -9,12 +10,17 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { estimateAvg3 } from '@ws/billing-core';
 import { estimateStreaksTx } from '../../common/estimate-streak.js';
+import { loadCoveringOrgsTx } from '../../common/account-aggregation-ownership.js';
+import { computeOrgScopeTx } from '../../common/org-scope.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
   assertAccountScopeTx as assertAccountCoverageTx,
   outOfScopeAccountIds,
 } from '../../common/account-scope.js';
+import { embedAccountIdentity } from '../../common/account-identity.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
+import { SETTLEMENT_BLOCKING_TYPES } from '../task/task.types.js';
 
 export const SETTLEMENT_SELECT = {
   id: true,
@@ -71,6 +77,100 @@ export interface EstimatePreviewBody {
   waterAccountId: string;
   period: string;
 }
+
+/** RC1-3 (Human Pilot F11): batch generation input — period + optional
+ *  route/org narrowing + a shared estimateReason for estimated accounts. */
+export interface SettlementBatchBody {
+  period: string;
+  bookId?: string;
+  orgUnitId?: string;
+  estimateReason?: string | null;
+}
+
+export type BatchItemStatus =
+  | 'READY'
+  | 'READY_ESTIMATED'
+  | 'GENERATED'
+  | 'GENERATED_ESTIMATED'
+  | 'SKIPPED_EXISTS'
+  | 'FAILED';
+
+export interface BatchItem {
+  waterAccountId: string;
+  accountNo: string;
+  status: BatchItemStatus;
+  settlementId?: string;
+  errorCode?: string;
+}
+
+export interface BatchReport {
+  period: string;
+  bookId?: string;
+  orgUnitId?: string;
+  total: number;
+  counts: {
+    ready: number;
+    readyEstimated: number;
+    generated: number;
+    generatedEstimated: number;
+    skippedExists: number;
+    failed: number;
+  };
+  items: BatchItem[];
+}
+
+/** A batch over this many candidate accounts must be narrowed first. */
+export const BATCH_MAX_ACCOUNTS = 500;
+
+/** Sentinel: batch preview rolls its whole transaction back via this throw —
+ *  the report rides along so none of the simulated business writes commit.
+ *  Note: this only guarantees zero business-state side effects — the audit
+ *  interceptor still writes an audit_log row in a separate transaction after
+ *  the successful response (the preview attempt itself is auditable). */
+class BatchPreviewRollback extends Error {
+  constructor(readonly report: BatchReport) {
+    super('batch preview rollback');
+  }
+}
+
+/** The stable domain code out of a thrown Nest exception (else INTERNAL). */
+const exceptionCode = (err: unknown): string => {
+  if (err instanceof HttpException) {
+    const res = err.getResponse();
+    if (res && typeof res === 'object' && typeof (res as { code?: unknown }).code === 'string') {
+      return (res as { code: string }).code;
+    }
+    return `HTTP_${err.getStatus()}`;
+  }
+  return 'INTERNAL';
+};
+
+const batchReport = (body: SettlementBatchBody, items: BatchItem[]): BatchReport => {
+  const counts = {
+    ready: 0,
+    readyEstimated: 0,
+    generated: 0,
+    generatedEstimated: 0,
+    skippedExists: 0,
+    failed: 0,
+  };
+  for (const i of items) {
+    if (i.status === 'READY') counts.ready += 1;
+    else if (i.status === 'READY_ESTIMATED') counts.readyEstimated += 1;
+    else if (i.status === 'GENERATED') counts.generated += 1;
+    else if (i.status === 'GENERATED_ESTIMATED') counts.generatedEstimated += 1;
+    else if (i.status === 'SKIPPED_EXISTS') counts.skippedExists += 1;
+    else counts.failed += 1;
+  }
+  return {
+    period: body.period,
+    bookId: body.bookId,
+    orgUnitId: body.orgUnitId,
+    total: items.length,
+    counts,
+    items,
+  };
+};
 
 const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
 
@@ -146,7 +246,10 @@ interface DialCheckpoint {
  */
 @Injectable()
 export class SettlementService {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly tasks: TaskService,
+  ) {}
 
   async list(
     ctx: TenantCtx,
@@ -277,6 +380,10 @@ export class SettlementService {
       });
     }
 
+    // 任务书 T9：该户存在未完成补差任务 → 阻断结算（任务完成/核销应用后自动解锁）。
+    await this.throwIfBlockedByTask(tx, ctx, body.waterAccountId);
+    const anchor = await this.accountTaskAnchor(tx, ctx, body.waterAccountId);
+
     const { start, end } = periodBounds(body.period);
     // Installations contributing to the period: lifetime intersects
     // [start,end) — still ACTIVE, or REMOVED during/after the period (an
@@ -311,6 +418,7 @@ export class SettlementService {
     const instIds = installations.map((i) => i.id);
     const prevChain = await this.prevChain(tx, ctx, body.waterAccountId, instIds, body.period);
     const readings = await this.validReadings(tx, ctx, instIds, body.period);
+    const pendingReadings = await this.pendingQcReadings(tx, ctx, instIds, body.period);
     const readerEstimates = await this.readerEstimates(tx, ctx, instIds, body.period);
     const history = await this.historyUsages(tx, ctx, body.waterAccountId, body.period);
     const suggested = estimateAvg3(history);
@@ -344,14 +452,29 @@ export class SettlementService {
       // An estimated end is not a physical dial: maxDial cannot turn an
       // over-estimate into a rollover. Correct billed estimates first.
       if (checkpoint?.sourceType === 'ESTIMATE' && actualEnd?.lt(prev)) {
-        throw new ConflictException({
-          code: 'ESTIMATE_RECOVERY_REQUIRES_RECONCILIATION',
-          waterAccountId: body.waterAccountId,
-          installationId: inst.id,
-          period: body.period,
-          estimatedReadingValue: prev.toString(),
-          actualReadingValue: actualEnd.toString(),
+        // 任务书 T6/T9：检测「实抄止度 < 估计止度」→ 自动建补差任务（幂等）
+        // 并阻断结算。核销应用后 prevChain 用真实读数替换估计 checkpoint，
+        // 该分支不再命中——完成解锁无需状态翻转。
+        // 注意：本事务随阻断 409 回滚，任务必须在独立事务中提交。
+        const task = await this.tasks.createTaskStandalone(ctx, {
+          type: 'SUPPLEMENT',
+          title: `补差：户 ${anchor.accountNo} 的 ${body.period} 期估水需校正`,
+          bizType: 'waterAccount',
+          bizId: body.waterAccountId,
+          bizLabel: anchor.accountNo,
+          reason: `实抄止度 ${actualEnd.toString()} < 估计止度 ${prev.toString()}`,
+          context: {
+            waterAccountId: body.waterAccountId,
+            waterAccountNo: anchor.accountNo,
+            period: body.period,
+            installationId: inst.id,
+            estimatedReadingValue: prev.toString(),
+            actualReadingValue: actualEnd.toString(),
+            diff: actualEnd.minus(prev).toString(),
+          },
+          orgUnitId: anchor.orgUnitId,
         });
+        await this.throwIfBlockedByTask(tx, ctx, body.waterAccountId, task);
       }
       if (removedInPeriod && inst.finalReading !== null) {
         // 拆表 final_reading is the end-of-life dial fact — it wins over any
@@ -374,6 +497,19 @@ export class SettlementService {
           sourceReadingId: valid.id,
         });
       } else {
+        // 10/8 报告 §6: 读数已录入但未过质检 ≠ 需要预估 —— 报真实
+        // 原因，把操作员引去质检而不是填预估原因。
+        const pending = pendingReadings.get(inst.id);
+        if (pending) {
+          throw new ConflictException({
+            code: 'READING_PENDING_QC',
+            waterAccountId: body.waterAccountId,
+            installationId: inst.id,
+            period: body.period,
+            readingId: pending.id,
+            qcStatus: pending.qcStatus,
+          });
+        }
         estimatedInsts.push(inst);
         drafts.push({
           installationId: inst.id,
@@ -615,6 +751,212 @@ export class SettlementService {
   }
 
   // -------------------------------------------------------------------------
+  // RC1-3 batch generation (Human Pilot F11)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Candidate accounts for a batch: every account with ≥1 installation whose
+   * lifetime intersects the period, narrowed by current book membership
+   * (bookId) or covering-book org subtree (orgUnitId), ordered by accountNo
+   * for deterministic processing. Scoped callers silently lose accounts
+   * whose PERIOD plan coverage touches out-of-scope books — the same
+   * anchor assertAccountScope uses per account (they are not listed, not
+   * merely failed). CLOSED accounts stay in the candidate set and surface
+   * as FAILED(WATER_ACCOUNT_CLOSED) so the count is honest.
+   */
+  private async batchCandidates(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    body: SettlementBatchBody,
+  ): Promise<{ id: string; accountNo: string }[]> {
+    const { start, end } = periodBounds(body.period);
+
+    let memberIds: Set<string> | null = null;
+    if (body.bookId) {
+      const book = await tx.readingBook.findFirst({
+        where: { tenantId: ctx.tenantId, id: body.bookId },
+        select: { orgUnitId: true },
+      });
+      if (!book) throw new BadRequestException({ code: 'BOOK_NOT_FOUND' });
+      if (!orgInScope(ctx, book.orgUnitId)) throw outOfScope();
+      const members = await tx.bookMeter.findMany({
+        where: { tenantId: ctx.tenantId, bookId: body.bookId },
+        select: { waterAccountId: true },
+      });
+      memberIds = new Set(members.map((m) => m.waterAccountId));
+    }
+
+    let orgSubtree: Set<string> | null = null;
+    if (body.orgUnitId) {
+      const org = await tx.orgUnit.findFirst({
+        where: { tenantId: ctx.tenantId, id: body.orgUnitId },
+        select: { id: true },
+      });
+      if (!org) throw new BadRequestException({ code: 'ORG_UNIT_NOT_FOUND' });
+      if (!orgInScope(ctx, body.orgUnitId)) throw outOfScope();
+      orgSubtree = new Set(
+        await computeOrgScopeTx(tx, ctx.tenantId, body.orgUnitId, 'ORG_SUBTREE'),
+      );
+    }
+
+    const insts = await tx.meterInstallation.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        installedAt: { lt: end },
+        OR: [{ removedAt: null }, { removedAt: { gte: start } }],
+      },
+      select: { waterAccountId: true },
+    });
+    let ids = [...new Set(insts.map((i) => i.waterAccountId))];
+    if (memberIds !== null) ids = ids.filter((id) => memberIds!.has(id));
+    if (orgSubtree !== null) {
+      const covering = await loadCoveringOrgsTx(tx, ctx.tenantId, ids);
+      ids = ids.filter((id) =>
+        [...(covering.get(id) ?? [])].some((o) => orgSubtree!.has(o)),
+      );
+    }
+    if (ctx.scope !== 'ALL' && ids.length > 0) {
+      // Mirror assertAccountScope: plan items OF THIS PERIOD whose covering
+      // book sits outside the caller's subtree → excluded from candidates.
+      const bad = await tx.$queryRaw<{ water_account_id: string }[]>`
+        SELECT DISTINCT rpi.water_account_id::text
+        FROM reading_plan_item rpi
+        JOIN reading_plan rp
+          ON rp.tenant_id = rpi.tenant_id AND rp.id = rpi.plan_id
+        JOIN reading_book rb
+          ON rb.tenant_id = rpi.tenant_id AND rb.id = rp.book_id
+        WHERE rpi.tenant_id = ${ctx.tenantId}::uuid
+          AND rp.period = ${body.period}
+          AND rpi.water_account_id = ANY(${ids}::uuid[])
+          AND rb.org_unit_id <> ALL(${ctx.orgScope}::uuid[])`;
+      const badSet = new Set(bad.map((r) => r.water_account_id));
+      ids = ids.filter((id) => !badSet.has(id));
+    }
+
+    const accounts = await tx.waterAccount.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: ids } },
+      select: { id: true, accountNo: true },
+      orderBy: [{ accountNo: 'asc' }, { id: 'asc' }],
+    });
+    if (accounts.length > BATCH_MAX_ACCOUNTS) {
+      throw new BadRequestException({
+        code: 'BATCH_TOO_LARGE',
+        max: BATCH_MAX_ACCOUNTS,
+        candidates: accounts.length,
+      });
+    }
+    return accounts;
+  }
+
+  /**
+   * POST /consumption-settlements/batch/preview — runs the REAL generateTx
+   * per candidate inside a per-account SAVEPOINT that is always rolled
+   * back, then rolls back the outer transaction via a sentinel throw. The
+   * classification is therefore exactly what execute would do: READY /
+   * READY_ESTIMATED / SKIPPED_EXISTS / FAILED(code) — no business state
+   * persists. (An audit_log row for the preview request may still be
+   * written post-response by the audit interceptor; that is intentional.)
+   */
+  async batchPreview(ctx: TenantCtx, body: SettlementBatchBody): Promise<BatchReport> {
+    try {
+      return await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+        const candidates = await this.batchCandidates(tx, ctx, body);
+        const existing = new Set(
+          (
+            await tx.consumptionSettlement.findMany({
+              where: {
+                tenantId: ctx.tenantId,
+                period: body.period,
+                waterAccountId: { in: candidates.map((c) => c.id) },
+              },
+              select: { waterAccountId: true },
+            })
+          ).map((r) => r.waterAccountId),
+        );
+        const items: BatchItem[] = [];
+        for (const c of candidates) {
+          if (existing.has(c.id)) {
+            items.push({
+              waterAccountId: c.id,
+              accountNo: c.accountNo,
+              status: 'SKIPPED_EXISTS',
+            });
+            continue;
+          }
+          let item: BatchItem;
+          await tx.$executeRaw`SAVEPOINT rc1_batch_item`;
+          try {
+            const created = await this.generateTx(tx, ctx, {
+              waterAccountId: c.id,
+              period: body.period,
+              estimateReason: body.estimateReason ?? null,
+            });
+            item = {
+              waterAccountId: c.id,
+              accountNo: c.accountNo,
+              status: created.isEstimated ? 'READY_ESTIMATED' : 'READY',
+            };
+          } catch (err) {
+            const code = exceptionCode(err);
+            item = {
+              waterAccountId: c.id,
+              accountNo: c.accountNo,
+              status: code === 'SETTLEMENT_ALREADY_EXISTS' ? 'SKIPPED_EXISTS' : 'FAILED',
+              ...(code === 'SETTLEMENT_ALREADY_EXISTS' ? {} : { errorCode: code }),
+            };
+          } finally {
+            await tx.$executeRaw`ROLLBACK TO SAVEPOINT rc1_batch_item`;
+          }
+          items.push(item);
+        }
+        throw new BatchPreviewRollback(batchReport(body, items));
+      });
+    } catch (err) {
+      if (err instanceof BatchPreviewRollback) return err.report;
+      throw err;
+    }
+  }
+
+  /**
+   * POST /consumption-settlements/batch — one independent runAsTenant
+   * transaction PER ACCOUNT in deterministic accountNo order: a single
+   * failure never aborts the batch, and retrying the batch is naturally
+   * idempotent (the unique key turns a rerun into SKIPPED_EXISTS).
+   */
+  async batchExecute(ctx: TenantCtx, body: SettlementBatchBody): Promise<BatchReport> {
+    const candidates = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.batchCandidates(tx, ctx, body),
+    );
+    const items: BatchItem[] = [];
+    for (const c of candidates) {
+      try {
+        const created = await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+          this.generateTx(tx, ctx, {
+            waterAccountId: c.id,
+            period: body.period,
+            estimateReason: body.estimateReason ?? null,
+          }),
+        );
+        items.push({
+          waterAccountId: c.id,
+          accountNo: c.accountNo,
+          status: created.isEstimated ? 'GENERATED_ESTIMATED' : 'GENERATED',
+          settlementId: created.id,
+        });
+      } catch (err) {
+        const code = exceptionCode(err);
+        items.push({
+          waterAccountId: c.id,
+          accountNo: c.accountNo,
+          status: code === 'SETTLEMENT_ALREADY_EXISTS' ? 'SKIPPED_EXISTS' : 'FAILED',
+          ...(code === 'SETTLEMENT_ALREADY_EXISTS' ? {} : { errorCode: code }),
+        });
+      }
+    }
+    return batchReport(body, items);
+  }
+
+  // -------------------------------------------------------------------------
   // internals
   // -------------------------------------------------------------------------
 
@@ -636,16 +978,99 @@ export class SettlementService {
       list.push(c);
       bySettlement.set(c.settlementId, list);
     }
+    // 分量人读引用（9·30 报告 §3）：安装记录 → 表号，来源读数 →
+    // 读数/日期/结果类型 —— 详情不再摆截断 uuid。
+    const instIds = [...new Set(components.map((c) => c.installationId))];
+    const insts = instIds.length
+      ? await tx.meterInstallation.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: instIds } },
+          select: { id: true, meter: { select: { meterNo: true } } },
+        })
+      : [];
+    const meterNoByInst = new Map(insts.map((i) => [i.id, i.meter.meterNo]));
+    const readingIds = [
+      ...new Set(
+        components
+          .map((c) => c.sourceReadingId)
+          .filter((v): v is string => !!v),
+      ),
+    ];
+    const readings = readingIds.length
+      ? await tx.meterReading.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: readingIds } },
+          select: {
+            id: true,
+            period: true,
+            readDate: true,
+            resultType: true,
+            readingValue: true,
+            estimateQty: true,
+          },
+        })
+      : [];
+    const readingById = new Map(readings.map((r) => [r.id, r]));
+    const namedComponents = (settlementId: string) =>
+      (bySettlement.get(settlementId) ?? []).map((c) => ({
+        ...c,
+        meterNo: meterNoByInst.get(c.installationId) ?? null,
+        sourceReading: (c.sourceReadingId && readingById.get(c.sourceReadingId)) ?? null,
+      }));
     const streaks = await this.estimateStreaks(
       tx,
       ctx,
       [...new Set(rows.map((r) => r.waterAccountId))],
     );
-    return rows.map((r) => ({
+    return (await embedAccountIdentity(tx, ctx.tenantId, rows)).map((r) => ({
       ...r,
-      components: bySettlement.get(r.id) ?? [],
+      components: namedComponents(r.id),
       consecutiveEstimates: streaks.get(r.id) ?? 0,
     }));
+  }
+
+  /**
+   * 任务锚点：户号（人读标签）+ 数据范围组织（首个覆盖册 org）。
+   * 册缺失时 org=null → 候选人不受组织限制（ALL/任意组织但有权限者）。
+   */
+  private async accountTaskAnchor(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+  ): Promise<{ accountNo: string; orgUnitId: string | null }> {
+    const rows = await tx.$queryRaw<{ account_no: string; org: string | null }[]>`
+      SELECT wa.account_no,
+             (SELECT rb.org_unit_id FROM book_meter bm
+                JOIN reading_book rb ON rb.id = bm.book_id AND rb.tenant_id = bm.tenant_id
+               WHERE bm.tenant_id = wa.tenant_id AND bm.water_account_id = wa.id
+               ORDER BY bm.created_at ASC LIMIT 1) AS org
+      FROM water_account wa
+      WHERE wa.tenant_id = ${ctx.tenantId}::uuid AND wa.id = ${waterAccountId}::uuid`;
+    return { accountNo: rows[0]?.account_no ?? waterAccountId, orgUnitId: rows[0]?.org ?? null };
+  }
+
+  /**
+   * 任务书 §1.8 三段式阻断：存在未完成任务 → 409，载荷带任务与候选责任人
+   * 姓名（有权限者看「请前往处理」，无权限者看「已指派给…」由前端按 canClaim 分流）。
+   */
+  private async throwIfBlockedByTask(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+    justCreated?: { candidates: { id: string; name: string }[] },
+  ) {
+    const blocking = await this.tasks.openTasksForBiz(
+      tx, ctx, SETTLEMENT_BLOCKING_TYPES, 'waterAccount', waterAccountId,
+    );
+    if (blocking.length === 0) return;
+    const first = blocking[0];
+    const candidates =
+      justCreated?.candidates ??
+      (await this.tasks.resolveCandidates(tx, ctx, first.requiredPerm, first.orgUnitId));
+    throw new ConflictException({
+      code: 'SETTLEMENT_BLOCKED_BY_TASK',
+      message: `该户存在未完成的【补差任务】（候选责任人：${candidates.map((c) => c.name).join('、') || '暂无具备权限的账号'}），完成后自动解锁。`,
+      tasks: blocking.map((t) => ({ id: t.id, type: t.type, title: t.title })),
+      candidates: candidates.map((c) => ({ id: c.id, name: c.name })),
+    });
   }
 
   /** Streak math lives in common/estimate-streak.ts (E9 shares it). */
@@ -805,6 +1230,56 @@ export class SettlementService {
       }
     }
     return valid;
+  }
+
+  /**
+   * 10/8 报告 §6: in-period ACTUAL/REMOTE readings awaiting review
+   * (qcStatus PENDING/MANUAL_REVIEW, not superseded) — the "real cause"
+   * behind most would-be-estimate components. Same superseded-child
+   * probe as validReadings.
+   */
+  private async pendingQcReadings(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    installationIds: string[],
+    period: string,
+  ) {
+    const candidates = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        installationId: { in: installationIds },
+        period,
+        resultType: { in: ['ACTUAL', 'REMOTE'] },
+        qcStatus: { in: ['PENDING', 'MANUAL_REVIEW'] },
+      },
+      select: {
+        id: true,
+        installationId: true,
+        qcStatus: true,
+        readDate: true,
+        createdAt: true,
+      },
+      orderBy: [{ readDate: 'desc' }, { createdAt: 'desc' }],
+    });
+    if (candidates.length === 0) {
+      return new Map<string, { id: string; qcStatus: string }>();
+    }
+    const children = await tx.meterReading.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        supersedesReadingId: { in: candidates.map((c) => c.id) },
+      },
+      select: { supersedesReadingId: true },
+    });
+    const superseded = new Set(children.map((c) => c.supersedesReadingId));
+    const pending = new Map<string, { id: string; qcStatus: string }>();
+    for (const r of candidates) {
+      if (superseded.has(r.id)) continue;
+      if (!pending.has(r.installationId)) {
+        pending.set(r.installationId, { id: r.id, qcStatus: r.qcStatus });
+      }
+    }
+    return pending;
   }
 
   /**

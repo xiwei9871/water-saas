@@ -145,6 +145,12 @@ export class WaterAccountService {
     private readonly installs: MeterInstallationService,
   ) {}
 
+  /**
+   * GET /water-accounts — RC1-4 unified `q`: one box searches account_no,
+   * addr, customer name/no/phone AND the CURRENT meter's meter_no (ACTIVE
+   * installation). RC1-5: default order is newest-first (createdAt desc,
+   * id desc) so a just-created account lands on page one.
+   */
   list(
     ctx: TenantCtx,
     q: {
@@ -154,6 +160,7 @@ export class WaterAccountService {
       settleAccountId?: string;
       status?: AccountStatus;
       accountNo?: string;
+      q?: string;
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
@@ -162,20 +169,79 @@ export class WaterAccountService {
       // resurrect an out-of-scope account.
       const hidden =
         ctx.scope === 'ALL' ? [] : await outOfScopeAccountIds(tx, ctx);
-      return tx.waterAccount.findMany({
+      const needle = q.q?.trim();
+      let meterHitIds: string[] | null = null;
+      if (needle) {
+        const hits = await tx.meterInstallation.findMany({
+          where: {
+            tenantId: ctx.tenantId,
+            status: 'ACTIVE',
+            meter: { meterNo: { contains: needle, mode: 'insensitive' } },
+          },
+          select: { waterAccountId: true },
+        });
+        meterHitIds = [...new Set(hits.map((h) => h.waterAccountId))];
+      }
+      const rows = await tx.waterAccount.findMany({
         where: {
           tenantId: ctx.tenantId,
           customerId: q.customerId,
           settleAccountId: q.settleAccountId,
           status: q.status,
           accountNo: q.accountNo,
+          ...(needle
+            ? {
+                OR: [
+                  { accountNo: { contains: needle, mode: 'insensitive' } },
+                  { addr: { contains: needle, mode: 'insensitive' } },
+                  {
+                    customer: {
+                      is: {
+                        OR: [
+                          { name: { contains: needle, mode: 'insensitive' } },
+                          { customerNo: { contains: needle, mode: 'insensitive' } },
+                          { phone: { contains: needle, mode: 'insensitive' } },
+                        ],
+                      },
+                    },
+                  },
+                  { id: { in: meterHitIds ?? [] } },
+                ],
+              }
+            : {}),
           ...(hidden.length ? { id: { notIn: hidden } } : {}),
         },
         select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
-        orderBy: { accountNo: 'asc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: q.take,
         skip: q.skip,
       });
+      // 当前表号 = ACTIVE installation ORDER BY installed_at DESC, id DESC
+      // (E7 current-meter rule, shared with the 360 resolver).
+      const actives = rows.length
+        ? await tx.meterInstallation.findMany({
+            where: {
+              tenantId: ctx.tenantId,
+              waterAccountId: { in: rows.map((r) => r.id) },
+              status: 'ACTIVE',
+            },
+            select: {
+              waterAccountId: true,
+              meter: { select: { meterNo: true } },
+            },
+            orderBy: [{ installedAt: 'desc' }, { id: 'desc' }],
+          })
+        : [];
+      const currentMeter = new Map<string, string>();
+      for (const a of actives) {
+        if (!currentMeter.has(a.waterAccountId)) {
+          currentMeter.set(a.waterAccountId, a.meter.meterNo);
+        }
+      }
+      return rows.map((r) => ({
+        ...r,
+        currentMeterNo: currentMeter.get(r.id) ?? null,
+      }));
     });
   }
 
@@ -564,6 +630,90 @@ export class WaterAccountService {
   }
 
   /**
+   * Doc numbers for entities this onboard will CREATE (not link, not
+   * explicitly numbered, not the MONITORING system pair). With >=2 such
+   * entities we allocate one shared suffix via nextAligned so the four
+   * numbers differ only by prefix. A single auto-numbered entity falls back
+   * to its own createTx allocation.
+   */
+  private async alignedDocNos(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    body: OnboardBody,
+    isMonitoring: boolean,
+  ) {
+    const tid = ctx.tenantId;
+    const slots: ({ seqKey: string; prefix: string } & {
+      field: 'customerNo' | 'settleNo' | 'accountNo' | 'meterNo';
+      exists: (no: string) => Promise<boolean>;
+    })[] = [];
+    if (
+      !isMonitoring &&
+      !body.customerId &&
+      !body.customer?.customerNo?.trim()
+    ) {
+      slots.push({
+        seqKey: 'customer_no',
+        prefix: 'C',
+        field: 'customerNo',
+        exists: async (no) =>
+          !!(await tx.customer.findFirst({
+            where: { tenantId: tid, customerNo: no },
+            select: { id: true },
+          })),
+      });
+    }
+    if (
+      !isMonitoring &&
+      !body.settleAccountId &&
+      !body.settleAccount?.settleNo?.trim()
+    ) {
+      slots.push({
+        seqKey: 'settle_no',
+        prefix: 'S',
+        field: 'settleNo',
+        exists: async (no) =>
+          !!(await tx.settleAccount.findFirst({
+            where: { tenantId: tid, settleNo: no },
+            select: { id: true },
+          })),
+      });
+    }
+    if (!body.account.accountNo?.trim()) {
+      slots.push({
+        seqKey: 'account_no',
+        prefix: 'A',
+        field: 'accountNo',
+        exists: async (no) =>
+          !!(await tx.waterAccount.findFirst({
+            where: { tenantId: tid, accountNo: no },
+            select: { id: true },
+          })),
+      });
+    }
+    if (!body.meterId && !body.meter?.meterNo?.trim()) {
+      slots.push({
+        seqKey: 'meter_no',
+        prefix: 'M',
+        field: 'meterNo',
+        exists: async (no) =>
+          !!(await tx.meter.findFirst({
+            where: { tenantId: tid, meterNo: no },
+            select: { id: true },
+          })),
+      });
+    }
+    if (slots.length < 2) return {};
+    const nos = await this.seq.nextAligned(tx, tid, slots, ctx.staffId);
+    return Object.fromEntries(slots.map((s, i) => [s.field, nos[i]])) as {
+      customerNo?: string;
+      settleNo?: string;
+      accountNo?: string;
+      meterNo?: string;
+    };
+  }
+
+  /**
    * 立户向导 — one transaction creates/links customer + settle_account +
    * water_account + meter + ACTIVE installation (spec §2.1 / §4 onboard).
    * Every document number draws from sys_sequence inside this tx: a rollback
@@ -573,6 +723,12 @@ export class WaterAccountService {
   async onboardTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: OnboardBody) {
     assertUsageCategory(body.account.usageCategory);
     const isMonitoring = body.account.usageCategory === 'MONITORING';
+
+    // Round-2 pilot feedback: every entity CREATED inside one onboard draws
+    // the same numeric suffix — 客户号/结算户/户号/表号 differ only by prefix
+    // (C/S/A/M…000042), so one household reads as one number. Linked or
+    // explicitly-numbered entities keep their own number and sit out.
+    const aligned = await this.alignedDocNos(tx, ctx, body, isMonitoring);
 
     // 1+2. customer + settle_account — monitoring meters hang off the
     //    tenant's system customer (MONITORING_INTERNAL); everything else
@@ -592,7 +748,10 @@ export class WaterAccountService {
           throw new BadRequestException({ code: 'CUSTOMER_NOT_FOUND' });
         }
       } else {
-        customer = await this.customers.createTx(tx, ctx, body.customer!);
+        customer = await this.customers.createTx(tx, ctx, {
+          ...body.customer!,
+          customerNo: aligned.customerNo ?? body.customer?.customerNo,
+        });
       }
       if (body.settleAccountId) {
         settleAccount = await tx.settleAccount.findFirst({
@@ -606,13 +765,16 @@ export class WaterAccountService {
           name: customer.name,
           phone: customer.phone ?? undefined,
         };
-        settleAccount = await this.settles.createTx(tx, ctx, settleBody);
+        settleAccount = await this.settles.createTx(tx, ctx, {
+          ...settleBody,
+          settleNo: aligned.settleNo ?? settleBody.settleNo,
+        });
       }
     }
 
     // 3. water_account
     const waterAccount = await this.createTx(tx, ctx, {
-      accountNo: body.account.accountNo,
+      accountNo: aligned.accountNo ?? body.account.accountNo,
       customerId: customer.id,
       settleAccountId: settleAccount.id,
       usageCategory: body.account.usageCategory,
@@ -648,7 +810,10 @@ export class WaterAccountService {
       });
       if (!meter) throw new BadRequestException({ code: 'METER_NOT_FOUND' });
     } else {
-      meter = await this.meters.createTx(tx, ctx, body.meter ?? {});
+      meter = await this.meters.createTx(tx, ctx, {
+        ...(body.meter ?? {}),
+        meterNo: aligned.meterNo ?? body.meter?.meterNo,
+      });
     }
 
     // 5. installation — installTx enforces AVAILABLE→INSTALLED itself, so an

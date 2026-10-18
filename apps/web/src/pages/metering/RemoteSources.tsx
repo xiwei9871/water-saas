@@ -30,7 +30,7 @@ import type {
   RemoteSource,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { cleanBody, newIdemKey } from '../common';
+import { cleanBody, enumLabel, newIdemKey } from '../common';
 import { OrgUnitTreeSelect } from '../pickers';
 
 interface SourceFormValues {
@@ -133,7 +133,7 @@ export default function RemoteSources() {
 
   const orgName = useCallback(
     (id: string | null) =>
-      id === null ? '全公司' : (orgs.find((o) => o.id === id)?.name ?? `${id.slice(0, 8)}…`),
+      id === null ? '全公司' : (orgs.find((o) => o.id === id)?.name ?? '—'),
     [orgs],
   );
 
@@ -273,7 +273,7 @@ export default function RemoteSources() {
       title: '类型',
       dataIndex: 'type',
       width: 110,
-      render: (t: string) => TYPE_LABELS[t] ?? t,
+      render: (t: string) => enumLabel(TYPE_LABELS, t),
     },
     { title: 'Adapter', dataIndex: 'adapterKey', width: 110 },
     { title: '时区', dataIndex: 'timezone', width: 130 },
@@ -367,7 +367,7 @@ export default function RemoteSources() {
         }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         title={modal?.kind === 'edit' ? `编辑数据源 ${modal.row.code}` : '新建数据源'}
         open={modal !== null}
         onCancel={() => setModal(null)}
@@ -432,7 +432,7 @@ export default function RemoteSources() {
         </Form>
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         title={`导入远传文件 — ${importSource?.name ?? ''}`}
         open={importSource !== null}
         onCancel={() => setImportSource(null)}

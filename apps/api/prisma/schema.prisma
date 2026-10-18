@@ -180,6 +180,11 @@ enum RunStatus {
   FAILED
 }
 
+enum BillingRunGenerationStatus {
+  GENERATING
+  READY
+}
+
 enum BillKind {
   NORMAL
   ADJUSTMENT
@@ -217,6 +222,25 @@ enum PayChannel {
   CASH
   POS
   TRANSFER
+  ONLINE
+  BANK_DEDUCT
+}
+
+/** G1: fee item classification — 综合单价口径 = 水费收入(不含代收项)/售水量。 */
+enum FeeItemKind {
+  WATER_FEE
+  AGENCY
+  OTHER
+}
+
+enum DictStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum WriteoffStatus {
+  ACTIVE
+  REVERSED
 }
 
 enum PaymentStatus {
@@ -227,6 +251,35 @@ enum PaymentStatus {
 
 enum ReceiptType {
   RECEIPT
+}
+
+enum ReconMatchStatus {
+  MATCHED
+  AMOUNT_MISMATCH
+  NOT_FOUND
+  STATUS_MISMATCH
+}
+
+enum ReceiptBookStatus {
+  STOCK
+  ISSUED
+  EXHAUSTED
+  RETIRED
+}
+
+enum InvoiceStatus {
+  ISSUED
+  VOID
+}
+
+enum InstallApplyStatus {
+  SUBMITTED
+  SURVEYED
+  APPROVED
+  INSTALLING
+  COMPLETED
+  REJECTED
+  CANCELLED
 }
 
 enum DayCloseStatus {
@@ -679,6 +732,12 @@ model BookMeter {
   updatedBy      String?  @map("updated_by") @db.Uuid
 
   @@id([bookId, waterAccountId])
+  // RC1-2: route order is server-assigned dense seq (F9) — UNIQUE backstop.
+  // One-book-per-account (F10) is enforced in the service layer (account
+  // FOR UPDATE + ACCOUNT_IN_OTHER_BOOK + transfer), deliberately NOT as a
+  // hard unique: the MULTI_BOOK detector reads physical book_meter rows and
+  // must stay exercisable by fault injection.
+  @@unique([bookId, seqNo])
   @@index([tenantId, bookId])
   @@index([tenantId, waterAccountId])
   @@map("book_meter")
@@ -884,6 +943,7 @@ model FeeItem {
   code      String
   name      String
   calcType  CalcType @map("calc_type")
+  kind      FeeItemKind @default(WATER_FEE)
   createdAt DateTime @default(now()) @map("created_at")
   createdBy String?  @map("created_by") @db.Uuid
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -951,6 +1011,9 @@ model BillingRun {
   period              String    @db.Char(6)
   runType             RunType   @map("run_type")
   status              RunStatus @default(DRAFT)
+  // Billing-run draft generation is multi-transaction (RC1): the run is
+  // claimable for post/retry only after finalize flips this to READY.
+  generationStatus    BillingRunGenerationStatus @default(READY) @map("generation_status")
   postedAt            DateTime? @map("posted_at")
   totalCount          Int       @default(0) @map("total_count")
   successCount        Int       @default(0) @map("success_count")
@@ -961,6 +1024,9 @@ model BillingRun {
   updatedAt           DateTime  @updatedAt @map("updated_at")
   updatedBy           String?   @map("updated_by") @db.Uuid
 
+  createIdempotencyKey IdempotencyKey?
+
+  @@unique([tenantId, id])
   @@index([tenantId, period, status])
   @@map("billing_run")
 }
@@ -1034,12 +1100,21 @@ model IdempotencyKey {
   responseStatus Int?       @map("response_status")
   responseRef    String?    @map("response_ref")
   status         IdemStatus @default(PROCESSING)
+  // Multi-tx create link (BillingRun RC1): the claiming key row points at
+  // the run it created. RESTRICT + explicit discard unlink — no implicit
+  // referential action (fail-closed if a link was missed).
+  billingRunId   String?    @map("billing_run_id") @db.Uuid
+  billingRun     BillingRun? @relation(fields: [tenantId, billingRunId], references: [tenantId, id], onDelete: Restrict)
   createdAt      DateTime   @default(now()) @map("created_at")
   createdBy      String?    @map("created_by") @db.Uuid
   updatedAt      DateTime   @updatedAt @map("updated_at")
   updatedBy      String?    @map("updated_by") @db.Uuid
 
   @@unique([tenantId, key])
+  // one BillingRun ↔ at most one create idempotency key;
+  // PostgreSQL allows multiple rows where billing_run_id IS NULL
+  @@unique([tenantId, billingRunId])
+  @@index([tenantId, billingRunId])
   @@map("idempotency_key")
 }
 
@@ -1433,4 +1508,309 @@ enum WorkItemStatus {
 enum ResolutionSource {
   AUTO
   MANUAL
+}
+
+// ---------------------------------------------------------------------------
+// 任务驱动机制（任务书 V1.0）— Task = 业务节点自动生成的行动项。
+// 与 work_item 的区别：work_item 记录异常 episode 的处理状态（ack/ignore），
+// task 是「需要下一步操作」的指派闭环：检测→建任务→按权限指派→领取→完成→解锁。
+// ---------------------------------------------------------------------------
+
+/// Action task auto-created by domain triggers (supplement/review/collection/
+/// approvals). type→requiredPerm mapping lives in sys_dict TASK_TYPE_PERM —
+/// candidates are permission-derived, never hard-coded job titles.
+/// At most ONE open task per (tenant,type,bizType,bizId) — enforced by the
+/// partial unique index `task_open_dedupe` in the hand-written migration;
+/// a DONE/CANCELLED task frees the key so the same biz can re-trigger later.
+model Task {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  // String, not enum: new task types must not require a migration.
+  type           String
+  title          String
+  bizType        String       @map("biz_type")
+  bizId          String       @map("biz_id") @db.Uuid
+  // Human-readable business reference (户号/单号·账期) — display layer never
+  // falls back to bizId.
+  bizLabel       String?      @map("biz_label")
+  reason         String
+  context        Json?        @db.JsonB
+  requiredPerm   String       @map("required_perm")
+  // Anchor org for candidate data-scope filtering (book/cashier org).
+  orgUnitId      String?      @map("org_unit_id") @db.Uuid
+  assigneeId     String?      @map("assignee_id") @db.Uuid
+  status         TaskStatus   @default(PENDING)
+  priority       TaskPriority @default(NORMAL)
+  dueAt          DateTime?    @map("due_at")
+  sourceTaskId   String?      @map("source_task_id") @db.Uuid
+  // Snapshot at creation: 0 → admin alert (no qualified assignee).
+  candidateCount Int          @default(0) @map("candidate_count")
+  escalatedAt    DateTime?    @map("escalated_at")
+  completedAt    DateTime?    @map("completed_at")
+  completedBy    String?      @map("completed_by") @db.Uuid
+  cancelledAt    DateTime?    @map("cancelled_at")
+  cancelReason   String?      @map("cancel_reason")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  createdBy      String?      @map("created_by") @db.Uuid
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  updatedBy      String?      @map("updated_by") @db.Uuid
+
+  @@index([tenantId, status, type])
+  @@index([tenantId, assigneeId, status])
+  @@index([tenantId, bizType, bizId])
+  @@index([tenantId, dueAt])
+  @@map("task")
+}
+
+enum TaskStatus {
+  PENDING
+  CLAIMED
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+// ---------------------------------------------------------------------------
+// E10 查询导出 / 报表支撑 — G4 统一字典 + G2 坏账核销登记
+// ---------------------------------------------------------------------------
+
+/**
+ * G4 统一可配置字典：红冲/减免/核销/流失原因、账龄分段等筛选类别集中一表，
+ * 由租户在系统管理页增删停用，不散落硬编码。category 为约定字符串（见
+ * web 端 DICT_CATEGORIES），新增类别不需要迁移。
+ */
+model SysDict {
+  id        String     @id @default(uuid()) @db.Uuid
+  tenantId  String     @map("tenant_id") @db.Uuid
+  category  String
+  code      String
+  name      String
+  seq       Int        @default(0)
+  status    DictStatus @default(ACTIVE)
+  value     Json?      @db.JsonB
+  createdAt DateTime   @default(now()) @map("created_at")
+  createdBy String?    @map("created_by") @db.Uuid
+  updatedAt DateTime   @updatedAt @map("updated_at")
+  updatedBy String?    @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, category, code])
+  @@unique([tenantId, id])
+  @@index([tenantId, category, status])
+  @@map("sys_dict")
+}
+
+/**
+ * G2 坏账核销登记（轻量版）：人工登记 + 原因 + 留痕，不做账务冲销——
+ * 应收数据保持原样（financial invariant 不破），报表在展示层扣减/标注。
+ * 粒度到结算户 + 可选账单/用水户；REVERSED 保留历史（append-only 语义）。
+ */
+model BadDebtWriteoff {
+  id              String         @id @default(uuid()) @db.Uuid
+  tenantId        String         @map("tenant_id") @db.Uuid
+  settleAccountId String         @map("settle_account_id") @db.Uuid
+  waterAccountId  String?        @map("water_account_id") @db.Uuid
+  billId          String?        @map("bill_id") @db.Uuid
+  amount          BigInt
+  reasonCode      String         @map("reason_code")
+  note            String?
+  status          WriteoffStatus @default(ACTIVE)
+  effectiveDate   DateTime       @map("effective_date") @db.Date
+  reversedAt      DateTime?      @map("reversed_at")
+  reversedBy      String?        @map("reversed_by") @db.Uuid
+  createdAt       DateTime       @default(now()) @map("created_at")
+  createdBy       String?        @map("created_by") @db.Uuid
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  updatedBy       String?        @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId, settleAccountId, status])
+  @@index([tenantId, effectiveDate])
+  @@map("bad_debt_writeoff")
+}
+
+/**
+ * 数据查询·个人模板（阶段三）：保存「筛选条件+勾选字段+账期」快照，
+ * 仅创建者本人可见/可删。payload 为 UnifiedQuery 请求体（含字段顺序）。
+ */
+model ReportQueryTemplate {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  staffId   String   @map("staff_id") @db.Uuid
+  name      String
+  payload   Json     @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, staffId, name])
+  @@index([tenantId, staffId])
+  @@map("report_query_template")
+}
+
+/// 员工个人偏好（H2 驾驶舱个人视图等 per-staff JSON 配置）。
+model StaffPref {
+  tenantId  String   @map("tenant_id") @db.Uuid
+  staffId   String   @map("staff_id") @db.Uuid
+  key       String
+  value     Json     @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@id([tenantId, staffId, key])
+  @@map("staff_pref")
+}
+
+// ---------------------------------------------------------------------------
+// G 缺口补齐（docs/GAP_ANALYSIS_2026-10.md）
+// ---------------------------------------------------------------------------
+
+/// G3 渠道对账批次：银行/三方通道流水文件导入核账（mock 通道可生成对账单）。
+model ChannelReconBatch {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  channel       String
+  fileName      String?  @map("file_name")
+  bizDateFrom   DateTime? @map("biz_date_from") @db.Date
+  bizDateTo     DateTime? @map("biz_date_to") @db.Date
+  totalRows     Int      @default(0) @map("total_rows")
+  matched       Int      @default(0)
+  mismatched    Int      @default(0)
+  missingInFile Int      @default(0) @map("missing_in_file")
+  taskId        String?  @map("task_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at")
+  createdBy     String?  @map("created_by") @db.Uuid
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  updatedBy     String?  @map("updated_by") @db.Uuid
+
+  rows ChannelReconRow[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, createdAt])
+  @@map("channel_recon_batch")
+}
+
+model ChannelReconRow {
+  id          String           @id @default(uuid()) @db.Uuid
+  tenantId    String           @map("tenant_id") @db.Uuid
+  batchId     String           @map("batch_id") @db.Uuid
+  rowNo       Int              @map("row_no")
+  channelRef  String           @map("channel_ref")
+  amount      BigInt
+  paidAt      DateTime?        @map("paid_at")
+  matchStatus ReconMatchStatus @map("match_status")
+  paymentId   String?          @map("payment_id") @db.Uuid
+  note        String?
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  batch ChannelReconBatch @relation(fields: [tenantId, batchId], references: [tenantId, id], onDelete: Cascade)
+
+  @@index([tenantId, batchId])
+  @@map("channel_recon_row")
+}
+
+/// G4 催缴通知单：欠费户打印/留痕；bills 快照列出明细（应收/账期）。
+model CollectionNotice {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  noticeNo        String    @map("notice_no")
+  waterAccountId  String    @map("water_account_id") @db.Uuid
+  settleAccountId String    @map("settle_account_id") @db.Uuid
+  periodFrom      String    @map("period_from") @db.Char(6)
+  periodTo        String    @map("period_to") @db.Char(6)
+  amountDue       BigInt    @map("amount_due")
+  billCount       Int       @map("bill_count")
+  bills           Json      @db.JsonB
+  printCount      Int       @default(0) @map("print_count")
+  lastPrintedAt   DateTime? @map("last_printed_at")
+  taskId          String?   @map("task_id") @db.Uuid
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by") @db.Uuid
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  updatedBy       String?   @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, noticeNo])
+  @@index([tenantId, waterAccountId])
+  @@map("collection_notice")
+}
+
+/// G5 收据号段台账：领用后收款自动占用 next_no。
+model ReceiptBook {
+  id         String            @id @default(uuid()) @db.Uuid
+  tenantId   String            @map("tenant_id") @db.Uuid
+  bookNo     String            @map("book_no")
+  prefix     String            @default("S")
+  rangeStart Int               @map("range_start")
+  rangeEnd   Int               @map("range_end")
+  nextNo     Int               @map("next_no")
+  status     ReceiptBookStatus @default(STOCK)
+  issuedTo   String?           @map("issued_to") @db.Uuid
+  issuedAt   DateTime?         @map("issued_at")
+  createdAt  DateTime          @default(now()) @map("created_at")
+  createdBy  String?           @map("created_by") @db.Uuid
+  updatedAt  DateTime          @updatedAt @map("updated_at")
+  updatedBy  String?           @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, bookNo])
+  @@unique([tenantId, id])
+  @@index([tenantId, issuedTo, status])
+  @@map("receipt_book")
+}
+
+/// G5 发票登记台账（不接税控，登记/作废留痕）。
+model InvoiceRegistry {
+  id             String        @id @default(uuid()) @db.Uuid
+  tenantId       String        @map("tenant_id") @db.Uuid
+  invoiceNo      String        @map("invoice_no")
+  waterAccountId String?       @map("water_account_id") @db.Uuid
+  paymentId      String?       @map("payment_id") @db.Uuid
+  billId         String?       @map("bill_id") @db.Uuid
+  amount         BigInt
+  status         InvoiceStatus @default(ISSUED)
+  remark         String?
+  voidedAt       DateTime?     @map("voided_at")
+  voidedBy       String?       @map("voided_by") @db.Uuid
+  createdAt      DateTime      @default(now()) @map("created_at")
+  createdBy      String?       @map("created_by") @db.Uuid
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  updatedBy      String?       @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, invoiceNo])
+  @@index([tenantId, waterAccountId])
+  @@map("invoice_registry")
+}
+
+/// S1 报装申请（独立域）：申请→勘察→审批→装表→归档（归档调立户向导）。
+model InstallApplication {
+  id             String             @id @default(uuid()) @db.Uuid
+  tenantId       String             @map("tenant_id") @db.Uuid
+  applyNo        String             @map("apply_no")
+  applicantName  String             @map("applicant_name")
+  custType       String             @default("PERSONAL") @map("cust_type")
+  contactPhone   String?            @map("contact_phone")
+  addr           String
+  usageCategory  String             @map("usage_category")
+  caliberReq     String?            @map("caliber_req")
+  remark         String?
+  status         InstallApplyStatus @default(SUBMITTED)
+  orgUnitId      String?            @map("org_unit_id") @db.Uuid
+  surveyNote     String?            @map("survey_note")
+  installNote    String?            @map("install_note")
+  rejectReason   String?            @map("reject_reason")
+  waterAccountId String?            @map("water_account_id") @db.Uuid
+  createdAt      DateTime           @default(now()) @map("created_at")
+  createdBy      String?            @map("created_by") @db.Uuid
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+  updatedBy      String?            @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, applyNo])
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@map("install_application")
 }

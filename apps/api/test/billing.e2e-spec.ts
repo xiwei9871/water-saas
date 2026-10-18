@@ -26,11 +26,19 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import bcrypt from 'bcrypt';
+import { createHash } from 'node:crypto';
 import pg from 'pg';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module.js';
+import { TenantPrismaService } from '../src/common/tenant-prisma.js';
+import type { TenantCtx } from '../src/common/tenant-context.js';
+import { BillingRunService } from '../src/modules/billing/billing-run.service.js';
+import {
+  loadYtdBeforeQtyMap,
+  ytdBeforeQty,
+} from '../src/modules/billing/pricing.js';
 
 // Point the app's runtime client at the TEST database before Nest builds it.
 process.env.DATABASE_URL =
@@ -235,6 +243,8 @@ beforeAll(async () => {
   // run counters. Wipe tenant A's business tables (FK-safe order); iam
   // fixtures above are idempotent and stay.
   for (const table of [
+    // idempotency_key.billing_run_id RESTRICTs run deletes — keys first.
+    'idempotency_key',
     'bill_item',
     'bill',
     'billing_run',
@@ -831,7 +841,7 @@ describe('v0.2: monitoring skip + household-scaled pricing', () => {
     const mon = await post('/water-accounts/onboard', {
       account: { usageCategory: 'MONITORING', addr: 'DMA-09 入口' },
       meter: { brand: 't10-brand' },
-      installation: { initialReading: 0 },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
     }).expect(201);
     const st = await post('/consumption-settlements', {
       waterAccountId: mon.body.waterAccount.id,
@@ -877,9 +887,14 @@ describe('v0.2: monitoring skip + household-scaled pricing', () => {
 
     const a = await post('/water-accounts/onboard', {
       customer: { name: `T10 HH ${RUN}`, custType: 'PERSONAL' },
-      account: { usageCategory: 'RES_SHARED', addr: 'hh st', householdSize: 5 },
+      account: {
+        usageCategory: 'RES_SHARED',
+        addr: 'hh st',
+        householdSize: 5,
+        openedAt: '2026-01-01',
+      },
       meter: { brand: 't10-brand' },
-      installation: { initialReading: 0 },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
     }).expect(201);
     const st = await post('/consumption-settlements', {
       waterAccountId: a.body.waterAccount.id,
@@ -909,9 +924,14 @@ describe('v0.2: monitoring skip + household-scaled pricing', () => {
     // 216×3 + 14×5 = 718.00 — proving the shift priced it.
     const a4 = await post('/water-accounts/onboard', {
       customer: { name: `T10 HH4 ${RUN}`, custType: 'PERSONAL' },
-      account: { usageCategory: 'RES_SHARED', addr: 'hh4 st', householdSize: 4 },
+      account: {
+        usageCategory: 'RES_SHARED',
+        addr: 'hh4 st',
+        householdSize: 4,
+        openedAt: '2026-01-01',
+      },
       meter: { brand: 't10-brand' },
-      installation: { initialReading: 0 },
+      installation: { initialReading: 0, installedAt: '2026-01-01' },
     }).expect(201);
     const st4 = await post('/consumption-settlements', {
       waterAccountId: a4.body.waterAccount.id,
@@ -930,5 +950,481 @@ describe('v0.2: monitoring skip + household-scaled pricing', () => {
       )
     ).rows[0];
     expect(bill4.t).toBe('71800');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RC1 — multi-tx billing-run create: generation status, guards, idempotency
+// lifecycle, schema invariants, bulk-YTD equivalence, pricing drift.
+// ---------------------------------------------------------------------------
+const T10_CTX: TenantCtx = {
+  tenantId: T10A,
+  staffId: STAFF_ADMIN_A,
+  scope: 'ALL',
+  orgScope: [],
+};
+
+const setGenerating = (id: string) =>
+  owner.query(
+    `UPDATE billing_run SET generation_status = 'GENERATING' WHERE id = $1`,
+    [id],
+  );
+
+const keyRow = (key: string) =>
+  owner.query(
+    `SELECT id::text, status, billing_run_id::text AS "billingRunId",
+            response_status AS "responseStatus", response_ref AS "responseRef"
+     FROM idempotency_key WHERE tenant_id = $1 AND key = $2`,
+    [T10A, key],
+  );
+
+const insertKey = (opts: {
+  tenantId?: string;
+  key: string;
+  hash?: string;
+  status?: string;
+  runId?: string | null;
+}) =>
+  owner.query(
+    `INSERT INTO idempotency_key
+       (id, tenant_id, key, method, route, request_hash, status,
+        billing_run_id, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, 'POST', '/billing-runs', $3, $4, $5,
+             now(), now())`,
+    [
+      opts.tenantId ?? T10A,
+      opts.key,
+      opts.hash ?? 'x',
+      opts.status ?? 'PROCESSING',
+      opts.runId ?? null,
+    ],
+  );
+
+const postKeyed = (key: string, body: unknown) =>
+  request(app.getHttpServer())
+    .post('/billing-runs')
+    .set(auth(adminToken))
+    .set('Idempotency-Key', key)
+    .send(body);
+
+describe('RC1: GENERATING guards + crash → discard → re-create', () => {
+  it('exposes generationStatus=READY on create; a GENERATING run rejects post/retry, discards cleanly, re-creates identically', async () => {
+    // A1-13 settlement (202611, 5m³) is still unbilled — rE was discarded.
+    const res = await post('/billing-runs', { period: '202611' }).expect(201);
+    const runId = res.body.id as string;
+    expect(res.body.generationStatus).toBe('READY');
+    expect(res.body.bills).toHaveLength(1);
+    const sourceIds = res.body.bills.map((b: { sourceId: string }) => b.sourceId);
+
+    // Simulate a crash mid-create: run stays DRAFT+GENERATING with its
+    // partial DRAFT bills — the frozen recovery path applies.
+    await setGenerating(runId);
+    for (const verb of ['post', 'retry']) {
+      const r = await post(`/billing-runs/${runId}/${verb}`, {});
+      expect(r.status).toBe(409);
+      expect(r.body).toMatchObject({ code: 'RUN_STILL_GENERATING' });
+    }
+
+    await post(`/billing-runs/${runId}/discard`, {}).expect(201);
+    const bills = await owner.query(
+      `SELECT count(*)::int AS n FROM bill WHERE tenant_id = $1 AND billing_run_id = $2`,
+      [T10A, runId],
+    );
+    expect(bills.rows[0].n).toBe(0);
+
+    const redo = await post('/billing-runs', { period: '202611' }).expect(201);
+    expect(redo.body.status).toBe('DRAFT');
+    expect(redo.body.generationStatus).toBe('READY');
+    expect(redo.body.bills.map((b: { sourceId: string }) => b.sourceId)).toEqual(
+      sourceIds,
+    );
+    run['r202611'] = redo.body.id;
+  });
+});
+
+describe('RC1: idempotency-key ↔ billing-run lifecycle', () => {
+  it('GENERATING + linked PROCESSING key → discard deletes the key → same key reusable', async () => {
+    const res = await post('/billing-runs', { period: '202702' }).expect(201);
+    const runId = res.body.id as string;
+    await setGenerating(runId);
+    const key = `t10-proc-${RUN}`;
+    await insertKey({ key, runId });
+
+    await post(`/billing-runs/${runId}/discard`, {}).expect(201);
+    expect((await keyRow(key)).rows).toHaveLength(0);
+
+    const reuse = await postKeyed(key, { period: '202703' }).expect(201);
+    expect(reuse.body.period).toBe('202703');
+    run['r202703'] = reuse.body.id;
+  });
+
+  it('READY + COMPLETED key → discard unlinks (key survives, billingRunId NULL) → same request replays verbatim', async () => {
+    const key = `t10-comp-${RUN}`;
+    const first = await postKeyed(key, { period: '202704' }).expect(201);
+    const runId = first.body.id as string;
+    const before = (await keyRow(key)).rows[0];
+    expect(before.status).toBe('COMPLETED');
+    expect(before.billingRunId).toBe(runId);
+
+    // Fail-closed: while ANY link remains, the composite FK blocks the
+    // run delete outright (RESTRICT as defense-in-depth).
+    await expect(
+      owner.query(`DELETE FROM billing_run WHERE id = $1`, [runId]),
+    ).rejects.toThrow();
+
+    await post(`/billing-runs/${runId}/discard`, {}).expect(201);
+    const after = (await keyRow(key)).rows[0];
+    expect(after.status).toBe('COMPLETED');
+    expect(after.billingRunId).toBeNull();
+    expect(after.responseRef).toBe(before.responseRef);
+
+    const replay = await postKeyed(key, { period: '202704' }).expect(201);
+    expect(replay.body).toEqual(first.body);
+  });
+
+  it('PROCESSING key → 409 IDEMPOTENCY_IN_PROGRESS; same key + different body → 409', async () => {
+    const key = `t10-inprog-${RUN}`;
+    const body = { period: '202705' };
+    await insertKey({
+      key,
+      hash: createHash('sha256').update(JSON.stringify(body)).digest('hex'),
+    });
+    const r = await postKeyed(key, body);
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ code: 'IDEMPOTENCY_IN_PROGRESS' });
+    await owner.query(
+      `DELETE FROM idempotency_key WHERE tenant_id = $1 AND key = $2`,
+      [T10A, key],
+    );
+    // reuse freed key with the same request → fresh claim
+    await postKeyed(key, body).expect(201);
+    run['r202705'] = (
+      await get('/billing-runs?period=202705')
+    ).body[0].id;
+  });
+
+  it('two concurrent creates under one key → one wins, the other replays or 409s IN_PROGRESS — never double-generates', async () => {
+    const key = `t10-conc-${RUN}`;
+    const [a, b] = await Promise.all([
+      postKeyed(key, { period: '202706' }),
+      postKeyed(key, { period: '202706' }),
+    ]);
+    for (const r of [a, b]) {
+      if (r.status === 409) {
+        expect(r.body).toMatchObject({ code: 'IDEMPOTENCY_IN_PROGRESS' });
+      } else {
+        expect(r.status).toBe(201);
+      }
+    }
+    if (a.status === 201 && b.status === 201) {
+      expect(b.body.id).toBe(a.body.id);
+    }
+    const runs = (await get('/billing-runs?period=202706')).body;
+    expect(runs).toHaveLength(1);
+    run['r202706'] = runs[0].id;
+  });
+});
+
+describe('RC1: schema invariants', () => {
+  it('billing_run.generation_status defaults to READY (legacy rows stay postable)', async () => {
+    const d = await owner.query(
+      `SELECT column_default FROM information_schema.columns
+       WHERE table_name = 'billing_run' AND column_name = 'generation_status'`,
+    );
+    expect(d.rows[0].column_default).toContain('READY');
+  });
+
+  it('cross-tenant key↔run link is rejected by the composite FK; a second key on one run is rejected by UNIQUE', async () => {
+    const runId = run['r202611']; // created without a key — link slot free
+    // tenant B key pointing at tenant A's run — composite FK violation
+    await expect(
+      insertKey({ tenantId: T10B, key: `t10-x-${RUN}`, runId }),
+    ).rejects.toThrow();
+    // second key on the same run — unique(tenant_id, billing_run_id)
+    const key1 = `t10-l1-${RUN}`;
+    await insertKey({ key: key1, runId });
+    await expect(
+      insertKey({ key: `t10-l2-${RUN}`, runId }),
+    ).rejects.toThrow();
+    // multiple NULL billing_run_id rows coexist fine
+    await insertKey({ key: `t10-n1-${RUN}` });
+    await insertKey({ key: `t10-n2-${RUN}` });
+    await owner.query(
+      `DELETE FROM idempotency_key WHERE tenant_id = $1 AND key = ANY($2)`,
+      [T10A, [key1, `t10-n1-${RUN}`, `t10-n2-${RUN}`]],
+    );
+  });
+});
+
+describe('RC1: bulk YTD equivalence + pricing drift', () => {
+  it('loadYtdBeforeQtyMap ≡ ytdBeforeQty per account (NORMAL + posted-side windows)', async () => {
+    const tp = app.get(TenantPrismaService);
+    await tp.runAsTenant(T10A, async (tx) => {
+      const ids = [acct['A1'], acct['A2']];
+      for (const period of ['202607', '202612', '202701']) {
+        const map = await loadYtdBeforeQtyMap(tx, T10_CTX, ids, period);
+        for (const id of ids) {
+          const single = await ytdBeforeQty(tx, T10_CTX, id, period);
+          expect(map.get(id)?.toString() ?? '0').toBe(single.toString());
+        }
+      }
+    });
+    // A1 @202612: only the POSTED 202606 bill counts (100) — the 202607
+    // bill was REVERSED upstream and drops off the ladder. Anchors the
+    // cursor on real posted history, not 0≡0.
+    const v = await tp.runAsTenant(T10A, (tx) =>
+      loadYtdBeforeQtyMap(tx, T10_CTX, [acct['A1']], '202612'),
+    );
+    expect(v.get(acct['A1'])?.toString()).toBe('100');
+  });
+
+  it('a tariff change between TX0 and a generation batch aborts with PRICING_SNAPSHOT_DRIFT', async () => {
+    const svc = app.get(BillingRunService);
+    const tp = app.get(TenantPrismaService);
+    type PrivateSvc = {
+      claimCreateTx(
+        tx: unknown,
+        ctx: TenantCtx,
+        body: { period: string },
+        key: string | null,
+      ): Promise<{ runId: string; settlements: { id: string }[] }>;
+      generateBatchTx(
+        tx: unknown,
+        ctx: TenantCtx,
+        snapshot: unknown,
+        slice: unknown[],
+      ): Promise<unknown>;
+    };
+    const priv = svc as unknown as PrivateSvc;
+    // 202611 has a FINAL settlement → its category's pricing enters the
+    // fingerprint, so the plan mutation below is observable as drift.
+    const snapshot = await tp.runAsTenant(T10A, (tx) =>
+      priv.claimCreateTx(tx, T10_CTX, { period: '202611' }, null),
+    );
+
+    // Shrink the plan window so it no longer covers the period —
+    // live fingerprint diverges from the TX0 snapshot.
+    await owner.query(
+      `UPDATE tariff_plan SET effective_to = '2026-06-30' WHERE id = $1`,
+      [planRes],
+    );
+    try {
+      await expect(
+        tp.runAsTenant(T10A, (tx) =>
+          priv.generateBatchTx(tx, T10_CTX, snapshot, snapshot.settlements),
+        ),
+      ).rejects.toMatchObject({
+        response: { code: 'PRICING_SNAPSHOT_DRIFT' },
+      });
+    } finally {
+      await owner.query(
+        `UPDATE tariff_plan SET effective_to = NULL WHERE id = $1`,
+        [planRes],
+      );
+    }
+    // Aborted run stays DRAFT+GENERATING — discard recovers it.
+    const r = await post(`/billing-runs/${snapshot.runId}/discard`, {});
+    expect(r.status).toBe(201);
+  });
+
+  it('P2-B: TX0 + batch1 committed → crash before batch2 leaves DRAFT+GENERATING partials; discard + re-create == uninterrupted', async () => {
+    // Fresh period with two billable settlements — one commits in batch 1,
+    // the second is the never-ran remainder.
+    await seedSettlement('A1-04', acct['A1'], '202604', 8);
+    await seedSettlement('A2-04', acct['A2'], '202604', 12);
+
+    const svc = app.get(BillingRunService);
+    const tp = app.get(TenantPrismaService);
+    type PrivateSvc = {
+      claimCreateTx(
+        tx: unknown,
+        ctx: TenantCtx,
+        body: { period: string },
+        key: string | null,
+      ): Promise<{ runId: string; settlements: { id: string }[] }>;
+      generateBatchTx(
+        tx: unknown,
+        ctx: TenantCtx,
+        snapshot: unknown,
+        slice: unknown[],
+      ): Promise<unknown>;
+    };
+    const priv = svc as unknown as PrivateSvc;
+
+    // TX0: claim + snapshot. TX1: batch 1 only — then "crash": no more
+    // batches, no finalize.
+    const snapshot = await tp.runAsTenant(T10A, (tx) =>
+      priv.claimCreateTx(tx, T10_CTX, { period: '202604' }, null),
+    );
+    expect(snapshot.settlements).toHaveLength(2);
+    await tp.runAsTenant(T10A, (tx) =>
+      priv.generateBatchTx(tx, T10_CTX, snapshot, [snapshot.settlements[0]]),
+    );
+    // crash — orchestrator dies here.
+
+    const stuck = await owner.query(
+      `SELECT status, generation_status AS "generationStatus" FROM billing_run WHERE id = $1`,
+      [snapshot.runId],
+    );
+    expect(stuck.rows[0]).toEqual({
+      status: 'DRAFT',
+      generationStatus: 'GENERATING',
+    });
+    const partialBills = await owner.query(
+      `SELECT count(*)::int AS n FROM bill WHERE tenant_id = $1 AND billing_run_id = $2 AND status = 'DRAFT'`,
+      [T10A, snapshot.runId],
+    );
+    expect(partialBills.rows[0].n).toBe(1);
+
+    for (const verb of ['post', 'retry']) {
+      const r = await post(`/billing-runs/${snapshot.runId}/${verb}`, {});
+      expect(r.status).toBe(409);
+      expect(r.body).toMatchObject({ code: 'RUN_STILL_GENERATING' });
+    }
+
+    await post(`/billing-runs/${snapshot.runId}/discard`, {}).expect(201);
+    const after = await owner.query(
+      `SELECT count(*)::int AS n FROM bill WHERE tenant_id = $1 AND billing_run_id = $2`,
+      [T10A, snapshot.runId],
+    );
+    expect(after.rows[0].n).toBe(0);
+
+    const clean = await post('/billing-runs', { period: '202604' }).expect(201);
+    expect(clean.body).toMatchObject({
+      status: 'DRAFT',
+      generationStatus: 'READY',
+      totalCount: 2,
+      successCount: 0,
+      failedCount: 0,
+    });
+    expect(
+      clean.body.bills
+        .map((b: { sourceId: string }) => b.sourceId)
+        .sort(),
+    ).toEqual([settle['A1-04'], settle['A2-04']].sort());
+    await post(`/billing-runs/${clean.body.id}/discard`, {}).expect(201);
+  });
+
+  it('P2-A: bulk YTD ≡ per-account with NORMAL + REPLACEMENT + two RECONCILIATION versions (latest wins)', async () => {
+    // Fresh account so the seeded history can't disturb other anchors.
+    const a = await onboard('A6', 'RES_METERED');
+    await seedSettlement('A6-06', a.waterAccount.id, '202606', 100);
+    // Posted NORMAL bill on the 202606 settlement (base usage 100).
+    const normalBillId = await seedPostedBill(
+      a.waterAccount.id,
+      a.settleAccount.id,
+      '202606',
+      settle['A6-06'],
+      planRes,
+      31000,
+    );
+    // Posted REPLACEMENT bill (period 202607) with PER_QTY item qty 40.
+    const repl = (
+      await owner.query(
+        `INSERT INTO bill (id, tenant_id, settle_account_id, water_account_id, period,
+                           bill_kind, source_type, source_id, tariff_plan_id, status,
+                           total_amount, issued_at, due_date, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, '202607', 'REPLACEMENT', 'ORIGINAL_BILL',
+                 $4, $5, 'POSTED', 12000, now(), '2026-07-15', now(), now())
+         RETURNING id::text AS id`,
+        [T10A, a.settleAccount.id, a.waterAccount.id, normalBillId, planRes],
+      )
+    ).rows[0];
+    await owner.query(
+      `INSERT INTO bill_item (id, tenant_id, bill_id, fee_item_id, item_type,
+                              description, qty, unit_price, amount, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 'NORMAL', 'replacement usage',
+               40, '3', 12000, now(), now())`,
+      [T10A, repl.id, waterItem],
+    );
+    // Two RECONCILIATION corrections for the SAME source period 202606 —
+    // +10 then −30; the later one must win (usage 100 → 70).
+    const adj = async (period: string, qty: number, minutesAgo: number) => {
+      const b = (
+        await owner.query(
+          `INSERT INTO bill (id, tenant_id, settle_account_id, water_account_id, period,
+                             bill_kind, source_type, source_id, tariff_plan_id, status,
+                             total_amount, issued_at, due_date, created_at, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, 'ADJUSTMENT', 'RECONCILIATION',
+                   gen_random_uuid(), $5, 'POSTED', 0, now(), '2026-08-15',
+                   now() - ($6 || ' minutes')::interval,
+                   now() - ($6 || ' minutes')::interval)
+           RETURNING id::text AS id`,
+          [T10A, a.settleAccount.id, a.waterAccount.id, period, planRes, minutesAgo],
+        )
+      ).rows[0];
+      await owner.query(
+        `INSERT INTO bill_item (id, tenant_id, bill_id, item_type, description,
+                                qty, amount, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, 'ADJUSTMENT', $3, $4, 0, now(), now())`,
+        [T10A, b.id, 'reconcile 202606', qty],
+      );
+    };
+    await adj('202608', 10, 60); // older correction — must NOT win
+    await adj('202609', -30, 30); // latest — wins
+
+    const tp = app.get(TenantPrismaService);
+    const { map, single } = await tp.runAsTenant(T10A, async (tx) => {
+      const m = await loadYtdBeforeQtyMap(tx, T10_CTX, [a.waterAccount.id], '202612');
+      const s = await ytdBeforeQty(tx, T10_CTX, a.waterAccount.id, '202612');
+      return { map: m, single: s };
+    });
+    expect(map.get(a.waterAccount.id)?.toString()).toBe(single.toString());
+    // latest correction wins: 100 − 30 (not 100 + 10 − 30 nor +10) + repl 40
+    expect(single.toString()).toBe('110');
+  });
+});
+
+describe('Round-2 §9 — 开账前置校验 GET /billing-runs/preflight', () => {
+  it('returns coverage buckets: missingReading / missingSettlement / draftSettlement / willBillCount', async () => {
+    // 全新账期 202703：P1 有 FINAL 结算、P2 无结算，两户均未抄表。
+    await onboard('P1', 'RES_METERED');
+    await onboard('P2', 'RES_METERED');
+    const bookRes = await post('/reading-books', {
+      name: `T10 Preflight ${RUN}`,
+      orgUnitId: ORG_A,
+    }).expect(201);
+    const bookId = bookRes.body.id;
+    await post(`/reading-books/${bookId}/meters`, {
+      waterAccountId: acct['P1'],
+    }).expect(201);
+    await post(`/reading-books/${bookId}/meters`, {
+      waterAccountId: acct['P2'],
+    }).expect(201);
+    const plan = await post('/reading-plans/generate', {
+      bookId,
+      period: '202703',
+      planDate: '2027-03-05',
+    }).expect(201);
+    expect(plan.body.items).toHaveLength(2);
+
+    await seedSettlement('P1-03', acct['P1'], '202703', 40);
+    // P2 留 DRAFT 结算 → 走 draftSettlement 桶而非 missingSettlement。
+    await owner.query(
+      `INSERT INTO consumption_settlement
+         (id, tenant_id, water_account_id, period, total_usage_qty, status,
+          created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, '202703', 20, 'DRAFT', now(), now())`,
+      [T10A, acct['P2']],
+    );
+
+    const res = await get('/billing-runs/preflight?period=202703');
+    expect(res.body).toMatchObject({
+      period: '202703',
+      plannedCount: 2,
+      willBillCount: 1,
+    });
+    const body = res.body as {
+      missingReading: { waterAccountId: string }[];
+      missingSettlement: { waterAccountId: string }[];
+      draftSettlement: { waterAccountId: string }[];
+    };
+    expect(body.missingReading.map((r) => r.waterAccountId).sort()).toEqual(
+      [acct['P1'], acct['P2']].sort(),
+    );
+    expect(body.missingSettlement).toEqual([]);
+    expect(body.draftSettlement.map((r) => r.waterAccountId)).toEqual([
+      acct['P2'],
+    ]);
   });
 });

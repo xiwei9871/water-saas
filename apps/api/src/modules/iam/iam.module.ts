@@ -3,9 +3,11 @@ import { JwtModule } from '@nestjs/jwt';
 import { AuditLogsController } from './audit-logs.controller.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
+import { DictsController } from './dicts.controller.js';
 import { OrgsController } from './orgs.controller.js';
 import { RolesController } from './roles.controller.js';
 import { StaffController } from './staff.controller.js';
+import { MyPrefsController } from './my-prefs.controller.js';
 import { TenantParamsController } from './tenant-params.controller.js';
 
 /**
@@ -45,6 +47,8 @@ const jwtSecret = (() => {
     StaffController,
     RolesController,
     TenantParamsController,
+    MyPrefsController,
+    DictsController,
     AuditLogsController,
   ],
   providers: [AuthService],

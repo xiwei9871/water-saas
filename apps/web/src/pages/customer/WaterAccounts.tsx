@@ -28,6 +28,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   AccountInstallation,
+  AccountOutstanding,
   AccountStatus,
   Customer,
   HouseholdProfile,
@@ -39,6 +40,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   ACCOUNT_STATUS_LABELS,
   cleanBody,
   DECIMAL_RULE,
@@ -81,7 +83,7 @@ const EVENT_TEXT: Record<
 
 const STATUS_OPTIONS = (['NORMAL', 'SUSPENDED', 'CLOSED'] as const).map((s) => ({
   value: s,
-  label: ACCOUNT_STATUS_LABELS[s],
+  label: enumLabel(ACCOUNT_STATUS_LABELS, s),
 }));
 
 interface CreateFormValues {
@@ -142,7 +144,7 @@ type MeterModalState =
   | null;
 
 /**
- * 水表户：户号精确搜索 + 状态/客户过滤 + 开户 + 编辑 + 生命周期操作
+ * 用水户：户号精确搜索 + 状态/客户过滤 + 开户 + 编辑 + 生命周期操作
  * （暂停/恢复/销户/过户，各走独立 POST + account_event）。
  * URL 参数：?accountNo= / ?customerId=（客户详情抽屉的“查看全部”入口）。
  */
@@ -154,8 +156,12 @@ export default function WaterAccounts() {
 
   const [rows, setRows] = useState<WaterAccount[]>([]);
   const [loading, setLoading] = useState(false);
-  const [noInput, setNoInput] = useState(searchParams.get('accountNo') ?? '');
-  const [accountNo, setAccountNo] = useState(searchParams.get('accountNo') ?? '');
+  // RC1-4: 统一搜索（户号/客户名/客户号/电话/地址/在装表号）；?accountNo=
+  // 深链同样走这个框（包含匹配覆盖精确户号）。
+  const [qInput, setQInput] = useState(searchParams.get('accountNo') ?? '');
+  const [q, setQ] = useState(searchParams.get('accountNo') ?? '');
+  // RC1-5: 新建后回到第一页并高亮该行。
+  const [highlightId, setHighlightId] = useState<string | null>(null);
   const [status, setStatus] = useState<AccountStatus | undefined>(undefined);
   const [customerId, setCustomerId] = useState<string | undefined>(
     searchParams.get('customerId') ?? undefined,
@@ -170,6 +176,10 @@ export default function WaterAccounts() {
   const [saving, setSaving] = useState(false);
   // E6：过户前预取原结算户的预存余额，用于“余额不迁移”警告。
   const [transferBalance, setTransferBalance] = useState<string | null>(null);
+  // Round-2 §1：销户预检 —— 打开销户弹窗即拉欠费/贷方/预存结余，
+  // 分类给出处理指引，未清零时禁用确认。
+  const [closeCheck, setCloseCheck] = useState<AccountOutstanding | null>(null);
+  const [closeCheckLoading, setCloseCheckLoading] = useState(false);
   const [createForm] = Form.useForm<CreateFormValues>();
   const [editForm] = Form.useForm<EditFormValues>();
   const [transferForm] = Form.useForm<TransferFormValues>();
@@ -199,8 +209,8 @@ export default function WaterAccounts() {
     const cid = searchParams.get('customerId');
     queueMicrotask(() => {
       if (no !== null) {
-        setNoInput(no);
-        setAccountNo(no);
+        setQInput(no);
+        setQ(no);
         setPage(1);
       }
       if (cid) setCustomerId(cid);
@@ -230,7 +240,7 @@ export default function WaterAccounts() {
           params: {
             take: size,
             skip: (p - 1) * size,
-            ...(accountNo.trim() ? { accountNo: accountNo.trim() } : {}),
+            ...(q.trim() ? { q: q.trim() } : {}),
             ...(status ? { status } : {}),
             ...(customerId ? { customerId } : {}),
           },
@@ -242,7 +252,7 @@ export default function WaterAccounts() {
         setLoading(false);
       }
     },
-    [accountNo, customerId, message, status],
+    [customerId, message, q, status],
   );
 
   useEffect(() => {
@@ -268,6 +278,23 @@ export default function WaterAccounts() {
         .then((res) => setTransferBalance(res.data.balance))
         .catch(() => setTransferBalance('0')); // 无预存读权限时不阻塞过户
     }
+    if (m.kind === 'close') {
+      void refreshCloseCheck(m.account.id);
+    }
+  };
+
+  const refreshCloseCheck = async (accountId: string) => {
+    setCloseCheckLoading(true);
+    try {
+      const res = await api.get<AccountOutstanding>(
+        `/water-accounts/${accountId}/outstanding`,
+      );
+      setCloseCheck(res.data);
+    } catch {
+      setCloseCheck(null); // 预检失败不阻塞 —— 服务端仍会校验
+    } finally {
+      setCloseCheckLoading(false);
+    }
   };
 
   const loadHousehold = useCallback(async (accountId: string) => {
@@ -289,7 +316,8 @@ export default function WaterAccounts() {
   }, [message]);
 
   const openHousehold = (account: WaterAccount) => {
-    householdForm.setFieldsValue({ effectiveMonth: dayjs() });
+    // RC1-1: 默认生效账期=下个账期（申报向前生效，不回溯当月）。
+    householdForm.setFieldsValue({ effectiveMonth: dayjs().add(1, 'month') });
     setHhCurrent(null);
     setHhProfiles([]);
     openModal({ kind: 'household', account });
@@ -314,7 +342,9 @@ export default function WaterAccounts() {
         },
         { headers: { 'Idempotency-Key': idemKey } },
       );
-      message.success('人数申报已保存，自下个账期起生效于阶梯计费');
+      message.success(
+        `申报已保存，自 ${fmtPeriod(values.effectiveMonth.format('YYYYMM'))} 起生效`,
+      );
       householdForm.setFieldsValue({ householdSize: undefined });
       // 弹窗允许多次申报 —— 每次成功后换新幂等键（失败保留原键供重试回放）。
       setIdemKey(newIdemKey());
@@ -335,7 +365,7 @@ export default function WaterAccounts() {
     }
     setSaving(true);
     try {
-      await api.post(
+      const created = await api.post<WaterAccount>(
         '/water-accounts',
         cleanBody({
           customerId: values.customerId,
@@ -347,9 +377,13 @@ export default function WaterAccounts() {
         }),
         { headers: { 'Idempotency-Key': idemKey } },
       );
-      message.success('水表户已开立');
+      message.success('用水户已开立');
       setModal(null);
-      await load(page, pageSize);
+      // RC1-5: createdAt-desc ordering puts the new row on page one; jump
+      // there and highlight it so the operator sees it immediately.
+      setHighlightId(created.data.id);
+      setPage(1);
+      await load(1, pageSize);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -371,7 +405,7 @@ export default function WaterAccounts() {
         `/water-accounts/${modal.account.id}`,
         cleanBody({ usageCategory: values.usageCategory, addr: values.addr }),
       );
-      message.success('水表户已更新');
+      message.success('用水户已更新');
       setModal(null);
       await load(page, pageSize);
     } catch (err) {
@@ -567,9 +601,16 @@ export default function WaterAccounts() {
   const columns: ColumnsType<WaterAccount> = [
     { title: '户号', dataIndex: 'accountNo', key: 'accountNo', width: 150 },
     {
-      title: '客户',
+      title: '当前表号',
+      dataIndex: 'currentMeterNo',
+      key: 'currentMeterNo',
+      width: 120,
+      render: (v: string | null | undefined) => v ?? '—',
+    },
+    {
+      title: '客户名称',
       key: 'customer',
-      width: 160,
+      width: 170,
       render: (_: unknown, r: WaterAccount) =>
         r.customer ? `${r.customer.name}（${r.customer.customerNo}）` : '—',
     },
@@ -589,7 +630,7 @@ export default function WaterAccounts() {
       width: 150,
       render: (v: string, row) => (
         <>
-          {USAGE_CATEGORY_LABELS[v] ?? v}
+          {enumLabel(USAGE_CATEGORY_LABELS, v)}
           {row.billable === false && (
             <Tag color="blue" style={{ marginLeft: 6 }}>
               不计费
@@ -722,17 +763,17 @@ export default function WaterAccounts() {
 
   return (
     <Card
-      title="水表户"
+      title="用水户"
       extra={
         <Space wrap>
           <Input.Search
             allowClear
-            placeholder="按户号精确查询"
-            style={{ width: 180 }}
-            value={noInput}
-            onChange={(e) => setNoInput(e.target.value)}
+            placeholder="搜户号/客户/电话/地址/表号"
+            style={{ width: 280 }}
+            value={qInput}
+            onChange={(e) => setQInput(e.target.value)}
             onSearch={(v) => {
-              setAccountNo(v);
+              setQ(v);
               setPage(1);
             }}
           />
@@ -798,9 +839,13 @@ export default function WaterAccounts() {
       <Table<WaterAccount>
         rowKey="id"
         size="middle"
+        scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         loading={loading}
         columns={columns}
         dataSource={rows}
+        rowClassName={(r) =>
+          r.id === highlightId ? 'ws-row-highlight' : ''
+        }
         pagination={{
           current: page,
           pageSize,
@@ -814,9 +859,9 @@ export default function WaterAccounts() {
       />
 
       {/* 开户 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'create'}
-        title="开立水表户"
+        title="开立用水户"
         okText="开户"
         cancelText="取消"
         confirmLoading={saving}
@@ -863,9 +908,9 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 编辑 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'edit'}
-        title={modal?.kind === 'edit' ? `编辑水表户 — ${modal.account.accountNo}` : ''}
+        title={modal?.kind === 'edit' ? `编辑用水户 — ${modal.account.accountNo}` : ''}
         okText="保存"
         cancelText="取消"
         confirmLoading={saving}
@@ -892,7 +937,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 过户 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'transfer'}
         title={
           modal?.kind === 'transfer' ? `过户 — ${modal.account.accountNo}` : ''
@@ -915,7 +960,7 @@ export default function WaterAccounts() {
             type="warning"
             showIcon
             style={{ marginBottom: 16 }}
-            message={`原结算户预存余额 ${fmtCent(transferBalance)} 不会随改挂迁移 —— 余额归属结算户而非水表户；如需跨结算户转移请先办理预存退款。`}
+            message={`原结算户预存余额 ${fmtCent(transferBalance)} 不会随改挂迁移 —— 余额归属结算户而非用水户；如需跨结算户转移请先办理预存退款。`}
           />
         )}
         <Form form={transferForm} layout="vertical">
@@ -935,7 +980,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 暂停 / 恢复 / 销户 */}
-      <Modal
+      <Modal maskClosable={false}
         open={eventKind !== null}
         title={
           eventKind && modal && 'account' in modal
@@ -943,7 +988,16 @@ export default function WaterAccounts() {
             : ''
         }
         okText={eventKind ? EVENT_TEXT[eventKind].ok : '确定'}
-        okButtonProps={{ danger: eventKind === 'close' }}
+        okButtonProps={{
+          danger: eventKind === 'close',
+          disabled:
+            eventKind === 'close' &&
+            (closeCheckLoading ||
+              (closeCheck !== null &&
+                (Number(closeCheck.totalOutstanding) !== 0 ||
+                  Number(closeCheck.reversedBillCredit) !== 0 ||
+                  Number(closeCheck.prepaymentBalance) !== 0))),
+        }}
         cancelText="取消"
         confirmLoading={saving}
         onOk={() => void submitEvent()}
@@ -951,13 +1005,64 @@ export default function WaterAccounts() {
         destroyOnHidden
       >
         {eventKind === 'close' && (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="销户为不可逆操作"
-            description="销户前须结清该户全部欠费与余额，存在未结清款项时服务端将拒绝。"
-          />
+          <>
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="销户为不可逆操作"
+              description="销户前须结清该户全部欠费与余额，存在未结清款项时服务端将拒绝。"
+            />
+            {closeCheckLoading && <Alert type="info" showIcon style={{ marginBottom: 12 }} message="正在检查该户欠费与结余…" />}
+            {closeCheck && Number(closeCheck.totalOutstanding) > 0 && (
+              <Alert
+                type="error"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`欠费 ${fmtCent(closeCheck.totalOutstanding)} 未结清`}
+                description="请先引导客户到收费台缴清欠费，结清后点击下方「重新检查」再销户。"
+              />
+            )}
+            {closeCheck && Number(closeCheck.reversedBillCredit) !== 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`应退贷方余额 ${fmtCent(closeCheck.reversedBillCredit)}（已缴后被红冲的款项）`}
+                description="这是应退给客户的钱，不是欠费 —— 请到收费台对该户执行「收款红冲」退款，退回后点击下方「重新检查」再销户。"
+              />
+            )}
+            {closeCheck && Number(closeCheck.prepaymentBalance) !== 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`预存结余 ${fmtCent(closeCheck.prepaymentBalance)} 待退`}
+                description="请到收费台对该结算户执行「预存退款」，当日退回客户后点击下方「重新检查」再销户。"
+              />
+            )}
+            {closeCheck &&
+              Number(closeCheck.totalOutstanding) === 0 &&
+              Number(closeCheck.reversedBillCredit) === 0 &&
+              Number(closeCheck.prepaymentBalance) === 0 && (
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message="预检通过：无欠费、无待退余额、无预存结余"
+                />
+              )}
+            {closeCheck && modal && 'account' in modal && (
+              <Button
+                size="small"
+                loading={closeCheckLoading}
+                style={{ marginBottom: 16 }}
+                onClick={() => void refreshCloseCheck(modal.account.id)}
+              >
+                重新检查
+              </Button>
+            )}
+          </>
         )}
         <Form form={eventForm} layout="vertical">
           <Form.Item name="effectiveDate" label="生效日期">
@@ -970,7 +1075,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 一户多人口申报 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal?.kind === 'household'}
         title={
           modal?.kind === 'household'
@@ -1001,8 +1106,9 @@ export default function WaterAccounts() {
         <Form form={householdForm} layout="inline" style={{ marginBottom: 16 }}>
           <Form.Item
             name="householdSize"
-            label="用水人数"
-            rules={[{ required: true, message: '请输入人数' }]}
+            label="变更申报人口"
+            rules={[{ required: true, message: '请输入变更后的人口数' }]}
+            extra="本次申报的新人口数（不是累计增量）"
           >
             <InputNumber min={1} max={99} precision={0} placeholder="人" />
           </Form.Item>
@@ -1010,6 +1116,7 @@ export default function WaterAccounts() {
             name="effectiveMonth"
             label="生效账期"
             rules={[{ required: true, message: '请选择生效账期' }]}
+            extra="自该账期起生效，不修改历史"
           >
             <DatePicker picker="month" allowClear={false} />
           </Form.Item>
@@ -1105,7 +1212,7 @@ export default function WaterAccounts() {
       </Drawer>
 
       {/* 装表（户内） */}
-      <Modal
+      <Modal maskClosable={false}
         open={meterModal?.kind === 'install'}
         title="装表"
         okText="确认装表"
@@ -1138,7 +1245,7 @@ export default function WaterAccounts() {
               allowClear
               options={(
                 ['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
-              ).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }))}
+              ).map((r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }))}
               placeholder="默认新装"
             />
           </Form.Item>
@@ -1146,7 +1253,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 拆表（户内） */}
-      <Modal
+      <Modal maskClosable={false}
         open={meterModal?.kind === 'remove'}
         title={
           meterModal?.kind === 'remove'
@@ -1187,7 +1294,7 @@ export default function WaterAccounts() {
       </Modal>
 
       {/* 换表（户内）— 原子操作，两个读数分属不同物理表盘 */}
-      <Modal
+      <Modal maskClosable={false}
         open={meterModal?.kind === 'replace'}
         title={
           meterModal?.kind === 'replace'
@@ -1238,7 +1345,7 @@ export default function WaterAccounts() {
             <Select
               allowClear
               options={(['REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const).map(
-                (r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }),
+                (r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }),
               )}
               placeholder="默认换表"
             />
@@ -1250,7 +1357,7 @@ export default function WaterAccounts() {
 }
 
 /**
- * 水表户详情的“水表”区（E7 对象中心视图）：
+ * 用水户详情的“水表”区（E7 对象中心视图）：
  * - 0 ACTIVE：装表入口
  * - 1 ACTIVE：当前表卡片 + 换表/拆表
  * - >1 ACTIVE：如实展示 + 异常警示（domain 允许多表，UI 不自动修复）

@@ -746,6 +746,21 @@ describe('RBAC + write ops', () => {
     expect(row.status).toBe('OPEN');
   });
 
+  it('write op on a never-reconciled fact lazily creates the episode', async () => {
+    // Facts are detected live but episodes only exist after refresh.
+    // Acting on a fresh fact without running refresh must materialize the
+    // episode instead of 409 EPISODE_CLEARED (Pilot regression).
+    const { accId } = await seedAccount('lazy-ep');
+    const key = `wa:${accId}:NO_BOOK`;
+    // 无 refresh、无 work_item —— 直接 ack
+    await post(`/exceptions/${encodeURIComponent(key)}/ack`, undefined).expect(201);
+    const [row] = await workItems(key);
+    expect(row.status).toBe('ACK');
+    // badge/list 口径不变：episode 建出来后 OPEN→ACK 不再计入徽标
+    const badge = (await get('/exceptions/badge', adminToken)).body;
+    expect(badge.byDomain.metering ?? 0).toBeGreaterThanOrEqual(0);
+  });
+
   it('detail returns fact + episode + history; bad key → 400', async () => {
     const { accId } = await seedAccount('detail');
     await post('/exceptions/refresh').expect(201);

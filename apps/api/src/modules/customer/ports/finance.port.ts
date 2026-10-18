@@ -24,6 +24,16 @@ export abstract class FinancePort {
     waterAccountId: string,
     tx?: Prisma.TransactionClient,
   ): Promise<bigint>;
+
+  /**
+   * 结算户预存余额（Σ prepayment_ledger_entry）— 销户前必须为 0；
+   * 余额须先经收费台「预存退款」退给客户（Round-2 报告 §1b）。
+   */
+  abstract getPrepaymentBalance(
+    tenantId: string,
+    waterAccountId: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<bigint>;
 }
 
 /**
@@ -42,5 +52,15 @@ export class StubFinancePort extends FinancePort {
     _tx?: Prisma.TransactionClient,
   ): Promise<bigint> {
     return Promise.resolve(this.outstanding);
+  }
+
+  prepaymentBalance = 0n;
+
+  getPrepaymentBalance(
+    _tenantId: string,
+    _waterAccountId: string,
+    _tx?: Prisma.TransactionClient,
+  ): Promise<bigint> {
+    return Promise.resolve(this.prepaymentBalance);
   }
 }

@@ -49,12 +49,15 @@ const ORG_B = 'b7b7b7b7-0000-4000-8000-0000000000c0';
 const ROLE_ADMIN_A = 'a7a7a7a7-0000-4000-8000-00000000ad01';
 const ROLE_VIEWER_A = 'a7a7a7a7-0000-4000-8000-000000001e01';
 const ROLE_WRITER_A = 'a7a7a7a7-0000-4000-8000-000000001e02';
+const ROLE_REVIEWER_A = 'a7a7a7a7-0000-4000-8000-000000001e03';
 const ROLE_B_ADMIN = 'b7b7b7b7-0000-4000-8000-00000000ad01';
 const PERM_MET_READ = 'a7a7a7a7-0000-4000-8000-00000000e601';
 const PERM_MET_WRITE = 'a7a7a7a7-0000-4000-8000-00000000e602';
+const PERM_MET_QC = 'a7a7a7a7-0000-4000-8000-00000000e603';
 const STAFF_ADMIN_A = 'a7a7a7a7-0000-4000-8000-0000000a0001';
 const STAFF_VIEWER_A = 'a7a7a7a7-0000-4000-8000-0000000b0002';
 const STAFF_WRITER_A = 'a7a7a7a7-0000-4000-8000-0000000b0004';
+const STAFF_REVIEWER_A = 'a7a7a7a7-0000-4000-8000-0000000b0005';
 const STAFF_B_ADMIN = 'b7b7b7b7-0000-4000-8000-0000000a0001';
 
 const owner = new pg.Client({ connectionString: OWNER_URL });
@@ -62,6 +65,7 @@ let app: INestApplication<App>;
 let adminToken = '';
 let viewerToken = '';
 let writerToken = '';
+let reviewerToken = '';
 let tenantBToken = '';
 
 // ids populated by the sequential suite
@@ -190,39 +194,44 @@ beforeAll(async () => {
      VALUES ($1, $3, 'admin', 'T7 Admin', 'ALL', now(), now()),
             ($2, $3, 't7-viewer', 'T7 Viewer', 'ORG_SUBTREE', now(), now()),
             ($6, $3, 't7-writer', 'T7 Writer', 'ORG_SUBTREE', now(), now()),
+            ($7, $3, 't7-reviewer', 'T7 Reviewer', 'ORG_SUBTREE', now(), now()),
             ($4, $5, 'admin', 'T7B Admin', 'ALL', now(), now())
      ON CONFLICT DO NOTHING`,
-    [ROLE_ADMIN_A, ROLE_VIEWER_A, T7A, ROLE_B_ADMIN, T7B, ROLE_WRITER_A],
+    [ROLE_ADMIN_A, ROLE_VIEWER_A, T7A, ROLE_B_ADMIN, T7B, ROLE_WRITER_A, ROLE_REVIEWER_A],
   );
   await owner.query(
     `INSERT INTO permission (id, tenant_id, code, type, created_at, updated_at)
      VALUES ($1, $2, 'metering:read', 'ACTION', now(), now()),
-            ($3, $2, 'metering:write', 'ACTION', now(), now())
+            ($3, $2, 'metering:write', 'ACTION', now(), now()),
+            ($4, $2, 'metering:qc', 'ACTION', now(), now())
      ON CONFLICT DO NOTHING`,
-    [PERM_MET_READ, T7A, PERM_MET_WRITE],
+    [PERM_MET_READ, T7A, PERM_MET_WRITE, PERM_MET_QC],
   );
   await owner.query(
     `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
      VALUES ($1, $2, $3, now(), now()),
-            ($1, $4, $5, now(), now())
+            ($1, $4, $5, now(), now()),
+            ($1, $6, $7, now(), now())
      ON CONFLICT DO NOTHING`,
-    [T7A, ROLE_VIEWER_A, PERM_MET_READ, ROLE_WRITER_A, PERM_MET_WRITE],
+    [T7A, ROLE_VIEWER_A, PERM_MET_READ, ROLE_WRITER_A, PERM_MET_WRITE, ROLE_REVIEWER_A, PERM_MET_QC],
   );
   await owner.query(
     `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
      VALUES ($1, $4, $6, 't7-admin',   $7, 'T7 Admin',  'ACTIVE', now(), now()),
             ($2, $4, $6, 't7-viewer',  $7, 'T7 Viewer', 'ACTIVE', now(), now()),
             ($9, $4, $10,'t7-writer',  $7, 'T7 Writer', 'ACTIVE', now(), now()),
+            ($11,$4, $6, 't7-reviewer',$7, 'T7 Reviewer','ACTIVE', now(), now()),
             ($3, $5, $8, 't7b-admin',  $7, 'T7B Admin', 'ACTIVE', now(), now())
      ON CONFLICT (tenant_id, login) DO NOTHING`,
-    [STAFF_ADMIN_A, STAFF_VIEWER_A, STAFF_B_ADMIN, T7A, T7B, ORG_A, hash, ORG_B, STAFF_WRITER_A, ORG_A_BR],
+    [STAFF_ADMIN_A, STAFF_VIEWER_A, STAFF_B_ADMIN, T7A, T7B, ORG_A, hash, ORG_B, STAFF_WRITER_A, ORG_A_BR, STAFF_REVIEWER_A],
   );
   await owner.query(
     `INSERT INTO staff_role (tenant_id, staff_id, role_id, created_at, updated_at)
      VALUES ($1, $2, $4, now(), now()),
             ($1, $3, $5, now(), now()),
             ($1, $6, $7, now(), now()),
-            ($8, $9, $10, now(), now())
+            ($8, $9, $10, now(), now()),
+            ($1, $11, $12, now(), now())
      ON CONFLICT DO NOTHING`,
     [
       T7A,
@@ -235,6 +244,8 @@ beforeAll(async () => {
       T7B,
       STAFF_B_ADMIN,
       ROLE_B_ADMIN,
+      STAFF_REVIEWER_A,
+      ROLE_REVIEWER_A,
     ],
   );
 
@@ -254,6 +265,7 @@ beforeAll(async () => {
   adminToken = await login('t7-water', 't7-admin');
   viewerToken = await login('t7-water', 't7-viewer');
   writerToken = await login('t7-water', 't7-writer');
+  reviewerToken = await login('t7-water', 't7-reviewer');
   tenantBToken = await login('t7-other', 't7b-admin');
 });
 
@@ -655,7 +667,7 @@ describe('estimate preview', () => {
 });
 
 describe('idempotency + scope + isolation', () => {
-  it('scoped writer (branch subtree) → 403 ORG_OUT_OF_SCOPE on generate/finalize', async () => {
+  it('scoped writer (branch subtree) → 403 on generate; finalize denied by perm', async () => {
     // F lands in p12's book (ORG_A) — outside the writer's branch subtree.
     await genPlan('p12', '202612');
     const gen = await request(app.getHttpServer())
@@ -665,12 +677,37 @@ describe('idempotency + scope + isolation', () => {
     expect(gen.status).toBe(403);
     expect(gen.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
 
+    // Round-2 §3: 终审 requires metering:qc — a writer fails the permission
+    // gate before org scope is even evaluated.
     const fin = await request(app.getHttpServer())
       .post(`/consumption-settlements/${settlement['E09']}/finalize`)
       .set(auth(writerToken))
       .send({});
     expect(fin.status).toBe(403);
-    expect(fin.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+    expect(fin.body).toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  it('finalize split (Round-2 §3): writer 403; reviewer (metering:qc) finalizes', async () => {
+    // Fresh DRAFT inside the reviewer's company subtree — E has reading
+    // history so AUTO_AVG3 prices it with a reason alone (F is multi-meter
+    // and would need per-install overrides).
+    const created = await settle('E', '202611', { estimateReason: 'split probe' });
+    expect(created.status).toBe(201);
+    const id: string = created.body.id;
+
+    const denied = await request(app.getHttpServer())
+      .post(`/consumption-settlements/${id}/finalize`)
+      .set(auth(writerToken))
+      .send({});
+    expect(denied.status).toBe(403);
+    expect(denied.body).toMatchObject({ code: 'PERMISSION_DENIED' });
+
+    const ok = await request(app.getHttpServer())
+      .post(`/consumption-settlements/${id}/finalize`)
+      .set(auth(reviewerToken))
+      .send({});
+    expect(ok.status).toBe(201);
+    expect(ok.body.status).toBe('FINAL');
   });
 
   it('Idempotency-Key replays generation verbatim (no double-write)', async () => {
@@ -783,20 +820,25 @@ describe('T7 review follow-ups: supersede exclusion + rollover', () => {
     expect(Number(c.usageQty)).toBe(187);
   });
 
-  it('superseded parent with child still PENDING → ESTIMATE (no valid fact)', async () => {
+  it('superseded parent with child still PENDING → READING_PENDING_QC (10/8 §6)', async () => {
     await genPlan('x2', '202702');
     const parent = await passActual('x2', 'S', 300, '2027-02-06');
-    await request(app.getHttpServer())
-      .post(`/meter-readings/${parent.id}/supersede`)
-      .set(auth(adminToken))
-      .send({ readingValue: 310 })
-      .expect(201);
-    // Child deliberately left PENDING — the parent is superseded history
-    // and the child is unverdicted, so no READING source exists.
-    const res = await settle('S', '202702', { estimateReason: 'correction pending QC' }).expect(201);
-    const c = componentOf(res.body, inst['S2']);
-    expect(c.sourceType).toBe('ESTIMATE');
-    expect(res.body.isEstimated).toBe(true);
+    const child = (
+      await request(app.getHttpServer())
+        .post(`/meter-readings/${parent.id}/supersede`)
+        .set(auth(adminToken))
+        .send({ readingValue: 310 })
+        .expect(201)
+    ).body;
+    // Child deliberately left PENDING — the truthful blocker is "读数未
+    // 质检", not "需要预估" (10/8 报告 §6: 报错必须说真实原因).
+    const res = await settle('S', '202702', { estimateReason: 'correction pending QC' });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'READING_PENDING_QC',
+      readingId: child.id,
+      qcStatus: 'PENDING',
+    });
   });
 
   it('rollover: end < prev with maxDial → usage = (maxDial − prev) + end', async () => {
@@ -1130,5 +1172,219 @@ describe('v0.2: household profile → settlement snapshot', () => {
     acct['H3'] = a.waterAccount.id;
     const s = await settle('H3', '203501', { usageQty: 10, estimateReason: 'x' }).expect(201);
     expect(s.body.householdSizeSnapshot).toBeNull();
+  });
+});
+
+/**
+ * RC1-3 (Human Pilot F11): server-side batch settlement generation.
+ * 20 accounts on a dedicated book, 203603 batch period:
+ *  - BA1..BA8  PASSED ACTUAL in-period          → GENERATED
+ *  - BE1..BE6  READING history (203602), no in-period read → GENERATED_ESTIMATED
+ *  - BX1..BX4  no history at all                → FAILED(ESTIMATE_USAGE_REQUIRED)
+ *  - BD1, BD2  already settled for 203603       → SKIPPED_EXISTS
+ * Preview must classify identically while writing nothing; re-execution is
+ * idempotent (everything lands SKIPPED_EXISTS, zero new rows).
+ */
+describe('RC1-3 batch settlement generation', () => {
+  const B_PERIOD = '203603';
+  const H_PERIOD = '203602';
+  let batchBookId = '';
+
+  const genPlanOn = async (book: string, key: string, period: string) => {
+    const res = await request(app.getHttpServer())
+      .post('/reading-plans/generate')
+      .set(auth(adminToken))
+      .send({ bookId: book, period, planDate: `${period.slice(0, 4)}-${period.slice(4)}-05` })
+      .expect(201);
+    plans[key] = { id: res.body.id, items: res.body.items };
+  };
+
+  const batch = (body: Record<string, unknown>, token = adminToken) =>
+    request(app.getHttpServer())
+      .post('/consumption-settlements/batch')
+      .set(auth(token))
+      .send(body);
+
+  const batchPreview = (body: Record<string, unknown>, token = adminToken) =>
+    request(app.getHttpServer())
+      .post('/consumption-settlements/batch/preview')
+      .set(auth(token))
+      .send(body);
+
+  // The test DB keeps rows between runs — count settlements only among
+  // THIS run's batch accounts, not the whole tenant period.
+  const batchLabels = [
+    ...Array.from({ length: 8 }, (_, i) => `BA${i + 1}`),
+    ...Array.from({ length: 6 }, (_, i) => `BE${i + 1}`),
+    ...Array.from({ length: 4 }, (_, i) => `BX${i + 1}`),
+    'BD1',
+    'BD2',
+  ];
+  const settlementCount = async (period: string) => {
+    let n = 0;
+    for (const label of batchLabels) {
+      if (!acct[label]) continue;
+      const rows = (
+        await request(app.getHttpServer())
+          .get(`/consumption-settlements?waterAccountId=${acct[label]}&period=${period}`)
+          .set(auth(adminToken))
+          .expect(200)
+      ).body;
+      n += rows.length;
+    }
+    return n;
+  };
+
+  it('fixtures: 20 accounts on a dedicated book, mixed readiness', async () => {
+    const book = await request(app.getHttpServer())
+      .post('/reading-books')
+      .set(auth(adminToken))
+      .send({ name: `T7 Batch ${RUN}`, orgUnitId: ORG_A })
+      .expect(201);
+    batchBookId = book.body.id;
+
+    const labels = batchLabels;
+    expect(labels).toHaveLength(20);
+    for (const label of labels) {
+      const a = await onboard(label, '2036-01-01', 0);
+      acct[label] = a.waterAccount.id;
+      inst[label] = a.installation.id;
+      await request(app.getHttpServer())
+        .post(`/reading-books/${batchBookId}/meters`)
+        .set(auth(adminToken))
+        .send({ waterAccountId: a.waterAccount.id })
+        .expect(201);
+    }
+
+    // History period: BE accounts get a real READING-settled usage of 10.
+    await genPlanOn(batchBookId, 'bp602', H_PERIOD);
+    for (let i = 1; i <= 6; i++) {
+      const label = `BE${i}`;
+      await passActual('bp602', label, 10, '2036-02-05');
+      const s = await request(app.getHttpServer())
+        .post('/consumption-settlements')
+        .set(auth(adminToken))
+        .send({ waterAccountId: acct[label], period: H_PERIOD })
+        .expect(201);
+      expect(s.body.isEstimated).toBe(false);
+    }
+
+    // Batch period: BA accounts get PASSED ACTUALs; BD accounts pre-settled.
+    await genPlanOn(batchBookId, 'bp603', B_PERIOD);
+    for (let i = 1; i <= 8; i++) {
+      await passActual('bp603', `BA${i}`, 20, '2036-03-05');
+    }
+    for (const label of ['BD1', 'BD2']) {
+      await request(app.getHttpServer())
+        .post('/consumption-settlements')
+        .set(auth(adminToken))
+        .send({
+          waterAccountId: acct[label],
+          period: B_PERIOD,
+          usageQty: 5,
+          estimateReason: 'pre-settled',
+        })
+        .expect(201);
+    }
+  });
+
+  it('wire validation: missing period / bad ids → 400', async () => {
+    for (const body of [
+      {},
+      { period: '20363' },
+      { period: '203613' },
+      { period: B_PERIOD, bookId: 'not-a-uuid' },
+      { period: B_PERIOD, orgUnitId: 'not-a-uuid' },
+    ]) {
+      const res = await batch(body);
+      expect(res.status).toBe(400);
+    }
+    const ghost = await batch({ period: B_PERIOD, bookId: '99999999-9999-4999-8999-999999999999' });
+    expect(ghost.status).toBe(400);
+    expect(ghost.body).toMatchObject({ code: 'BOOK_NOT_FOUND' });
+  });
+
+  it('preview classifies all 20 without persisting anything', async () => {
+    const before = await settlementCount(B_PERIOD);
+
+    // Without a batch estimateReason the six estimate-path accounts fail.
+    const noReason = await batchPreview({ period: B_PERIOD, bookId: batchBookId }).expect(200);
+    expect(noReason.body.total).toBe(20);
+    expect(noReason.body.counts).toMatchObject({
+      ready: 8,
+      readyEstimated: 0,
+      skippedExists: 2,
+      failed: 10,
+    });
+    const estFailed = noReason.body.items.filter(
+      (i: { errorCode?: string }) => i.errorCode === 'ESTIMATE_REASON_REQUIRED',
+    );
+    expect(estFailed).toHaveLength(6);
+
+    const res = await batchPreview({
+      period: B_PERIOD,
+      bookId: batchBookId,
+      estimateReason: 'batch no-read',
+    }).expect(200);
+    expect(res.body.total).toBe(20);
+    expect(res.body.counts).toMatchObject({
+      ready: 8,
+      readyEstimated: 6,
+      skippedExists: 2,
+      failed: 4,
+    });
+    // Deterministic order: items are accountNo-asc.
+    const nos = res.body.items.map((i: { accountNo: string }) => i.accountNo);
+    expect(nos).toEqual([...nos].sort((a, b) => a.localeCompare(b)));
+    // Preview is a pure simulation — settlement count unchanged.
+    expect(await settlementCount(B_PERIOD)).toBe(before);
+  });
+
+  it('execute: per-account isolation, aggregate counts, then idempotent rerun', async () => {
+    const res = await batch({
+      period: B_PERIOD,
+      bookId: batchBookId,
+      estimateReason: 'batch no-read',
+    }).expect(201);
+    expect(res.body.total).toBe(20);
+    expect(res.body.counts).toMatchObject({
+      generated: 8,
+      generatedEstimated: 6,
+      skippedExists: 2,
+      failed: 4,
+    });
+    // Failures carry the domain code; successes carry the settlement id.
+    for (const item of res.body.items) {
+      if (item.status === 'FAILED') expect(item.errorCode).toBe('ESTIMATE_USAGE_REQUIRED');
+      if (item.status === 'GENERATED' || item.status === 'GENERATED_ESTIMATED') {
+        expect(item.settlementId).toBeTruthy();
+      }
+    }
+    expect(await settlementCount(B_PERIOD)).toBe(16);
+
+    // Rerun: the 16 created/existing rows all report SKIPPED_EXISTS —
+    // deterministic retry with zero duplicate settlements.
+    const again = await batch({
+      period: B_PERIOD,
+      bookId: batchBookId,
+      estimateReason: 'batch no-read',
+    }).expect(201);
+    expect(again.body.counts).toMatchObject({
+      generated: 0,
+      generatedEstimated: 0,
+      skippedExists: 16,
+      failed: 4,
+    });
+    expect(await settlementCount(B_PERIOD)).toBe(16);
+  });
+
+  it('scoped writer and tenant B are both walled off', async () => {
+    const scoped = await batch({ period: B_PERIOD, bookId: batchBookId }, writerToken);
+    expect(scoped.status).toBe(403);
+    expect(scoped.body).toMatchObject({ code: 'ORG_OUT_OF_SCOPE' });
+
+    const cross = await batch({ period: B_PERIOD, bookId: batchBookId }, tenantBToken);
+    expect(cross.status).toBe(400);
+    expect(cross.body).toMatchObject({ code: 'BOOK_NOT_FOUND' });
   });
 });

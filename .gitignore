@@ -24,3 +24,18 @@ artifacts/pilot/
 artifacts/uat-v02/
 artifacts/uat-e5/
 artifacts/uat-e6/
+artifacts/uat-e8/
+artifacts/uat-e9/
+artifacts/system-flow/
+artifacts/e10/
+artifacts/*.tar.gz
+backups/
+
+# Pilot scripts tsc build output
+scripts/pilot/lib/*.js
+scripts/pilot/lib/*.js.map
+scripts/pilot/lib/*.d.ts
+scripts/pilot/lib/**/*.js
+scripts/pilot/lib/**/*.js.map
+scripts/pilot/lib/**/*.d.ts
+artifacts/t19/

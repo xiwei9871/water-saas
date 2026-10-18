@@ -410,7 +410,7 @@ test('S4 NO_READ 预计用水量：不伪造表码 + 结算来源标识', async 
     .getByText(`UAT抄表-${stamp}（`, { exact: false })
     .first()
     .click();
-  await main(page).locator('.ant-select').filter({ hasText: '按水表户过滤' }).click();
+  await main(page).locator('.ant-select').filter({ hasText: '按用水户过滤' }).click();
   await page
     .locator('.ant-select-dropdown:visible')
     .getByText(S.acctD.waterAccount.accountNo, { exact: false })

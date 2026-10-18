@@ -8,6 +8,7 @@ import {
 import {
   Alert,
   App as AntdApp,
+  AutoComplete,
   Button,
   Card,
   DatePicker,
@@ -36,6 +37,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   DECIMAL_RULE,
   INSTALLATION_STATUS_LABELS,
   INSTALL_REASON_LABELS,
@@ -77,7 +79,7 @@ interface MeterFormValues {
 }
 
 interface InstallFormValues {
-  customerId?: string; // 仅用于级联过滤水表户，不提交
+  customerId?: string; // 仅用于级联过滤用水户，不提交
   waterAccountId: string;
   meterId: string;
   initialReading: string;
@@ -100,13 +102,13 @@ interface ReplaceFormValues {
 
 const REASON_OPTIONS = (
   ['NEW', 'REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
-).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }));
+).map((r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }));
 
 const REPLACE_REASON_OPTIONS = (
   ['REPLACE', 'FAULT', 'PERIODIC_CHECK'] as const
-).map((r) => ({ value: r, label: INSTALL_REASON_LABELS[r] }));
+).map((r) => ({ value: r, label: enumLabel(INSTALL_REASON_LABELS, r) }));
 
-/** 水表档案：设备台账（含受限状态流转）+ 装拆记录（装表/拆表）。 */
+/** 水表管理：设备台账（含受限状态流转）+ 装拆记录（装表/拆表）。 */
 export default function Meters() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
@@ -115,6 +117,7 @@ export default function Meters() {
   const [rows, setRows] = useState<Meter[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<MeterStatus | undefined>();
+  const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
@@ -158,6 +161,7 @@ export default function Meters() {
             take: size,
             skip: (p - 1) * size,
             ...(statusFilter ? { status: statusFilter } : {}),
+            ...(search ? { q: search } : {}),
           },
         });
         setRows(res.data);
@@ -167,7 +171,7 @@ export default function Meters() {
         setLoading(false);
       }
     },
-    [message, statusFilter],
+    [message, statusFilter, search],
   );
 
   useEffect(() => {
@@ -386,6 +390,20 @@ export default function Meters() {
   const meterColumns: ColumnsType<Meter> = [
     { title: '表号', dataIndex: 'meterNo', key: 'meterNo', width: 150 },
     {
+      title: '在装户号',
+      dataIndex: 'currentAccountNo',
+      key: 'currentAccountNo',
+      width: 140,
+      render: (v: string | null | undefined) => v ?? '—',
+    },
+    {
+      title: '在装客户',
+      dataIndex: 'currentCustomerName',
+      key: 'currentCustomerName',
+      width: 120,
+      render: (v: string | null | undefined) => v ?? '—',
+    },
+    {
       title: '出厂编号',
       dataIndex: 'serialNo',
       key: 'serialNo',
@@ -463,10 +481,13 @@ export default function Meters() {
 
   const instColumns: ColumnsType<MeterInstallation> = [
     {
-      title: '水表户',
+      title: '用水户',
       key: 'account',
-      width: 150,
-      render: (_: unknown, r: MeterInstallation) => r.waterAccount.accountNo,
+      width: 220,
+      render: (_: unknown, r: MeterInstallation) =>
+        r.waterAccount.customer?.name
+          ? `${r.waterAccount.accountNo} · ${r.waterAccount.customer.name}`
+          : r.waterAccount.accountNo,
     },
     {
       title: '表号',
@@ -506,7 +527,7 @@ export default function Meters() {
       dataIndex: 'reason',
       key: 'reason',
       width: 90,
-      render: (r: InstallReason) => INSTALL_REASON_LABELS[r],
+      render: (r: InstallReason) => enumLabel(INSTALL_REASON_LABELS, r),
     },
     {
       title: '状态',
@@ -560,16 +581,25 @@ export default function Meters() {
   return (
     <>
       <Card
-        title="水表档案"
+        title="水表管理"
         extra={
           <Space wrap>
+            <Input.Search
+              allowClear
+              placeholder="搜表号/户号/客户名"
+              style={{ width: 200 }}
+              onSearch={(v) => {
+                setSearch(v.trim());
+                setPage(1);
+              }}
+            />
             <Select
               allowClear
               placeholder="按状态筛选"
               style={{ width: 130 }}
               options={(
                 ['AVAILABLE', 'INSTALLED', 'MAINTENANCE', 'RETIRED'] as const
-              ).map((s) => ({ value: s, label: METER_STATUS_LABELS[s] }))}
+              ).map((s) => ({ value: s, label: enumLabel(METER_STATUS_LABELS, s) }))}
               value={statusFilter}
               onChange={(v) => {
                 setStatusFilter(v);
@@ -632,7 +662,7 @@ export default function Meters() {
                 style={{ width: 120 }}
                 options={(['ACTIVE', 'REMOVED'] as const).map((s) => ({
                   value: s,
-                  label: INSTALLATION_STATUS_LABELS[s],
+                  label: enumLabel(INSTALLATION_STATUS_LABELS, s),
                 }))}
                 value={instStatus}
                 onChange={(v) => {
@@ -658,7 +688,7 @@ export default function Meters() {
                     setInstAccountId(v);
                     setInstPage(1);
                   }}
-                  placeholder="按水表户过滤"
+                  placeholder="按用水户过滤"
                 />
               </span>
               <Button
@@ -704,7 +734,7 @@ export default function Meters() {
       </div>
 
       {/* 登记 / 编辑水表 */}
-      <Modal
+      <Modal maskClosable={false}
         open={meterModal !== null}
         title={meterModal?.mode === 'create' ? '登记水表' : '编辑水表'}
         okText="保存"
@@ -733,7 +763,20 @@ export default function Meters() {
             <Input />
           </Form.Item>
           <Form.Item name="caliber" label="口径">
-            <Input placeholder="如 DN15" />
+            {/* 10/8 报告 §4：常用口径下拉可选，未列举的可手工录入。 */}
+            <AutoComplete
+              placeholder="选择或输入口径，如 DN15"
+              options={[
+                'DN15',
+                'DN20',
+                'DN25',
+                'DN40',
+                'DN50',
+                'DN100',
+                'DN150',
+                'DN200',
+              ].map((v) => ({ value: v }))}
+            />
           </Form.Item>
           <Form.Item
             name="maxDial"
@@ -746,7 +789,7 @@ export default function Meters() {
             <Form.Item name="status" label="状态">
               <Select
                 options={[meterModal.meter.status, ...editTransitions].map(
-                  (s) => ({ value: s, label: METER_STATUS_LABELS[s] }),
+                  (s) => ({ value: s, label: enumLabel(METER_STATUS_LABELS, s) }),
                 )}
               />
             </Form.Item>
@@ -762,7 +805,7 @@ export default function Meters() {
       </Modal>
 
       {/* 装表 */}
-      <Modal
+      <Modal maskClosable={false}
         open={installOpen}
         title="装表"
         okText="确认装表"
@@ -781,13 +824,13 @@ export default function Meters() {
             }
           }}
         >
-          <Form.Item name="customerId" label="客户（用于筛选水表户）">
+          <Form.Item name="customerId" label="客户（用于筛选用水户）">
             <CustomerSelect />
           </Form.Item>
           <Form.Item
             name="waterAccountId"
-            label="水表户"
-            rules={[{ required: true, message: '请选择水表户' }]}
+            label="用水户"
+            rules={[{ required: true, message: '请选择用水户' }]}
           >
             <WaterAccountSelect customerId={installCustomerId} />
           </Form.Item>
@@ -815,7 +858,7 @@ export default function Meters() {
       </Modal>
 
       {/* 拆表 */}
-      <Modal
+      <Modal maskClosable={false}
         open={removeTarget !== null}
         title={removeTarget ? `拆表 — ${removeTarget.meter.meterNo}` : ''}
         okText="确认拆除"
@@ -852,11 +895,11 @@ export default function Meters() {
       </Modal>
 
       {/* 换表 — 原子操作：旧表止码 + 新表始码各自独立填写 */}
-      <Modal
+      <Modal maskClosable={false}
         open={replaceTarget !== null}
         title={
           replaceTarget
-            ? `换表 — ${replaceTarget.meter.meterNo}（水表户 ${replaceTarget.waterAccount.accountNo}）`
+            ? `换表 — ${replaceTarget.meter.meterNo}（用水户 ${replaceTarget.waterAccount.accountNo}）`
             : ''
         }
         okText="确认换表"
@@ -955,7 +998,7 @@ export default function Meters() {
                 pagination={false}
                 columns={[
                   {
-                    title: '水表户',
+                    title: '用水户',
                     key: 'acct',
                     render: (_: unknown, r: MeterDetail['installations'][number]) =>
                       r.waterAccount.accountNo,
@@ -979,7 +1022,7 @@ export default function Meters() {
                   {
                     title: '原因',
                     dataIndex: 'reason',
-                    render: (r: InstallReason) => INSTALL_REASON_LABELS[r],
+                    render: (r: InstallReason) => enumLabel(INSTALL_REASON_LABELS, r),
                   },
                   {
                     title: '状态',

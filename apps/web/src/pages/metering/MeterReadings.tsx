@@ -1,3 +1,4 @@
+import { TaskContextBanner } from '../../components/TaskContextBanner';
 import {
   CheckOutlined,
   CloseOutlined,
@@ -5,6 +6,7 @@ import {
   EyeOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SettingOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
 import {
@@ -18,6 +20,7 @@ import {
   Form,
   Input,
   Modal,
+  Popover,
   Select,
   Space,
   Spin,
@@ -36,10 +39,10 @@ import type {
   MeterReading,
   QcStatus,
   ReadResultType,
-  Staff,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   DECIMAL_RULE,
   cleanBody,
   fmtDate,
@@ -87,13 +90,13 @@ f47ac10b-58cc-4372-a567-0e02b2c3d480,NO_READ,,LOCKED,2026-10-05`;
  * 追加新事实行）+ CSV 批量导入（all-or-nothing，失败行报告内嵌展示）。
  */
 export default function MeterReadings() {
-  const { message } = AntdApp.useApp();
+  const { message, modal } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
-  const canQc = canWrite || hasPerm('metering:qc');
+  // 质检是复核动作（metering:qc），录表权限不再放行（Round-2 报告 §2）。
+  const canQc = hasPerm('metering:qc');
   const [searchInput, setSearchInput] = useState('');
   const [query, setQuery] = useState('');
-  const canIamRead = hasPerm('iam:read');
 
   const [rows, setRows] = useState<MeterReading[]>([]);
   const [loading, setLoading] = useState(false);
@@ -109,7 +112,6 @@ export default function MeterReadings() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const [staff, setStaff] = useState<Staff[]>([]);
   const [acting, setActing] = useState<string | null>(null);
 
   const [supersedeTarget, setSupersedeTarget] = useState<MeterReading | null>(null);
@@ -158,22 +160,6 @@ export default function MeterReadings() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  useEffect(() => {
-    if (!canIamRead) return;
-    api
-      .get<Staff[]>('/iam/staff')
-      .then((res) => setStaff(res.data))
-      .catch(() => setStaff([]));
-  }, [canIamRead]);
-
-  const staffName = useCallback(
-    (id: string | null) => {
-      if (!id) return '—';
-      const s = staff.find((x) => x.id === id);
-      return s ? s.name : `${id.slice(0, 8)}…`;
-    },
-    [staff],
-  );
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -193,15 +179,30 @@ export default function MeterReadings() {
     }
   };
 
-  const qc = async (reading: MeterReading, action: QcAction) => {
+  const doQc = async (reading: MeterReading, action: QcAction) => {
     setActing(reading.id);
     try {
-      await api.post(
+      const res = await api.post(
         `/meter-readings/${reading.id}/qc`,
         { action },
         { headers: { 'Idempotency-Key': newIdemKey() } },
       );
       message.success(`质检已${QC_ACTION_TEXT[action].label}`);
+      // 任务书 T10/§1.8 三段式：有权限者「请从待办领取」，无权限者「已通知××，您无需操作」。
+      const st = (res.data as {
+        supplementTask?: { id: string; deduped: boolean; candidates: { name: string }[] } | null;
+      }).supplementTask;
+      if (st) {
+        const names = st.candidates.length
+          ? st.candidates.map((c) => c.name).join('、')
+          : '（暂无具备权限的账号，已告警管理员）';
+        modal.warning({
+          title: '检测到【实抄止度 < 估计止度】，已生成【补差任务】',
+          content: hasPerm('billing:write')
+            ? `该任务在您的待办中心可领取处理${st.deduped ? '（沿用既有任务）' : ''}，候选责任人：${names}。`
+            : `已${st.deduped ? '沿用既有任务并' : ''}通知具备权限的账号：${names}。您无需操作。`,
+        });
+      }
       await load(page, pageSize);
     } catch (err) {
       message.error(apiErrorText(err));
@@ -209,6 +210,25 @@ export default function MeterReadings() {
     } finally {
       setActing(null);
     }
+  };
+
+  /**
+   * Round-2 报告 §10：通过一条「未抄见」读数且该户已连续多期未抄见时，
+   * 强制二次确认 —— 长期估抄需要复核员有意识地放行，不能顺手点过。
+   */
+  const qc = (reading: MeterReading, action: QcAction) => {
+    const streak = reading.consecutiveNoRead ?? 0;
+    if (action === 'pass' && reading.resultType === 'NO_READ' && streak >= 2) {
+      modal.confirm({
+        title: '连续未抄见警示',
+        content: `该户截至本期已连续 ${streak} 期未抄见（含本条）。通过后将继续按预估口径结算；达到连续预估上限的账户请转异常中心跟进入户核查。确认仍要通过？`,
+        okText: '仍要通过',
+        cancelText: '取消',
+        onOk: () => doQc(reading, action),
+      });
+      return;
+    }
+    void doQc(reading, action);
   };
 
   const submitSupersede = async () => {
@@ -273,7 +293,7 @@ export default function MeterReadings() {
 
   const columns: ColumnsType<MeterReading> = [
     { title: '户号', key: 'account', width: 165, render: (_, r) => r.account?.accountNo ?? '—' },
-    { title: '客户', key: 'customer', width: 190, render: (_, r) => r.account?.customerName ?? '—' },
+    { title: '客户名称', key: 'customer', width: 190, render: (_, r) => r.account?.customerName ?? '—' },
     { title: '用水地址', key: 'addr', width: 220, render: (_, r) => r.account?.addr ?? '—' },
     {
       title: '账期',
@@ -295,7 +315,7 @@ export default function MeterReadings() {
       key: 'resultType',
       width: 90,
       render: (t: ReadResultType) => (
-        <Tag color={RESULT_TYPE_COLORS[t]}>{RESULT_TYPE_LABELS[t]}</Tag>
+        <Tag color={RESULT_TYPE_COLORS[t]}>{enumLabel(RESULT_TYPE_LABELS, t)}</Tag>
       ),
     },
     {
@@ -304,13 +324,18 @@ export default function MeterReadings() {
       width: 150,
       render: (_: unknown, r: MeterReading) =>
         r.resultType === 'NO_READ' ? (
-          <Space size={4}>
+          <Space size={4} wrap>
             <Tag color="orange">
-              {r.exceptionCode ? EXCEPTION_CODE_LABELS[r.exceptionCode] : r.exceptionCode}
+              {r.exceptionCode ? enumLabel(EXCEPTION_CODE_LABELS, r.exceptionCode) : r.exceptionCode}
             </Tag>
             {r.estimateQty != null && (
               <Tooltip title="抄表员预计用量，非表码">
                 <Tag color="cyan">估 {r.estimateQty} m³</Tag>
+              </Tooltip>
+            )}
+            {(r.consecutiveNoRead ?? 0) >= 2 && (
+              <Tooltip title="该户连续多期未抄见，复核前请确认是否已达连续预估上限并需入户核查">
+                <Tag color="red">连{r.consecutiveNoRead}期未抄</Tag>
               </Tooltip>
             )}
           </Space>
@@ -324,9 +349,9 @@ export default function MeterReadings() {
       width: 100,
       render: (_: unknown, r: MeterReading) => (
         <Tooltip
-          title={r.qcAt ? `质检人 ${(r.qcByName ?? staffName(r.qcBy))} · ${fmtTime(r.qcAt)}` : undefined}
+          title={r.qcAt ? `质检人 ${(r.qcByName ?? '—')} · ${fmtTime(r.qcAt)}` : undefined}
         >
-          <Tag color={QC_STATUS_COLORS[r.qcStatus]}>{QC_STATUS_LABELS[r.qcStatus]}</Tag>
+          <Tag color={QC_STATUS_COLORS[r.qcStatus]}>{enumLabel(QC_STATUS_LABELS, r.qcStatus)}</Tag>
         </Tooltip>
       ),
     },
@@ -335,7 +360,7 @@ export default function MeterReadings() {
       dataIndex: 'source',
       key: 'source',
       width: 90,
-      render: (s: MeterReading['source']) => <Tag>{READ_SOURCE_LABELS[s]}</Tag>,
+      render: (s: MeterReading['source']) => <Tag>{enumLabel(READ_SOURCE_LABELS, s)}</Tag>,
     },
     {
       title: '更正链',
@@ -361,7 +386,7 @@ export default function MeterReadings() {
       dataIndex: 'operatorId',
       key: 'operatorId',
       width: 100,
-      render: (_: unknown, r: MeterReading) => r.operatorName ?? staffName(r.operatorId),
+      render: (_: unknown, r: MeterReading) => r.operatorName ?? '—',
     },
     {
       title: '录入时间',
@@ -398,7 +423,7 @@ export default function MeterReadings() {
                 icon={QC_ACTION_TEXT[a].icon}
                 danger={QC_ACTION_TEXT[a].danger}
                 loading={acting === record.id}
-                onClick={() => void qc(record, a)}
+                onClick={() => qc(record, a)}
               >
                 {QC_ACTION_TEXT[a].label}
               </Button>
@@ -434,35 +459,55 @@ export default function MeterReadings() {
   ];
 
   return (
-    <Card
+    <>
+      <TaskContextBanner />
+      <Card
       title="抄表记录 / 质检"
       extra={
         <Space wrap>
           <Input.Search allowClear placeholder="搜索户号、客户或地址" style={{ width: 250 }}
             value={searchInput} onChange={e => setSearchInput(e.target.value)}
             onSearch={value => { setQuery(value.trim()); setPage(1); }} />
-          <Input.Search
-            allowClear
-            placeholder="计划明细 ID"
-            style={{ width: 200 }}
-            value={planItemInput}
-            onChange={(e) => setPlanItemInput(e.target.value)}
-            onSearch={(v) => {
-              setPlanItemId(v);
-              setPage(1);
-            }}
-          />
-          <Input.Search
-            allowClear
-            placeholder="表计安装 ID"
-            style={{ width: 200 }}
-            value={installationInput}
-            onChange={(e) => setInstallationInput(e.target.value)}
-            onSearch={(v) => {
-              setInstallationId(v);
-              setPage(1);
-            }}
-          />
+          <Popover
+            trigger="click"
+            placement="bottomLeft"
+            title="高级筛选（技术参数，日常按户号搜索即可）"
+            content={
+              <Space direction="vertical" style={{ width: 300 }}>
+                <Input.Search
+                  allowClear
+                  placeholder="计划明细 ID"
+                  value={planItemInput}
+                  onChange={(e) => setPlanItemInput(e.target.value)}
+                  onSearch={(v) => {
+                    setPlanItemId(v);
+                    setPage(1);
+                  }}
+                />
+                <Input.Search
+                  allowClear
+                  placeholder="表计安装 ID"
+                  value={installationInput}
+                  onChange={(e) => setInstallationInput(e.target.value)}
+                  onSearch={(v) => {
+                    setInstallationId(v);
+                    setPage(1);
+                  }}
+                />
+              </Space>
+            }
+          >
+            <Button
+              icon={<SettingOutlined />}
+              type={
+                planItemId.trim() || installationId.trim()
+                  ? 'primary'
+                  : 'default'
+              }
+            >
+              高级筛选
+            </Button>
+          </Popover>
           <DatePicker
             picker="month"
             allowClear
@@ -479,7 +524,7 @@ export default function MeterReadings() {
             style={{ width: 110 }}
             options={(['ACTUAL', 'REMOTE', 'NO_READ'] as const).map((t) => ({
               value: t,
-              label: RESULT_TYPE_LABELS[t],
+              label: enumLabel(RESULT_TYPE_LABELS, t),
             }))}
             value={resultType}
             onChange={(v) => {
@@ -492,7 +537,7 @@ export default function MeterReadings() {
             placeholder="质检状态"
             style={{ width: 120 }}
             options={(['PENDING', 'PASSED', 'REJECTED', 'MANUAL_REVIEW'] as const).map(
-              (s) => ({ value: s, label: QC_STATUS_LABELS[s] }),
+              (s) => ({ value: s, label: enumLabel(QC_STATUS_LABELS, s) }),
             )}
             value={qcStatus}
             onChange={(v) => {
@@ -526,7 +571,7 @@ export default function MeterReadings() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1900 }}
+        scroll={{ x: 1900, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -540,7 +585,7 @@ export default function MeterReadings() {
       />
 
       {/* 更正读数 */}
-      <Modal
+      <Modal maskClosable={false}
         open={supersedeTarget !== null}
         title="更正读数（追加新事实行，原记录保留为历史）"
         okText="更正"
@@ -555,7 +600,7 @@ export default function MeterReadings() {
             type="info"
             showIcon
             style={{ marginBottom: 16 }}
-            message={`原读数：${supersedeTarget.readingValue ?? '—'}（${RESULT_TYPE_LABELS[supersedeTarget.resultType]} · ${fmtPeriod(supersedeTarget.period)}）`}
+            message={`原读数：${supersedeTarget.readingValue ?? '—'}（${enumLabel(RESULT_TYPE_LABELS, supersedeTarget.resultType)} · ${fmtPeriod(supersedeTarget.period)}）`}
           />
         )}
         <Form form={supersedeForm} layout="vertical">
@@ -573,7 +618,7 @@ export default function MeterReadings() {
       </Modal>
 
       {/* CSV 批量导入 */}
-      <Modal
+      <Modal maskClosable={false}
         open={importOpen}
         title="批量导入抄表记录（全部成功或全部回滚）"
         okText="导入"
@@ -644,7 +689,7 @@ export default function MeterReadings() {
             column={1}
             items={[
               { key: 'accountNo', label: '户号', children: detail.account?.accountNo ?? '—' },
-              { key: 'customer', label: '客户', children: detail.account?.customerName ?? '—' },
+              { key: 'customer', label: '客户名称', children: detail.account?.customerName ?? '—' },
               { key: 'address', label: '用水地址', children: detail.account?.addr ?? '—' },
               { key: 'meterNo', label: '表号', children: detail.meterNo ?? '—' },
               {
@@ -658,11 +703,11 @@ export default function MeterReadings() {
                 children: (
                   <Space size={4}>
                     <Tag color={RESULT_TYPE_COLORS[detail.resultType]}>
-                      {RESULT_TYPE_LABELS[detail.resultType]}
+                      {enumLabel(RESULT_TYPE_LABELS, detail.resultType)}
                     </Tag>
                     {detail.resultType === 'NO_READ'
                       ? detail.exceptionCode
-                        ? EXCEPTION_CODE_LABELS[detail.exceptionCode]
+                        ? enumLabel(EXCEPTION_CODE_LABELS, detail.exceptionCode)
                         : '—'
                       : (detail.readingValue ?? '—')}
                   </Space>
@@ -676,25 +721,28 @@ export default function MeterReadings() {
                 children: (
                   <Space size={4}>
                     <Tag color={QC_STATUS_COLORS[detail.qcStatus]}>
-                      {QC_STATUS_LABELS[detail.qcStatus]}
+                      {enumLabel(QC_STATUS_LABELS, detail.qcStatus)}
                     </Tag>
                     {detail.qcAt &&
-                      `${(detail.qcByName ?? staffName(detail.qcBy))} · ${fmtTime(detail.qcAt)}`}
+                      `${(detail.qcByName ?? '—')} · ${fmtTime(detail.qcAt)}`}
                   </Space>
                 ),
               },
               {
                 key: 'source',
                 label: '来源',
-                children: <Tag>{READ_SOURCE_LABELS[detail.source]}</Tag>,
+                children: <Tag>{enumLabel(READ_SOURCE_LABELS, detail.source)}</Tag>,
               },
               {
-                key: 'item',
-                label: '计划明细',
-                children: detail.planItemId ?? '—（计划外录入）',
+                key: 'tech',
+                label: '技术标识',
+                children: (
+                  <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                    明细 {detail.planItemId ?? '无（计划外录入）'} · 安装{' '}
+                    {detail.installationId} · 表计 {detail.meterId}
+                  </span>
+                ),
               },
-              { key: 'inst', label: '表计安装 ID', children: detail.installationId },
-              { key: 'meter', label: '表计 ID', children: detail.meterId },
               {
                 key: 'chain',
                 label: '更正链',
@@ -714,7 +762,7 @@ export default function MeterReadings() {
                   </Space>
                 ),
               },
-              { key: 'operator', label: '抄表人', children: detail.operatorName ?? staffName(detail.operatorId) },
+              { key: 'operator', label: '抄表人', children: detail.operatorName ?? '—' },
               { key: 'photo', label: '照片凭证', children: detail.photoRef ?? '—' },
               { key: 'remark', label: '备注', children: detail.remark ?? '—' },
               { key: 'created', label: '录入时间', children: fmtTime(detail.createdAt) },
@@ -723,5 +771,6 @@ export default function MeterReadings() {
         )}
       </Drawer>
     </Card>
+    </>
   );
 }

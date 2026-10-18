@@ -28,6 +28,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { OrgUnit } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import { enumLabel } from '../common';
 
 const ORG_TYPE_LABELS: Record<OrgUnit['type'], string> = {
   COMPANY: '公司',
@@ -97,7 +98,7 @@ export default function Orgs() {
     const build = (list: OrgUnit[]): DataNode[] =>
       list.map((o) => ({
         key: o.id,
-        title: `${o.name}（${ORG_TYPE_LABELS[o.type]}）`,
+        title: `${o.name}（${enumLabel(ORG_TYPE_LABELS, o.type)}）`,
         children: build(childrenOf(o.id)),
       }));
     return build(rootNodes);
@@ -229,7 +230,7 @@ export default function Orgs() {
                   {
                     key: 'type',
                     label: '类型',
-                    children: ORG_TYPE_LABELS[selected.type],
+                    children: enumLabel(ORG_TYPE_LABELS, selected.type),
                   },
                   {
                     key: 'parent',
@@ -289,7 +290,7 @@ export default function Orgs() {
         </Col>
       </Row>
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={modal?.mode === 'create' ? '新增组织' : '编辑组织'}
         okText="保存"
@@ -320,7 +321,7 @@ export default function Orgs() {
             <Select
               options={(['COMPANY', 'BRANCH', 'DEPT'] as const).map((t) => ({
                 value: t,
-                label: ORG_TYPE_LABELS[t],
+                label: enumLabel(ORG_TYPE_LABELS, t),
               }))}
             />
           </Form.Item>

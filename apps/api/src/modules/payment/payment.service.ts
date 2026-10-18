@@ -15,6 +15,11 @@ import {
   outOfScopeSettleAccountIds,
 } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
+import {
+  embedSettleIdentity,
+  embedStaffNames,
+} from '../../common/account-identity.js';
 import { lockAccountForUpdate } from '../billing/pricing.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
 
@@ -71,7 +76,7 @@ export const RECEIPT_SELECT = {
   updatedAt: true,
 } satisfies Prisma.ReceiptSelect;
 
-type PayChannel = 'CASH' | 'POS' | 'TRANSFER';
+type PayChannel = 'CASH' | 'POS' | 'TRANSFER' | 'ONLINE' | 'BANK_DEDUCT';
 type PaymentStatus = 'RECEIVED' | 'DAY_CLOSED' | 'REVERSED';
 type BillStatus = 'DRAFT' | 'POSTED' | 'PARTIAL_PAID' | 'PAID' | 'REVERSED';
 
@@ -170,6 +175,7 @@ export class PaymentService {
     private readonly prisma: TenantPrismaService,
     private readonly seq: SequenceService,
     private readonly prepay: PrepaymentService,
+    private readonly tasks: TaskService,
   ) {}
 
   list(
@@ -194,7 +200,7 @@ export class PaymentService {
         !q.settleAccountId && ctx.scope !== 'ALL'
           ? await outOfScopeSettleAccountIds(tx, ctx)
           : [];
-      return tx.payment.findMany({
+      const rows = await tx.payment.findMany({
         where: {
           tenantId: ctx.tenantId,
           settleAccountId: q.settleAccountId,
@@ -208,6 +214,18 @@ export class PaymentService {
         take: q.take,
         skip: q.skip,
       });
+      // 10/8 报告 §2：结算户号/名称 + 收费员姓名内嵌，无 customer:read /
+      // iam:read 的收费/账务角色不再看到裸 uuid。
+      return this.embedRefs(
+        tx,
+        ctx,
+        await embedStaffNames(
+          tx,
+          ctx.tenantId,
+          await embedSettleIdentity(tx, ctx.tenantId, rows),
+          { cashierId: 'cashierName' },
+        ),
+      );
     });
   }
 
@@ -338,13 +356,26 @@ export class PaymentService {
         updatedBy: ctx.staffId,
       })),
     });
-    const receiptNo = await this.seq.nextFormatted(
-      tx,
-      ctx.tenantId,
-      'receipt_no',
-      'R',
-      ctx.staffId,
-    );
+    // G5 票据台账：收费员有已领用号段时占用 next_no，否则退回全局序号。
+    const book = await tx.receiptBook.findFirst({
+      where: { tenantId: ctx.tenantId, status: 'ISSUED', issuedTo: ctx.staffId },
+      orderBy: { issuedAt: 'asc' },
+    });
+    let receiptNo: string;
+    if (book && book.nextNo <= book.rangeEnd) {
+      const pad = String(book.rangeEnd).length;
+      receiptNo = `${book.prefix}${String(book.nextNo).padStart(pad, '0')}`;
+      await tx.receiptBook.update({
+        where: { id: book.id },
+        data: {
+          nextNo: { increment: 1 },
+          ...(book.nextNo >= book.rangeEnd ? { status: 'EXHAUSTED' } : {}),
+          updatedBy: ctx.staffId,
+        },
+      });
+    } else {
+      receiptNo = await this.seq.nextFormatted(tx, ctx.tenantId, 'receipt_no', 'R', ctx.staffId);
+    }
     const receipt = await tx.receipt.create({
       data: {
         tenantId: ctx.tenantId,
@@ -382,7 +413,70 @@ export class PaymentService {
       select: PAYMENT_ALLOC_SELECT,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
+    // 任务书 T13：收款后仍欠费超限 → 自动建催缴任务（payment:write 候选）。
+    // 幂等去重由 task_open_dedupe 保证——清完前重复收款不会刷屏。
+    await this.detectCollectionTask(tx, ctx, body.settleAccountId, payment.orgUnitId);
     return { ...payment, allocs, receipt };
+  }
+
+  /**
+   * 催缴检测：结算户剩余欠费（未结清账单净额）> TASK_RULE.COLLECTION
+   * .amountThreshold 分，或存在逾期 > overdueDays 天的账单 → 建任务。
+   */
+  private async detectCollectionTask(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    settleAccountId: string,
+    orgUnitId: string | null,
+  ) {
+    const rule = await tx.sysDict.findFirst({
+      where: { tenantId: ctx.tenantId, category: 'TASK_RULE', code: 'COLLECTION', status: 'ACTIVE' },
+      select: { value: true },
+    });
+    const v = (rule?.value ?? {}) as { amountThreshold?: number; overdueDays?: number };
+    const threshold = BigInt(v.amountThreshold ?? 100000);
+    const overdueDays = v.overdueDays ?? 30;
+    const rows = await tx.$queryRaw<{ arrears: bigint; overdue: bigint; settle_no: string | null }[]>`
+      SELECT COALESCE(sum(GREATEST(b.total_amount - COALESCE(a.paid,0),0)),0) AS arrears,
+             count(*) FILTER (WHERE b.due_date < CURRENT_DATE - (${overdueDays} || ' days')::interval
+                              AND b.total_amount - COALESCE(a.paid,0) > 0) AS overdue,
+             (SELECT s.settle_no FROM settle_account s
+               WHERE s.tenant_id = ${ctx.tenantId}::uuid AND s.id = ${settleAccountId}::uuid) AS settle_no
+      FROM bill b
+      LEFT JOIN (SELECT bill_id, sum(pa.amount) AS paid FROM payment_alloc pa
+                  JOIN payment p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+                  WHERE pa.tenant_id = ${ctx.tenantId}::uuid
+                    AND p.status IN ('RECEIVED','DAY_CLOSED')
+                  GROUP BY bill_id) a ON a.bill_id = b.id
+      WHERE b.tenant_id = ${ctx.tenantId}::uuid
+        AND b.settle_account_id = ${settleAccountId}::uuid
+        AND b.bill_kind <> 'REVERSAL'
+        AND b.status IN ('POSTED','PARTIAL_PAID')`;
+    const { arrears, overdue, settle_no } = rows[0] ?? { arrears: 0n, overdue: 0n, settle_no: null };
+    const overAmount = arrears > threshold;
+    const overDays = overdue > 0n;
+    if (!overAmount && !overDays) return;
+    const reason = [
+      overAmount ? `欠费 ¥${(Number(arrears) / 100).toFixed(2)} 超阈值` : null,
+      overDays ? `${overdue} 笔逾期超 ${overdueDays} 天` : null,
+    ].filter(Boolean).join('；');
+    await this.tasks.createTask(tx, ctx, {
+      type: 'COLLECTION',
+      title: `催缴：结算户 ${settle_no ?? settleAccountId} 欠费超限`,
+      bizType: 'settleAccount',
+      bizId: settleAccountId,
+      bizLabel: settle_no ?? null,
+      reason,
+      context: {
+        settleAccountId,
+        settleNo: settle_no,
+        arrearsCent: arrears.toString(),
+        overdueBillCount: overdue.toString(),
+        thresholdCent: threshold.toString(),
+        overdueDays,
+      },
+      orgUnitId,
+    });
   }
 
   /**
@@ -777,6 +871,25 @@ export class PaymentService {
       where: { tenantId: ctx.tenantId, paymentId: id, voidFlag: false },
       data: { voidFlag: true, updatedBy: ctx.staffId },
     });
+    // 任务书 T14：红冲发起 → 审批任务（billing:write 候选，事后复核制）。
+    const reversalReason = (req.body as { reason?: string } | undefined)?.reason;
+    await this.tasks.createTask(tx, ctx, {
+      type: 'REVERSAL_APPROVAL',
+      title: `红冲审批：收款 ${original.paymentNo} 红冲复核`,
+      bizType: 'payment',
+      bizId: reversal.id,
+      bizLabel: paymentNo,
+      reason: reversalReason ? `红冲原因：${reversalReason}` : '发起红冲需审批',
+      context: {
+        reversalPaymentId: reversal.id,
+        reversalPaymentNo: paymentNo,
+        originalPaymentId: original.id,
+        originalPaymentNo: original.paymentNo,
+        amountCent: original.amount.toString(),
+        reason: reversalReason ?? null,
+      },
+      orgUnitId: original.orgUnitId,
+    });
 
     // Bills recover outstanding: Σ allocs after the negative mirrors.
     // A bill red-flushed meanwhile (REVERSED) keeps its status — the
@@ -845,6 +958,25 @@ export class PaymentService {
       select: PAYMENT_ALLOC_SELECT,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
+    // 展示层取值规范：分摊的账单引用要人读（户号 · 账期），不是裸 uuid。
+    const allocBillIds = [...new Set(allocs.map((a) => a.billId))];
+    const allocBills = allocBillIds.length
+      ? await tx.bill.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: allocBillIds } },
+          select: {
+            id: true,
+            period: true,
+            waterAccount: { select: { accountNo: true } },
+          },
+        })
+      : [];
+    const billLabelById = new Map(
+      allocBills.map((b) => [b.id, `${b.waterAccount.accountNo} · ${b.period}`]),
+    );
+    const allocsView = allocs.map((a) => ({
+      ...a,
+      billLabel: billLabelById.get(a.billId) ?? null,
+    }));
     const receipt = await tx.receipt.findFirst({
       where: { tenantId: ctx.tenantId, paymentId: payment.id },
       select: RECEIPT_SELECT,
@@ -858,7 +990,65 @@ export class PaymentService {
       payment.id,
       ['TOP_UP', 'REFUND', 'REVERSAL'],
     );
-    return { ...payment, allocs, receipt, prepaymentEntries };
+    const [enriched] = await this.embedRefs(
+      tx,
+      ctx,
+      await embedStaffNames(
+        tx,
+        ctx.tenantId,
+        await embedSettleIdentity(tx, ctx.tenantId, [
+          payment as T & { settleAccountId?: string | null },
+        ]),
+        { cashierId: 'cashierName' },
+      ),
+    );
+    return { ...enriched, allocs: allocsView, receipt, prepaymentEntries };
+  }
+
+  /**
+   * 10/8 报告 §2 延伸：reversalOfId/dayCloseId 同样内嵌人读引用 —
+   * 红冲对象 → 原收款单号；日结单 → 日结日期（详情可再点入）。
+   */
+  private async embedRefs<T extends object>(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    rows: T[],
+  ) {
+    const ref = (r: T) =>
+      r as { reversalOfId?: string | null; dayCloseId?: string | null };
+    const revIds = [
+      ...new Set(
+        rows.map((r) => ref(r).reversalOfId).filter((v): v is string => !!v),
+      ),
+    ];
+    const closeIds = [
+      ...new Set(
+        rows.map((r) => ref(r).dayCloseId).filter((v): v is string => !!v),
+      ),
+    ];
+    const revs = revIds.length
+      ? await tx.payment.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: revIds } },
+          select: { id: true, paymentNo: true },
+        })
+      : [];
+    const closes = closeIds.length
+      ? await tx.cashierDayClose.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: closeIds } },
+          select: { id: true, closeDate: true },
+        })
+      : [];
+    const revById = new Map(revs.map((p) => [p.id, p.paymentNo]));
+    const closeById = new Map(closes.map((c) => [c.id, c.closeDate]));
+    return rows.map((r) => ({
+      ...r,
+      reversalOfNo: ref(r).reversalOfId
+        ? (revById.get(ref(r).reversalOfId!) ?? null)
+        : null,
+      dayCloseDate: ref(r).dayCloseId
+        ? (closeById.get(ref(r).dayCloseId!) ?? null)
+        : null,
+    }));
   }
 
   /** Σ payment_alloc.amount per bill (reversal allocs net negative). */

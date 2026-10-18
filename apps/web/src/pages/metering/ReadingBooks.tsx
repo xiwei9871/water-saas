@@ -26,18 +26,17 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { api, apiErrorText, errorCode, toApiError } from '../../api/client';
 import type {
   BookCadence,
   BookMember,
   MeterChannel,
-  OrgUnit,
   ReadingBook,
   ReadingBookDetail,
-  Staff,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   cleanBody,
   cleanPatch,
   fmtTime,
@@ -45,6 +44,7 @@ import {
 } from '../common';
 import {
   AccountStatusTag,
+  BillingAccountSelect,
   CustomerSelect,
   OrgUnitTreeSelect,
   StaffSelect,
@@ -73,13 +73,10 @@ const CHANNEL_LABELS: Record<MeterChannel, string> = {
 };
 
 interface MemberFormValues {
-  customerId?: string; // 仅用于级联过滤水表户，不提交
+  customerId?: string; // 仅用于级联过滤用水户，不提交
   waterAccountId: string;
-  seqNo?: number | null;
 }
 
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 type ModalState =
   | { kind: 'create' }
@@ -87,12 +84,12 @@ type ModalState =
   | null;
 
 /**
- * 抄表册：册列表 + 新建/编辑 + 册内水表户管理（抽屉）+ 删除。
+ * 抄表册：册列表 + 新建/编辑 + 册内用水户管理（抽屉）+ 删除。
  * 组织/抄表员选择需要 iam:read；没有该权限时组织默认取当前用户
  * 所属组织、抄表员字段隐藏（服务端readerId可空，生成计划时再指定）。
  */
 export default function ReadingBooks() {
-  const { message } = AntdApp.useApp();
+  const { message, modal: antdModal } = AntdApp.useApp();
   const { user, hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
   const canIamRead = hasPerm('iam:read');
@@ -107,9 +104,6 @@ export default function ReadingBooks() {
   const [orgFilter, setOrgFilter] = useState<string | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-
-  const [orgs, setOrgs] = useState<OrgUnit[]>([]);
-  const [staff, setStaff] = useState<Staff[]>([]);
 
   const [modal, setModal] = useState<ModalState>(null);
   const [idemKey, setIdemKey] = useState('');
@@ -149,31 +143,9 @@ export default function ReadingBooks() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  // 组织/员工名称展示 —— 仅 iam:read 用户可拉取；失败静默退化为短 id。
-  useEffect(() => {
-    if (!canIamRead) return;
-    api
-      .get<OrgUnit[]>('/iam/orgs')
-      .then((res) => setOrgs(res.data))
-      .catch(() => setOrgs([]));
-    api
-      .get<Staff[]>('/iam/staff')
-      .then((res) => setStaff(res.data))
-      .catch(() => setStaff([]));
-  }, [canIamRead]);
-
-  const orgName = useCallback(
-    (id: string) => orgs.find((o) => o.id === id)?.name ?? `${id.slice(0, 8)}…`,
-    [orgs],
-  );
-  const staffName = useCallback(
-    (id: string | null) => {
-      if (!id) return '—';
-      const s = staff.find((x) => x.id === id);
-      return s ? `${s.name}（${s.login}）` : `${id.slice(0, 8)}…`;
-    },
-    [staff],
-  );
+  // 组织/抄表员名称已由 API 内嵌（orgUnitName/readerName）；取不到按规范显 '—'。
+  const orgName = useCallback((_id: string) => '—', []);
+  const staffName = useCallback((_id: string | null) => '—', []);
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -314,11 +286,11 @@ export default function ReadingBooks() {
     if (!membersBook) return;
     setMemberSaving(true);
     try {
+      // 顺序号由服务端按 max+1 分配（RC1-2 / F9），前端不再提交。
       await api.post(
         `/reading-books/${membersBook.id}/meters`,
         cleanBody({
           waterAccountId: values.waterAccountId,
-          seqNo: values.seqNo ?? undefined,
         }),
         { headers: { 'Idempotency-Key': memberIdemKey } },
       );
@@ -327,7 +299,34 @@ export default function ReadingBooks() {
       memberForm.resetFields();
       await reloadMembers();
     } catch (err) {
-      message.error(apiErrorText(err));
+      // RC1-2 / F10: 该户已在其他册 → 显式转移确认，绝不静默双册。
+      if (errorCode(err) === 'ACCOUNT_IN_OTHER_BOOK') {
+        const body = toApiError(err).body as
+          | { bookNo?: string | null; bookName?: string | null }
+          | undefined;
+        const where = body?.bookNo
+          ? `${body.bookName ?? ''}（${body.bookNo}）`
+          : '另一抄表册';
+        antdModal.confirm({
+          title: '该用水户已在其他抄表册',
+          content: `该用水户当前已属于：${where}。是否转移到本册「${membersBook.name}」？`,
+          okText: '转移到本册',
+          cancelText: '取消',
+          onOk: async () => {
+            await api.post(
+              `/reading-books/${membersBook.id}/meters/transfer`,
+              { waterAccountId: values.waterAccountId },
+              { headers: { 'Idempotency-Key': newIdemKey() } },
+            );
+            message.success('已转移到本册');
+            setMemberIdemKey(newIdemKey());
+            memberForm.resetFields();
+            await reloadMembers();
+          },
+        });
+      } else {
+        message.error(apiErrorText(err));
+      }
     } finally {
       setMemberSaving(false);
     }
@@ -349,17 +348,17 @@ export default function ReadingBooks() {
     { title: '名称', dataIndex: 'name', key: 'name' },
     {
       title: '所属组织',
-      dataIndex: 'orgUnitId',
-      key: 'orgUnitId',
+      key: 'orgUnit',
       width: 140,
-      render: orgName,
+      render: (_: unknown, r: ReadingBook) =>
+        r.orgUnitName ?? orgName(r.orgUnitId),
     },
     {
       title: '默认抄表员',
-      dataIndex: 'readerId',
-      key: 'readerId',
+      key: 'reader',
       width: 150,
-      render: staffName,
+      render: (_: unknown, r: ReadingBook) =>
+        r.readerName ?? staffName(r.readerId),
     },
     {
       title: '抄表日',
@@ -375,12 +374,12 @@ export default function ReadingBooks() {
       render: (_: unknown, r: ReadingBook) => (
         <Space size={4} wrap>
           <Tag>
-            {CADENCE_LABELS[r.cadence ?? 'MONTHLY']}
+            {enumLabel(CADENCE_LABELS, r.cadence ?? 'MONTHLY')}
             {r.cadence === 'BIMONTHLY' && r.anchorPeriod
               ? ` · 锚 ${r.anchorPeriod.slice(0, 4)}-${r.anchorPeriod.slice(4)}`
               : ''}
           </Tag>
-          <Tag color="geekblue">{CHANNEL_LABELS[r.meterChannel ?? 'MECHANICAL']}</Tag>
+          <Tag color="geekblue">{enumLabel(CHANNEL_LABELS, r.meterChannel ?? 'MECHANICAL')}</Tag>
         </Space>
       ),
     },
@@ -437,9 +436,16 @@ export default function ReadingBooks() {
     {
       title: '户号',
       key: 'accountNo',
-      width: 160,
+      width: 150,
       render: (_: unknown, m: BookMember) =>
-        m.waterAccount?.accountNo ?? `${m.waterAccountId.slice(0, 8)}…`,
+        m.waterAccount?.accountNo ?? '—',
+    },
+    {
+      title: '客户名称',
+      key: 'customerName',
+      width: 110,
+      ellipsis: true,
+      render: (_: unknown, m: BookMember) => m.waterAccount?.customer?.name ?? '—',
     },
     {
       title: '地址',
@@ -462,7 +468,7 @@ export default function ReadingBooks() {
             width: 90,
             render: (_: unknown, m: BookMember) => (
               <Popconfirm
-                title="移出该水表户？"
+                title="移出该用水户？"
                 description="已生成的计划明细不受影响。"
                 okText="移出"
                 okButtonProps={{ danger: true }}
@@ -548,7 +554,7 @@ export default function ReadingBooks() {
       />
 
       {/* 新建 / 编辑 */}
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={
           modal?.kind === 'create'
@@ -610,7 +616,7 @@ export default function ReadingBooks() {
             <Select
               options={(Object.keys(CADENCE_LABELS) as BookCadence[]).map((c) => ({
                 value: c,
-                label: CADENCE_LABELS[c],
+                label: enumLabel(CADENCE_LABELS, c),
               }))}
             />
           </Form.Item>
@@ -636,7 +642,7 @@ export default function ReadingBooks() {
             <Select
               options={(Object.keys(CHANNEL_LABELS) as MeterChannel[]).map((c) => ({
                 value: c,
-                label: CHANNEL_LABELS[c],
+                label: enumLabel(CHANNEL_LABELS, c),
               }))}
             />
           </Form.Item>
@@ -645,6 +651,7 @@ export default function ReadingBooks() {
 
       {/* 成员管理抽屉 */}
       <Drawer
+        maskClosable={false}
         open={membersBook !== null || membersLoading}
         width={640}
         title={membersBook ? `册成员 — ${membersBook.name}（${membersBook.bookNo}）` : '册成员'}
@@ -672,33 +679,27 @@ export default function ReadingBooks() {
                       {({ getFieldValue }) => (
                         <Form.Item
                           name="waterAccountId"
-                          rules={[{ required: true, message: '请选择水表户' }]}
+                          rules={[{ required: true, message: '请选择用水户' }]}
                           style={{ minWidth: 220 }}
                         >
                           <WaterAccountSelect
                             customerId={getFieldValue('customerId')}
-                            placeholder="选择水表户"
+                            placeholder="选择用水户"
                           />
                         </Form.Item>
                       )}
                     </Form.Item>
                   </>
                 ) : (
-                  // 无 customer:read 时退化为手填 uuid（服务端仍校验）。
+                  // 无 customer:read 走业务侧户号搜索，不填 uuid。
                   <Form.Item
                     name="waterAccountId"
-                    rules={[
-                      { required: true, message: '请输入水表户 ID' },
-                      { pattern: UUID_RE, message: 'ID 格式不正确' },
-                    ]}
+                    rules={[{ required: true, message: '请选择用水户' }]}
                     style={{ minWidth: 300 }}
                   >
-                    <Input placeholder="水表户 uuid" />
+                    <BillingAccountSelect placeholder="搜索户号/客户名" />
                   </Form.Item>
                 )}
-                <Form.Item name="seqNo" style={{ width: 110 }}>
-                  <InputNumber min={1} precision={0} placeholder="顺序(可空)" style={{ width: '100%' }} />
-                </Form.Item>
                 <Form.Item>
                   <Button
                     type="primary"
@@ -717,7 +718,7 @@ export default function ReadingBooks() {
               columns={memberColumns}
               dataSource={membersBook.members}
               pagination={false}
-              locale={{ emptyText: '册内暂无水表户' }}
+              locale={{ emptyText: '册内暂无用水户' }}
             />
             <div style={{ marginTop: 8 }}>
               <Tag color="blue">共 {membersBook.members.length} 户</Tag>

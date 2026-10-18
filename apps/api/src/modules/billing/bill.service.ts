@@ -8,6 +8,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { DomainError } from '@ws/billing-core';
 import type { Request } from 'express';
+import { embedAccountIdentity } from '../../common/account-identity.js';
 import { isUniqueViolation } from '../../common/prisma-errors.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
@@ -16,6 +17,7 @@ import {
   outOfScopeAccountIds,
 } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
 import { PrepaymentService } from '../prepayment/prepayment.service.js';
 import {
   computeBill,
@@ -108,6 +110,7 @@ export class BillService {
   constructor(
     private readonly prisma: TenantPrismaService,
     private readonly prepay: PrepaymentService,
+    private readonly tasks: TaskService,
   ) {}
 
   list(
@@ -135,7 +138,7 @@ export class BillService {
         !q.waterAccountId && ctx.scope !== 'ALL'
           ? await outOfScopeAccountIds(tx, ctx)
           : [];
-      return tx.bill.findMany({
+      const rows = await tx.bill.findMany({
         where: {
           tenantId: ctx.tenantId,
           period: q.period,
@@ -150,7 +153,34 @@ export class BillService {
         take: q.take,
         skip: q.skip,
       });
+      return this.embedIdentity(tx, ctx, rows);
     });
+  }
+
+  /**
+   * 户号/客户名称/结算户号/结算户名称 are part of the bill document —
+   * embedded inline so roles without customer:read still see real
+   * identifiers instead of uuids (Round-2 report §4/§9).
+   */
+  private async embedIdentity<T extends { waterAccountId: string; settleAccountId: string }>(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    rows: T[],
+  ) {
+    const withAccount = await embedAccountIdentity(tx, ctx.tenantId, rows);
+    const settleIds = [...new Set(rows.map((r) => r.settleAccountId))];
+    const settles = settleIds.length
+      ? await tx.settleAccount.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: settleIds } },
+          select: { id: true, settleNo: true, name: true },
+        })
+      : [];
+    const bySettle = new Map(settles.map((s) => [s.id, s]));
+    return withAccount.map((r) => ({
+      ...r,
+      settleNo: bySettle.get(r.settleAccountId)?.settleNo ?? null,
+      settleName: bySettle.get(r.settleAccountId)?.name ?? null,
+    }));
   }
 
   async getById(ctx: TenantCtx, id: string) {
@@ -283,6 +313,29 @@ export class BillService {
         createdBy: ctx.staffId,
         updatedBy: ctx.staffId,
       })),
+    });
+    // 任务书 T14：账单红冲同样纳入审批任务（billing:write 候选）。
+    const acctNo = await tx.waterAccount.findUnique({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id: original.waterAccountId } },
+      select: { accountNo: true },
+    });
+    const billLabel = `${acctNo?.accountNo ?? original.waterAccountId} · ${original.period}`;
+    await this.tasks.createTask(tx, ctx, {
+      type: 'REVERSAL_APPROVAL',
+      title: `红冲审批：账单 ${billLabel} 红冲复核`,
+      bizType: 'bill',
+      bizId: reversal.id,
+      bizLabel: billLabel,
+      reason: '发起账单红冲需审批',
+      context: {
+        reversalBillId: reversal.id,
+        originalBillId: original.id,
+        waterAccountId: original.waterAccountId,
+        waterAccountNo: acctNo?.accountNo ?? null,
+        period: original.period,
+        totalAmountCent: original.totalAmount.toString(),
+      },
+      orgUnitId: null,
     });
     return this.withItems(tx, ctx, reversal);
   }
@@ -444,7 +497,17 @@ export class BillService {
   // internals
   // -------------------------------------------------------------------------
 
-  private async withItems<T extends { id: string }>(
+  private async withItems<
+    T extends {
+      id: string;
+      waterAccountId: string;
+      settleAccountId: string;
+      sourceType: string;
+      sourceId: string;
+      billingRunId: string | null;
+      tariffPlanId: string | null;
+    },
+  >(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     bill: T,
@@ -469,7 +532,104 @@ export class BillService {
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
-    return { ...bill, items, allocs };
+    // 10/8 报告 §8 延伸：分摊行内嵌收款单号 / 预存流水类型 ——
+    // "收款/流水"列不再摆截断 uuid。
+    const allocPaymentIds = [
+      ...new Set(allocs.map((a) => a.paymentId).filter((v): v is string => !!v)),
+    ];
+    const allocEntryIds = [
+      ...new Set(
+        allocs
+          .map((a) => a.prepaymentEntryId)
+          .filter((v): v is string => !!v),
+      ),
+    ];
+    const allocPayments = allocPaymentIds.length
+      ? await tx.payment.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: allocPaymentIds } },
+          select: { id: true, paymentNo: true },
+        })
+      : [];
+    const allocEntries = allocEntryIds.length
+      ? await tx.prepaymentLedgerEntry.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: allocEntryIds } },
+          select: { id: true, type: true },
+        })
+      : [];
+    const allocPayNo = new Map(allocPayments.map((p) => [p.id, p.paymentNo]));
+    const allocEntryType = new Map(allocEntries.map((e) => [e.id, e.type]));
+    const namedAllocs = allocs.map((a) => ({
+      ...a,
+      paymentNo: (a.paymentId && allocPayNo.get(a.paymentId)) ?? null,
+      prepaymentEntryType:
+        (a.prepaymentEntryId && allocEntryType.get(a.prepaymentEntryId)) ??
+        null,
+    }));
+    // 详情页人读引用（9·30 报告 §1）：费用项名称 + 开账批次/资费版本/
+    // 来源单据的可读标识 —— 明细里不再只摆 uuid。
+    const feeItemIds = [
+      ...new Set(items.map((i) => i.feeItemId).filter((v): v is string => !!v)),
+    ];
+    const feeItems = feeItemIds.length
+      ? await tx.feeItem.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: feeItemIds } },
+          select: { id: true, code: true, name: true },
+        })
+      : [];
+    const feeMap = new Map(feeItems.map((f) => [f.id, f]));
+    const namedItems = items.map((i) => ({
+      ...i,
+      feeItemCode: (i.feeItemId && feeMap.get(i.feeItemId)?.code) ?? null,
+      feeItemName: (i.feeItemId && feeMap.get(i.feeItemId)?.name) ?? null,
+    }));
+    const billingRunRef = bill.billingRunId
+      ? await tx.billingRun.findFirst({
+          where: { tenantId: ctx.tenantId, id: bill.billingRunId },
+          select: { period: true, runType: true, createdAt: true },
+        })
+      : null;
+    const tariffPlanRef = bill.tariffPlanId
+      ? await tx.tariffPlan.findFirst({
+          where: { tenantId: ctx.tenantId, id: bill.tariffPlanId },
+          select: { code: true, name: true },
+        })
+      : null;
+    let sourcePeriod: string | null = null;
+    let sourcePeriodTo: string | null = null;
+    if (bill.sourceId && bill.sourceType === 'SETTLEMENT') {
+      sourcePeriod =
+        (
+          await tx.consumptionSettlement.findFirst({
+            where: { tenantId: ctx.tenantId, id: bill.sourceId },
+            select: { period: true },
+          })
+        )?.period ?? null;
+    } else if (bill.sourceId && bill.sourceType === 'ORIGINAL_BILL') {
+      sourcePeriod =
+        (
+          await tx.bill.findFirst({
+            where: { tenantId: ctx.tenantId, id: bill.sourceId },
+            select: { period: true },
+          })
+        )?.period ?? null;
+    } else if (bill.sourceId && bill.sourceType === 'RECONCILIATION') {
+      const rec = await tx.reconciliation.findFirst({
+        where: { tenantId: ctx.tenantId, id: bill.sourceId },
+        select: { fromPeriod: true, toPeriod: true },
+      });
+      sourcePeriod = rec?.fromPeriod ?? null;
+      sourcePeriodTo = rec?.toPeriod ?? null;
+    }
+    const [identified] = await this.embedIdentity(tx, ctx, [bill]);
+    return {
+      ...identified,
+      items: namedItems,
+      allocs: namedAllocs,
+      billingRunRef,
+      tariffPlanRef,
+      sourcePeriod,
+      sourcePeriodTo,
+    };
   }
 
   /**

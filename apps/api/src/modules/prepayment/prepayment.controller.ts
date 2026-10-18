@@ -17,7 +17,7 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 import { PrepaymentService } from './prepayment.service.js';
 
-const PAY_CHANNELS = new Set(['CASH', 'POS', 'TRANSFER']);
+const PAY_CHANNELS = new Set(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT']);
 const ENTRY_TYPES = new Set(['TOP_UP', 'APPLY', 'REFUND', 'REVERSAL']);
 
 const pageArgs = (take?: string, skip?: string) => ({

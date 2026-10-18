@@ -1,3 +1,4 @@
+import { TaskContextBanner } from '../../components/TaskContextBanner';
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -19,23 +20,30 @@ import {
   Spin,
   Table,
   Tag,
-  Tooltip,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
-import type { ReconStatus, Reconciliation, ReconciliationCreated } from '../../api/types';
+import type {
+  MeterReading,
+  ReconStatus,
+  Reconciliation,
+  ReconciliationCreated,
+} from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   cleanBody,
   fmtCent,
+  fmtDate,
   fmtPeriod,
   fmtTime,
   newIdemKey,
   useWaterAccountLabels,
 } from '../common';
-import { CustomerSelect, WaterAccountSelect } from '../pickers';
+import { RESULT_TYPE_LABELS } from '../metering/common';
+import { BillingAccountSelect, CustomerSelect, WaterAccountSelect } from '../pickers';
 import { RECON_STATUS_COLORS, RECON_STATUS_LABELS } from './common';
 
 interface CreateFormValues {
@@ -44,7 +52,81 @@ interface CreateFormValues {
   actualReadingId?: string;
 }
 
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+/** 修正读数待办行（GET /reconciliations/drift-hints）。 */
+interface DriftHint {
+  waterAccountId: string;
+  accountNo: string;
+  customerName: string;
+  readingId: string;
+  period: string;
+  readDate: string;
+}
+
+interface Option {
+  value: string;
+  label: string;
+}
+
+/** 实抄读数选择：该户近期质检通过的实抄/远传读数（需 metering:read）。 */
+function TrustedReadingPicker({
+  accountId,
+  canMeterRead,
+}: {
+  accountId: string;
+  canMeterRead: boolean;
+}) {
+  const [options, setOptions] = useState<Option[]>([]);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!canMeterRead) return;
+    let cancelled = false;
+    api
+      .get<MeterReading[]>('/meter-readings', {
+        params: { waterAccountId: accountId, qcStatus: 'PASSED', take: 30 },
+      })
+      .then((res) => {
+        if (cancelled) return;
+        setOptions(
+          res.data
+            .filter(
+              (r) => r.resultType === 'ACTUAL' || r.resultType === 'REMOTE',
+            )
+            .map((r) => ({
+              value: r.id,
+              label: `${fmtPeriod(r.period)} · 读数 ${r.readingValue ?? '—'} · ${enumLabel(RESULT_TYPE_LABELS, r.resultType)}`,
+            })),
+        );
+        setFailed(false);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId, canMeterRead]);
+
+  const extra = '留空自动取该户最新一条可信实抄（质检通过的实抄/远传）';
+  if (!canMeterRead || failed) {
+    // 读数列表拉不下来时只允许自动取最新，不手填 uuid。
+    return (
+      <Form.Item label="实抄读数" extra={extra}>
+        <Input disabled value="自动取最新可信实抄" />
+      </Form.Item>
+    );
+  }
+  return (
+    <Form.Item name="actualReadingId" label="实抄读数（可空）" extra={extra}>
+      <Select
+        allowClear
+        showSearch
+        optionFilterProp="label"
+        options={options}
+        placeholder="选择实抄读数，留空自动取最新"
+      />
+    </Form.Item>
+  );
+}
 
 const RESULT_TEXT: Record<ReconStatus, string> = {
   DRAFT: '补差记录已创建（草稿）',
@@ -92,14 +174,17 @@ const reconSummary = (d: Reconciliation): string => {
 export default function Reconciliations() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
-  const canWrite = hasPerm('billing:write');
+  // Round-2 §7：复核员（metering:qc）可直接发起补差，与 billing:write 并列。
+  const canWrite = hasPerm('billing:write') || hasPerm('metering:qc');
   const canCustomerRead = hasPerm('customer:read');
+  const canMeterRead = hasPerm('metering:read');
 
   const [rows, setRows] = useState<Reconciliation[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterCustomerId, setFilterCustomerId] = useState<string | undefined>(undefined);
-  const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
-  const [accountIdInput, setAccountIdInput] = useState('');
+  const [waterAccountId, setWaterAccountId] = useState<string | undefined>(
+    () => new URLSearchParams(window.location.search).get('waterAccountId') ?? undefined,
+  );
   const [status, setStatus] = useState<ReconStatus | undefined>(undefined);
   const [period, setPeriod] = useState<dayjs.Dayjs | null>(null);
   const [page, setPage] = useState(1);
@@ -113,11 +198,10 @@ export default function Reconciliations() {
   const [saving, setSaving] = useState(false);
   const [createForm] = Form.useForm<CreateFormValues>();
 
-  const effectiveAccountId = canCustomerRead
-    ? waterAccountId
-    : UUID_RE.test(accountIdInput.trim())
-      ? accountIdInput.trim()
-      : undefined;
+  // Round-2 §7：已结算读数被修正但未补差 —— 事实级待办横幅。
+  const [driftHints, setDriftHints] = useState<DriftHint[]>([]);
+
+  const effectiveAccountId = waterAccountId;
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -146,7 +230,22 @@ export default function Reconciliations() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  const accountLabel = useWaterAccountLabels(rows.map((r) => r.waterAccountId));
+  const loadDriftHints = useCallback(async () => {
+    try {
+      const res = await api.get<DriftHint[]>('/reconciliations/drift-hints');
+      setDriftHints(res.data);
+    } catch {
+      // 横幅是辅助提示 —— 权限不足或网络失败时静默
+    }
+  }, []);
+
+  useEffect(() => {
+    queueMicrotask(() => void loadDriftHints());
+  }, [loadDriftHints]);
+
+  const { accountLabel, accountInfo } = useWaterAccountLabels(
+    rows.map((r) => r.waterAccountId),
+  );
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -194,6 +293,7 @@ export default function Reconciliations() {
           : RESULT_TEXT[res.data.status];
       message.success(`${text}${extra}`);
       setCreateOpen(false);
+      void loadDriftHints();
       await load(page, pageSize);
     } catch (err) {
       // RECONCILIATION_EXISTS / EMPTY_SPAN / UNBILLED_SPAN / ANCHOR_NOT_FOUND…
@@ -205,15 +305,21 @@ export default function Reconciliations() {
 
   const columns: ColumnsType<Reconciliation> = [
     {
-      title: '水表户',
+      title: '户号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
-      render: (id: string) => (
-        <Tooltip title={id}>
-          <span>{accountLabel(id)}</span>
-        </Tooltip>
+      render: (id: string, r: Reconciliation) => (
+        <span>{r.accountNo ?? accountInfo(id)?.accountNo ?? '—'}</span>
       ),
+    },
+    {
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, r: Reconciliation) =>
+        r.customerName ?? accountInfo(r.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '补差区间',
@@ -266,7 +372,7 @@ export default function Reconciliations() {
       key: 'status',
       width: 95,
       render: (s: ReconStatus) => (
-        <Tag color={RECON_STATUS_COLORS[s]}>{RECON_STATUS_LABELS[s]}</Tag>
+        <Tag color={RECON_STATUS_COLORS[s]}>{enumLabel(RECON_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -288,16 +394,39 @@ export default function Reconciliations() {
     },
   ];
 
-  const shortId = (id: string | null) =>
-    id ? (
-      <Tooltip title={id}>
-        <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-      </Tooltip>
-    ) : (
-      '—'
-    );
 
   return (
+    <>
+      <TaskContextBanner />
+      {driftHints.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`${driftHints.length} 户已结算读数被修正，待补差处理`}
+          description={
+            <Space wrap>
+              {driftHints.map((h) => (
+                <Button
+                  key={h.readingId}
+                  size="small"
+                  disabled={!canWrite}
+                  onClick={() => {
+                    createForm.setFieldsValue({
+                      waterAccountId: h.waterAccountId,
+                      actualReadingId: h.readingId,
+                    });
+                    setCreateIdemKey(newIdemKey());
+                    setCreateOpen(true);
+                  }}
+                >
+                  {h.accountNo} · {h.customerName} · {fmtPeriod(h.period)}
+                </Button>
+              ))}
+            </Space>
+          }
+        />
+      )}
     <Card
       title="补差管理"
       extra={
@@ -323,26 +452,28 @@ export default function Reconciliations() {
                     setWaterAccountId(v);
                     setPage(1);
                   }}
-                  placeholder="按水表户过滤"
+                  placeholder="按用水户过滤"
                 />
               </span>
             </>
           ) : (
-            <Input.Search
-              allowClear
-              placeholder="按水表户 ID 过滤"
-              style={{ width: 260 }}
-              value={accountIdInput}
-              onChange={(e) => setAccountIdInput(e.target.value)}
-              onSearch={() => setPage(1)}
-            />
+            <span style={{ width: 220, display: 'inline-block' }}>
+              <BillingAccountSelect
+                value={waterAccountId}
+                onChange={(v) => {
+                  setWaterAccountId(v);
+                  setPage(1);
+                }}
+                placeholder="按用水户过滤"
+              />
+            </span>
           )}
           <Select
             allowClear
             placeholder="状态"
             style={{ width: 110 }}
             options={(['DRAFT', 'ABSORBED', 'APPLIED', 'MANUAL_REVIEW'] as const).map(
-              (s) => ({ value: s, label: RECON_STATUS_LABELS[s] }),
+              (s) => ({ value: s, label: enumLabel(RECON_STATUS_LABELS, s) }),
             )}
             value={status}
             onChange={(v) => {
@@ -385,6 +516,8 @@ export default function Reconciliations() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        // 列宽总和超过视口 —— scroll.x 让溢出发生在表格内而不是整页。
+        scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -398,7 +531,7 @@ export default function Reconciliations() {
       />
 
       {/* 发起补差 */}
-      <Modal
+      <Modal maskClosable={false}
         open={createOpen}
         title="发起补差"
         okText="发起"
@@ -418,15 +551,15 @@ export default function Reconciliations() {
         <Form form={createForm} layout="vertical">
           {canCustomerRead ? (
             <>
-              <Form.Item name="customerId" label="客户（仅用于过滤水表户）">
+              <Form.Item name="customerId" label="客户（仅用于过滤用水户）">
                 <CustomerSelect />
               </Form.Item>
               <Form.Item noStyle shouldUpdate={(a, b) => a.customerId !== b.customerId}>
                 {({ getFieldValue }) => (
                   <Form.Item
                     name="waterAccountId"
-                    label="水表户"
-                    rules={[{ required: true, message: '请选择水表户' }]}
+                    label="用水户"
+                    rules={[{ required: true, message: '请选择用水户' }]}
                   >
                     <WaterAccountSelect customerId={getFieldValue('customerId')} />
                   </Form.Item>
@@ -436,23 +569,27 @@ export default function Reconciliations() {
           ) : (
             <Form.Item
               name="waterAccountId"
-              label="水表户 ID"
-              rules={[
-                { required: true, message: '请输入水表户 ID' },
-                { pattern: UUID_RE, message: 'ID 格式不正确' },
-              ]}
-              extra="无客户查询权限，需直接填写水表户 ID"
+              label="用水户"
+              rules={[{ required: true, message: '请选择用水户' }]}
             >
-              <Input placeholder="水表户 uuid" />
+              <BillingAccountSelect placeholder="搜索户号/客户名称" />
             </Form.Item>
           )}
-          <Form.Item
-            name="actualReadingId"
-            label="实抄读数 ID（可空）"
-            rules={[{ pattern: UUID_RE, message: 'ID 格式不正确' }]}
-            extra="留空自动取该户最新一条可信实抄（质检通过的实抄/远传）"
-          >
-            <Input placeholder="meter_reading uuid" />
+          <Form.Item noStyle shouldUpdate={(a, b) => a.waterAccountId !== b.waterAccountId}>
+            {({ getFieldValue }) => {
+              const accId = getFieldValue('waterAccountId') as string | undefined;
+              if (!accId) {
+                return (
+                  <Form.Item name="actualReadingId" label="实抄读数（可空）"
+                    extra="留空自动取该户最新一条可信实抄；先选用水户后可从下拉选取">
+                    <Select placeholder="请先选择用水户" disabled />
+                  </Form.Item>
+                );
+              }
+              return (
+                <TrustedReadingPicker accountId={accId} canMeterRead={canMeterRead} />
+              );
+            }}
           </Form.Item>
         </Form>
       </Modal>
@@ -463,7 +600,11 @@ export default function Reconciliations() {
         width={560}
         title={
           detail
-            ? `补差详情 — ${accountLabel(detail.waterAccountId)}`
+            ? `补差详情 — ${
+                detail.accountNo
+                  ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                  : accountLabel(detail.waterAccountId)
+              }`
             : '补差详情'
         }
         onClose={() => setDetail(null)}
@@ -478,15 +619,17 @@ export default function Reconciliations() {
             items={[
               {
                 key: 'wa',
-                label: '水表户',
-                children: accountLabel(detail.waterAccountId),
+                label: '用水户',
+                children: detail.accountNo
+                  ? `${detail.accountNo}${detail.customerName ? ` · ${detail.customerName}` : ''}`
+                  : accountLabel(detail.waterAccountId),
               },
               {
                 key: 'status',
                 label: '状态',
                 children: (
                   <Tag color={RECON_STATUS_COLORS[detail.status]}>
-                    {RECON_STATUS_LABELS[detail.status]}
+                    {enumLabel(RECON_STATUS_LABELS, detail.status)}
                   </Tag>
                 ),
               },
@@ -498,12 +641,16 @@ export default function Reconciliations() {
               {
                 key: 'anchor',
                 label: '锚点读数',
-                children: shortId(detail.anchorReadingId),
+                children: detail.anchorReading
+                  ? `${detail.anchorReading.readingValue ?? '—'} m³ · ${fmtDate(detail.anchorReading.readDate)}（${fmtPeriod(detail.anchorReading.period)}）`
+                  : '—',
               },
               {
                 key: 'actual',
                 label: '实抄读数',
-                children: shortId(detail.actualReadingId),
+                children: detail.actualReading
+                  ? `${detail.actualReading.readingValue ?? '—'} m³ · ${fmtDate(detail.actualReading.readDate)}（${fmtPeriod(detail.actualReading.period)}）`
+                  : '—',
               },
               {
                 key: 'actualTotal',
@@ -518,7 +665,9 @@ export default function Reconciliations() {
               {
                 key: 'absorbed',
                 label: '吸收至结算',
-                children: shortId(detail.absorbedSettlementId),
+                children: detail.absorbedSettlement
+                  ? `结算水量（${fmtPeriod(detail.absorbedSettlement.period)}）`
+                  : '—',
               },
               {
                 key: 'correct',
@@ -559,5 +708,6 @@ export default function Reconciliations() {
         )}
       </Drawer>
     </Card>
+    </>
   );
 }

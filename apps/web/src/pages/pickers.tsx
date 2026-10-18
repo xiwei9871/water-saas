@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText } from '../api/client';
 import type {
   AccountStatus,
+  BillingRun,
   Customer,
   InstallationStatus,
   Meter,
@@ -15,17 +16,20 @@ import type {
   WaterAccount,
 } from '../api/types';
 import {
+  enumLabel,
   ACCOUNT_STATUS_COLORS,
   ACCOUNT_STATUS_LABELS,
   INSTALLATION_STATUS_COLORS,
   INSTALLATION_STATUS_LABELS,
   METER_STATUS_COLORS,
   METER_STATUS_LABELS,
+  USAGE_CATEGORY_LABELS,
 } from './common';
+import { RUN_STATUS_LABELS, RUN_TYPE_LABELS } from './billing/common';
 
 /**
  * uuid 选择器约定：绝不让用户手填 uuid —— 客户/结算户走后端模糊搜索
- * （?name= 子串匹配），水表/水表户取一页数据后由 Select 本地过滤。
+ * （?name= 子串匹配），水表/用水户取一页数据后由 Select 本地过滤。
  */
 
 interface PickerProps {
@@ -74,7 +78,7 @@ const withSelected = (
   labelCache: Map<string, string>,
 ): Option[] => {
   if (!value || options.some((o) => o.value === value)) return options;
-  const label = labelCache.get(value) ?? `${value.slice(0, 8)}…`;
+  const label = labelCache.get(value) ?? '—';
   return [...options, { value, label }];
 };
 
@@ -281,8 +285,14 @@ interface WaterAccountSelectProps extends PickerProps {
 }
 
 /**
- * 水表户选择：户号过滤是精确匹配，不适合远程搜索 —— 改为级联：先选客户，
- * 再拉取其名下全部水表户（?customerId=）本地过滤。
+ * 用水户选择：户号过滤是精确匹配，不适合远程搜索 —— 改为级联：先选客户，
+ * 再拉取其名下全部用水户（?customerId=）本地过滤。
+ *
+ * RC1-7 (Human Pilot F12)：选客户后 —
+ *   0 户 → "无可用用水户"；1 户 → 自动选中，不需第二次点击；
+ *   N 户 → 选项展示 户号/地址/当前表号（RC1-4）。
+ * 客户切换后旧值若不在新选项内 → 清空，避免残留他户。
+ * RC1-6: 选项里的用水类别走中文标签，不透内部枚举码。
  */
 export function WaterAccountSelect({
   value,
@@ -295,6 +305,14 @@ export function WaterAccountSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  // Refs mirror the controlled value/handler so the fetch callback reads the
+  // current selection without re-subscribing the effect on every change.
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    valueRef.current = value;
+    onChangeRef.current = onChange;
+  }, [value, onChange]);
 
   useEffect(() => {
     if (!customerId) {
@@ -309,12 +327,25 @@ export function WaterAccountSelect({
       })
       .then((res) => {
         if (cancelled) return;
-        setOptions(
-          res.data.map((a) => ({
-            value: a.id,
-            label: `${a.accountNo} · ${a.usageCategory} · ${a.addr}`,
-          })),
-        );
+        const opts = res.data.map((a) => ({
+          value: a.id,
+          label: [
+            a.accountNo,
+            a.addr,
+            a.currentMeterNo ? `表 ${a.currentMeterNo}` : '无在装表',
+            enumLabel(USAGE_CATEGORY_LABELS, a.usageCategory),
+          ].join(' · '),
+        }));
+        setOptions(opts);
+        // Stale selection from a previous customer → clear it; exactly one
+        // account → auto-select it (RC1-7).
+        const cur = valueRef.current;
+        if (cur && !opts.some((o) => o.value === cur)) {
+          onChangeRef.current?.(undefined);
+        } else if (opts.length === 1 && cur !== opts[0].value) {
+          labelCache.set(opts[0].value, opts[0].label);
+          onChangeRef.current?.(opts[0].value);
+        }
       })
       .catch((err) => {
         if (!cancelled) message.error(apiErrorText(err));
@@ -325,7 +356,7 @@ export function WaterAccountSelect({
     return () => {
       cancelled = true;
     };
-  }, [customerId, message]);
+  }, [customerId, message, labelCache]);
 
   return (
     <Select
@@ -333,7 +364,7 @@ export function WaterAccountSelect({
       allowClear
       optionFilterProp="label"
       placeholder={
-        customerId ? (placeholder ?? '选择水表户') : '请先选择客户'
+        customerId ? (placeholder ?? '选择用水户') : '请先选择客户'
       }
       disabled={disabled || !customerId}
       loading={fetching}
@@ -346,7 +377,369 @@ export function WaterAccountSelect({
         }
         onChange?.(v);
       }}
-      notFoundContent={fetching ? '加载中…' : '该客户暂无水表户'}
+      notFoundContent={fetching ? '加载中…' : '无可用用水户'}
+    />
+  );
+}
+
+interface BizPickerProps extends PickerProps {
+  /** 筛选场景需能选到已销户的历史户（查历史单据），业务办理场景保持默认排除。 */
+  includeClosed?: boolean;
+}
+
+interface WaterAccountSearchSelectProps extends PickerProps {
+  /** Selected account row is handed back so callers can read
+   * settleAccountId / customerId without a second fetch. */
+  onSelect?: (account: WaterAccount | undefined) => void;
+}
+
+/**
+ * 用水户远程搜索（RC1-4）：?q= 统一匹配 户号/客户名称/客户号/电话/地址/
+ * 当前表号 —— 与级联版 WaterAccountSelect 互补：不知道客户时直接用。
+ */
+export function WaterAccountSearchSelect({
+  value,
+  onChange,
+  onSelect,
+  placeholder,
+  disabled,
+}: WaterAccountSearchSelectProps) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+  const rowsRef = useRef<Map<string, WaterAccount>>(new Map());
+
+  const fetch = useCallback(
+    async (kw: string) => {
+      setFetching(true);
+      try {
+        const res = await api.get<WaterAccount[]>('/water-accounts', {
+          params: { take: 50, ...(kw.trim() ? { q: kw.trim() } : {}) },
+        });
+        rowsRef.current = new Map(res.data.map((a) => [a.id, a]));
+        setOptions(
+          res.data.map((a) => ({
+            value: a.id,
+            label: [
+              a.accountNo,
+              a.customer.name,
+              a.addr,
+              a.currentMeterNo ? `表 ${a.currentMeterNo}` : '无在装表',
+            ].join(' · '),
+          })),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setFetching(false);
+      }
+    },
+    [message],
+  );
+
+  useEffect(() => {
+    queueMicrotask(() => void fetch(''));
+  }, [fetch]);
+  const onSearch = useDebounced((kw) => void fetch(kw));
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      filterOption={false}
+      placeholder={placeholder ?? '户号 / 客户 / 地址 / 表号'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+        onSelect?.(v ? rowsRef.current.get(v) : undefined);
+      }}
+      onSearch={onSearch}
+      notFoundContent={fetching ? '加载中…' : '无匹配用水户'}
+    />
+  );
+}
+
+/**
+ * 业务侧用水户搜索（Round-2 §8）：GET /reconciliations/account-lookup 走
+ * billing/metering 业务权限而非 customer:read —— 账务/复核角色也能按
+ * 户号或客户名选户，不再手填 uuid。返回行仅 id/户号/客户名。
+ */
+export function BillingAccountSelect({
+  value,
+  onChange,
+  placeholder,
+  disabled,
+  includeClosed,
+}: BizPickerProps) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+
+  const fetch = useCallback(
+    async (kw: string) => {
+      setFetching(true);
+      try {
+        const res = await api.get<
+          { id: string; accountNo: string; customerName: string }[]
+        >('/reconciliations/account-lookup', {
+          params: {
+            ...(kw.trim() ? { q: kw.trim() } : {}),
+            ...(includeClosed ? { includeClosed: '1' } : {}),
+          },
+        });
+        setOptions(
+          res.data.map((a) => ({
+            value: a.id,
+            label: `${a.accountNo} · ${a.customerName}`,
+          })),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setFetching(false);
+      }
+    },
+    [message, includeClosed],
+  );
+
+  useEffect(() => {
+    queueMicrotask(() => void fetch(''));
+  }, [fetch]);
+  const onSearch = useDebounced((kw) => void fetch(kw));
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      filterOption={false}
+      placeholder={placeholder ?? '搜索户号/客户名称'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
+      onSearch={onSearch}
+      notFoundContent={fetching ? '加载中…' : '无匹配用水户'}
+    />
+  );
+}
+
+/**
+ * 业务侧结算户搜索（10/8 报告 §1-2）：GET /reconciliations/settle-account-lookup
+ * 挂 billing/payment/metering 业务权限而非 customer:read —— 收费员/复核员
+ * 也能按结算户号或名称选户。
+ */
+export function SettleAccountLookupSelect({
+  value,
+  onChange,
+  placeholder,
+  disabled,
+  includeClosed,
+}: BizPickerProps) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+
+  const fetch = useCallback(
+    async (kw: string) => {
+      setFetching(true);
+      try {
+        const res = await api.get<
+          { id: string; settleNo: string; name: string }[]
+        >('/reconciliations/settle-account-lookup', {
+          params: {
+            ...(kw.trim() ? { q: kw.trim() } : {}),
+            ...(includeClosed ? { includeClosed: '1' } : {}),
+          },
+        });
+        setOptions(
+          res.data.map((a) => ({
+            value: a.id,
+            label: `${a.settleNo} · ${a.name}`,
+          })),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setFetching(false);
+      }
+    },
+    [message, includeClosed],
+  );
+
+  useEffect(() => {
+    queueMicrotask(() => void fetch(''));
+  }, [fetch]);
+  const onSearch = useDebounced((kw) => void fetch(kw));
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      filterOption={false}
+      placeholder={placeholder ?? '搜索结算户号/名称'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
+      onSearch={onSearch}
+      notFoundContent={fetching ? '加载中…' : '无匹配结算户'}
+    />
+  );
+}
+
+/**
+ * 开账批次选择：账单页"按批次过滤"不许填 uuid —— 列出最近批次，
+ * label = 账期 · 类型 · 状态 · 创建时间（10/8 报告 §1）。
+ */
+export function BillingRunSelect({
+  value,
+  onChange,
+  placeholder,
+  disabled,
+}: PickerProps) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => setFetching(true));
+    api
+      .get<BillingRun[]>('/billing-runs', { params: { take: 100 } })
+      .then((res) => {
+        if (cancelled) return;
+        setOptions(
+          res.data.map((r) => ({
+            value: r.id,
+            label: [
+              `${r.period.slice(0, 4)}-${r.period.slice(4)}`,
+              enumLabel(RUN_TYPE_LABELS, r.runType),
+              enumLabel(RUN_STATUS_LABELS, r.status),
+              `开账${r.successCount}张`,
+            ].join(' · '),
+          })),
+        );
+      })
+      .catch((err) => {
+        if (!cancelled) message.error(apiErrorText(err));
+      })
+      .finally(() => {
+        if (!cancelled) setFetching(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [message]);
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      optionFilterProp="label"
+      placeholder={placeholder ?? '按账期/批次过滤'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        if (v) {
+          const l = (option as Option | undefined)?.label;
+          if (l) labelCache.set(v, l);
+        }
+        onChange?.(v);
+      }}
+      notFoundContent={fetching ? '加载中…' : '暂无开账批次'}
+    />
+  );
+}
+
+/**
+ * 员工姓名级搜索（10/8 报告 §2/§3）：GET /iam/staff/lookup 挂业务读权限，
+ * 收费/抄表/复核角色无 iam:read 也能按姓名/登录名选人。
+ */
+export function StaffLookupSelect({
+  value,
+  onChange,
+  onLabelChange,
+  placeholder,
+  disabled,
+}: PickerProps & { onLabelChange?: (label: string | undefined) => void }) {
+  const { message } = AntdApp.useApp();
+  const [options, setOptions] = useState<Option[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const labelCache = useLabelCache();
+
+  const fetch = useCallback(
+    async (kw: string) => {
+      setFetching(true);
+      try {
+        const res = await api.get<{ id: string; name: string; login: string }[]>(
+          '/iam/staff/lookup',
+          { params: kw.trim() ? { q: kw.trim() } : {} },
+        );
+        setOptions(
+          res.data.map((s) => ({
+            value: s.id,
+            label: `${s.name}（${s.login}）`,
+          })),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setFetching(false);
+      }
+    },
+    [message],
+  );
+
+  useEffect(() => {
+    queueMicrotask(() => void fetch(''));
+  }, [fetch]);
+  const onSearch = useDebounced((kw) => void fetch(kw));
+
+  return (
+    <Select
+      showSearch
+      allowClear
+      filterOption={false}
+      placeholder={placeholder ?? '搜索姓名/登录名'}
+      disabled={disabled}
+      loading={fetching}
+      options={withSelected(options, value, labelCache)}
+      value={value}
+      onChange={(v: string | undefined, option) => {
+        const l = v ? (option as Option | undefined)?.label : undefined;
+        if (v && l) labelCache.set(v, l);
+        onLabelChange?.(l);
+        onChange?.(v);
+      }}
+      onSearch={onSearch}
+      notFoundContent={fetching ? '加载中…' : '无匹配员工'}
     />
   );
 }
@@ -532,14 +925,14 @@ export function ReadingBookSelect({
 export function AccountStatusTag({ status }: { status: AccountStatus }) {
   return (
     <Tag color={ACCOUNT_STATUS_COLORS[status]}>
-      {ACCOUNT_STATUS_LABELS[status]}
+      {enumLabel(ACCOUNT_STATUS_LABELS, status)}
     </Tag>
   );
 }
 
 export function MeterStatusTag({ status }: { status: MeterStatus }) {
   return (
-    <Tag color={METER_STATUS_COLORS[status]}>{METER_STATUS_LABELS[status]}</Tag>
+    <Tag color={METER_STATUS_COLORS[status]}>{enumLabel(METER_STATUS_LABELS, status)}</Tag>
   );
 }
 
@@ -550,7 +943,7 @@ export function InstallationStatusTag({
 }) {
   return (
     <Tag color={INSTALLATION_STATUS_COLORS[status]}>
-      {INSTALLATION_STATUS_LABELS[status]}
+      {enumLabel(INSTALLATION_STATUS_LABELS, status)}
     </Tag>
   );
 }

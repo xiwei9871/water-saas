@@ -27,6 +27,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   fmtCent,
   fmtDate,
   fmtPeriod,
@@ -45,6 +46,7 @@ import {
   READ_SOURCE_LABELS,
   RESULT_TYPE_LABELS,
 } from '../metering/common';
+import { COMPONENT_SOURCE_LABELS } from '../settlement/common';
 import { AccountStatusTag } from '../pickers';
 import { MeterSection } from './MeterSection';
 
@@ -302,7 +304,7 @@ export function WaterAccount360({
               showIcon
               style={{ marginBottom: 16 }}
               message={summary.warnings
-                .map((w) => WARNING_LABELS[w] ?? w)
+                .map((w) => enumLabel(WARNING_LABELS, w))
                 .join('；')}
             />
           )}
@@ -313,7 +315,7 @@ export function WaterAccount360({
             <Descriptions.Item label="状态">
               <AccountStatusTag status={account?.status ?? 'NORMAL'} />
             </Descriptions.Item>
-            <Descriptions.Item label="客户">
+            <Descriptions.Item label="客户名称">
               {account?.customer
                 ? `${account.customer.name}（${account.customer.customerNo}）`
                 : '—'}
@@ -327,7 +329,7 @@ export function WaterAccount360({
               {account?.addr ?? '—'}
             </Descriptions.Item>
             <Descriptions.Item label="用水性质">
-              {USAGE_CATEGORY_LABELS[account?.usageCategory ?? ''] ??
+              {enumLabel(USAGE_CATEGORY_LABELS, account?.usageCategory ?? '') ??
                 account?.usageCategory}
             </Descriptions.Item>
             <Descriptions.Item label="当前人数">
@@ -423,7 +425,7 @@ export function WaterAccount360({
                     {
                       title: '计划状态',
                       dataIndex: 'status',
-                      render: (s: ReadingPlan['status']) => PLAN_STATUS_LABELS[s],
+                      render: (s: ReadingPlan['status']) => enumLabel(PLAN_STATUS_LABELS, s),
                     },
                     {
                       title: '本户任务',
@@ -457,17 +459,17 @@ export function WaterAccount360({
                     {
                       title: '类型',
                       dataIndex: 'resultType',
-                      render: (t: MeterReading['resultType']) => RESULT_TYPE_LABELS[t],
+                      render: (t: MeterReading['resultType']) => enumLabel(RESULT_TYPE_LABELS, t),
                     },
                     {
                       title: '来源',
                       dataIndex: 'source',
-                      render: (s: MeterReading['source']) => READ_SOURCE_LABELS[s],
+                      render: (s: MeterReading['source']) => enumLabel(READ_SOURCE_LABELS, s),
                     },
                     {
                       title: 'QC',
                       dataIndex: 'qcStatus',
-                      render: (s: MeterReading['qcStatus']) => QC_STATUS_LABELS[s],
+                      render: (s: MeterReading['qcStatus']) => enumLabel(QC_STATUS_LABELS, s),
                     },
                   ]}
                 />
@@ -500,7 +502,11 @@ export function WaterAccount360({
                           render: (v: string | null) => v ?? '—',
                         },
                         { title: '用量', dataIndex: 'usageQty' },
-                        { title: '来源', dataIndex: 'sourceType' },
+                        {
+                          title: '来源',
+                          dataIndex: 'sourceType',
+                          render: (t: string) => enumLabel(COMPONENT_SOURCE_LABELS, t as keyof typeof COMPONENT_SOURCE_LABELS),
+                        },
                       ]}
                     />
                   ),
@@ -521,7 +527,7 @@ export function WaterAccount360({
                   {
                     title: '状态',
                     dataIndex: 'status',
-                    render: (s: string) => SETTLEMENT_STATUS_LABELS[s] ?? s,
+                    render: (s: string) => enumLabel(SETTLEMENT_STATUS_LABELS, s),
                   },
                   {
                     title: '连续预估',
@@ -555,7 +561,7 @@ export function WaterAccount360({
                   {
                     title: '类型',
                     dataIndex: 'billKind',
-                    render: (k: Bill['billKind']) => BILL_KIND_LABELS[k],
+                    render: (k: Bill['billKind']) => enumLabel(BILL_KIND_LABELS, k),
                   },
                   {
                     title: '金额',
@@ -572,7 +578,7 @@ export function WaterAccount360({
                   {
                     title: '状态',
                     dataIndex: 'status',
-                    render: (s: Bill['status']) => BILL_STATUS_LABELS[s],
+                    render: (s: Bill['status']) => enumLabel(BILL_STATUS_LABELS, s),
                   },
                 ]}
               />
@@ -633,7 +639,7 @@ export function WaterAccount360({
                       render: (_: unknown, r) =>
                         r.source === 'PAYMENT'
                           ? (r.payment?.paymentNo ?? '—')
-                          : `预存 ${r.prepaymentEntry?.id.slice(0, 8) ?? '—'}`,
+                          : `预存流水（${r.prepaymentEntry?.id ? '已关联' : '—'}）`,
                     },
                     {
                       title: '核销金额',
@@ -651,7 +657,7 @@ export function WaterAccount360({
                       key: 'ch',
                       render: (_: unknown, r) =>
                         r.source === 'PAYMENT' && r.payment
-                          ? `${PAY_CHANNEL_LABELS[r.payment.channel] ?? r.payment.channel} / ${PAYMENT_STATUS_LABELS[r.payment.status] ?? r.payment.status}`
+                          ? `${enumLabel(PAY_CHANNEL_LABELS, r.payment.channel)} / ${enumLabel(PAYMENT_STATUS_LABELS, r.payment.status)}`
                           : '—',
                     },
                   ]}
@@ -692,7 +698,7 @@ export function WaterAccount360({
                       title: '类型',
                       dataIndex: 'type',
                       render: (t: PrepaymentEntriesPage['items'][number]['type']) =>
-                        PREPAY_ENTRY_LABELS[t] ?? t,
+                        enumLabel(PREPAY_ENTRY_LABELS, t),
                     },
                     {
                       title: '金额',
@@ -727,7 +733,7 @@ export function WaterAccount360({
             {
               title: '事件',
               dataIndex: 'type',
-              render: (t: AccountEvent['type']) => EVENT_TYPE_LABELS[t] ?? t,
+              render: (t: AccountEvent['type']) => enumLabel(EVENT_TYPE_LABELS, t),
             },
             {
               title: '登记时间',

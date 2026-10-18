@@ -259,6 +259,55 @@ describe('onboard wizard (立户)', () => {
     });
   });
 
+  // Round-2 pilot feedback: one household must read as ONE number — the
+  // four doc numbers may only differ by prefix letter (C/S/A/M + yyyyMM +
+  // same 6-digit suffix).
+  it('aligns customer/settle/account/meter suffix for one household', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `T4 Aligned ${RUN}`, custType: 'PERSONAL' },
+        account: { usageCategory: 'RES_METERED', addr: '5 Align Ave' },
+        meter: { brand: 't4-brand' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+
+    const { customer, settleAccount, waterAccount, meter } = res.body;
+    expect([
+      customer.customerNo[0],
+      settleAccount.settleNo[0],
+      waterAccount.accountNo[0],
+      meter.meterNo[0],
+    ]).toEqual(['C', 'S', 'A', 'M']);
+    const suffix = waterAccount.accountNo.slice(1);
+    expect(customer.customerNo.slice(1)).toBe(suffix);
+    expect(settleAccount.settleNo.slice(1)).toBe(suffix);
+    expect(meter.meterNo.slice(1)).toBe(suffix);
+  });
+
+  it('linked customer keeps its number; newly created S/A/M still align', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customerId: custId, // T4 Alice from the first onboard
+        account: { usageCategory: 'RES_METERED', addr: '6 Align Ave' },
+        meter: { brand: 't4-brand' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+
+    const { customer, settleAccount, waterAccount, meter } = res.body;
+    expect(customer.id).toBe(custId);
+    const suffix = waterAccount.accountNo.slice(1);
+    expect(settleAccount.settleNo.slice(1)).toBe(suffix);
+    expect(meter.meterNo.slice(1)).toBe(suffix);
+    // the pre-existing customer number is untouched, not re-aligned
+    expect(customer.customerNo).toMatch(/^C\d{12}$/);
+  });
+
   it('rejects malformed wizard bodies (400, not 500)', async () => {
     // neither customer nor customerId
     await request(app.getHttpServer())
@@ -491,6 +540,57 @@ describe('account events (过户/暂停/恢复/销户)', () => {
     // PAID bills carry no outstanding — clearing the debt path for the
     // next test (T12 will model real payment allocations).
     await owner.query(`UPDATE bill SET status = 'PAID' WHERE id = $1`, [bill.id]);
+  });
+
+  it('close refuses while prepay balance remains → ACCOUNT_PREPAY_BALANCE (Round-2 §1b)', async () => {
+    const sa = (
+      await owner.query(
+        `SELECT settle_account_id::text AS id FROM water_account WHERE id = $1`,
+        [acctId],
+      )
+    ).rows[0].id;
+    const payId = (
+      await owner.query(
+        `INSERT INTO payment (id, tenant_id, payment_no, settle_account_id, cashier_id,
+                              org_unit_id, channel, amount, status, received_at,
+                              created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'CASH', 5000, 'RECEIVED',
+                 '2026-01-10T09:00:00Z', now(), now())
+         RETURNING id::text AS id`,
+        [T4A, `T4P${String(Date.now()).slice(-8)}`, sa, STAFF_ADMIN_A, ORG_A],
+      )
+    ).rows[0].id;
+    const lotId = (
+      await owner.query(
+        `INSERT INTO prepayment_ledger_entry
+           (id, tenant_id, settle_account_id, type, amount, payment_id,
+            operator_id, idempotency_key, created_at)
+         VALUES (gen_random_uuid(), $1, $2, 'TOP_UP', 5000, $3, $4, $5, now())
+         RETURNING id::text AS id`,
+        [T4A, sa, payId, STAFF_ADMIN_A, `t4-topup-${RUN}`],
+      )
+    ).rows[0].id;
+
+    const res = await request(app.getHttpServer())
+      .post(`/water-accounts/${acctId}/close`)
+      .set(auth(adminToken))
+      .send({})
+      .expect(409);
+    expect(res.body).toMatchObject({
+      code: 'ACCOUNT_PREPAY_BALANCE',
+      balance: '5000',
+    });
+
+    // 退款清零（REFUND 负分录：payment_id + origin_top_up_id + reason）→
+    // 预检通过路径留给下一个用例。
+    await owner.query(
+      `INSERT INTO prepayment_ledger_entry
+         (id, tenant_id, settle_account_id, type, amount, payment_id,
+          origin_top_up_id, reason, operator_id, idempotency_key, created_at)
+       VALUES (gen_random_uuid(), $1, $2, 'REFUND', -5000, $3, $4, 'close-refund',
+               $5, $6, now())`,
+      [T4A, sa, payId, lotId, STAFF_ADMIN_A, `t4-refund-${RUN}`],
+    );
   });
 
   it('close with outstanding cleared → CLOSED + closedAt + CLOSE event; second close → 409', async () => {
@@ -758,5 +858,101 @@ describe('v0.2: monitoring meter onboard （监控表）', () => {
       .send({ waterAccountId: res.body.waterAccount.id });
     expect(recon.status).toBe(409);
     expect(recon.body).toMatchObject({ code: 'ACCOUNT_NOT_BILLABLE' });
+  });
+});
+
+/**
+ * RC1-4/5 (Human Pilot F1/F3): unified `?q=` water-account search —
+ * 户号/客户名/客户号/电话/地址/在装表号 all resolve through one box —
+ * plus newest-first ordering so a just-created record lands on page one.
+ */
+describe('RC1-4/5 unified search + newest-first', () => {
+  const phone = `139${String(Date.now()).slice(-8)}`;
+  let c1: { id: string; customerNo: string };
+  let wa1: { id: string; accountNo: string };
+  let wa2: { id: string; accountNo: string };
+  let meterNo1 = '';
+
+  it('one q hits every field family', async () => {
+    const uniq = `qfind-${RUN}`;
+    const o1 = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `${uniq}张三`, custType: 'PERSONAL', phone },
+        account: { usageCategory: 'RES_METERED', addr: `${uniq}路12号` },
+        meter: { brand: 't4-brand', caliber: 'DN15' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+    wa1 = o1.body.waterAccount;
+    c1 = o1.body.customer;
+    meterNo1 = o1.body.meter.meterNo;
+
+    const o2 = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `${uniq}李四`, custType: 'PERSONAL' },
+        account: { usageCategory: 'NON_RES', addr: `${uniq}路34号` },
+        meter: { brand: 't4-brand', caliber: 'DN20' },
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+    wa2 = o2.body.waterAccount;
+
+    const hits = async (q: string) =>
+      (
+        await request(app.getHttpServer())
+          .get('/water-accounts')
+          .query({ q, take: 50 })
+          .set(auth(adminToken))
+          .expect(200)
+      ).body.map((r: { id: string }) => r.id) as string[];
+
+    // 户号 / 客户名 / 客户号 / 电话 / 地址 / 当前表号
+    expect(await hits(wa1.accountNo)).toContain(wa1.id);
+    expect(await hits(`${uniq}张三`)).toContain(wa1.id);
+    expect(await hits(c1.customerNo)).toContain(wa1.id);
+    expect(await hits(phone)).toContain(wa1.id);
+    expect(await hits(`${uniq}路12号`)).toContain(wa1.id);
+    expect(await hits(meterNo1)).toContain(wa1.id);
+    // list row carries the current meter for display
+    const row = (
+      await request(app.getHttpServer())
+        .get('/water-accounts')
+        .query({ accountNo: wa1.accountNo })
+        .set(auth(adminToken))
+        .expect(200)
+    ).body[0];
+    expect(row.currentMeterNo).toBe(meterNo1);
+  });
+
+  it('createdAt desc ordering: newest account first within a customer', async () => {
+    // wa2 was onboarded after wa1 — under one customer the newest rows
+    // must come first (RC1-5 discoverability).
+    const accounts = (
+      await request(app.getHttpServer())
+        .get('/water-accounts')
+        .query({ q: `qfind-${RUN}`, take: 50 })
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    const idx1 = accounts.findIndex((r: { id: string }) => r.id === wa1.id);
+    const idx2 = accounts.findIndex((r: { id: string }) => r.id === wa2.id);
+    expect(idx1).toBeGreaterThanOrEqual(0);
+    expect(idx2).toBeGreaterThanOrEqual(0);
+    expect(idx2).toBeLessThan(idx1);
+
+    const customers = (
+      await request(app.getHttpServer())
+        .get('/customers')
+        .query({ name: `qfind-${RUN}`, take: 50 })
+        .set(auth(adminToken))
+        .expect(200)
+    ).body;
+    expect(customers.length).toBe(2);
+    // 李四's customer was created after 张三's → appears first.
+    expect(customers[0].name).toContain('李四');
   });
 });

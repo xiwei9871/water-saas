@@ -99,4 +99,26 @@ export class BillingFinancePort extends FinancePort {
     };
     return tx ? run(tx) : this.prisma.runAsTenant(tenantId, run);
   }
+
+  /** Σ prepayment_ledger_entry for the account's settle account. */
+  async getPrepaymentBalance(
+    tenantId: string,
+    waterAccountId: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<bigint> {
+    const run = async (t: Prisma.TransactionClient) => {
+      const account = await t.waterAccount.findFirst({
+        where: { tenantId, id: waterAccountId },
+        select: { settleAccountId: true },
+      });
+      if (!account) return 0n;
+      const rows = await t.$queryRaw<{ balance: bigint | null }[]>`
+        SELECT SUM(amount)::bigint AS balance
+        FROM prepayment_ledger_entry
+        WHERE tenant_id = ${tenantId}::uuid
+          AND settle_account_id = ${account.settleAccountId}::uuid`;
+      return rows[0]?.balance ?? 0n;
+    };
+    return tx ? run(tx) : this.prisma.runAsTenant(tenantId, run);
+  }
 }

@@ -1,6 +1,11 @@
 import { Module } from '@nestjs/common';
+import { OpsReportService } from './ops-report.service.js';
+import { AnalysisService } from './analysis.service.js';
+import { QueryController } from './query.controller.js';
+import { QueryService } from './query.service.js';
 import { ReportService } from './report.service.js';
 import { ReportsController } from './reports.controller.js';
+import { UnifiedQueryService } from './unified.service.js';
 
 /**
  * Report module （报表） — read-only aggregate projections (Task 13,
@@ -15,7 +20,7 @@ import { ReportsController } from './reports.controller.js';
  * this module ever writes.
  */
 @Module({
-  controllers: [ReportsController],
-  providers: [ReportService],
+  controllers: [ReportsController, QueryController],
+  providers: [ReportService, QueryService, AnalysisService, UnifiedQueryService, OpsReportService],
 })
 export class ReportModule {}

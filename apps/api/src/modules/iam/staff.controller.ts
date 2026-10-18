@@ -18,7 +18,10 @@ import { createHash } from 'node:crypto';
 import type { Request } from 'express';
 import { assertAdmin } from '../../common/admin.js';
 import { IdempotencyService } from '../../common/idempotency.service.js';
-import { Permissions } from '../../common/permissions.decorator.js';
+import {
+  AnyPermissions,
+  Permissions,
+} from '../../common/permissions.decorator.js';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import { currentTenant, orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -62,6 +65,52 @@ export class StaffController {
     private readonly idem: IdempotencyService,
   ) {}
 
+  /**
+   * GET /iam/staff/lookup?q= — 员工姓名级搜索器（10/8 报告 §2/§3）：
+   * 收费员/抄表员等业务角色也要能按姓名选人（筛选、指派），不能要求
+   * iam:read。返回仅 id+姓名+登录名，scope 过滤沿用组织范围。
+   */
+  @Get('lookup')
+  @AnyPermissions(
+    'iam:read',
+    'customer:read',
+    'metering:read',
+    'metering:write',
+    'metering:qc',
+    'billing:read',
+    'billing:write',
+    'payment:read',
+    'payment:write',
+    'prepayment:reverse',
+    'report:read',
+    'exception:read',
+  )
+  lookup(@Query('q') q?: string) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.staff.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          status: 'ACTIVE',
+          orgUnitId:
+            ctx.scope === 'ALL' ? undefined : { in: ctx.orgScope },
+          ...(q?.trim()
+            ? {
+                OR: [
+                  { name: { contains: q.trim(), mode: 'insensitive' } },
+                  { login: { contains: q.trim(), mode: 'insensitive' } },
+                ],
+              }
+            : {}),
+        },
+        select: { id: true, name: true, login: true },
+        orderBy: { login: 'asc' },
+        take: 20,
+      });
+      return rows;
+    });
+  }
+
   /** List staff, scoped to the caller's orgScope; optional ?orgUnitId filter. */
   @Get()
   @Permissions('iam:read')
@@ -70,8 +119,8 @@ export class StaffController {
     if (orgUnitId && !orgInScope(ctx, orgUnitId)) {
       return [];
     }
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.staff.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const staff = await tx.staff.findMany({
         where: {
           tenantId: ctx.tenantId,
           // ALL scope: no org filter — ctx.orgScope is frozen at login and
@@ -80,8 +129,28 @@ export class StaffController {
         },
         select: SAFE_SELECT,
         orderBy: { login: 'asc' },
-      }),
-    );
+      });
+      if (staff.length === 0) return [];
+      // Round-2: rows carry their current role bindings so the edit form
+      // can prefill — previously the role Select opened empty and an
+      // untouched submit had to rely on the rolesTouched sentinel.
+      const links = await tx.staffRole.findMany({
+        where: { tenantId: ctx.tenantId, staffId: { in: staff.map((s) => s.id) } },
+        select: { staffId: true, roleId: true },
+      });
+      const roles = await tx.role.findMany({
+        where: { tenantId: ctx.tenantId, id: { in: links.map((l) => l.roleId) } },
+        select: { id: true, code: true, name: true },
+      });
+      const roleById = new Map(roles.map((r) => [r.id, r]));
+      return staff.map((s) => ({
+        ...s,
+        roles: links
+          .filter((l) => l.staffId === s.id)
+          .map((l) => roleById.get(l.roleId))
+          .filter((r): r is NonNullable<typeof r> => !!r),
+      }));
+    });
   }
 
   private async createStaffTx(

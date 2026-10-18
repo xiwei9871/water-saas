@@ -72,12 +72,14 @@ export class MeterService {
     ctx: TenantCtx,
     q: { take: number; skip: number; status?: MeterStatus; q?: string },
   ) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.meter.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.meter.findMany({
         where: {
           tenantId: ctx.tenantId,
           status: q.status,
-          // Device-pick search — the registry can exceed one picker page.
+          // Device search — registry fields plus the CURRENTLY mounted
+          // account (户号) and its customer name, so staff can find "which
+          // meter serves household X" without knowing the device number.
           ...(q.q
             ? {
                 OR: [
@@ -86,6 +88,23 @@ export class MeterService {
                   { barcode: { contains: q.q } },
                   { brand: { contains: q.q } },
                   { model: { contains: q.q } },
+                  {
+                    installations: {
+                      some: {
+                        status: 'ACTIVE',
+                        waterAccount: {
+                          OR: [
+                            { accountNo: { contains: q.q } },
+                            {
+                              customer: {
+                                name: { contains: q.q, mode: 'insensitive' },
+                              },
+                            },
+                          ],
+                        },
+                      },
+                    },
+                  },
                 ],
               }
             : {}),
@@ -94,8 +113,42 @@ export class MeterService {
         orderBy: { meterNo: 'asc' },
         take: q.take,
         skip: q.skip,
-      }),
-    );
+      });
+      // 在装户号 = ACTIVE installation (E7 current-meter rule in reverse).
+      const actives = rows.length
+        ? await tx.meterInstallation.findMany({
+            where: {
+              tenantId: ctx.tenantId,
+              meterId: { in: rows.map((r) => r.id) },
+              status: 'ACTIVE',
+            },
+            select: {
+              meterId: true,
+              waterAccount: {
+                select: { accountNo: true, customer: { select: { name: true } } },
+              },
+            },
+            orderBy: [{ installedAt: 'desc' }, { id: 'desc' }],
+          })
+        : [];
+      const bound = new Map<
+        string,
+        { accountNo: string; customerName: string | null }
+      >();
+      for (const a of actives) {
+        if (!bound.has(a.meterId)) {
+          bound.set(a.meterId, {
+            accountNo: a.waterAccount.accountNo,
+            customerName: a.waterAccount.customer?.name ?? null,
+          });
+        }
+      }
+      return rows.map((r) => ({
+        ...r,
+        currentAccountNo: bound.get(r.id)?.accountNo ?? null,
+        currentCustomerName: bound.get(r.id)?.customerName ?? null,
+      }));
+    });
   }
 
   async getById(ctx: TenantCtx, id: string) {

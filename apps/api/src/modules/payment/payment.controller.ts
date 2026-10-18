@@ -21,7 +21,7 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 import { PaymentService, type CreatePaymentBody } from './payment.service.js';
 
-const PAY_CHANNELS = new Set(['CASH', 'POS', 'TRANSFER']);
+const PAY_CHANNELS = new Set(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT']);
 const PAYMENT_STATUSES = new Set(['RECEIVED', 'DAY_CLOSED', 'REVERSED']);
 
 /** ?take default 50, hard-capped at 200; ?skip default 0. */
@@ -107,7 +107,7 @@ export class PaymentController {
       settleAccountId,
       cashierId,
       status: status as 'RECEIVED' | 'DAY_CLOSED' | 'REVERSED' | undefined,
-      channel: channel as 'CASH' | 'POS' | 'TRANSFER' | undefined,
+      channel: channel as 'CASH' | 'POS' | 'TRANSFER' | 'ONLINE' | 'BANK_DEDUCT' | undefined,
     });
   }
 

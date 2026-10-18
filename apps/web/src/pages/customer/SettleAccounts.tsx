@@ -32,6 +32,7 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
+  enumLabel,
   ACCOUNT_STATUS_LABELS,
   cleanBody,
   cleanPatch,
@@ -52,7 +53,7 @@ interface SettleFormValues {
 
 const STATUS_OPTIONS = (['NORMAL', 'SUSPENDED', 'CLOSED'] as const).map((s) => ({
   value: s,
-  label: ACCOUNT_STATUS_LABELS[s],
+  label: enumLabel(ACCOUNT_STATUS_LABELS, s),
 }));
 
 /** 结算户：列表 + 名称/状态过滤 + 新建/编辑（含 NORMAL↔SUSPENDED）+ 详情抽屉。 */
@@ -193,7 +194,7 @@ export default function SettleAccounts() {
 
   const columns: ColumnsType<SettleAccount> = [
     { title: '结算号', dataIndex: 'settleNo', key: 'settleNo', width: 150 },
-    { title: '名称', dataIndex: 'name', key: 'name' },
+    { title: '结算户名称', dataIndex: 'name', key: 'name' },
     {
       title: '电话',
       dataIndex: 'phone',
@@ -251,7 +252,7 @@ export default function SettleAccounts() {
       title: '用水类别',
       dataIndex: 'usageCategory',
       key: 'usageCategory',
-      render: (v: string) => USAGE_CATEGORY_LABELS[v] ?? v,
+      render: (v: string) => enumLabel(USAGE_CATEGORY_LABELS, v),
     },
     {
       title: '状态',
@@ -321,7 +322,7 @@ export default function SettleAccounts() {
         }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={modal?.mode === 'create' ? '新增结算户' : '编辑结算户'}
         okText="保存"
@@ -360,7 +361,7 @@ export default function SettleAccounts() {
               <Select
                 options={(['NORMAL', 'SUSPENDED'] as const).map((s) => ({
                   value: s,
-                  label: ACCOUNT_STATUS_LABELS[s],
+                  label: enumLabel(ACCOUNT_STATUS_LABELS, s),
                 }))}
               />
             </Form.Item>
@@ -384,7 +385,7 @@ export default function SettleAccounts() {
               column={1}
               items={[
                 { key: 'no', label: '结算号', children: detail.settleNo },
-                { key: 'name', label: '名称', children: detail.name },
+                { key: 'name', label: '结算户名称', children: detail.name },
                 {
                   key: 'status',
                   label: '状态',
@@ -399,7 +400,7 @@ export default function SettleAccounts() {
               ]}
             />
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
-              结算的水表户
+              结算的用水户
             </div>
             <Table<WaterAccountRef>
               rowKey="id"
@@ -425,15 +426,6 @@ export default function SettleAccounts() {
                   pagination={false}
                   locale={{ emptyText: '无预存批次' }}
                   columns={[
-                    {
-                      title: '批次',
-                      dataIndex: 'topUpEntryId',
-                      render: (v: string) => (
-                        <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                          {v.slice(0, 8)}…
-                        </span>
-                      ),
-                    },
                     {
                       title: '充值额',
                       dataIndex: 'amount',
@@ -474,7 +466,7 @@ export default function SettleAccounts() {
                       dataIndex: 'type',
                       width: 100,
                       render: (t: keyof typeof PREPAY_ENTRY_LABELS) => (
-                        <Tag color={PREPAY_ENTRY_COLORS[t]}>{PREPAY_ENTRY_LABELS[t]}</Tag>
+                        <Tag color={PREPAY_ENTRY_COLORS[t]}>{enumLabel(PREPAY_ENTRY_LABELS, t)}</Tag>
                       ),
                     },
                     {

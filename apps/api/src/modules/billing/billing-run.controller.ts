@@ -10,8 +10,7 @@ import {
   Req,
 } from '@nestjs/common';
 import type { Request } from 'express';
-import { IdempotencyService } from '../../common/idempotency.service.js';
-import { withOptionalIdem } from '../../common/idempotent.js';
+import { idemRequestHash } from '../../common/idempotent.js';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -49,7 +48,6 @@ export class BillingRunController {
   constructor(
     private readonly svc: BillingRunService,
     private readonly prisma: TenantPrismaService,
-    private readonly idem: IdempotencyService,
   ) {}
 
   /** GET /billing-runs — ?period= / ?status= / paging. */
@@ -72,6 +70,20 @@ export class BillingRunController {
     });
   }
 
+  /**
+   * GET /billing-runs/preflight?period=YYYYMM — Round-2 报告 §9：开账前
+   * 覆盖预检（缺抄/缺结算/未终审清单 + 将出账数）。Literal route MUST
+   * precede :id.
+   */
+  @Get('preflight')
+  @Permissions('billing:read')
+  preflight(@Query('period') period?: string) {
+    if (!period) {
+      throw new BadRequestException({ code: 'PERIOD_REQUIRED', field: 'period' });
+    }
+    return this.svc.preflight(currentTenant(), assertPeriod(period));
+  }
+
   /** GET /billing-runs/:id — run + its bill list. */
   @Get(':id')
   @Permissions('billing:read')
@@ -81,12 +93,16 @@ export class BillingRunController {
 
   /**
    * POST /billing-runs — {period}: creates the DRAFT run and generates
-   * one DRAFT NORMAL bill per FINAL settlement of the period, in one tx.
+   * one DRAFT NORMAL bill per FINAL settlement of the period over
+   * bounded multi-tx generation (RC1: GENERATING → batches → READY).
    * Unbillable settlements land in failed_settlement_ids, not as errors.
+   * Idempotency-Key is claimed/completed inside the orchestrator —
+   * this endpoint intentionally does NOT use the single-tx
+   * withOptionalIdem wrapper.
    */
   @Post()
   @Permissions('billing:write')
-  create(
+  async create(
     @Body() body: { period?: string },
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
@@ -96,13 +112,20 @@ export class BillingRunController {
     }
     const parsed = { period: assertPeriod(body.period) };
     const ctx = currentTenant();
-    return withOptionalIdem(
-      this.prisma,
-      this.idem,
+    const res = await this.svc.create(
       ctx,
-      { key, method: 'POST', route: req.path, body, responseStatus: 201 },
-      (tx) => this.svc.createTx(tx, ctx, parsed),
+      parsed,
+      key
+        ? {
+            key,
+            method: 'POST',
+            route: req.path,
+            requestHash: idemRequestHash(body),
+            responseStatus: 201,
+          }
+        : undefined,
     );
+    return res.body;
   }
 
   /**

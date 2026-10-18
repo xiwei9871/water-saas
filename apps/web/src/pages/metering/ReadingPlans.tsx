@@ -33,7 +33,6 @@ import type {
   BookMember,
   PlanItemStatus,
   PlanStatus,
-  ReadingBook,
   ReadingBookDetail,
   ReadingPlan,
   ReadingPlanDetail,
@@ -41,11 +40,11 @@ import type {
   MeterReading,
   ReadingPlanProgress,
   ReadResultType,
-  Staff,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { EXCEPTION_CODES, READ_RESULT_TYPES } from '@ws/types';
 import {
+  enumLabel,
   DECIMAL_RULE,
   cleanBody,
   fmtDate,
@@ -87,7 +86,7 @@ interface BatchRowState {
 }
 
 const ITEM_STATUS_OPTIONS = (['PENDING', 'READ', 'NO_READ', 'SKIPPED'] as const).map(
-  (s) => ({ value: s, label: PLAN_ITEM_STATUS_LABELS[s] }),
+  (s) => ({ value: s, label: enumLabel(PLAN_ITEM_STATUS_LABELS, s) }),
 );
 
 /** 可录入的明细状态：待抄 + 未抄见（未抄见允许重抄，服务端同样放行）。 */
@@ -100,7 +99,7 @@ const WRITABLE_PLAN: PlanStatus[] = ['OPEN', 'IN_PROGRESS'];
  * （明细行内抄表录入 + 批量录入）。
  */
 export default function ReadingPlans() {
-  const { message } = AntdApp.useApp();
+  const { message, modal } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('metering:write');
   const canIamRead = hasPerm('iam:read');
@@ -113,8 +112,6 @@ export default function ReadingPlans() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
-  const [books, setBooks] = useState<ReadingBook[]>([]);
-  const [staff, setStaff] = useState<Staff[]>([]);
   const [progressMap, setProgressMap] = useState<Map<string, ReadingPlanProgress>>(
     new Map(),
   );
@@ -177,22 +174,7 @@ export default function ReadingPlans() {
     queueMicrotask(() => void load(page, pageSize));
   }, [load, page, pageSize]);
 
-  // 册名/抄表员水合 + 当前页各计划进度。
-  useEffect(() => {
-    api
-      .get<ReadingBook[]>('/reading-books', { params: { take: 200 } })
-      .then((res) => setBooks(res.data))
-      .catch(() => setBooks([]));
-  }, []);
-
-  useEffect(() => {
-    if (!canIamRead) return;
-    api
-      .get<Staff[]>('/iam/staff')
-      .then((res) => setStaff(res.data))
-      .catch(() => setStaff([]));
-  }, [canIamRead]);
-
+  // 册名/抄表员已由 API 内嵌（bookName/readerName）；本地仅加载各计划进度。
   useEffect(() => {
     if (rows.length === 0) return;
     let cancelled = false;
@@ -218,21 +200,9 @@ export default function ReadingPlans() {
     };
   }, [rows]);
 
-  const bookLabel = useCallback(
-    (id: string) => {
-      const b = books.find((x) => x.id === id);
-      return b ? `${b.name}（${b.bookNo}）` : `${id.slice(0, 8)}…`;
-    },
-    [books],
-  );
-  const staffName = useCallback(
-    (id: string | null) => {
-      if (!id) return '—';
-      const s = staff.find((x) => x.id === id);
-      return s ? `${s.name}（${s.login}）` : `${id.slice(0, 8)}…`;
-    },
-    [staff],
-  );
+  // 册名/抄表员已由 API 内嵌；取不到时按规范显示占位符而非截断 uuid。
+  const bookLabel = useCallback((_id: string) => '—', []);
+  const staffName = useCallback((_id: string | null) => '—', []);
 
   const total = useMemo(
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
@@ -327,8 +297,14 @@ export default function ReadingPlans() {
               b.data.members.map((m: BookMember) => [
                 m.waterAccountId,
                 m.waterAccount
-                  ? `${m.waterAccount.accountNo} · ${m.waterAccount.addr}`
-                  : `${m.waterAccountId.slice(0, 8)}…`,
+                  ? [
+                      m.waterAccount.accountNo,
+                      m.waterAccount.customer?.name,
+                      m.waterAccount.addr,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : '—',
               ]),
             ),
           );
@@ -353,7 +329,7 @@ export default function ReadingPlans() {
   };
 
   const accountLabel = (item: ReadingPlanItem) =>
-    memberLabels.get(item.waterAccountId) ?? `${item.waterAccountId.slice(0, 8)}…`;
+    memberLabels.get(item.waterAccountId) ?? '—';
 
   const filteredItems = useMemo(
     () => (detail?.items ?? []).filter((i) => !itemStatus || i.status === itemStatus),
@@ -394,7 +370,7 @@ export default function ReadingPlans() {
     if (!entryItem || !drawerPlanId) return;
     setEntrySaving(true);
     try {
-      await api.post(
+      const res = await api.post(
         '/meter-readings',
         cleanBody({
           planItemId: entryItem.id,
@@ -414,6 +390,9 @@ export default function ReadingPlans() {
         { headers: { 'Idempotency-Key': entryIdemKey } },
       );
       message.success('抄表记录已录入');
+      showReviewTaskNotice(
+        (res.data as { reviewTasks?: { reason: string }[] }).reviewTasks,
+      );
       setEntryItem(null);
       await loadDetail(drawerPlanId);
       await load(page, pageSize);
@@ -427,6 +406,15 @@ export default function ReadingPlans() {
   };
 
   // ---- 批量录入 ----
+
+  /** 任务书 T10 三段式：录入触发复核任务 → 告知已生成任务并通知质检人员。 */
+  const showReviewTaskNotice = (tasks?: { reason: string }[]) => {
+    if (!tasks?.length) return;
+    modal.warning({
+      title: `检测到 ${tasks.length} 条读数异常，已生成【抄表异常复核】任务`,
+      content: `原因：${[...new Set(tasks.map((t) => t.reason))].join('；')}。已通知具备质检权限的账号，复核通过后方可用于结算。`,
+    });
+  };
 
   const openBatch = () => {
     const map = new Map<string, BatchRowState>();
@@ -488,12 +476,12 @@ export default function ReadingPlans() {
     }
     setBatchSaving(true);
     try {
-      const res = await api.post<{ created: number }>(
-        '/meter-readings',
-        { items },
-        { headers: { 'Idempotency-Key': batchIdemKey } },
-      );
+      const res = await api.post<{
+        created: number;
+        reviewTasks?: { reason: string }[];
+      }>('/meter-readings', { items }, { headers: { 'Idempotency-Key': batchIdemKey } });
       message.success(`已批量录入 ${res.data.created} 条抄表记录`);
+      showReviewTaskNotice(res.data.reviewTasks);
       setBatchOpen(false);
       await loadDetail(drawerPlanId);
       await load(page, pageSize);
@@ -518,9 +506,9 @@ export default function ReadingPlans() {
     },
     {
       title: '抄表册',
-      dataIndex: 'bookId',
-      key: 'bookId',
-      render: bookLabel,
+      key: 'book',
+      render: (_: unknown, r: ReadingPlan) =>
+        r.bookName ? `${r.bookName}（${r.bookNo}）` : bookLabel(r.bookId),
     },
     {
       title: '计划抄表日',
@@ -531,10 +519,10 @@ export default function ReadingPlans() {
     },
     {
       title: '抄表员',
-      dataIndex: 'readerId',
-      key: 'readerId',
+      key: 'reader',
       width: 150,
-      render: staffName,
+      render: (_: unknown, r: ReadingPlan) =>
+        r.readerName ?? staffName(r.readerId),
     },
     {
       title: '状态',
@@ -542,7 +530,7 @@ export default function ReadingPlans() {
       key: 'status',
       width: 90,
       render: (s: PlanStatus) => (
-        <Tag color={PLAN_STATUS_COLORS[s]}>{PLAN_STATUS_LABELS[s]}</Tag>
+        <Tag color={PLAN_STATUS_COLORS[s]}>{enumLabel(PLAN_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -620,7 +608,7 @@ export default function ReadingPlans() {
   const itemColumns: ColumnsType<ReadingPlanItem> = [
     { title: '顺序', dataIndex: 'seqNo', key: 'seqNo', width: 60 },
     {
-      title: '水表户',
+      title: '用水户',
       key: 'waterAccount',
       ellipsis: true,
       render: (_: unknown, item: ReadingPlanItem) => accountLabel(item),
@@ -631,22 +619,24 @@ export default function ReadingPlans() {
       key: 'status',
       width: 90,
       render: (s: PlanItemStatus) => (
-        <Tag color={PLAN_ITEM_STATUS_COLORS[s]}>{PLAN_ITEM_STATUS_LABELS[s]}</Tag>
+        <Tag color={PLAN_ITEM_STATUS_COLORS[s]}>{enumLabel(PLAN_ITEM_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
-      title: '完成读数',
-      dataIndex: 'completedReadingId',
-      key: 'completedReadingId',
-      width: 100,
-      render: (id: string | null) =>
-        id ? (
-          <Tooltip title={id}>
-            <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-          </Tooltip>
-        ) : (
-          '—'
-        ),
+      title: '上期止度(m³)',
+      dataIndex: 'prevReadingValue',
+      key: 'prevReadingValue',
+      width: 105,
+      align: 'right',
+      render: (v: string | null) => v ?? '—',
+    },
+    {
+      title: '完成读数(m³)',
+      dataIndex: 'completedReadingValue',
+      key: 'completedReadingValue',
+      width: 105,
+      align: 'right',
+      render: (v: string | null) => v ?? '—',
     },
     ...(canWrite && detail && WRITABLE_PLAN.includes(detail.status)
       ? [
@@ -700,7 +690,7 @@ export default function ReadingPlans() {
             style={{ width: 110 }}
             options={(['OPEN', 'IN_PROGRESS', 'DONE', 'CLOSED'] as const).map((s) => ({
               value: s,
-              label: PLAN_STATUS_LABELS[s],
+              label: enumLabel(PLAN_STATUS_LABELS, s),
             }))}
             value={status}
             onChange={(v) => {
@@ -733,7 +723,7 @@ export default function ReadingPlans() {
         loading={loading}
         columns={columns}
         dataSource={rows}
-        scroll={{ x: 1300 }}
+        scroll={{ x: 1300, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
           pageSize,
@@ -747,7 +737,7 @@ export default function ReadingPlans() {
       />
 
       {/* 生成计划 */}
-      <Modal
+      <Modal maskClosable={false}
         open={genOpen}
         title="生成抄表计划"
         okText="生成"
@@ -789,7 +779,7 @@ export default function ReadingPlans() {
         width={760}
         title={
           detail
-            ? `计划明细 — ${bookLabel(detail.bookId)} · ${fmtPeriod(detail.period)}`
+            ? `计划明细 — ${detail.bookName ? `${detail.bookName}（${detail.bookNo}）` : bookLabel(detail.bookId)} · ${fmtPeriod(detail.period)}`
             : '计划明细'
         }
         onClose={() => setDrawerPlanId(null)}
@@ -800,7 +790,7 @@ export default function ReadingPlans() {
           <>
             <Space wrap style={{ marginBottom: 12 }}>
               <Tag color={PLAN_STATUS_COLORS[detail.status]}>
-                {PLAN_STATUS_LABELS[detail.status]}
+                {enumLabel(PLAN_STATUS_LABELS, detail.status)}
               </Tag>
               {detailProgress && (
                 <>
@@ -812,7 +802,7 @@ export default function ReadingPlans() {
                 </>
               )}
               <span style={{ color: '#888' }}>
-                计划日 {fmtDate(detail.planDate)} · 抄表员 {staffName(detail.readerId)}
+                计划日 {fmtDate(detail.planDate)} · 抄表员 {detail.readerName ?? staffName(detail.readerId)}
               </span>
             </Space>
             <Space wrap style={{ marginBottom: 12 }}>
@@ -851,7 +841,7 @@ export default function ReadingPlans() {
       </Drawer>
 
       {/* 单条抄表录入 */}
-      <Modal
+      <Modal maskClosable={false}
         open={entryItem !== null}
         title={entryItem ? `抄表录入 — ${accountLabel(entryItem)}` : ''}
         okText="提交"
@@ -866,7 +856,7 @@ export default function ReadingPlans() {
             <Radio.Group
               options={READ_RESULT_TYPES.map((t) => ({
                 value: t,
-                label: RESULT_TYPE_LABELS[t],
+                label: enumLabel(RESULT_TYPE_LABELS, t),
               }))}
               optionType="button"
             />
@@ -889,7 +879,7 @@ export default function ReadingPlans() {
                 <Select
                   options={EXCEPTION_CODES.map((c) => ({
                     value: c,
-                    label: EXCEPTION_CODE_LABELS[c],
+                    label: enumLabel(EXCEPTION_CODE_LABELS, c),
                   }))}
                   placeholder="选择原因"
                 />
@@ -940,7 +930,7 @@ export default function ReadingPlans() {
       </Modal>
 
       {/* 批量抄表录入 */}
-      <Modal
+      <Modal maskClosable={false}
         open={batchOpen}
         title="批量抄表录入（单事务，任一行失败整批回滚）"
         okText={`提交（${[...batchRows.values()].filter((r) => (r.resultType === 'NO_READ' ? !!r.exceptionCode : !!r.readingValue.trim())).length} 行）`}
@@ -959,7 +949,7 @@ export default function ReadingPlans() {
           columns={[
             { title: '顺序', dataIndex: 'seqNo', width: 60 },
             {
-              title: '水表户',
+              title: '用水户',
               key: 'wa',
               ellipsis: true,
               render: (_: unknown, item: ReadingPlanItem) => accountLabel(item),
@@ -975,7 +965,7 @@ export default function ReadingPlans() {
                   value={batchRows.get(item.id)?.resultType}
                   options={READ_RESULT_TYPES.map((t) => ({
                     value: t,
-                    label: RESULT_TYPE_LABELS[t],
+                    label: enumLabel(RESULT_TYPE_LABELS, t),
                   }))}
                   onChange={(v: ReadResultType) => setBatchRow(item.id, { resultType: v })}
                 />
@@ -998,7 +988,7 @@ export default function ReadingPlans() {
                       value={r.exceptionCode}
                       options={EXCEPTION_CODES.map((c) => ({
                         value: c,
-                        label: EXCEPTION_CODE_LABELS[c],
+                        label: enumLabel(EXCEPTION_CODE_LABELS, c),
                       }))}
                       onChange={(v) => setBatchRow(item.id, { exceptionCode: v })}
                     />

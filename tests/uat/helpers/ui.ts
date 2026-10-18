@@ -5,6 +5,13 @@ export async function select(page: Page, control: Locator, text: string) {
   // The visible Select container handles clicks whether the input or selected label overlays it.
   const container = control.locator('xpath=ancestor-or-self::*[contains(concat(" ", normalize-space(@class), " "), " ant-select ")][1]');
   await container.click();
+  // Long option lists virtualize — narrow via the search input when editable. Remote
+  // search only matches the leading token (name / 户号), not the decorated label.
+  const input = container.locator('input');
+  if (await input.isEditable().catch(() => false)) {
+    await input.fill(text.split(/（| · /)[0]);
+    await page.waitForLoadState('networkidle').catch(() => {});
+  }
   // Ant Select virtual options expose matching visible title text; scoped dropdown avoids hidden options.
   await page.locator('.ant-select-dropdown:visible').getByText(text, { exact: true }).click();
 }

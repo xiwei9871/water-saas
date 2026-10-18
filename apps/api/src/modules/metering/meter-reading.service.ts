@@ -7,12 +7,14 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
+import { noReadStreaksTx } from '../../common/no-read-streak.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
   assertAccountScopeTx,
   outOfScopeAccountIds,
 } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
 
 export const METER_READING_SELECT = {
   id: true,
@@ -43,6 +45,7 @@ const READING_DISPLAY_SELECT = {
   ...METER_READING_SELECT,
   installation: {
     select: {
+      waterAccountId: true,
       waterAccount: {
         select: {
           accountNo: true,
@@ -182,7 +185,10 @@ export interface RowError {
  */
 @Injectable()
 export class MeterReadingService {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly tasks: TaskService,
+  ) {}
 
   list(
     ctx: TenantCtx,
@@ -312,6 +318,7 @@ export class MeterReadingService {
     return rows.map(({ installation, ...r }) => ({
       ...r,
       account: {
+        id: installation.waterAccountId,
         accountNo: installation.waterAccount.accountNo,
         customerName: installation.waterAccount.customer.name,
         addr: installation.waterAccount.addr,
@@ -329,11 +336,13 @@ export class MeterReadingService {
    * validReadings applies). Lets a client mark 已被更正 rows without a
    * second round-trip.
    */
-  private async attachSupersededBy<T extends { id: string }>(
+  private async attachSupersededBy<
+    T extends { id: string; period: string; account?: { id: string } },
+  >(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     rows: T[],
-  ): Promise<(T & { supersededById: string | null })[]> {
+  ): Promise<(T & { supersededById: string | null; consecutiveNoRead: number })[]> {
     if (rows.length === 0) return [];
     const children = await tx.meterReading.findMany({
       where: {
@@ -343,7 +352,21 @@ export class MeterReadingService {
       select: { id: true, supersedesReadingId: true },
     });
     const byParent = new Map(children.map((c) => [c.supersedesReadingId, c.id]));
-    return rows.map((r) => ({ ...r, supersededById: byParent.get(r.id) ?? null }));
+    // Round-2 §10: trailing NO_READ run per (account, period) — QC sees
+    // "已连续 N 期未抄见" instead of approving blind.
+    const streaks = await noReadStreaksTx(
+      tx,
+      ctx.tenantId,
+      rows
+        .filter((r) => r.account?.id)
+        .map((r) => ({ waterAccountId: r.account!.id, period: r.period })),
+    );
+    return rows.map((r) => ({
+      ...r,
+      supersededById: byParent.get(r.id) ?? null,
+      consecutiveNoRead:
+        streaks.get(`${r.account?.id}:${r.period}`) ?? 0,
+    }));
   }
 
   /**
@@ -403,9 +426,9 @@ export class MeterReadingService {
       resolved.push({ input, item, plan, installation });
     }
 
-    const readings = await this.writeReadings(tx, ctx, resolved);
+    const { readings, reviewTasks } = await this.writeReadings(tx, ctx, resolved);
     await this.advancePlans(tx, ctx, [...new Set(resolved.map((r) => r.plan.id))]);
-    return readings;
+    return { readings, reviewTasks };
   }
 
   /**
@@ -502,9 +525,9 @@ export class MeterReadingService {
       });
     }
 
-    const readings = await this.writeReadings(tx, ctx, resolved);
+    const { readings, reviewTasks } = await this.writeReadings(tx, ctx, resolved);
     await this.advancePlans(tx, ctx, [...new Set(resolved.map((r) => r.plan.id))]);
-    return readings;
+    return { readings, reviewTasks };
   }
 
   /**
@@ -549,10 +572,69 @@ export class MeterReadingService {
         to,
       });
     }
-    return tx.meterReading.findUniqueOrThrow({
+    const row = await tx.meterReading.findUniqueOrThrow({
       where: { id },
       select: METER_READING_SELECT,
     });
+    // 任务书 T5/T6：质检确认（PASS）时检测「实抄止度 < 估计止度」→ 自动建补差任务。
+    // 幂等由 task_open_dedupe 保证；结算侧还会兜底再查一次。
+    const supplementTask =
+      to === 'PASSED' && existing.readingValue !== null
+        ? await this.detectSupplementOnQc(tx, ctx, existing)
+        : null;
+    return { ...row, supplementTask };
+  }
+
+  /**
+   * QC 确认点的估高检测：该表计在本读数账期之前的最近结算 checkpoint 为
+   * ESTIMATE 且其止度高于本次实抄 → 建补差任务（billing:write 候选）。
+   */
+  private async detectSupplementOnQc(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    reading: { installationId: string; period: string; readingValue: Prisma.Decimal | null },
+  ) {
+    const checkpoint = await tx.$queryRaw<
+      { end_reading_value: Prisma.Decimal; source_type: string; water_account_id: string; account_no: string; org: string | null }[]
+    >`
+      SELECT cc.end_reading_value, cc.source_type, mi.water_account_id, wa.account_no,
+             (SELECT rb.org_unit_id FROM book_meter bm
+                JOIN reading_book rb ON rb.id = bm.book_id AND rb.tenant_id = bm.tenant_id
+               WHERE bm.tenant_id = wa.tenant_id AND bm.water_account_id = wa.id
+               ORDER BY bm.created_at ASC LIMIT 1) AS org
+      FROM consumption_component cc
+      JOIN consumption_settlement cs
+        ON cs.id = cc.settlement_id AND cs.tenant_id = cc.tenant_id
+      JOIN meter_installation mi ON mi.id = cc.installation_id AND mi.tenant_id = cc.tenant_id
+      JOIN water_account wa ON wa.id = mi.water_account_id AND wa.tenant_id = cc.tenant_id
+      WHERE cc.tenant_id = ${ctx.tenantId}::uuid
+        AND cc.installation_id = ${reading.installationId}::uuid
+        AND cc.end_reading_value IS NOT NULL
+        AND cs.period < ${reading.period}
+      ORDER BY cs.period DESC, cc.created_at DESC
+      LIMIT 1`;
+    const cp = checkpoint[0];
+    if (!cp || cp.source_type !== 'ESTIMATE' || !reading.readingValue) return null;
+    if (!reading.readingValue.lt(cp.end_reading_value)) return null;
+    const created = await this.tasks.createTask(tx, ctx, {
+      type: 'SUPPLEMENT',
+      title: `补差：户 ${cp.account_no} 的 ${reading.period} 期估水需校正`,
+      bizType: 'waterAccount',
+      bizId: cp.water_account_id,
+      bizLabel: cp.account_no,
+      reason: `实抄止度 ${reading.readingValue.toString()} < 估计止度 ${cp.end_reading_value.toString()}`,
+      context: {
+        waterAccountId: cp.water_account_id,
+        waterAccountNo: cp.account_no,
+        period: reading.period,
+        installationId: reading.installationId,
+        estimatedReadingValue: cp.end_reading_value.toString(),
+        actualReadingValue: reading.readingValue.toString(),
+        diff: reading.readingValue.minus(cp.end_reading_value).toString(),
+      },
+      orgUnitId: cp.org,
+    });
+    return { id: created.id, deduped: created.deduped, candidates: created.candidates };
   }
 
   /**
@@ -718,6 +800,7 @@ export class MeterReadingService {
     }[],
   ) {
     const readings = [];
+    const reviewTasks: { id: string; readingId: string; reason: string }[] = [];
     for (const { input, item, plan, installation } of rows) {
       const reading = await tx.meterReading.create({
         data: {
@@ -760,8 +843,93 @@ export class MeterReadingService {
       });
       if (flipped.count === 0) throw itemAlreadyDone(item.status);
       readings.push(reading);
+      // 任务书 T12：录入即检测「突增突减/读数倒挂」→ 自动建复核任务（metering:qc）。
+      const review = await this.detectEntryAnomaly(tx, ctx, {
+        readingId: reading.id,
+        installationId: installation.id,
+        waterAccountId: item.waterAccountId,
+        period: plan.period,
+        readingValue: input.readingValue ?? null,
+        resultType: input.resultType,
+        bookOrgUnitId: plan.bookOrgUnitId,
+      });
+      if (review) reviewTasks.push(review);
     }
-    return readings;
+    return { readings, reviewTasks };
+  }
+
+  /**
+   * 录入异常检测：与上期可信止度比对。倒挂 / 用量>3倍近3期均值 / 用量<均值1/3
+   * 任一命中 → 复核任务。无历史参照（首抄/无结算）不触发。
+   */
+  private async detectEntryAnomaly(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    p: {
+      readingId: string;
+      installationId: string;
+      waterAccountId: string;
+      period: string;
+      readingValue: Prisma.Decimal | null;
+      resultType: string;
+      bookOrgUnitId: string | null;
+    },
+  ) {
+    if (p.resultType === 'NO_READ' || p.readingValue === null) return null;
+    const refs = await tx.$queryRaw<
+      { prev_value: Prisma.Decimal | null; avg_usage: Prisma.Decimal | null; account_no: string }[]
+    >`
+      SELECT
+        (SELECT r2.reading_value FROM meter_reading r2
+          WHERE r2.tenant_id = ${ctx.tenantId}::uuid
+            AND r2.installation_id = ${p.installationId}::uuid
+            AND r2.id <> ${p.readingId}::uuid
+            AND r2.result_type IN ('ACTUAL','REMOTE')
+            AND r2.reading_value IS NOT NULL
+            AND r2.qc_status <> 'REJECTED'
+            AND NOT EXISTS (SELECT 1 FROM meter_reading c
+              WHERE c.tenant_id = r2.tenant_id AND c.supersedes_reading_id = r2.id)
+          ORDER BY r2.period DESC, r2.read_date DESC, r2.created_at DESC
+          LIMIT 1) AS prev_value,
+        (SELECT avg(cc.usage_qty) FROM (
+           SELECT cc.usage_qty FROM consumption_component cc
+           JOIN consumption_settlement cs ON cs.id = cc.settlement_id AND cs.tenant_id = cc.tenant_id
+           WHERE cc.tenant_id = ${ctx.tenantId}::uuid
+             AND cc.installation_id = ${p.installationId}::uuid
+             AND cs.period < ${p.period}
+           ORDER BY cs.period DESC, cc.created_at DESC LIMIT 3) cc) AS avg_usage,
+        (SELECT wa.account_no FROM water_account wa
+          WHERE wa.tenant_id = ${ctx.tenantId}::uuid AND wa.id = ${p.waterAccountId}::uuid) AS account_no`;
+    const { prev_value: prev, avg_usage: avg3, account_no: accountNo } = refs[0] ?? {};
+    const reasons: string[] = [];
+    const usage = prev !== null && prev !== undefined ? p.readingValue.minus(prev) : null;
+    if (usage?.lt(0)) reasons.push('读数倒挂');
+    if (usage && avg3 !== null && avg3 !== undefined && new Prisma.Decimal(avg3).gt(0)) {
+      if (usage.gt(new Prisma.Decimal(avg3).mul(3))) reasons.push('用量突增（超近3期均值3倍）');
+      else if (usage.lt(new Prisma.Decimal(avg3).div(3))) reasons.push('用量突减（低于近3期均值1/3）');
+    }
+    if (!reasons.length) return null;
+    const label = `${accountNo ?? p.waterAccountId} · ${p.period}`;
+    const created = await this.tasks.createTask(tx, ctx, {
+      type: 'METER_REVIEW',
+      title: `复核：户 ${accountNo ?? ''} ${p.period} 期读数异常`,
+      bizType: 'meterReading',
+      bizId: p.readingId,
+      bizLabel: label,
+      reason: reasons.join('、'),
+      context: {
+        waterAccountId: p.waterAccountId,
+        waterAccountNo: accountNo ?? null,
+        period: p.period,
+        installationId: p.installationId,
+        readingValue: p.readingValue.toString(),
+        prevReadingValue: prev?.toString() ?? null,
+        usageQty: usage?.toString() ?? null,
+        avgUsage3: avg3?.toString() ?? null,
+      },
+      orgUnitId: p.bookOrgUnitId,
+    });
+    return { id: created.id, readingId: p.readingId, reason: reasons.join('、') };
   }
 
   /**

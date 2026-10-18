@@ -68,7 +68,7 @@ test('Pilot payment: 26 payments, receipts, reversals and two cashier closes', a
         expect(['C', 'F']).not.toContain(person.group);
         await asCashier(action.cashier);
         await page.goto('/payment/counter'); await ready(page);
-        const before = await response(page, `/water-accounts/${person.waterAccount.id}/outstanding`, () => selectPerson(page, main(page), person, '先选客户', '再选水表户'), 'GET');
+        const before = await response(page, `/water-accounts/${person.waterAccount.id}/outstanding`, () => selectPerson(page, main(page), person, '先选客户', '再选用水户'), 'GET');
         // The product deliberately shows debt for the entire settlement account.
         const siblingAccounts = new Set(s.people.filter(p => p.settleAccount.id === person.settleAccount.id).map(p => p.waterAccount.id));
         const accountBills = s.bills.filter(b => siblingAccounts.has(b.waterAccountId));
@@ -121,7 +121,7 @@ test('Pilot payment: 26 payments, receipts, reversals and two cashier closes', a
         expect(detail.receipt.voidFlag).toBe(true); await expect(page.getByRole('dialog')).toContainText('已作废');
         const person = s.people[original.personIndex];
         await page.goto('/payment/counter'); await ready(page);
-        const after = await response(page, `/water-accounts/${person.waterAccount.id}/outstanding`, () => selectPerson(page, main(page), person, '先选客户', '再选水表户'), 'GET');
+        const after = await response(page, `/water-accounts/${person.waterAccount.id}/outstanding`, () => selectPerson(page, main(page), person, '先选客户', '再选用水户'), 'GET');
         expect(cents(after.totalOutstanding)).toBe(s.bills.filter(b => s.people.some(p => p.waterAccount.id === b.waterAccountId && p.settleAccount.id === person.settleAccount.id)).reduce((n, b) => n + outstanding(s, b.id), 0));
         s.reversalChecks ||= []; s.reversalChecks.push({ originalId: original.id, receipt: detail.receipt, outstanding: after }); save(s);
         await evidence(page, info, `reverse-${original.pilotKey}`, { original, reversal, voidReceipt: detail.receipt, after });

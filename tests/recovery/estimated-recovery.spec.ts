@@ -44,7 +44,7 @@ test('Chrome: paid over-estimate → Chinese guidance → adjustment → zero cu
   await page.getByLabel('账号', { exact: true }).fill('admin');
   await page.getByLabel('密码', { exact: true }).fill('recovery-pass');
   await button(page, '登录').click();
-  await expect(page.getByRole('heading', { name: '工作台' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /经营驾驶舱|工作台/ })).toBeVisible();
 
   async function openGenerate(period: string) {
     await page.goto('/settlement/list'); await ready(page);
@@ -96,7 +96,7 @@ test('Chrome: paid over-estimate → Chinese guidance → adjustment → zero cu
   await evidence(page, info, 'next-period-real-dial', next);
 
   await page.goto('/payment/counter'); await ready(page);
-  await selectPerson(page, main(page), person, '先选客户', '再选水表户');
+  await selectPerson(page, main(page), person, '先选客户', '再选用水户');
   const pickers = main(page).locator('.cashier-picker > .ant-select');
   const customerBox = await pickers.nth(0).boundingBox();
   const accountBox = await pickers.nth(1).boundingBox();

@@ -18,16 +18,28 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
-import type { CalcType, FeeItem } from '../../api/types';
+import type { CalcType, FeeItem, FeeItemKind } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { cleanBody, fmtTime, newIdemKey } from '../common';
+import {
+  enumLabel,
+  cleanBody,
+  fmtTime,
+  newIdemKey,
+} from '../common';
 import { CALC_TYPE_LABELS } from './common';
 
 interface CreateFormValues {
   code: string;
   name: string;
   calcType: CalcType;
+  kind: FeeItemKind;
 }
+
+const FEE_KIND_LABELS: Record<FeeItemKind, string> = {
+  WATER_FEE: '水费',
+  AGENCY: '代收',
+  OTHER: '其他',
+};
 
 type ModalState =
   | { kind: 'create' }
@@ -95,7 +107,7 @@ export default function FeeItems() {
 
   const openEdit = (item: FeeItem) => {
     form.resetFields();
-    form.setFieldsValue({ code: item.code, name: item.name, calcType: item.calcType });
+    form.setFieldsValue({ code: item.code, name: item.name, calcType: item.calcType, kind: item.kind ?? 'WATER_FEE' });
     setModal({ kind: 'edit', item });
   };
 
@@ -115,6 +127,7 @@ export default function FeeItems() {
             code: values.code,
             name: values.name,
             calcType: values.calcType,
+            kind: values.kind,
           }),
           { headers: { 'Idempotency-Key': idemKey } },
         );
@@ -122,6 +135,7 @@ export default function FeeItems() {
       } else if (modal?.kind === 'edit') {
         await api.patch(`/fee-items/${modal.item.id}`, {
           name: values.name.trim(),
+          kind: values.kind,
         });
         message.success('费用项已更新');
       }
@@ -142,7 +156,18 @@ export default function FeeItems() {
       dataIndex: 'calcType',
       key: 'calcType',
       width: 120,
-      render: (t: CalcType) => <Tag color="blue">{CALC_TYPE_LABELS[t]}</Tag>,
+      render: (t: CalcType) => <Tag color="blue">{enumLabel(CALC_TYPE_LABELS, t)}</Tag>,
+    },
+    {
+      title: '类别',
+      dataIndex: 'kind',
+      key: 'kind',
+      width: 90,
+      render: (k: FeeItemKind | undefined) => (
+        <Tag color={k === 'AGENCY' ? 'orange' : 'default'}>
+          {enumLabel(FEE_KIND_LABELS, k ?? 'WATER_FEE')}
+        </Tag>
+      ),
     },
     {
       title: '创建时间',
@@ -186,7 +211,7 @@ export default function FeeItems() {
             style={{ width: 130 }}
             options={(['PER_QTY', 'FIXED', 'PERCENT'] as const).map((t) => ({
               value: t,
-              label: CALC_TYPE_LABELS[t],
+              label: enumLabel(CALC_TYPE_LABELS, t),
             }))}
             value={calcType}
             onChange={(v) => {
@@ -223,7 +248,7 @@ export default function FeeItems() {
         }}
       />
 
-      <Modal
+      <Modal maskClosable={false}
         open={modal !== null}
         title={
           modal?.kind === 'create'
@@ -265,7 +290,20 @@ export default function FeeItems() {
               disabled={modal?.kind === 'edit'}
               options={(['PER_QTY', 'FIXED', 'PERCENT'] as const).map((t) => ({
                 value: t,
-                label: CALC_TYPE_LABELS[t],
+                label: enumLabel(CALC_TYPE_LABELS, t),
+              }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="kind"
+            label="类别"
+            initialValue="WATER_FEE"
+            extra="「代收」项不计入综合单价口径（水费收入 ÷ 售水量）"
+          >
+            <Select
+              options={(['WATER_FEE', 'AGENCY', 'OTHER'] as const).map((k) => ({
+                value: k,
+                label: enumLabel(FEE_KIND_LABELS, k),
               }))}
             />
           </Form.Item>

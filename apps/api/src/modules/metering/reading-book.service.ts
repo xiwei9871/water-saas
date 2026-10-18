@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -16,6 +17,10 @@ import {
   type MeterChannel,
 } from '../../common/reading-cadence.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import {
+  embedOrgNames,
+  embedStaffNames,
+} from '../../common/account-identity.js';
 import { assertAccountScopeTx } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
@@ -40,6 +45,8 @@ const ACCOUNT_SUMMARY = {
   accountNo: true,
   addr: true,
   status: true,
+  // Round-2: member rows carry the customer name — 册员清单不能只有户号。
+  customer: { select: { name: true } },
 } satisfies Prisma.WaterAccountSelect;
 
 export interface ReadingBookBody {
@@ -65,7 +72,14 @@ export interface ReadingBookPatchBody {
 
 export interface BookMemberBody {
   waterAccountId?: string;
+  /**
+   * Internal escape hatch ONLY (fault injection / seed scripts): the public
+   * controller never passes it — route order is always assigned server-side
+   * as max(seq_no)+1 under the book row lock (RC1-2 / F9).
+   */
   seqNo?: number;
+  /** Internal: bypass the one-book-per-account rule (fault injection only). */
+  allowMultiBook?: boolean;
 }
 
 const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
@@ -123,7 +137,7 @@ export class ReadingBookService {
             })
           ).map((m) => m.bookId)
         : undefined;
-      return tx.readingBook.findMany({
+      const rows = await tx.readingBook.findMany({
         where: {
           tenantId: ctx.tenantId,
           bookNo: q.bookNo,
@@ -137,6 +151,16 @@ export class ReadingBookService {
         take: q.take,
         skip: q.skip,
       });
+      // 10/8 报告 §3：组织名/抄表员姓名由服务端内嵌 —— 无 iam:read 的
+      // 业务角色不再看到截断 uuid。
+      return embedOrgNames(
+        tx,
+        ctx.tenantId,
+        await embedStaffNames(tx, ctx.tenantId, rows, {
+          readerId: 'readerName',
+        }),
+        { orgUnitId: 'orgUnitName' },
+      );
     });
   }
 
@@ -173,7 +197,15 @@ export class ReadingBookService {
       // member list is customer data but the book itself already gates.
       if (!orgInScope(ctx, book.orgUnitId)) throw outOfScope();
       const members = await this.membersOf(tx, ctx, id);
-      return { ...book, members };
+      const [enriched] = await embedOrgNames(
+        tx,
+        ctx.tenantId,
+        await embedStaffNames(tx, ctx.tenantId, [book], {
+          readerId: 'readerName',
+        }),
+        { orgUnitId: 'orgUnitName' },
+      );
+      return { ...enriched, members };
     });
   }
 
@@ -327,9 +359,20 @@ export class ReadingBookService {
 
   /**
    * Add a water account to the book (book_meter). The account must exist and
-   * not be CLOSED — a closed point has nothing to read. seq_no defaults to
-   * max+1 (append at the end of the route); the (book_id, water_account_id)
-   * PK dedupes a double-add → 409.
+   * not be CLOSED — a closed point has nothing to read.
+   *
+   * RC1-2 invariants (F9/F10):
+   *  - seq_no is ALWAYS assigned server-side as max(seq_no)+1, serialized by a
+   *    FOR UPDATE lock on the book row (same pattern as deleteTx) — callers
+   *    cannot pick a sequence and concurrent adds cannot collide.
+   *    (book_id, seq_no) is UNIQUE as the DB backstop.
+   *  - one account has at most ONE current membership — enforced here under
+   *    the account-row FOR UPDATE lock (a hard DB unique would make the
+   *    MULTI_BOOK detector un-injectable; see migration note). Adding an
+   *    account that already belongs to another book → 409
+   *    ACCOUNT_IN_OTHER_BOOK carrying the current book so the UI can offer
+   *    an explicit transfer instead.
+   *  - the (book_id, water_account_id) PK dedupes a double-add → 409.
    */
   async addMemberTx(
     tx: Prisma.TransactionClient,
@@ -341,6 +384,11 @@ export class ReadingBookService {
     if (!body.waterAccountId) {
       throw new BadRequestException({ code: 'BOOK_MEMBER_FIELDS_REQUIRED' });
     }
+    // Serialize seq allocation across concurrent addMemberTx calls.
+    await tx.$queryRaw`
+      SELECT id FROM reading_book
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${bookId}::uuid
+      FOR UPDATE`;
     const account = await tx.waterAccount.findFirst({
       where: { tenantId: ctx.tenantId, id: body.waterAccountId },
     });
@@ -348,14 +396,41 @@ export class ReadingBookService {
     if (account.status === 'CLOSED') {
       throw new BadRequestException({ code: 'ACCOUNT_CLOSED' });
     }
-    let seqNo = body.seqNo;
-    if (seqNo === undefined) {
-      const agg = await tx.bookMeter.aggregate({
-        where: { tenantId: ctx.tenantId, bookId },
-        _max: { seqNo: true },
+    // Lock the ACCOUNT row before the membership check: two concurrent adds
+    // of the same account into DIFFERENT books take different book locks, so
+    // only the account-row lock serializes the single-book check (F10).
+    // Lock order is always book → account (transfer path follows the same
+    // order) so no deadlock cycle is possible.
+    await tx.$queryRaw`
+      SELECT id FROM water_account
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${body.waterAccountId}::uuid
+      FOR UPDATE`;
+    if (!body.allowMultiBook) {
+      const existing = await tx.bookMeter.findFirst({
+        where: { tenantId: ctx.tenantId, waterAccountId: body.waterAccountId },
       });
-      seqNo = (agg._max.seqNo ?? 0) + 1;
+      if (existing && existing.bookId !== bookId) {
+        const current = await tx.readingBook.findFirst({
+          where: { tenantId: ctx.tenantId, id: existing.bookId },
+          select: { id: true, bookNo: true, name: true },
+        });
+        throw new ConflictException({
+          code: 'ACCOUNT_IN_OTHER_BOOK',
+          waterAccountId: body.waterAccountId,
+          bookId: current?.id ?? existing.bookId,
+          bookNo: current?.bookNo ?? null,
+          bookName: current?.name ?? null,
+        });
+      }
     }
+    const seqNo: number =
+      body.seqNo ??
+      (await tx.bookMeter
+        .aggregate({
+          where: { tenantId: ctx.tenantId, bookId },
+          _max: { seqNo: true },
+        })
+        .then((agg) => (agg._max.seqNo ?? 0) + 1));
     return conflictOnUnique(
       tx.bookMeter.create({
         data: {
@@ -368,6 +443,58 @@ export class ReadingBookService {
         },
       }),
     );
+  }
+
+  /**
+   * Transfer a membership into this book — the ONLY way an account already
+   * on another book moves (RC1-2 / F10). Delete-old + insert-new in the
+   * caller's transaction; seq is assigned at the route end like addMemberTx.
+   * Both the target book and the book being left must be in scope.
+   */
+  async transferMemberTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    bookId: string,
+    waterAccountId: string,
+    req: Request,
+  ) {
+    await this.assertBookInScope(tx, ctx, bookId);
+    await tx.$queryRaw`
+      SELECT id FROM reading_book
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${bookId}::uuid
+      FOR UPDATE`;
+    const existing = await tx.bookMeter.findFirst({
+      where: { tenantId: ctx.tenantId, waterAccountId },
+    });
+    if (existing?.bookId === bookId) {
+      return { bookId, waterAccountId, transferred: false };
+    }
+    let fromBook: { id: string; bookNo: string; name: string } | null = null;
+    if (existing) {
+      const old = await tx.readingBook.findFirst({
+        where: { tenantId: ctx.tenantId, id: existing.bookId },
+        select: { id: true, bookNo: true, name: true, orgUnitId: true },
+      });
+      if (!old) throw new NotFoundException({ code: 'BOOK_NOT_FOUND' });
+      if (!orgInScope(ctx, old.orgUnitId)) throw outOfScope();
+      fromBook = old;
+      req.auditBefore = existing;
+      await tx.bookMeter.deleteMany({
+        where: {
+          tenantId: ctx.tenantId,
+          bookId: existing.bookId,
+          waterAccountId,
+        },
+      });
+    }
+    const created = await this.addMemberTx(tx, ctx, bookId, { waterAccountId });
+    return {
+      bookId,
+      waterAccountId,
+      transferred: existing !== null,
+      fromBook,
+      seqNo: created.seqNo,
+    };
   }
 
   /** Remove an account from the book; already-generated plans are unaffected. */

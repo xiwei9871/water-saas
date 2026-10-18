@@ -10,6 +10,7 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
   Descriptions,
   Drawer,
   Input,
@@ -33,7 +34,7 @@ import type {
   ExceptionSummary,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtTime } from '../common';
+import { enumLabel, fmtTime } from '../common';
 import { WaterAccount360 } from '../customer/WaterAccount360';
 
 const TYPE_LABELS: Record<string, string> = {
@@ -50,6 +51,35 @@ const TYPE_LABELS: Record<string, string> = {
   REMOTE_EVENT_CONFLICT: '远传读数冲突',
   REMOTE_EVENT_KEY_CONFLICT: '事件键冲突',
   UNPAID_BILL_OVERDUE: '账单逾期',
+  READING_QC_PENDING: '读数待质检',
+  SETTLEMENT_DRIFT: '待补差',
+  PLANNED_NO_READING: '计划缺读数',
+  PLANNED_NO_SETTLEMENT: '计划缺结算',
+  SETTLEMENT_UNFINALIZED: '结算未终审',
+  CLOSED_BALANCE_LEFT: '销户余额残留',
+};
+
+/** T1 工单去向：按异常类型直达处理页（覆盖 anchorRef 默认跳转）。 */
+const TARGET_PAGE: Record<string, string> = {
+  READING_QC_PENDING: '/metering/readings',
+  READING_QC_REVIEW: '/metering/readings',
+  READING_QC_REJECTED: '/metering/readings',
+  ESTIMATE_STREAK: '/metering/readings',
+  PLANNED_NO_READING: '/metering/readings',
+  NO_ACTIVE_METER: '/customer/meters',
+  MULTI_ACTIVE_METER: '/customer/meters',
+  NO_BOOK: '/metering/books',
+  MULTI_BOOK: '/metering/books',
+  REMOTE_EVENT_UNBOUND: '/metering/remote-events',
+  REMOTE_EVENT_WAITING_PLAN: '/metering/remote-events',
+  REMOTE_EVENT_FAILED: '/metering/remote-events',
+  REMOTE_EVENT_CONFLICT: '/metering/remote-events',
+  REMOTE_EVENT_KEY_CONFLICT: '/metering/remote-events',
+  SETTLEMENT_DRIFT: '/settlement/reconciliations',
+  PLANNED_NO_SETTLEMENT: '/settlement/list',
+  SETTLEMENT_UNFINALIZED: '/settlement/list',
+  CLOSED_BALANCE_LEFT: '/customer/settle-accounts',
+  UNPAID_BILL_OVERDUE: '/billing/bills',
 };
 
 const SEV_COLORS = { BLOCKING: 'red', WARNING: 'orange', INFO: 'blue' } as const;
@@ -67,7 +97,7 @@ const STATUS_COLORS: Record<string, string> = {
   RESOLVED: 'green',
 };
 const ANCHOR_LABELS: Record<string, string> = {
-  ACCOUNT: '水表户',
+  ACCOUNT: '用水户',
   TENANT: '租户级',
   REMOTE_SOURCE: '远传源',
 };
@@ -162,12 +192,12 @@ export default function Exceptions() {
   }, [loadSummary]);
 
   useEffect(() => {
-    if (!canManage) return;
+    // exception:read 也可获取（显示处理人姓名用，非管理操作）。
     api
       .get<{ id: string; name: string }[]>('/exceptions/options/assignees')
       .then((r) => setStaff(r.data.map((s) => ({ id: s.id, name: s.name }))))
       .catch(() => setStaff([]));
-  }, [canManage]);
+  }, []);
 
   useEffect(() => {
     // exception:read-gated projections — no iam/metering permission needed.
@@ -236,6 +266,11 @@ export default function Exceptions() {
 
   const drill = () => {
     if (!detail) return;
+    const target = TARGET_PAGE[detail.fact.type];
+    if (target) {
+      navigate(target);
+      return;
+    }
     const ref = detail.fact.anchorRef;
     if (ref.kind === 'water-account') {
       setDrill360(ref.id);
@@ -251,37 +286,44 @@ export default function Exceptions() {
       dataIndex: 'severity',
       width: 80,
       render: (s: ExceptionItem['severity']) => (
-        <Tag color={SEV_COLORS[s]}>{SEV_LABELS[s]}</Tag>
+        <Tag color={SEV_COLORS[s]}>{enumLabel(SEV_LABELS, s)}</Tag>
       ),
     },
     {
       title: '类型',
       dataIndex: 'type',
       width: 130,
-      render: (t: string) => TYPE_LABELS[t] ?? t,
+      render: (t: string) => enumLabel(TYPE_LABELS, t),
     },
     { title: '摘要', dataIndex: 'summary', ellipsis: true },
     {
       title: '锚点',
       dataIndex: 'anchor',
       width: 90,
-      render: (a: string) => ANCHOR_LABELS[a] ?? a,
+      render: (a: string) => enumLabel(ANCHOR_LABELS, a),
     },
     { title: '账期', dataIndex: 'period', width: 80, render: (p: string | null) => p ?? '—' },
     {
       title: '状态',
       width: 90,
       render: (_, r) => (
-        <Tag color={STATUS_COLORS[r.episode.status]}>{STATUS_LABELS[r.episode.status]}</Tag>
+        <Tag color={STATUS_COLORS[r.episode.status]}>{enumLabel(STATUS_LABELS, r.episode.status)}</Tag>
       ),
     },
     {
       title: '操作',
-      width: 70,
+      width: 150,
       render: (_, r) => (
-        <Button size="small" icon={<EyeOutlined />} onClick={() => void openDetail(r.key)}>
-          详情
-        </Button>
+        <Space size={4}>
+          <Button size="small" icon={<EyeOutlined />} onClick={() => void openDetail(r.key)}>
+            详情
+          </Button>
+          {TARGET_PAGE[r.type] && (
+            <Button size="small" type="link" onClick={() => navigate(TARGET_PAGE[r.type])}>
+              去处理
+            </Button>
+          )}
+        </Space>
       ),
     },
   ];
@@ -410,7 +452,7 @@ export default function Exceptions() {
       </Card>
 
       <Drawer
-        title={detail ? `${TYPE_LABELS[detail.fact.type] ?? detail.fact.type}` : '异常详情'}
+        title={detail ? `${enumLabel(TYPE_LABELS, detail.fact.type)}` : '异常详情'}
         open={!!detail || detailLoading}
         loading={detailLoading}
         width={560}
@@ -423,26 +465,39 @@ export default function Exceptions() {
             )}
             <Descriptions column={1} size="small" bordered>
               <Descriptions.Item label="摘要">{detail.fact.summary}</Descriptions.Item>
-              <Descriptions.Item label="异常键">
-                <Typography.Text code copyable style={{ fontSize: 12 }}>
-                  {detail.fact.key}
-                </Typography.Text>
+              <Descriptions.Item label="业务标识">
+                {enumLabel(TYPE_LABELS, detail.fact.type)} · {detail.fact.summary}
+                <Collapse
+                  ghost
+                  style={{ marginTop: 4 }}
+                  items={[
+                    {
+                      key: 'tech',
+                      label: '技术标识',
+                      children: (
+                        <Typography.Text code copyable style={{ fontSize: 12 }}>
+                          {detail.fact.key}
+                        </Typography.Text>
+                      ),
+                    },
+                  ]}
+                />
               </Descriptions.Item>
               <Descriptions.Item label="锚点">
-                {ANCHOR_LABELS[detail.fact.anchor] ?? detail.fact.anchor}
+                {enumLabel(ANCHOR_LABELS, detail.fact.anchor)}
                 {detail.fact.anchor === 'TENANT' && (
                   <Typography.Text type="secondary">（无册归属，仅租户级可处理）</Typography.Text>
                 )}
               </Descriptions.Item>
               <Descriptions.Item label="处理状态">
                 {ep ? (
-                  <Tag color={STATUS_COLORS[ep.status]}>{STATUS_LABELS[ep.status]}</Tag>
+                  <Tag color={STATUS_COLORS[ep.status]}>{enumLabel(STATUS_LABELS, ep.status)}</Tag>
                 ) : (
                   <Tag>待同步</Tag>
                 )}
                 {ep?.assigneeId && (
                   <Typography.Text type="secondary">
-                    处理人 {staff.find((s) => s.id === ep.assigneeId)?.name ?? ep.assigneeId.slice(0, 8)}
+                    处理人 {staff.find((s) => s.id === ep.assigneeId)?.name ?? '—'}
                   </Typography.Text>
                 )}
               </Descriptions.Item>
@@ -503,7 +558,7 @@ export default function Exceptions() {
                   items={detail.history.map((h) => ({
                     children: (
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {fmtTime(h.createdAt)} — {STATUS_LABELS[h.status]}
+                        {fmtTime(h.createdAt)} — {enumLabel(STATUS_LABELS, h.status)}
                         {h.resolutionSource ? `（${h.resolutionSource === 'AUTO' ? '自动' : '人工'}）` : ''}
                         {h.note ? ` ${h.note}` : ''}
                       </Typography.Text>
@@ -516,7 +571,7 @@ export default function Exceptions() {
         )}
       </Drawer>
 
-      <Modal
+      <Modal maskClosable={false}
         title="忽略异常"
         open={ignoreOpen}
         confirmLoading={acting}
@@ -539,7 +594,7 @@ export default function Exceptions() {
         />
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         title="标记已解决"
         open={resolveOpen}
         confirmLoading={acting}
@@ -568,7 +623,7 @@ export default function Exceptions() {
         />
       </Modal>
 
-      <Modal
+      <Modal maskClosable={false}
         title="指派处理人"
         open={assignOpen}
         confirmLoading={acting}

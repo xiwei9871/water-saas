@@ -330,6 +330,23 @@ describe('permissions', () => {
       .send({ login: 'x', name: 'x', password: 'x', orgUnitId: ORG_BR })
       .expect(403);
   });
+
+  // Round-2 regression: list rows carry current role bindings so the edit
+  // dialog can prefill (the old contract left the role Select blank).
+  it('staff list rows carry their role bindings', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/iam/staff')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    const writer = (res.body as { id: string; roles?: { id: string; code: string; name: string }[] }[])
+      .find((s) => s.id === STAFF_WRITER);
+    expect(writer).toBeTruthy();
+    expect(writer!.roles).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: ROLE_WRITER })]),
+    );
+    // every row exposes roles (possibly empty), never undefined
+    for (const s of res.body) expect(Array.isArray(s.roles)).toBe(true);
+  });
 });
 
 /**

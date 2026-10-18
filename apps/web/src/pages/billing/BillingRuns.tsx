@@ -22,7 +22,6 @@ import {
   Spin,
   Table,
   Tag,
-  Tooltip,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -32,10 +31,19 @@ import type {
   Bill,
   BillingRun,
   BillingRunDetail,
+  BillingRunPreflight,
+  RunFailure,
   RunStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtCent, fmtPeriod, fmtTime, newIdemKey, useWaterAccountLabels } from '../common';
+import {
+  enumLabel,
+  fmtCent,
+  fmtPeriod,
+  fmtTime,
+  newIdemKey,
+  useWaterAccountLabels,
+} from '../common';
 import {
   BILL_KIND_COLORS,
   BILL_KIND_LABELS,
@@ -73,6 +81,9 @@ export default function BillingRuns() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createIdemKey, setCreateIdemKey] = useState('');
   const [saving, setSaving] = useState(false);
+  // Round-2 §9：选定账期后自动预检本期抄表/结算覆盖。
+  const [preflight, setPreflight] = useState<BillingRunPreflight | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
   const [createForm] = Form.useForm<CreateFormValues>();
 
@@ -106,6 +117,20 @@ export default function BillingRuns() {
     () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
     [page, pageSize, rows.length],
   );
+
+  const fetchPreflight = async (p: string) => {
+    setPreflightLoading(true);
+    try {
+      const res = await api.get<BillingRunPreflight>('/billing-runs/preflight', {
+        params: { period: p },
+      });
+      setPreflight(res.data);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setPreflightLoading(false);
+    }
+  };
 
   const detailSeq = useRef(0);
 
@@ -191,26 +216,32 @@ export default function BillingRuns() {
     () => (detail?.bills ?? []).map((b) => b.waterAccountId),
     [detail],
   );
-  const accountLabel = useWaterAccountLabels(detailAccountIds);
+  const { accountInfo } = useWaterAccountLabels(detailAccountIds);
 
   const billColumns: ColumnsType<Bill> = [
     {
-      title: '账单 ID',
-      dataIndex: 'id',
-      key: 'id',
+      title: '账期',
+      dataIndex: 'period',
+      key: 'period',
       width: 100,
-      render: (id: string) => (
-        <Tooltip title={id}>
-          <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-        </Tooltip>
+      render: (p: string) => fmtPeriod(p),
+    },
+    {
+      title: '户号',
+      dataIndex: 'waterAccountId',
+      key: 'waterAccountId',
+      width: 150,
+      render: (id: string, b: Bill) => (
+        <span>{b.accountNo ?? accountInfo(id)?.accountNo ?? '—'}</span>
       ),
     },
     {
-      title: '水表户',
-      dataIndex: 'waterAccountId',
-      key: 'waterAccountId',
-      width: 140,
-      render: (id: string) => accountLabel(id),
+      title: '客户名称',
+      key: 'customerName',
+      width: 130,
+      ellipsis: true,
+      render: (_: unknown, b: Bill) =>
+        b.customerName ?? accountInfo(b.waterAccountId)?.customerName ?? '—',
     },
     {
       title: '类型',
@@ -218,7 +249,7 @@ export default function BillingRuns() {
       key: 'billKind',
       width: 90,
       render: (k: Bill['billKind']) => (
-        <Tag color={BILL_KIND_COLORS[k]}>{BILL_KIND_LABELS[k]}</Tag>
+        <Tag color={BILL_KIND_COLORS[k]}>{enumLabel(BILL_KIND_LABELS, k)}</Tag>
       ),
     },
     {
@@ -242,7 +273,7 @@ export default function BillingRuns() {
       key: 'status',
       width: 90,
       render: (s: Bill['status']) => (
-        <Tag color={BILL_STATUS_COLORS[s]}>{BILL_STATUS_LABELS[s]}</Tag>
+        <Tag color={BILL_STATUS_COLORS[s]}>{enumLabel(BILL_STATUS_LABELS, s)}</Tag>
       ),
     },
   ];
@@ -254,7 +285,7 @@ export default function BillingRuns() {
       dataIndex: 'runType',
       key: 'runType',
       width: 80,
-      render: (t: BillingRun['runType']) => RUN_TYPE_LABELS[t],
+      render: (t: BillingRun['runType']) => enumLabel(RUN_TYPE_LABELS, t),
     },
     {
       title: '状态',
@@ -262,7 +293,7 @@ export default function BillingRuns() {
       key: 'status',
       width: 120,
       render: (s: RunStatus) => (
-        <Tag color={RUN_STATUS_COLORS[s]}>{RUN_STATUS_LABELS[s]}</Tag>
+        <Tag color={RUN_STATUS_COLORS[s]}>{enumLabel(RUN_STATUS_LABELS, s)}</Tag>
       ),
     },
     {
@@ -382,7 +413,7 @@ export default function BillingRuns() {
             placeholder="状态"
             style={{ width: 140 }}
             options={(['DRAFT', 'PROCESSING', 'PARTIAL', 'POSTED', 'FAILED'] as const).map(
-              (s) => ({ value: s, label: RUN_STATUS_LABELS[s] }),
+              (s) => ({ value: s, label: enumLabel(RUN_STATUS_LABELS, s) }),
             )}
             value={status}
             onChange={(v) => {
@@ -428,7 +459,7 @@ export default function BillingRuns() {
       />
 
       {/* 新建批次 */}
-      <Modal
+      <Modal maskClosable={false}
         open={createOpen}
         title="新建开账批次"
         okText="生成"
@@ -450,9 +481,63 @@ export default function BillingRuns() {
             label="账期"
             rules={[{ required: true, message: '请选择账期' }]}
           >
-            <DatePicker picker="month" style={{ width: '100%' }} />
+            <DatePicker
+              picker="month"
+              style={{ width: '100%' }}
+              onChange={(v) => {
+                setPreflight(null);
+                if (v) void fetchPreflight(v.format('YYYYMM'));
+              }}
+            />
           </Form.Item>
         </Form>
+        {preflightLoading && (
+          <Alert type="info" showIcon style={{ marginTop: 4 }} message="正在预检本期抄表/结算覆盖…" />
+        )}
+        {preflight && !preflightLoading && (
+          <Alert
+            type={
+              preflight.missingSettlement.length === 0 &&
+              preflight.draftSettlement.length === 0 &&
+              preflight.missingReading.length === 0
+                ? 'success'
+                : 'warning'
+            }
+            showIcon
+            style={{ marginTop: 4 }}
+            message={`本期计划 ${preflight.plannedCount} 户 · 已终审可出账 ${preflight.willBillCount} 户`}
+            description={
+              <div>
+                {preflight.missingReading.length > 0 && (
+                  <div style={{ marginBottom: 4 }}>
+                    <b>{preflight.missingReading.length} 户本期未抄表</b>：
+                    {preflight.missingReading.slice(0, 10).map((r) => `${r.accountNo}（${r.customerName}）`).join('、')}
+                    {preflight.missingReading.length > 10 ? ` 等 ${preflight.missingReading.length} 户` : ''}
+                  </div>
+                )}
+                {preflight.missingSettlement.length > 0 && (
+                  <div style={{ marginBottom: 4 }}>
+                    <b>{preflight.missingSettlement.length} 户未生成结算</b>：
+                    {preflight.missingSettlement.slice(0, 10).map((r) => `${r.accountNo}（${r.customerName}）`).join('、')}
+                    {preflight.missingSettlement.length > 10 ? ` 等 ${preflight.missingSettlement.length} 户` : ''}
+                  </div>
+                )}
+                {preflight.draftSettlement.length > 0 && (
+                  <div style={{ marginBottom: 4 }}>
+                    <b>{preflight.draftSettlement.length} 户结算未终审（不会出账）</b>：
+                    {preflight.draftSettlement.slice(0, 10).map((r) => `${r.accountNo}（${r.customerName}）`).join('、')}
+                    {preflight.draftSettlement.length > 10 ? ` 等 ${preflight.draftSettlement.length} 户` : ''}
+                  </div>
+                )}
+                {preflight.missingSettlement.length === 0 &&
+                  preflight.draftSettlement.length === 0 &&
+                  preflight.missingReading.length === 0 && (
+                    <span>本期计划户均已终审结算，可直接生成。</span>
+                  )}
+              </div>
+            }
+          />
+        )}
       </Modal>
 
       {/* 批次详情抽屉 */}
@@ -477,11 +562,11 @@ export default function BillingRuns() {
                   label: '状态',
                   children: (
                     <Tag color={RUN_STATUS_COLORS[detail.status]}>
-                      {RUN_STATUS_LABELS[detail.status]}
+                      {enumLabel(RUN_STATUS_LABELS, detail.status)}
                     </Tag>
                   ),
                 },
-                { key: 'type', label: '类型', children: RUN_TYPE_LABELS[detail.runType] },
+                { key: 'type', label: '类型', children: enumLabel(RUN_TYPE_LABELS, detail.runType) },
                 {
                   key: 'counts',
                   label: '户数（成功/失败/总数）',
@@ -505,14 +590,12 @@ export default function BillingRuns() {
                   pagination={false}
                   columns={[
                     {
-                      title: '结算 ID',
-                      dataIndex: 'settlementId',
-                      key: 'settlementId',
-                      render: (id: string) => (
-                        <Tooltip title={id}>
-                          <span style={{ fontFamily: 'monospace' }}>{id.slice(0, 8)}…</span>
-                        </Tooltip>
-                      ),
+                      title: '用水户',
+                      key: 'account',
+                      render: (_: unknown, f: RunFailure) =>
+                        f.accountNo
+                          ? `${f.accountNo}${f.customerName ? ` · ${f.customerName}` : ''}`
+                          : '—',
                     },
                     {
                       title: '阶段',
@@ -543,13 +626,35 @@ export default function BillingRuns() {
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
               批次账单（{detail.bills.length} 张）
             </div>
+            {detail.successCount > detail.bills.length && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 8 }}
+                message={`有 ${detail.successCount - detail.bills.length} 户的账单已由同账期其他批次生成 —— 同一结算只会出账一次，不会重复出账。`}
+                description={
+                  detail.status === 'DRAFT' && detail.bills.length === 0
+                    ? '本批次名下没有账单：正式账单请查看「账单」页或该账期已过账的批次；若本批次为重复创建，可在列表行点「作废」清理。'
+                    : undefined
+                }
+              />
+            )}
+            {detail.status === 'DRAFT' &&
+              detail.generationStatus === 'GENERATING' && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 8 }}
+                  message="批次正在生成中，账单稍后可见 —— 请刷新详情。"
+                />
+              )}
             <Table<Bill>
               rowKey="id"
               size="small"
               columns={billColumns}
               dataSource={detail.bills}
               pagination={false}
-              scroll={{ y: 320 }}
+              scroll={{ x: 900, y: 320 }}
               locale={{ emptyText: '本批次暂无账单' }}
             />
           </>

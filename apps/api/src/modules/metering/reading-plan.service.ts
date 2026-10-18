@@ -9,6 +9,10 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { isBookDue, type BookCadence } from '../../common/reading-cadence.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
+import {
+  embedOrgNames,
+  embedStaffNames,
+} from '../../common/account-identity.js';
 import { assertAccountScopeTx } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 
@@ -123,11 +127,47 @@ export class ReadingPlanService {
         take: q.take,
         skip: q.skip,
       });
-      return rows.map((r) => {
+      const plans = rows.map((r) => {
         const { items, ...plan } = r as typeof r & { items?: unknown[] };
         return { ...plan, ...(items ? { myItem: items[0] ?? null } : {}) };
       });
+      return this.embedBookAndReader(tx, ctx, plans);
     });
+  }
+
+  /**
+   * 10/8 报告 §3：计划行内嵌 册号/册名/所属组织名/抄表员姓名 ——
+   * book_id 是裸列无 ORM 关系，批量二次查询后统一水合；无 iam:read
+   * 的角色不再看到截断 uuid。
+   */
+  private async embedBookAndReader<
+    T extends { bookId: string; readerId?: string | null },
+  >(tx: Prisma.TransactionClient, ctx: TenantCtx, rows: T[]) {
+    const bookIds = [...new Set(rows.map((r) => r.bookId))];
+    const books = bookIds.length
+      ? await tx.readingBook.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: bookIds } },
+          select: { id: true, bookNo: true, name: true, orgUnitId: true },
+        })
+      : [];
+    const byBook = new Map(books.map((b) => [b.id, b]));
+    const withBook = rows.map((r) => {
+      const b = byBook.get(r.bookId);
+      return {
+        ...r,
+        bookNo: b?.bookNo ?? null,
+        bookName: b?.name ?? null,
+        orgUnitId: b?.orgUnitId ?? null,
+      };
+    });
+    return embedOrgNames(
+      tx,
+      ctx.tenantId,
+      await embedStaffNames(tx, ctx.tenantId, withBook, {
+        readerId: 'readerName',
+      }),
+      { orgUnitId: 'orgUnitName' },
+    );
   }
 
   async getById(ctx: TenantCtx, id: string) {
@@ -141,10 +181,104 @@ export class ReadingPlanService {
       });
       if (!plan) return null;
       await this.assertPlanBookInScope(tx, ctx, plan.bookId);
-      return plan;
+      const items = await this.embedItemReadings(tx, ctx.tenantId, plan.items, plan.period);
+      const [enriched] = await this.embedBookAndReader(tx, ctx, [plan]);
+      return { ...enriched, items };
     });
     if (!row) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
     return row;
+  }
+
+  /**
+   * 10/12 报告 §3：计划明细人读化 —— 完成读数显示读数值而非读数 id；
+   * 并补"上一期抄表止度"（该计划表计在本期之前最后一条未被更正的
+   * 表度读数），供抄表员对照突增突减。
+   */
+  private async embedItemReadings<
+    T extends {
+      completedReadingId: string | null;
+      plannedInstallationId: string | null;
+      waterAccountId: string;
+    },
+  >(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    items: T[],
+    planPeriod: string,
+  ) {
+    const acctIds = [...new Set(items.map((i) => i.waterAccountId))];
+    const accounts = acctIds.length
+      ? await tx.waterAccount.findMany({
+          where: { tenantId, id: { in: acctIds } },
+          select: {
+            id: true,
+            accountNo: true,
+            addr: true,
+            customer: { select: { name: true } },
+          },
+        })
+      : [];
+    const acctMap = new Map(accounts.map((a) => [a.id, a]));
+    const completedIds = [
+      ...new Set(
+        items.map((i) => i.completedReadingId).filter((v): v is string => !!v),
+      ),
+    ];
+    const completed = completedIds.length
+      ? await tx.meterReading.findMany({
+          where: { tenantId, id: { in: completedIds } },
+          select: { id: true, readingValue: true },
+        })
+      : [];
+    const cvMap = new Map(completed.map((r) => [r.id, r.readingValue?.toString() ?? null]));
+    const instIds = [
+      ...new Set(
+        items
+          .map((i) => i.plannedInstallationId)
+          .filter((v): v is string => !!v),
+      ),
+    ];
+    const prevRows = instIds.length
+      ? await tx.$queryRaw<{ installation_id: string; reading_value: string | null }[]>`
+          SELECT DISTINCT ON (r.installation_id)
+                 r.installation_id, r.reading_value::text AS reading_value
+            FROM meter_reading r
+           WHERE r.tenant_id = ${tenantId}::uuid
+             AND r.installation_id IN (${Prisma.join(instIds.map((i) => Prisma.sql`${i}::uuid`))})
+             AND r.period < ${planPeriod}
+             AND r.reading_value IS NOT NULL
+             AND NOT EXISTS (
+                   SELECT 1 FROM meter_reading c
+                    WHERE c.tenant_id = r.tenant_id
+                      AND c.supersedes_reading_id = r.id)
+           ORDER BY r.installation_id, r.period DESC, r.created_at DESC`
+      : [];
+    const pvMap = new Map(prevRows.map((r) => [r.installation_id, r.reading_value]));
+    const insts = instIds.length
+      ? await tx.meterInstallation.findMany({
+          where: { tenantId, id: { in: instIds } },
+          select: { id: true, meter: { select: { meterNo: true } } },
+        })
+      : [];
+    const mnMap = new Map(insts.map((r) => [r.id, r.meter.meterNo]));
+    return items.map((i) => {
+      const acct = acctMap.get(i.waterAccountId);
+      return {
+        ...i,
+        accountNo: acct?.accountNo ?? null,
+        customerName: acct?.customer.name ?? null,
+        addr: acct?.addr ?? null,
+        meterNo: i.plannedInstallationId
+          ? (mnMap.get(i.plannedInstallationId) ?? null)
+          : null,
+        completedReadingValue: i.completedReadingId
+          ? (cvMap.get(i.completedReadingId) ?? null)
+          : null,
+        prevReadingValue: i.plannedInstallationId
+          ? (pvMap.get(i.plannedInstallationId) ?? null)
+          : null,
+      };
+    });
   }
 
   /** Paginated plan items (?status= filter); ordered by the snapshot seq_no. */
@@ -156,17 +290,18 @@ export class ReadingPlanService {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const plan = await tx.readingPlan.findFirst({
         where: { tenantId: ctx.tenantId, id: planId },
-        select: { id: true, bookId: true },
+        select: { id: true, bookId: true, period: true },
       });
       if (!plan) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
       await this.assertPlanBookInScope(tx, ctx, plan.bookId);
-      return tx.readingPlanItem.findMany({
+      const items = await tx.readingPlanItem.findMany({
         where: { tenantId: ctx.tenantId, planId, status: q.status },
         select: PLAN_ITEM_SELECT,
         orderBy: { seqNo: 'asc' },
         take: q.take,
         skip: q.skip,
       });
+      return this.embedItemReadings(tx, ctx.tenantId, items, plan.period);
     });
   }
 
