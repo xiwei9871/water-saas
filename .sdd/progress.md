@@ -257,3 +257,12 @@ a19c2a4 + 352d87f review fixes (scoped org trees/roles PUT guard/logout race/UX)
 - 新套件 `tests/e10/` + `playwright.e10.config.ts`: 36 用例全绿 —— 页面巡检×20 (无5xx/无裸uuid) + R1选择器/G1分类/G3渠道/R5代结/T2徽标/C1字典 控件级 + A1查询导出xlsx+审计留痕/B2/B3/G4字典增停启/G2核销登记撤销/A5 writtenOff/异常badge.
 - antd 测试要点: Select placeholder 在 .ant-select-selection-placeholder; 双字按钮自动插空格 (停 用); Switch 是 button.ant-switch; 下拉退场动画会让 :visible 匹配旧面板 → Enter 选高亮项最稳.
 - smoke: deploy/smoke.mts 32 checks 0 unexpected (Chrome 需 --no-proxy-server 绕系统代理).
+
+## G1–G5+S1 批次 + 抄表 H5 + 决策层报表改版 + N1–N6 (2026-10-16 → 10-18, pilot 86cb7ac)
+- G1–G5+S1 (bb69f31/bfd3b37): G1 违约金计提口径弹窗; G3 渠道对账（mock 对账单粘贴→核账批次→差异计数, POST /payments/recon 子路由曾遭 @Get(':id') 遮蔽→子控制器前置); G4 催缴通知单生成+打印留痕; G5 票据台账（收据号段领用/发票登记作废, 收款自动占号）; S1 报装独立域（申请→勘察→审批→装表→归档立户, 归档复用 parseOnboardWire 自动带客户/新建表, 用水类别对齐 USAGE_CATEGORY 枚举）。
+- 抄表工作台 H5 (66977e7/39bd853): /m/reading 裸路由（不进 AdminLayout, 自带登录守卫+metering:write）, 计划选择器列 OPEN/IN_PROGRESS 且 reader=我/未指派, 待抄队列按 seqNo 排序, 户卡回填 accountNo/customerName/addr/meterNo（embedItemReadings 扩展, 桌面端同受益）; 复用 POST /meter-readings source=APP + Idempotency-Key, ACTUAL/NO_READ 两分支, QC/复核规则零复制。坑: crypto.randomUUID 在非安全上下文(内网 http)undefined→白屏, 改安全回退 newIdemKey()。
+- 决策层报表改版 13 项 (37b2852/2fbb8c7): Q1 统一查询明细/汇总双 Tab + summary-trend 年度聚合+同比+维度(ALL/ORG/CATEGORY)+图+导出; Q2 指标查询页(搜索/定义/公式/当前值/近N期); Q3 核实非缺陷(导出路/上限/审计俱全); R1-R5 月报三层(KPI卡→echarts→规范表 21 指标)+勾选模板(tenant_param report.metrics.monthly)+年报分月合计; R6 company.name 租户参数; R7 orgUnitId 收费按 payment.org/水量账单按户→册归属+子树∩caller scope fail-closed; H1/H2 驾驶舱五区+/iam/my-prefs 个人视图(staff_pref 新表带 RLS)。窗口化指标引擎 metricsWindow(from,to,orgIds) 复用字典口径。
+- N1–N6 规范化 (86cb7ac): '/'=驾驶舱+'/workbench'=工作台拆菜单(无 report:read 自动重定向); 工作台四组模块卡(任务监控/业务办理/报表分析/系统管理+角标); '结算补差'→'结算管理'; utils/numfmt.ts 统一 fmtCent(¥千分位)/abbrevCN(万亿)/columnScale(整列统一单位); TrendChart 轴自适应; report.amountUnit 租户参数(元/万元)贯穿 meta/规范表/导出。
+- 部署注意: shared/compose.env 的 MIGRATION_DATABASE_URL runtime 指向受限 ws_app(无 public CREATE)——migrate deploy 必须显式传 owner 串(-e MIGRATION_DATABASE_URL=postgres://...); releases 目录按完整 sha 命名; api:3000 无 /v1 前缀, nginx 剥 /api 前缀。
+- 验证基线: API e2e 580+12(ops-report spec), e10 Playwright 41/41, web/api build ✓; 冒烟走 SSH 隧道 127.0.0.1:5185→192.168.3.185:5185(本机不在 pilot LAN)。
+- 公网勘误: water.manqiaotechnology.com→175.152.66.12 是另一套系统(A0xxx 数字错误码, 全路径 401), 与本项目无关; 试点仅内网 http://192.168.3.185:5185。
