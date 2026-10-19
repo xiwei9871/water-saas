@@ -266,3 +266,11 @@ a19c2a4 + 352d87f review fixes (scoped org trees/roles PUT guard/logout race/UX)
 - 部署注意: shared/compose.env 的 MIGRATION_DATABASE_URL runtime 指向受限 ws_app(无 public CREATE)——migrate deploy 必须显式传 owner 串(-e MIGRATION_DATABASE_URL=postgres://...); releases 目录按完整 sha 命名; api:3000 无 /v1 前缀, nginx 剥 /api 前缀。
 - 验证基线: API e2e 580+12(ops-report spec), e10 Playwright 41/41, web/api build ✓; 冒烟走 SSH 隧道 127.0.0.1:5185→192.168.3.185:5185(本机不在 pilot LAN)。
 - 公网勘误: water.manqiaotechnology.com→175.152.66.12 是另一套系统(A0xxx 数字错误码, 全路径 401), 与本项目无关; 试点仅内网 http://192.168.3.185:5185。
+
+## 抄表 H5 v2 + 表底 OCR 识别 (2026-10-19, pilot 4710762)
+- H5 v2 (fc224ab/d309d02): 查表顺序模式/重抄(supersede)/漏抄即待抄队列/搜索定位(户号·客户·地址·电话·表号)/拍照压缩上传/离线 localStorage 队列+幂等键/水表信息抽屉(口径·类别·上期止度)+现场联系信息 PATCH /water-accounts/:id/field-contact(白名单3字段,审计)/抄表统计抽屉; 强制拍照: 非户表必拍+非正常查表必拍(前端校验,服务端未硬拒以兼容旧数据)。
+- 表底识别 `POST /meter-readings/recognize` (metering:write, body {image:base64}): **纯传统 CV 不调大模型** — sharp 预处理→强圆判别(≥6 → 指针表)→字轮带检测+列向墨聚类窗口→tesseract.js 数字白名单(SPARSE_TEXT/SINGLE_LINE 双 psm × norm/negate/暗带gamma)→红轮小数边界(放宽 maroon 红+带纵向2.6×扩扫); 指针路径 Hough 圆(750px降采样)+径向暗像素角度采样+左列×1/×10/×100/×1000 组合。返回 {value,confidence,method,details,message} **仅参考不落库**, H5 预填+置信度提示人工核对。METER_OCR=off 关停。
+- tessdata: `apps/api/tessdata/eng.traineddata`(tessdata_fast 4MB) 已提交随源码进镜像, `langPath` 本地+`gzip:false`+`cacheMethod:none` 运行期零网络; TESSDATA_DIR 可覆盖。
+- 三类表实测: 混合字轮"0088+红7"→89(conf42,decimal_wheel_dropped); 暗光混合"00062"→9008(conf0 自动标低); 全指针8盘→300(conf53 POINTER_INFERRED_LAYOUT)。末轮半转/暗光为固有难点, 全部走人工核对兜底。
+- 验证: 单测 9/9 + ocr e2e 5/5 (401/400/403/合成图/乱码兜底), 全套 e2e 587+5, e10 40/41(1 消耗性跳过), 线上三图实测 5-8s/张。
+- 分支 feat/mobile-reading-v2 已推送未合 main (菜单顺序 09fcdd4 + H5v2 + OCR 同分支)。
