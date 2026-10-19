@@ -117,6 +117,24 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <FileTextOutlined />,
     element: <Tasks />,
   },
+  // S1 报装管理：独立于营销菜单组的业扩域（申请→勘察→审批→装表→归档），
+  // 业务流上先于客户建档，故排在客户管理之前。
+  {
+    key: 'install',
+    path: '/install',
+    label: '报装管理',
+    icon: <FileTextOutlined />,
+    perms: ['install:read'],
+    children: [
+      {
+        key: 'install-applications',
+        path: '/install/applications',
+        label: '报装申请',
+        perms: ['install:read'],
+        element: <InstallApplications />,
+      },
+    ],
+  },
   {
     key: 'customer',
     path: '/customer',
@@ -315,23 +333,6 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/payment/receipt-docs',
         label: '票据台账',
         element: <ReceiptDocs />,
-      },
-    ],
-  },
-  // S1 报装管理：独立于营销菜单组的业扩域（申请→勘察→审批→装表→归档）。
-  {
-    key: 'install',
-    path: '/install',
-    label: '报装管理',
-    icon: <FileTextOutlined />,
-    perms: ['install:read'],
-    children: [
-      {
-        key: 'install-applications',
-        path: '/install/applications',
-        label: '报装申请',
-        perms: ['install:read'],
-        element: <InstallApplications />,
       },
     ],
   },
