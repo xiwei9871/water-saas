@@ -19,6 +19,7 @@ import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 import { parseReadingCsv } from './csv-import.js';
+import { MeterOcrService } from './ocr/meter-ocr.service.js';
 import {
   MeterReadingService,
   type NumberedReadingInput,
@@ -164,6 +165,7 @@ export class MeterReadingController {
     private readonly svc: MeterReadingService,
     private readonly prisma: TenantPrismaService,
     private readonly idem: IdempotencyService,
+    private readonly ocr: MeterOcrService,
   ) {}
 
   /**
@@ -255,6 +257,27 @@ export class MeterReadingController {
         return { ...readings[0], reviewTasks };
       },
     );
+  }
+
+  /**
+   * POST /meter-readings/recognize — {image: <base64 jpeg/png or dataURL>}.
+   * Advisory only: returns {value, confidence, method, details}; the client
+   * prefills the reading box and the operator confirms before submit. The
+   * recognized value is never persisted by this endpoint.
+   */
+  @Post('recognize')
+  @Permissions('metering:write')
+  recognize(@Body() body: { image?: unknown }) {
+    if (typeof body?.image !== 'string' || body.image.length < 100) {
+      throw new BadRequestException({ code: 'IMAGE_REQUIRED' });
+    }
+    // Strip an optional dataURL prefix; cap ~1.4MB decoded (mobile photo
+    // compresses to ≈200-600KB jpeg → ≲800KB base64).
+    const b64 = body.image.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '');
+    if (b64.length > 1_900_000 || !/^[A-Za-z0-9+/=\s]+$/.test(b64)) {
+      throw new BadRequestException({ code: 'IMAGE_INVALID' });
+    }
+    return this.ocr.recognize(b64);
   }
 
   /**

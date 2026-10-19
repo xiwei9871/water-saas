@@ -163,6 +163,14 @@ export default function MobileReading() {
   const [readingValue, setReadingValue] = useState<number | null>(null);
   const [remark, setRemark] = useState('');
   const [photo, setPhoto] = useState<string | null>(null);
+  const [ocr, setOcr] = useState<{
+    value: string | null;
+    confidence: number;
+    method: string;
+    message?: string;
+  } | null>(null);
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const ocrReq = useRef(0);
   const [noReadOpen, setNoReadOpen] = useState(false);
   const [noReadForm] = Form.useForm<{ exceptionCode: string; estimateQty?: string; remark?: string }>();
   const [infoOpen, setInfoOpen] = useState(false);
@@ -219,6 +227,7 @@ export default function MobileReading() {
         setReadingValue(null);
         setRemark('');
         setPhoto(null);
+        setOcr(null);
       } catch (err) {
         message.error(apiErrorText(err));
       } finally {
@@ -341,6 +350,7 @@ export default function MobileReading() {
         setReadingValue(null);
         setRemark('');
         setPhoto(null);
+        setOcr(null);
         const [itemsRes, progRes] = await Promise.all([
           api.get(`/reading-plans/${planId}/items`, { params: { take: 500 } }),
           api.get(`/reading-plans/${planId}/progress`),
@@ -356,6 +366,7 @@ export default function MobileReading() {
           setReadingValue(null);
           setRemark('');
           setPhoto(null);
+          setOcr(null);
         } else {
           message.error(apiErrorText(err));
         }
@@ -427,6 +438,7 @@ export default function MobileReading() {
     setReadingValue(null);
     setRemark('');
     setPhoto(null);
+    setOcr(null);
   };
 
   const jumpTo = (it: PlanItem) => {
@@ -435,6 +447,7 @@ export default function MobileReading() {
       setReadingValue(null);
       setRemark('');
       setPhoto(null);
+      setOcr(null);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } else if (it.completedReadingId) {
       setReread(it);
@@ -611,12 +624,40 @@ export default function MobileReading() {
             </Space>
             <Upload
               accept="image/*"
-              capture="environment"
               showUploadList={false}
               beforeUpload={(file) => {
-                void compressPhoto(file).then(setPhoto).catch(() =>
-                  message.error('照片读取失败'),
-                );
+                void compressPhoto(file)
+                  .then((dataUrl) => {
+                    setPhoto(dataUrl);
+                    setOcr(null);
+                    setOcrBusy(true);
+                    const reqId = ++ocrReq.current;
+                    api
+                      .post<{
+                        value: string | null;
+                        confidence: number;
+                        method: string;
+                        message?: string;
+                      }>('/meter-readings/recognize', { image: dataUrl })
+                      .then((r) => {
+                        if (reqId !== ocrReq.current) return;
+                        const res = r.data;
+                        setOcr(res);
+                        if (res.value !== null) {
+                          const n = Number(res.value);
+                          if (Number.isFinite(n)) setReadingValue((v) => v ?? n);
+                        }
+                      })
+                      .catch(() => {
+                        if (reqId === ocrReq.current) {
+                          setOcr({ value: null, confidence: 0, method: 'none' });
+                        }
+                      })
+                      .finally(() => {
+                        if (reqId === ocrReq.current) setOcrBusy(false);
+                      });
+                  })
+                  .catch(() => message.error('照片读取失败'));
                 return false;
               }}
             >
@@ -636,6 +677,21 @@ export default function MobileReading() {
                 alt="表底照片"
                 style={{ width: '100%', borderRadius: 6, maxHeight: 160, objectFit: 'cover' }}
               />
+            )}
+            {ocrBusy && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                正在识别表底读数…
+              </Typography.Text>
+            )}
+            {!ocrBusy && ocr && (
+              <Typography.Text
+                style={{ fontSize: 12 }}
+                type={ocr.value !== null && ocr.confidence >= 55 ? 'success' : 'warning'}
+              >
+                {ocr.value !== null
+                  ? `识别参考 ${ocr.value}（置信度 ${ocr.confidence}%${ocr.method === 'pointer' ? '，指针表推断' : ''}），请核对表底后提交`
+                  : (ocr.message ?? '未能识别读数，请人工录入')}
+              </Typography.Text>
             )}
             <InputNumber
               size="large"

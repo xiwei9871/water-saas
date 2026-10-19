@@ -4,6 +4,7 @@ import { TaskModule } from '../task/task.module.js';
 import { EstimateController } from './estimate.controller.js';
 import { MeterReadingController } from './meter-reading.controller.js';
 import { MeterReadingService } from './meter-reading.service.js';
+import { MeterOcrService } from './ocr/meter-ocr.service.js';
 import { ReadingBookController } from './reading-book.controller.js';
 import { ReadingBookService } from './reading-book.service.js';
 import { ReadingPlanController } from './reading-plan.controller.js';
@@ -37,6 +38,7 @@ import { SettlementService } from './settlement.service.js';
     ReadingPlanService,
     MeterReadingService,
     SettlementService,
+    MeterOcrService,
   ],
 })
 export class MeteringModule {}
