@@ -213,9 +213,8 @@ export function pickRollerDigits(items: OcrResultItem[], img: ImageData, imgW: n
   return { digits: best.digits, confidence: Math.round(Math.min(0.99, best.score) * 100) };
 }
 
-/** 指针表盘列约定：左列 ×1/×10/×100/×1000 自上至下，右列 ×0.1/×0.01/…（只读 ×0.1 位）。 */
+/** 指针表盘列约定：左列 ×1/×10/×100/×1000 自上至下，右列小数位（只读 ×0.1）。 */
 const PTR_LEFT_MULTS = [1, 10, 100, 1000];
-const PTR_RIGHT_MULTS = [0.1, 0.01, 0.001, 0.0001];
 
 const ptrDbg = (m: string, v?: unknown) => {
   if (typeof window !== 'undefined' && (window as unknown as { __ocrDebug?: boolean }).__ocrDebug) {
@@ -530,7 +529,7 @@ function readPointerDials(items: OcrResultItem[], img: ImageData): { value: stri
   ptrDbg('mult', members.map((d) => [d.mult, Math.round(d.cx), Math.round(d.cy)]));
   if (!need.every((k) => intDials.some((d) => d.mult === k))) return null;
 
-  const readOne = (d: Dial): { digit: number; sharp: number } => {
+  const readOne = (d: Dial): { digit: number; sharp: number; v: number } => {
     // 自适应暗度阈值：针+刻字约占盘面最暗 20%；红针盘改用红色掩码。
     const rStat = d.r * 0.7;
     const lumas: number[] = [];
@@ -616,7 +615,6 @@ function readPointerDials(items: OcrResultItem[], img: ImageData): { value: stri
     }
     const bestA = (((best + (wDen ? wNum / wDen : 0)) * 2) % 360 + 360) % 360;
     const sharp = bestS / (sum / 180 || 1);
-    const ink = Math.round(bestS);
     const cw = d.cw ?? true;
     const v = cw ? bestA / 36 : (360 - bestA) / 36;
     const digit = ((Math.floor(v) % 10) + 10) % 10;
