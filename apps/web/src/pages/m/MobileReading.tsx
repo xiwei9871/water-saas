@@ -641,7 +641,8 @@ export default function MobileReading() {
                     }) => {
                       if (reqId !== ocrReq.current) return;
                       setOcr(res);
-                      if (res.value !== null) {
+                      // 低置信度不预填，只提示人工核对——避免旧兜底路径写入错值
+                      if (res.value !== null && res.confidence >= 55) {
                         const n = Number(res.value);
                         if (Number.isFinite(n)) setReadingValue((v) => v ?? n);
                       }
@@ -708,9 +709,11 @@ export default function MobileReading() {
                 style={{ fontSize: 12 }}
                 type={ocr.value !== null && ocr.confidence >= 55 ? 'success' : 'warning'}
               >
-                {ocr.value !== null
+                {ocr.value !== null && ocr.confidence >= 55
                   ? `识别参考 ${ocr.value}（置信度 ${ocr.confidence}%${ocr.method === 'pointer' ? '，指针表推断' : ocr.method === 'paddle-roller' ? '，本地字轮识别' : ''}），请核对表底后提交`
-                  : (ocr.message ?? '未能识别读数，请人工录入')}
+                  : ocr.value !== null
+                    ? `识别不确定（疑似 ${ocr.value}，置信度 ${ocr.confidence}%），未预填，请人工核对录入`
+                    : (ocr.message ?? '未能识别读数，请人工录入')}
               </Typography.Text>
             )}
             <InputNumber
