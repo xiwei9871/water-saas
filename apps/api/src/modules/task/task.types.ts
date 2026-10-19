@@ -61,6 +61,12 @@ export const TASK_TYPES: TaskTypeDef[] = [
     fallbackPerm: 'payment:write',
     bizRoute: '/payment/recon?focusId={bizId}',
   },
+  {
+    code: 'METER_SERVICE',
+    name: '表务工单',
+    fallbackPerm: 'metering:service',
+    bizRoute: '/metering/service-orders?focusId={bizId}',
+  },
 ];
 
 export const TASK_TYPE_CODES = TASK_TYPES.map((t) => t.code);

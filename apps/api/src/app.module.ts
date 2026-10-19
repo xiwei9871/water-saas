@@ -21,6 +21,7 @@ import { RemoteModule } from './modules/remote/remote.module.js';
 import { ReportModule } from './modules/report/report.module.js';
 import { ExceptionModule } from './modules/exception/exception.module.js';
 import { TaskModule } from './modules/task/task.module.js';
+import { ServiceOrderModule } from './modules/service-order/service-order.module.js';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { TaskModule } from './modules/task/task.module.js';
     DashboardModule,
     IntegrationModule,
     InstallModule,
+    ServiceOrderModule,
   ],
   controllers: [AppController],
   providers: [

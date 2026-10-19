@@ -78,6 +78,41 @@ export const INSTALL_REASON_LABELS: Record<InstallReason, string> = {
   PERIODIC_CHECK: '周期检定',
 };
 
+/** 表务工单服务类型（SERVICE_TYPE 字典镜像，20261019 需求 T1）。 */
+export const SERVICE_TYPE_LABELS: Record<string, string> = {
+  PERIODIC_CHECK: '周期校验',
+  DISPUTE_CHECK: '争议检定',
+  FAULT: '水表故障(换表)',
+  SUSPEND: '暂停供水(报停)',
+  STOP: '停水',
+  RESUME: '复水',
+  FLOW_LIMIT: '限流',
+  FACILITY_MAINTENANCE: '表位设施维护',
+  SITE_RECTIFICATION: '表位整改',
+  METER_GROUP_CLEANING: '表组清洁',
+  CLOSE: '销户(拆表销户)',
+};
+
+export const SERVICE_ORDER_STATUS_LABELS: Record<string, string> = {
+  PENDING_APPROVAL: '待审批',
+  APPROVED: '已审批',
+  DISPATCHED: '已派单',
+  EXECUTED: '已执行',
+  ARCHIVED: '已归档',
+  REJECTED: '已驳回',
+  CANCELLED: '已撤销',
+};
+
+export const SERVICE_ORDER_STATUS_COLORS: Record<string, string> = {
+  PENDING_APPROVAL: 'gold',
+  APPROVED: 'blue',
+  DISPATCHED: 'cyan',
+  EXECUTED: 'green',
+  ARCHIVED: 'default',
+  REJECTED: 'red',
+  CANCELLED: 'default',
+};
+
 export const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss');
 
 export const fmtDate = (iso?: string | null) =>

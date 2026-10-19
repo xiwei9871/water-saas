@@ -48,7 +48,8 @@ import { WaterAccountService } from './water-account.service.js';
     CloseAccountUseCase,
     { provide: FinancePort, useExisting: BillingFinancePort },
   ],
-  // 报装模块（S1 独立域）归档时复用立户向导事务
-  exports: [WaterAccountService],
+  // 报装模块（S1 独立域）归档时复用立户向导事务；
+  // 表务工单执行联动复用 suspend/resume/close/replace 事务件
+  exports: [WaterAccountService, MeterInstallationService, CloseAccountUseCase],
 })
 export class CustomerModule {}

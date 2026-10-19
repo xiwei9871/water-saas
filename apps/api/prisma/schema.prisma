@@ -66,6 +66,7 @@ enum AccountEventType {
   SUSPEND
   RESUME
   CLOSE
+  METER_CHECK
 }
 
 enum MeterStatus {
@@ -585,6 +586,7 @@ model WaterAccount {
   bills              Bill[]
   meterInstallations MeterInstallation[]
   householdProfiles  WaterAccountHouseholdProfile[]
+  serviceOrders      MeterServiceOrder[]
 
   @@unique([tenantId, accountNo])
   @@unique([tenantId, id])
@@ -1813,4 +1815,66 @@ model InstallApplication {
   @@unique([tenantId, id])
   @@index([tenantId, status])
   @@map("install_application")
+}
+
+// ---------------------------------------------------------------------------
+// 表务管理（2026-10-19 需求 T1-T4）：统一处置工单
+// ---------------------------------------------------------------------------
+
+enum ServiceOrderStatus {
+  PENDING_APPROVAL
+  APPROVED
+  DISPATCHED
+  EXECUTED
+  ARCHIVED
+  REJECTED
+  CANCELLED
+}
+
+/**
+ * 表务处置工单：11 类处置（SERVICE_TYPE 字典，sys_dict 可配置）统一工单。
+ * 流程：申请 PENDING_APPROVAL →(tenant_param meterService.requireApproval=false 免审)
+ * APPROVED → 派单 DISPATCHED(自动建 Task) → 执行回填 EXECUTED(域联动同事务) →
+ * 归档 ARCHIVED；驳回 REJECTED / 取消 CANCELLED。payload 为按类型的扩展字段
+ * （限流量/检定结论/换表三要素等），linkRef 记录联动产物（installation/event id）。
+ */
+model MeterServiceOrder {
+  id                  String             @id @default(uuid()) @db.Uuid
+  tenantId            String             @map("tenant_id") @db.Uuid
+  orderNo             String             @map("order_no")
+  waterAccountId      String             @map("water_account_id") @db.Uuid
+  meterInstallationId String?            @map("meter_installation_id") @db.Uuid
+  meterId             String?            @map("meter_id") @db.Uuid
+  serviceType         String             @map("service_type")
+  reason              String?
+  payload             Json?              @db.JsonB
+  status              ServiceOrderStatus @default(PENDING_APPROVAL)
+  applicantId         String?            @map("applicant_id") @db.Uuid
+  appliedAt           DateTime           @default(now()) @map("applied_at")
+  approverId          String?            @map("approver_id") @db.Uuid
+  approvedAt          DateTime?          @map("approved_at")
+  approvalNote        String?            @map("approval_note")
+  dispatcherId        String?            @map("dispatcher_id") @db.Uuid
+  assigneeId          String?            @map("assignee_id") @db.Uuid
+  dispatchedAt        DateTime?          @map("dispatched_at")
+  taskId              String?            @map("task_id") @db.Uuid
+  executedBy          String?            @map("executed_by") @db.Uuid
+  executedAt          DateTime?          @map("executed_at")
+  resultNote          String?            @map("result_note")
+  linkRef             Json?              @map("link_ref") @db.JsonB
+  archivedBy          String?            @map("archived_by") @db.Uuid
+  archivedAt          DateTime?          @map("archived_at")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  createdBy           String?            @map("created_by") @db.Uuid
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+  updatedBy           String?            @map("updated_by") @db.Uuid
+
+  waterAccount WaterAccount @relation(fields: [tenantId, waterAccountId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, orderNo])
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@index([tenantId, waterAccountId])
+  @@index([tenantId, serviceType, createdAt])
+  @@map("meter_service_order")
 }

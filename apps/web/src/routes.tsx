@@ -31,6 +31,7 @@ import ReadingPlans from './pages/metering/ReadingPlans';
 import RemoteDevices from './pages/metering/RemoteDevices';
 import RemoteEvents from './pages/metering/RemoteEvents';
 import RemoteSources from './pages/metering/RemoteSources';
+import ServiceOrders from './pages/metering/ServiceOrders';
 import Cashier from './pages/payment/Cashier';
 import CollectionNotices from './pages/payment/CollectionNotices';
 import DayClose from './pages/payment/DayClose';
@@ -200,6 +201,13 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/metering/readings',
         label: '抄表记录',
         element: <MeterReadings />,
+      },
+      {
+        key: 'metering-service-orders',
+        path: '/metering/service-orders',
+        label: '表务工单',
+        perms: ['metering:service'],
+        element: <ServiceOrders />,
       },
       {
         key: 'metering-remote-sources',

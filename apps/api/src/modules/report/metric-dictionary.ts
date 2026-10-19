@@ -22,7 +22,7 @@ export interface MetricDef {
   unavailableReason?: string;
 }
 
-export const METRIC_DICT_VERSION = '2026-10.v2';
+export const METRIC_DICT_VERSION = '2026-10.v3';
 
 export const METRIC_DICT: MetricDef[] = [
   {
@@ -347,6 +347,61 @@ export const METRIC_DICT: MetricDef[] = [
     formula: 'Σ prepayment_ledger_entry.amount（结算户维度汇总）',
     source: 'prepayment_ledger_entry',
     unit: 'cent',
+    direction: 'info',
+    available: true,
+  },
+  // ---- 20261019 表务管理 T11：表务处置统计指标 ----
+  {
+    code: 'SVC_ORDER_COUNT',
+    name: '表务工单量',
+    formula: '期间内 applied_at ∈ 期间的 meter_service_order 笔数（按 service_type 分组）',
+    source: 'meter_service_order',
+    unit: 'count',
+    direction: 'info',
+    available: true,
+  },
+  {
+    code: 'SVC_DONE_ON_TIME_RATE',
+    name: '表务按期完成率',
+    formula: 'applied_at→executed_at ≤ SLA 小时的已执行工单 ÷ 已执行工单（SLA=tenant_param.meterService.slaHours，默认 72h）',
+    source: 'meter_service_order(applied_at, executed_at)；SLA 取 tenant_param',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'SVC_AVG_HANDLE_HOURS',
+    name: '表务平均处置时长',
+    formula: 'avg(executed_at − applied_at) 小时（已执行工单）',
+    source: 'meter_service_order',
+    unit: 'count',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'SVC_REJECT_RATE',
+    name: '表务驳回率',
+    formula: 'status=REJECTED 工单 ÷ 期间内已审结工单（APPROVED+DISPATCHED+EXECUTED+ARCHIVED+REJECTED）',
+    source: 'meter_service_order',
+    unit: 'ratio',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'SVC_ARCHIVE_RATE',
+    name: '表务归档率',
+    formula: 'status=ARCHIVED 工单 ÷ 期间内已执行工单（EXECUTED+ARCHIVED）',
+    source: 'meter_service_order',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'SVC_REPLACE_COUNT',
+    name: '换表处置量',
+    formula: '期间内 executed_at ∈ 期间且 service_type=FAULT 的 meter_service_order 笔数',
+    source: 'meter_service_order(service_type=FAULT)',
+    unit: 'count',
     direction: 'info',
     available: true,
   },
