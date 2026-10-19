@@ -274,3 +274,15 @@ a19c2a4 + 352d87f review fixes (scoped org trees/roles PUT guard/logout race/UX)
 - 三类表实测: 混合字轮"0088+红7"→89(conf42,decimal_wheel_dropped); 暗光混合"00062"→9008(conf0 自动标低); 全指针8盘→300(conf53 POINTER_INFERRED_LAYOUT)。末轮半转/暗光为固有难点, 全部走人工核对兜底。
 - 验证: 单测 9/9 + ocr e2e 5/5 (401/400/403/合成图/乱码兜底), 全套 e2e 587+5, e10 40/41(1 消耗性跳过), 线上三图实测 5-8s/张。
 - 分支 feat/mobile-reading-v2 已推送未合 main (菜单顺序 09fcdd4 + H5v2 + OCR 同分支)。
+
+## 2026-10-19 表底 OCR 重构：PaddleOCR PP-OCRv6（浏览器本地推理）
+- 原因：自研 Tesseract/CV 管线在暗光字轮图上输出 `8`/`908`（真值 00062.825），不可靠。
+- 方案：`@paddleocr/paddleocr-js@0.4.2` + PP-OCRv6 small det/rec ONNX（非大模型）。
+  模型 tar(det-v6.tar/rec-v6.tar)+ort wasm/.mjs 打进 `apps/web/public/`，内网零外网依赖。
+- 解析层 `apps/web/src/utils/meter-ocr.ts`：纯数字框行聚类、逐字条带暖色(mean r-g>0)截断红轮小数、
+  4-6 位长度门（串号 >6 拒绝）、散布小数字框 ≥8 判为指针表返回 null → 回退服务端指针路径。
+- vite.config.ts dev 中间件直发 /ort、/ocr-models（绕过 public 导入限制）。
+- nginx.conf 加 /ort/ 与 /ocr-models/ location：.mjs 发 text/javascript（默认 octet-stream 会被
+  动态 import 拒绝）。deploy/ 资产（Dockerfile/compose/nginx.conf）本次起入库 git。
+- 线上实测三样片（57de6dc）：00062→62(99%)、0088→88(91%)、全指针 null→服务端兜底。
+- e10 移动抄表 spec 过；window.__meterOcr 诊断钩子可 console 直调。
