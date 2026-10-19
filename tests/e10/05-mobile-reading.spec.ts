@@ -83,7 +83,15 @@ test.describe('抄表工作台 H5', () => {
       await expect(page.getByText(item.accountNo).first()).toBeVisible();
     }
 
-    // 录入读数：上期止度+5（无上期则 5），走 ACTUAL（户表正读照片选填）
+    // 拍照（监控表/非户表必拍，户表选填）——统一先拍，顺带覆盖照片链路
+    await page.locator('input[type="file"]').setInputFiles({
+      name: 'site.jpg',
+      mimeType: 'image/jpeg',
+      buffer: TINY_JPEG,
+    });
+    await expect(page.getByRole('button', { name: /已拍照/ })).toBeVisible();
+
+    // 录入读数：上期止度+5（无上期则 5），走 ACTUAL
     const prev = item.prevReadingValue ? Number(item.prevReadingValue) : 0;
     const value = prev + 5;
     await page.getByPlaceholder('输入本期读数').fill(String(value));
