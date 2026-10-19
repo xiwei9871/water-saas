@@ -710,7 +710,7 @@ export default function MobileReading() {
                 type={ocr.value !== null && ocr.confidence >= 55 ? 'success' : 'warning'}
               >
                 {ocr.value !== null && ocr.confidence >= 55
-                  ? `识别参考 ${ocr.value}（置信度 ${ocr.confidence}%${ocr.method === 'pointer' ? '，指针表推断' : ocr.method === 'paddle-roller' ? '，本地字轮识别' : ''}），请核对表底后提交`
+                  ? `识别参考 ${ocr.value}（置信度 ${ocr.confidence}%${ocr.method === 'paddle-pointer' ? '，本地指针表推断' : ocr.method === 'pointer' ? '，指针表推断' : ocr.method === 'paddle-roller' ? '，本地字轮识别' : ''}），请核对表底后提交`
                   : ocr.value !== null
                     ? `识别不确定（疑似 ${ocr.value}，置信度 ${ocr.confidence}%），未预填，请人工核对录入`
                     : (ocr.message ?? '未能识别读数，请人工录入')}
