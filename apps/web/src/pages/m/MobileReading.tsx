@@ -45,6 +45,7 @@ import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { cleanBody, enumLabel, USAGE_CATEGORY_LABELS } from '../common';
 import { EXCEPTION_CODE_LABELS } from '../metering/common';
+import { recognizeMeterReading } from '../../utils/meter-ocr';
 
 interface PlanRow {
   id: string;
@@ -632,30 +633,49 @@ export default function MobileReading() {
                     setOcr(null);
                     setOcrBusy(true);
                     const reqId = ++ocrReq.current;
-                    api
-                      .post<{
-                        value: string | null;
-                        confidence: number;
-                        method: string;
-                        message?: string;
-                      }>('/meter-readings/recognize', { image: dataUrl })
-                      .then((r) => {
+                    const applyResult = (res: {
+                      value: string | null;
+                      confidence: number;
+                      method: string;
+                      message?: string;
+                    }) => {
+                      if (reqId !== ocrReq.current) return;
+                      setOcr(res);
+                      if (res.value !== null) {
+                        const n = Number(res.value);
+                        if (Number.isFinite(n)) setReadingValue((v) => v ?? n);
+                      }
+                    };
+                    // 先走浏览器本地 PaddleOCR（字轮表）；无可靠结果或本地推理失败时回退服务端识别（指针表兜底）
+                    const serverFallback = () => {
+                      api
+                        .post<{
+                          value: string | null;
+                          confidence: number;
+                          method: string;
+                          message?: string;
+                        }>('/meter-readings/recognize', { image: dataUrl })
+                        .then((r) => applyResult(r.data))
+                        .catch(() => {
+                          if (reqId === ocrReq.current) {
+                            setOcr({ value: null, confidence: 0, method: 'none' });
+                          }
+                        })
+                        .finally(() => {
+                          if (reqId === ocrReq.current) setOcrBusy(false);
+                        });
+                    };
+                    recognizeMeterReading(dataUrl)
+                      .then((local) => {
                         if (reqId !== ocrReq.current) return;
-                        const res = r.data;
-                        setOcr(res);
-                        if (res.value !== null) {
-                          const n = Number(res.value);
-                          if (Number.isFinite(n)) setReadingValue((v) => v ?? n);
+                        if (local) {
+                          applyResult(local);
+                          setOcrBusy(false);
+                        } else {
+                          serverFallback();
                         }
                       })
-                      .catch(() => {
-                        if (reqId === ocrReq.current) {
-                          setOcr({ value: null, confidence: 0, method: 'none' });
-                        }
-                      })
-                      .finally(() => {
-                        if (reqId === ocrReq.current) setOcrBusy(false);
-                      });
+                      .catch(serverFallback);
                   })
                   .catch(() => message.error('照片读取失败'));
                 return false;
@@ -689,7 +709,7 @@ export default function MobileReading() {
                 type={ocr.value !== null && ocr.confidence >= 55 ? 'success' : 'warning'}
               >
                 {ocr.value !== null
-                  ? `识别参考 ${ocr.value}（置信度 ${ocr.confidence}%${ocr.method === 'pointer' ? '，指针表推断' : ''}），请核对表底后提交`
+                  ? `识别参考 ${ocr.value}（置信度 ${ocr.confidence}%${ocr.method === 'pointer' ? '，指针表推断' : ocr.method === 'paddle-roller' ? '，本地字轮识别' : ''}），请核对表底后提交`
                   : (ocr.message ?? '未能识别读数，请人工录入')}
               </Typography.Text>
             )}
