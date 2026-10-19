@@ -61,8 +61,11 @@ const assertPeriod = (v: unknown, field = 'period'): string => {
   return v;
 };
 
-const optString = (v: unknown): string | null =>
-  typeof v === 'string' ? v.trim() || null : null;
+const optString = (v: unknown, maxLen = 4000): string | null => {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  return t && t.length <= maxLen ? t : null;
+};
 
 interface ReadingWireBody {
   planItemId?: string;
@@ -137,7 +140,7 @@ const parseReadingInput = (
     exceptionCode,
     readDate: assertOptionalDate(body.readDate, 'readDate'),
     source: (body.source as ReadingInput['source']) ?? defaultSource,
-    photoRef: optString(body.photoRef),
+    photoRef: optString(body.photoRef, 800_000),
     remark: optString(body.remark),
   };
 };

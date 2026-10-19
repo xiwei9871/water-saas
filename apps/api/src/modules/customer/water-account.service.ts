@@ -85,6 +85,13 @@ export interface WaterAccountPatchBody {
   addr?: string;
 }
 
+/** 抄表 APP 现场更正联系信息 —— metering:write 可用；只放白名单字段。 */
+export interface FieldContactBody {
+  addr?: string;
+  phone?: string;
+  locationRemark?: string;
+}
+
 export interface EventBody {
   effectiveDate?: Date;
   remark?: string;
@@ -880,6 +887,54 @@ export class WaterAccountService {
       },
       select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
     });
+  }
+
+  /**
+   * PATCH /water-accounts/:id/field-contact — 抄表员现场更正。
+   * 白名单三字段：户地址(water_account.addr)、联系电话(customer.phone)、
+   * 表位说明（当前 ACTIVE 安装的 location_remark）。审计走拦截器。
+   */
+  async fieldContactTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+    body: FieldContactBody,
+    req: Request,
+  ) {
+    const existing = await this.loadAccount(tx, ctx, id);
+    if (existing.status === 'CLOSED') throw invalidTransition('CLOSED', 'PATCH');
+    req.auditBefore = existing;
+    const wa = await tx.waterAccount.update({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      data: { addr: body.addr, updatedBy: ctx.staffId },
+      select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
+    });
+    if (body.phone !== undefined) {
+      await tx.customer.update({
+        where: {
+          tenantId_id: { tenantId: ctx.tenantId, id: existing.customerId },
+        },
+        data: { phone: body.phone, updatedBy: ctx.staffId },
+      });
+    }
+    if (body.locationRemark !== undefined) {
+      const inst = await tx.meterInstallation.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: id,
+          status: 'ACTIVE',
+        },
+        select: { id: true },
+        orderBy: { installedAt: 'desc' },
+      });
+      if (inst) {
+        await tx.meterInstallation.update({
+          where: { tenantId_id: { tenantId: ctx.tenantId, id: inst.id } },
+          data: { locationRemark: body.locationRemark, updatedBy: ctx.staffId },
+        });
+      }
+    }
+    return wa;
   }
 
   /**

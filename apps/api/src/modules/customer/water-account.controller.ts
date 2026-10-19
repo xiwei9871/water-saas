@@ -25,6 +25,7 @@ import {
   type EventBody,
   type TransferBody,
   type WaterAccountBody,
+  type FieldContactBody,
   type WaterAccountPatchBody,
 } from './water-account.service.js';
 
@@ -246,6 +247,24 @@ export class WaterAccountController {
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       this.svc.patchHouseholdProfileTx(tx, ctx, id, profileId, parsed, req),
+    );
+  }
+
+  /**
+   * PATCH /water-accounts/:id/field-contact — 抄表 APP 现场更正
+   * {addr?, phone?, locationRemark?}。metering:write 或 customer:write 可用。
+   */
+  @Patch(':id/field-contact')
+  @Permissions('metering:write', 'customer:write')
+  fieldContact(
+    @Param('id') id: string,
+    @Body() body: FieldContactBody,
+    @Req() req: Request,
+  ) {
+    assertUuid(id, 'id');
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.fieldContactTx(tx, ctx, id, body ?? {}, req),
     );
   }
 

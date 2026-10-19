@@ -214,7 +214,8 @@ export class ReadingPlanService {
             id: true,
             accountNo: true,
             addr: true,
-            customer: { select: { name: true } },
+            usageCategory: true,
+            customer: { select: { name: true, phone: true } },
           },
         })
       : [];
@@ -257,10 +258,14 @@ export class ReadingPlanService {
     const insts = instIds.length
       ? await tx.meterInstallation.findMany({
           where: { tenantId, id: { in: instIds } },
-          select: { id: true, meter: { select: { meterNo: true } } },
+          select: {
+            id: true,
+            locationRemark: true,
+            meter: { select: { meterNo: true, caliber: true } },
+          },
         })
       : [];
-    const mnMap = new Map(insts.map((r) => [r.id, r.meter.meterNo]));
+    const instMap = new Map(insts.map((r) => [r.id, r]));
     return items.map((i) => {
       const acct = acctMap.get(i.waterAccountId);
       return {
@@ -268,8 +273,16 @@ export class ReadingPlanService {
         accountNo: acct?.accountNo ?? null,
         customerName: acct?.customer.name ?? null,
         addr: acct?.addr ?? null,
+        usageCategory: acct?.usageCategory ?? null,
+        phone: acct?.customer.phone ?? null,
         meterNo: i.plannedInstallationId
-          ? (mnMap.get(i.plannedInstallationId) ?? null)
+          ? (instMap.get(i.plannedInstallationId)?.meter.meterNo ?? null)
+          : null,
+        caliber: i.plannedInstallationId
+          ? (instMap.get(i.plannedInstallationId)?.meter.caliber ?? null)
+          : null,
+        locationRemark: i.plannedInstallationId
+          ? (instMap.get(i.plannedInstallationId)?.locationRemark ?? null)
           : null,
         completedReadingValue: i.completedReadingId
           ? (cvMap.get(i.completedReadingId) ?? null)
