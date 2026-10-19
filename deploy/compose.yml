@@ -1,0 +1,47 @@
+name: water_saas
+services:
+  db:
+    image: postgres:15-alpine@sha256:ef9d1517df69c4d27dbb9ddcec14f431a2442628603f4e9daa429b92ae6c3cd1
+    restart: unless-stopped
+    env_file: ["${WATER_SHARED_DIR:?required}/db.env"]
+    volumes: ["water_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d water_pilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [water]
+  api:
+    image: water-saas-api:${WATER_RELEASE_SHA:?required}
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+      args: { RELEASE_SHA: "${WATER_RELEASE_SHA:?required}" }
+    restart: unless-stopped
+    env_file: ["${WATER_SHARED_DIR:?required}/runtime.env"]
+    depends_on:
+      db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/auth/me').then(r=>{if(r.status!==401)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [water]
+  web:
+    image: water-saas-web:${WATER_RELEASE_SHA:?required}
+    build:
+      context: ..
+      dockerfile: deploy/web.Dockerfile
+      args: { RELEASE_SHA: "${WATER_RELEASE_SHA:?required}" }
+    restart: unless-stopped
+    ports: ["${WATER_BIND_IP:-127.0.0.1}:${WATER_BIND_PORT:-5185}:80"]
+    depends_on:
+      api: { condition: service_healthy }
+    networks: [water]
+volumes:
+  water_data:
+    name: water_saas_pilot_data
+networks:
+  water:
+    name: water-saas-release
