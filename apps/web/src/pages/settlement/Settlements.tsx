@@ -47,6 +47,7 @@ import {
   fmtPeriod,
   fmtTime,
   newIdemKey,
+  SEGMENT_ROLE_LABELS,
   useWaterAccountLabels,
 } from '../common';
 import {
@@ -523,8 +524,20 @@ export default function Settlements() {
     {
       title: '表号',
       key: 'meterNo',
-      width: 120,
-      render: (_: unknown, c: ConsumptionComponent) => c.meterNo ?? '—',
+      width: 160,
+      render: (_: unknown, c: ConsumptionComponent) => (
+        <>
+          {c.meterNo ?? '—'}
+          {c.segmentRole ? (
+            <Tag
+              color={c.segmentRole === 'OLD_SEGMENT' ? 'orange' : 'green'}
+              style={{ marginLeft: 6 }}
+            >
+              {enumLabel(SEGMENT_ROLE_LABELS, c.segmentRole)}
+            </Tag>
+          ) : null}
+        </>
+      ),
     },
     {
       title: '来源',

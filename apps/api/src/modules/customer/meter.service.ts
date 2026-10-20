@@ -22,6 +22,8 @@ export const METER_SELECT = {
   model: true,
   caliber: true,
   maxDial: true,
+  checkPeriodYears: true,
+  lastCheckDate: true,
   parentMeterId: true,
   status: true,
   createdAt: true,
@@ -53,6 +55,24 @@ export interface MeterBody {
   model?: string;
   caliber?: string;
   maxDial?: Prisma.Decimal;
+  /** 检定周期年限；缺省按口径自动带入（≤25mm→6, ≤50→4, >50→2）。 */
+  checkPeriodYears?: number | null;
+  /** 上次检定日期（YYYY-MM-DD）。 */
+  lastCheckDate?: string | null;
+}
+
+/**
+ * 检定周期年限（20261020 核查 T4 / CJ/T 检定规程档位）：
+ * 口径 ≤25mm → 6 年；25–50mm → 4 年；>50mm → 2 年。
+ * 25mm 边界归小口径档（当地规程可另定，建档时可人工修正）。
+ */
+export function deriveCheckPeriodYears(caliber?: string | null): number | null {
+  if (!caliber) return null;
+  const m = /(\d+(?:\.\d+)?)/.exec(caliber);
+  if (!m) return null;
+  const mm = Number(m[1]);
+  if (!Number.isFinite(mm) || mm <= 0) return null;
+  return mm <= 25 ? 6 : mm <= 50 ? 4 : 2;
 }
 
 export interface MeterPatchBody extends MeterBody {
@@ -237,6 +257,9 @@ export class MeterService {
           model: body.model,
           caliber: body.caliber,
           maxDial: body.maxDial,
+          checkPeriodYears:
+            body.checkPeriodYears ?? deriveCheckPeriodYears(body.caliber),
+          lastCheckDate: body.lastCheckDate ? new Date(body.lastCheckDate) : null,
           status: 'AVAILABLE',
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
@@ -277,6 +300,12 @@ export class MeterService {
         model: body.model,
         caliber: body.caliber,
         maxDial: body.maxDial,
+        ...(body.checkPeriodYears !== undefined
+          ? { checkPeriodYears: body.checkPeriodYears }
+          : {}),
+        ...(body.lastCheckDate !== undefined
+          ? { lastCheckDate: body.lastCheckDate ? new Date(body.lastCheckDate) : null }
+          : {}),
         status: body.status,
         updatedBy: ctx.staffId,
       },

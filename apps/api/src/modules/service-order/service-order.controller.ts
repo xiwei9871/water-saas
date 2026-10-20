@@ -59,6 +59,8 @@ export class ServiceOrderController {
     @Query('status') status?: string,
     @Query('serviceType') serviceType?: string,
     @Query('waterAccountId') waterAccountId?: string,
+    @Query('orgUnitId') orgUnitId?: string,
+    @Query('sourceType') sourceType?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
@@ -68,8 +70,20 @@ export class ServiceOrderController {
       status: status && ORDER_STATUS.has(status) ? (status as ServiceOrderStatus) : undefined,
       serviceType,
       waterAccountId,
+      orgUnitId: orgUnitId ? assertUuid(orgUnitId) : undefined,
+      sourceType,
       from,
       to,
+    });
+  }
+
+  /** T4 到期检定扫描：默认提前 30 天（meterService.checkLeadDays 可配）。 */
+  @Post('scan-check-due')
+  @Permissions('metering:service')
+  scanCheckDue(@Body() body?: { leadDays?: number; asOf?: string }) {
+    return this.svc.scanCheckDue(currentTenant(), {
+      leadDays: body?.leadDays !== undefined ? Math.max(0, Math.trunc(body.leadDays)) : undefined,
+      asOf: body?.asOf,
     });
   }
 

@@ -4,22 +4,25 @@
  * permission guards, tenant ALS and RLS all apply.
  *
  * Covers:
- *  1. Full flow: create → approve → dispatch (auto Task METER_SERVICE) →
- *     execute (PERIODIC_CHECK writes AccountEvent METER_CHECK) → archive.
+ *  1. Full flow: create (SVC_APPROVAL task) → approve (task DONE) →
+ *     dispatch (SVC_EXECUTE task) → execute (PERIODIC_CHECK writes
+ *     AccountEvent METER_CHECK + meter.lastCheckDate 回写) → archive.
  *  2. tenant_param meterService.requireApproval=false → create lands
  *     APPROVED directly.
  *  3. FAULT execute → replaceTx 三要素分段 (old inst REMOVED + final,
  *     new inst ACTIVE + initial, linkRef populated).
  *  4. SUSPEND/RESUME execute → water_account status flip; execute replay
  *     is a no-op (no double SUSPEND event).
- *  5. CLOSE execute with ACTIVE installation → 409
- *     ACCOUNT_HAS_ACTIVE_INSTALLATION (order stays DISPATCHED).
+ *  5. CLOSE execute：录拆除止码 → removeTx 拆表 + 销户同事务；缺止码
+ *     → 400 CLOSE_FINAL_READING_REQUIRED，工单停 DISPATCHED。
  *  6. Transition guards: dispatch before approve, execute before
  *     dispatch, archive before execute → 409.
  *  7. REJECTED / CANCELLED terminal states.
  *  8. Permissions: staff without metering:service → 403; tenant-B admin
  *     sees nothing of tenant-A orders.
  *  9. meter-lifecycle timeline endpoint.
+ * 10. T4 scan-check-due 到期检定自动建单（幂等）；T5 来源字段 +
+ *     建单自动挂最新在装表位。
  */
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -175,7 +178,7 @@ afterAll(async () => {
 });
 
 describe('表务工单全流程', () => {
-  it('create → approve → dispatch(Task) → execute(METER_CHECK) → archive', async () => {
+  it('create → approve → dispatch(Task) → execute(METER_CHECK) → archive；任务双节点联动', async () => {
     const a = await onboard('flow');
     const created = await createOrder({
       waterAccountId: a.waterAccount.id,
@@ -186,6 +189,21 @@ describe('表务工单全流程', () => {
     const id = created.body.id as string;
     expect(created.body.orderNo).toMatch(/^SG\d{12}$/);
     expect(created.body.status).toBe('PENDING_APPROVAL');
+    // 只传表位 → meterId 自动带出；详情给目标表具档案
+    expect(created.body.meterId).toBe(a.meter.id);
+    const detail = (await get(`/service-orders/${id}`)).body;
+    expect(detail.targetMeter?.id).toBe(a.meter.id);
+    expect(detail.installation?.id).toBe(a.installation.id);
+
+    // T2：申请即建 SVC_APPROVAL 待办任务
+    const approvalTask = (
+      await owner.query(
+        `SELECT type, status::text AS status FROM task
+         WHERE tenant_id = $1 AND biz_type = 'service_order' AND biz_id = $2 AND type = 'SVC_APPROVAL'`,
+        [TA, id],
+      )
+    ).rows[0];
+    expect(approvalTask?.status).toBe('PENDING');
 
     // 守卫：未审批不能派单/执行
     await post(`/service-orders/${id}/dispatch`, {}).expect(409);
@@ -194,20 +212,30 @@ describe('表务工单全流程', () => {
     const approved = await post(`/service-orders/${id}/approve`, { note: 'ok' }).expect(201);
     expect(approved.body.status).toBe('APPROVED');
 
+    // 审批通过 → 审批任务完结
+    const afterApprove = (
+      await owner.query(
+        `SELECT status::text AS status FROM task
+         WHERE tenant_id = $1 AND biz_type = 'service_order' AND biz_id = $2 AND type = 'SVC_APPROVAL'`,
+        [TA, id],
+      )
+    ).rows[0];
+    expect(afterApprove.status).toBe('DONE');
+
     const dispatched = await post(`/service-orders/${id}/dispatch`, {
       assigneeId: STAFF_ADMIN_A,
     }).expect(201);
     expect(dispatched.body.status).toBe('DISPATCHED');
     expect(dispatched.body.taskId).toBeTruthy();
 
-    // 派单自动建了 METER_SERVICE 任务
+    // 派单自动建了 SVC_EXECUTE 任务
     const task = (
       await owner.query(
         `SELECT type, biz_type, status::text AS status FROM task WHERE tenant_id = $1 AND id = $2`,
         [TA, dispatched.body.taskId],
       )
     ).rows[0];
-    expect(task.type).toBe('METER_SERVICE');
+    expect(task.type).toBe('SVC_EXECUTE');
     expect(task.biz_type).toBe('service_order');
 
     // 守卫：未派单不能归档
@@ -217,19 +245,50 @@ describe('表务工单全流程', () => {
 
     const executed = await post(`/service-orders/${id}/execute`, {
       resultNote: '校验合格',
-      payload: { checkResult: 'PASS', effectiveDate: '2026-10-19' },
+      payload: {
+        checkOrg: '市计量院',
+        checkDate: '2026-10-19',
+        checkResult: 'PASS',
+        checkError: '+0.8',
+        certNo: 'CERT-2026-001',
+        photoRefs: ['site-photo-1'],
+      },
     }).expect(201);
     expect(executed.body.status).toBe('EXECUTED');
     expect(executed.body.linkRef.accountEventId).toBeTruthy();
+    expect(executed.body.linkRef.photoRefs).toEqual(['site-photo-1']);
 
-    // 检定档案留痕
+    // 执行任务完结
+    const afterExec = (
+      await owner.query(
+        `SELECT status::text AS status FROM task
+         WHERE tenant_id = $1 AND biz_type = 'service_order' AND biz_id = $2 AND type = 'SVC_EXECUTE'`,
+        [TA, id],
+      )
+    ).rows[0];
+    expect(afterExec.status).toBe('DONE');
+
+    // 检定档案留痕（机构/证书/误差全量入 payload）
     const ev = (
       await owner.query(
-        `SELECT type::text AS type FROM account_event WHERE tenant_id = $1 AND id = $2`,
+        `SELECT type::text AS type, payload FROM account_event WHERE tenant_id = $1 AND id = $2`,
         [TA, executed.body.linkRef.accountEventId],
       )
     ).rows[0];
     expect(ev.type).toBe('METER_CHECK');
+    expect(ev.payload.checkOrg).toBe('市计量院');
+    expect(ev.payload.certNo).toBe('CERT-2026-001');
+
+    // 检定日期回写表具档案 → 驱动下次到期扫描
+    const meter = (
+      await owner.query(
+        `SELECT last_check_date::text AS lcd, check_period_years AS cpy FROM meter
+         WHERE tenant_id = $1 AND id = $2`,
+        [TA, a.meter.id],
+      )
+    ).rows[0];
+    expect(meter.lcd.slice(0, 10)).toBe('2026-10-19');
+    expect(meter.cpy).toBe(6); // DN15 → 6 年自动带入
 
     // 重放安全：重复 execute 返回同一行，不再产生域动作
     const replay = await post(`/service-orders/${id}/execute`, { resultNote: 'x' }).expect(201);
@@ -337,7 +396,7 @@ describe('表务工单全流程', () => {
     expect(await accountStatus(a.waterAccount.id)).toBe('NORMAL');
   });
 
-  it('CLOSE 执行：有 ACTIVE 安装 → 409，工单停 DISPATCHED', async () => {
+  it('CLOSE 执行：录拆除止码 → 拆表 + 销户同事务；缺止码 400', async () => {
     const a = await onboard('close');
     const created = await createOrder({
       waterAccountId: a.waterAccount.id,
@@ -347,11 +406,37 @@ describe('表务工单全流程', () => {
     const id = created.body.id as string;
     await post(`/service-orders/${id}/approve`, {}).expect(201);
     await post(`/service-orders/${id}/dispatch`, {}).expect(201);
-    const res = await post(`/service-orders/${id}/execute`, { payload: {} });
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('ACCOUNT_HAS_ACTIVE_INSTALLATION');
-    const order = (await get(`/service-orders/${id}`)).body;
-    expect(order.status).toBe('DISPATCHED');
+
+    // 未录拆除读数 → 400，工单停 DISPATCHED
+    const bad = await post(`/service-orders/${id}/execute`, { payload: {} });
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe('CLOSE_FINAL_READING_REQUIRED');
+    expect((await get(`/service-orders/${id}`)).body.status).toBe('DISPATCHED');
+
+    // 录拆除止码 → removeTx 拆表 + CloseAccountUseCase 销户，同一事务
+    const executed = await post(`/service-orders/${id}/execute`, {
+      payload: { finalReading: 66, removedAt: '2026-10-20' },
+    }).expect(201);
+    expect(executed.body.status).toBe('EXECUTED');
+    expect(executed.body.linkRef.waterAccountStatus).toBe('CLOSED');
+    expect(await accountStatus(a.waterAccount.id)).toBe('CLOSED');
+    const inst = (
+      await owner.query(
+        `SELECT status::text AS s, final_reading::text AS fr FROM meter_installation
+         WHERE tenant_id = $1 AND id = $2`,
+        [TA, a.installation.id],
+      )
+    ).rows[0];
+    expect(inst.s).toBe('REMOVED');
+    expect(Number(inst.fr)).toBe(66);
+    // 拆表后表具回库可再装
+    const m = (
+      await owner.query(
+        `SELECT status::text AS s FROM meter WHERE tenant_id = $1 AND id = $2`,
+        [TA, a.meter.id],
+      )
+    ).rows[0];
+    expect(m.s).toBe('AVAILABLE');
   });
 
   it('REJECTED / CANCELLED 终态', async () => {
@@ -453,5 +538,76 @@ describe('表务工单全流程', () => {
     expect(Number(rec!.oldMeter.finalReading)).toBe(88);
     expect(rec!.newMeter).toBeTruthy();
     expect(Number(rec!.newMeter!.initialReading)).toBe(0);
+  });
+
+  it('T4 scan-check-due：到期检定自动生成工单+审批任务，幂等不重复', async () => {
+    const a = await onboard('due');
+    // DN15 → 6 年；上次检定 2020-01 → 下次 2026-01，今天已到期
+    await owner.query(
+      `UPDATE meter SET last_check_date = '2020-01-15', check_period_years = 6
+       WHERE tenant_id = $1 AND id = $2`,
+      [TA, a.meter.id],
+    );
+    const scan = (
+      await post('/service-orders/scan-check-due', { leadDays: 30 }).expect(201)
+    ).body as {
+      scanned: number;
+      created: { orderId: string; meterNo: string; waterAccountId: string }[];
+    };
+    const mine = scan.created.find((c) => c.waterAccountId === a.waterAccount.id);
+    expect(mine).toBeTruthy();
+    const order = (await get(`/service-orders/${mine!.orderId}`)).body;
+    expect(order.serviceType).toBe('PERIODIC_CHECK');
+    expect(order.sourceType).toBe('AUTO_CHECK');
+    expect(order.meterId).toBe(a.meter.id);
+    expect(order.meterInstallationId).toBe(a.installation.id);
+    expect(order.status).toBe('PENDING_APPROVAL');
+    // 到期工单也进审批待办
+    const t = (
+      await owner.query(
+        `SELECT count(*)::int AS n FROM task
+         WHERE tenant_id = $1 AND biz_type = 'service_order' AND biz_id = $2 AND type = 'SVC_APPROVAL'`,
+        [TA, order.id],
+      )
+    ).rows[0].n;
+    expect(t).toBe(1);
+
+    // 重复扫描：同表存在未完结检定工单 → 不再建
+    const scan2 = (
+      await post('/service-orders/scan-check-due', { leadDays: 30 }).expect(201)
+    ).body as { created: unknown[] };
+    expect(scan2.created.find((c) => (c as { orderId: string }).orderId === order.id)).toBeUndefined();
+
+    // 无检定属性的表不生成
+    const b = await onboard('nodue');
+    const scan3 = (
+      await post('/service-orders/scan-check-due', { leadDays: 30 }).expect(201)
+    ).body as { created: { waterAccountId: string }[] };
+    // onboard 新表口径 DN15 自动带入 6 年但无 lastCheckDate → 不生成
+    expect(scan3.created.every((c) => c.waterAccountId !== b.waterAccount.id)).toBe(true);
+  });
+
+  it('T5 READING_REPORT 来源 + 建单自动挂最新在装表位', async () => {
+    const a = await onboard('report');
+    // 不传表位/表号（抄表上报场景）→ 自动解析 ACTIVE 安装行
+    const created = await createOrder({
+      waterAccountId: a.waterAccount.id,
+      serviceType: 'FAULT',
+      reason: '现场表不走',
+      sourceType: 'READING_REPORT',
+      photoRefs: ['data:image/jpeg;base64,x'],
+    }).expect(201);
+    expect(created.body.sourceType).toBe('READING_REPORT');
+    expect(created.body.meterInstallationId).toBe(a.installation.id);
+    expect(created.body.meterId).toBe(a.meter.id);
+    expect(created.body.payload.photoRefs).toEqual(['data:image/jpeg;base64,x']);
+
+    // 非法/跨户读数引用 → 400
+    await createOrder({
+      waterAccountId: a.waterAccount.id,
+      serviceType: 'FAULT',
+      sourceType: 'READING_REPORT',
+      sourceReadingId: '00000000-0000-4000-8000-000000000000',
+    }).expect(400);
   });
 });

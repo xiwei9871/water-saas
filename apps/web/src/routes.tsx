@@ -9,8 +9,11 @@ import {
   SearchOutlined,
   SettingOutlined,
   TeamOutlined,
+  ToolOutlined,
   TransactionOutlined,
 } from '@ant-design/icons';
+
+import { Navigate } from 'react-router-dom';
 
 import type { ReactNode } from 'react';
 import Home from './pages/Home';
@@ -31,7 +34,9 @@ import ReadingPlans from './pages/metering/ReadingPlans';
 import RemoteDevices from './pages/metering/RemoteDevices';
 import RemoteEvents from './pages/metering/RemoteEvents';
 import RemoteSources from './pages/metering/RemoteSources';
-import ServiceOrders from './pages/metering/ServiceOrders';
+import ServiceOrders from './pages/service/ServiceOrders';
+import ServiceOrderStats from './pages/service/ServiceOrderStats';
+import ReplaceRecords from './pages/service/ReplaceRecords';
 import Cashier from './pages/payment/Cashier';
 import CollectionNotices from './pages/payment/CollectionNotices';
 import DayClose from './pages/payment/DayClose';
@@ -81,6 +86,8 @@ export interface AppRoute {
    * 重定向到 /workbench——路由不拦，菜单用 menuPerms 隐藏。
    */
   menuPerms?: string[];
+  /** 菜单隐藏但路由保留（旧路径重定向等）。 */
+  menuHidden?: boolean;
   element?: ReactNode;
   children?: AppRoute[];
 }
@@ -203,11 +210,14 @@ export const APP_ROUTES: AppRoute[] = [
         element: <MeterReadings />,
       },
       {
+        // 20261020 核查：表务工单提为一级「表务管理」——旧路径保留
+        // 重定向但不在菜单显示。
         key: 'metering-service-orders',
         path: '/metering/service-orders',
         label: '表务工单',
         perms: ['metering:service'],
-        element: <ServiceOrders />,
+        menuHidden: true,
+        element: <Navigate to="/service/orders" replace />,
       },
       {
         key: 'metering-remote-sources',
@@ -226,6 +236,34 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/metering/remote-events',
         label: '远传事件',
         element: <RemoteEvents />,
+      },
+    ],
+  },
+  {
+    // 20261020 核查：表务管理提为独立一级模块（原挂抄表管理下）。
+    key: 'service',
+    path: '/service',
+    label: '表务管理',
+    icon: <ToolOutlined />,
+    perms: ['metering:service'],
+    children: [
+      {
+        key: 'service-orders',
+        path: '/service/orders',
+        label: '表务工单',
+        element: <ServiceOrders />,
+      },
+      {
+        key: 'service-stats',
+        path: '/service/stats',
+        label: '处置统计',
+        element: <ServiceOrderStats />,
+      },
+      {
+        key: 'service-replace-records',
+        path: '/service/replace-records',
+        label: '换表记录',
+        element: <ReplaceRecords />,
       },
     ],
   },

@@ -87,9 +87,11 @@ interface ProgressRow {
 /** 非户表（非居民/特种/监控）抄表强制拍照 —— 文档第四步口径。 */
 const FORCED_PHOTO_CATEGORIES = new Set(['NON_RES', 'SPECIAL', 'MONITORING']);
 
-/** 离线待上传队列项 —— localStorage 持久化，联网后手动/自动上传。 */
+/** 离线待上传队列项 —— localStorage 持久化，联网后手动/自动上传。
+ *  url 缺省 /meter-readings；异常上报走 /service-orders。 */
 interface QueuedReading {
   planItemId: string;
+  url?: string;
   body: Record<string, unknown>;
   idemKey: string;
   queuedAt: string;
@@ -141,6 +143,14 @@ const STATUS_TAG: Record<PlanItem['status'], { color: string; text: string }> = 
   SKIPPED: { color: 'default', text: '已跳过' },
 };
 
+/** 现场异常 → 自动建对应表务工单（20261020 核查 T5）。 */
+const ANOMALY_TYPES = [
+  { value: 'FAULT', label: '水表损坏/停走 → 故障换表工单' },
+  { value: 'METER_GROUP_CLEANING', label: '表盘污浊不清 → 表组清洁工单' },
+  { value: 'FACILITY_MAINTENANCE', label: '表井积水/设施损坏 → 表位维护工单' },
+  { value: 'SITE_RECTIFICATION', label: '表位安装不当 → 表位整改工单' },
+];
+
 /**
  * 抄表工作台（H5）— 现场抄表员移动入口，挂 AdminLayout 外裸路由 /m/reading。
  * 按《抄表APP使用流程》实现：计划下载（更新数据）→ 顺序查表（续抄/跳过）→
@@ -174,6 +184,8 @@ export default function MobileReading() {
   const ocrReq = useRef(0);
   const [noReadOpen, setNoReadOpen] = useState(false);
   const [noReadForm] = Form.useForm<{ exceptionCode: string; estimateQty?: string; remark?: string }>();
+  const [anomalyOpen, setAnomalyOpen] = useState(false);
+  const [anomalyForm] = Form.useForm<{ serviceType: string; desc?: string }>();
   const [infoOpen, setInfoOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [reread, setReread] = useState<PlanItem | null>(null);
@@ -271,11 +283,12 @@ export default function MobileReading() {
   }, [items, filter, search]);
 
   const enqueue = useCallback(
-    (item: PlanItem, body: Record<string, unknown>) => {
+    (item: PlanItem, body: Record<string, unknown>, url?: string) => {
       persistQueue([
         ...queue,
         {
           planItemId: item.id,
+          url,
           body: cleanBody({ planItemId: item.id, source: 'APP', ...body }),
           idemKey: idemKey.current,
           queuedAt: new Date().toISOString(),
@@ -297,7 +310,7 @@ export default function MobileReading() {
     let bizFail = 0;
     for (const q of queue) {
       try {
-        await api.post('/meter-readings', q.body, {
+        await api.post(q.url ?? '/meter-readings', q.body, {
           headers: { 'Idempotency-Key': q.idemKey },
         });
         ok += 1;
@@ -426,6 +439,46 @@ export default function MobileReading() {
       if (planId) void loadItems(planId);
     } catch (err) {
       message.error(apiErrorText(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  /** 现场异常上报 → 自动生成对应表务工单（挂当前表位/照片，
+   *  离线入队联网随读数一起上传）。 */
+  const submitAnomaly = async () => {
+    if (!current) return;
+    const v = await anomalyForm.validateFields();
+    const label = ANOMALY_TYPES.find((a) => a.value === v.serviceType)?.label ?? '';
+    const body = {
+      waterAccountId: current.waterAccountId,
+      serviceType: v.serviceType,
+      reason: `[抄表上报·${label.split(' ')[0]}] ${v.desc ?? ''}`.trim(),
+      sourceType: 'READING_REPORT',
+      sourceReadingId: current.completedReadingId ?? undefined,
+      photoRefs: photo ? [photo] : [],
+    };
+    setSubmitting(true);
+    try {
+      if (navigator.onLine === false) throw new Error('OFFLINE');
+      const res = await api.post<{ orderNo: string }>(
+        '/service-orders',
+        cleanBody(body),
+        { headers: { 'Idempotency-Key': newIdemKey() } },
+      );
+      message.success(`异常已上报，表务工单 ${res.data.orderNo} 已生成`);
+      setAnomalyOpen(false);
+      anomalyForm.resetFields();
+    } catch (err) {
+      const status = (err as { response?: { status?: number } }).response?.status;
+      if (!status || (err as Error).message === 'OFFLINE') {
+        enqueue(current, body, '/service-orders');
+        message.warning('已离线保存上报，联网后随读数一起上传');
+        setAnomalyOpen(false);
+        anomalyForm.resetFields();
+      } else {
+        message.error(apiErrorText(err));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -760,6 +813,15 @@ export default function MobileReading() {
                 跳过
               </Button>
             </Space.Compact>
+            <Button
+              size="small"
+              type="dashed"
+              icon={<WarningOutlined />}
+              onClick={() => setAnomalyOpen(true)}
+              block
+            >
+              现场异常上报（损坏/污浊/积水 → 自动建工单）
+            </Button>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               顺序查表：提交后自动跳下一只；跳过可稍后回抄。
             </Typography.Text>
@@ -947,6 +1009,35 @@ export default function MobileReading() {
           </Form.Item>
           <Typography.Text type="warning" style={{ fontSize: 12 }}>
             非正常查表必须拍照（请先关闭本弹窗拍照再提交）。
+          </Typography.Text>
+        </Form>
+      </Modal>
+
+      {/* 现场异常上报 → 自动建表务工单（T5） */}
+      <Modal
+        title="现场异常上报"
+        open={anomalyOpen}
+        onOk={submitAnomaly}
+        okText="上报并建工单"
+        confirmLoading={submitting}
+        onCancel={() => setAnomalyOpen(false)}
+        destroyOnHidden
+      >
+        <Form form={anomalyForm} layout="vertical">
+          <Form.Item
+            name="serviceType"
+            label="异常类型"
+            rules={[{ required: true, message: '请选择异常类型' }]}
+          >
+            <Select size="large" options={ANOMALY_TYPES} />
+          </Form.Item>
+          <Form.Item name="desc" label="现场情况说明">
+            <Input.TextArea rows={3} maxLength={200} placeholder="如：表玻璃碎裂、指针停走、表井被水淹没" />
+          </Form.Item>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {photo
+              ? '已拍照片将随工单留证。'
+              : '未拍照——建议先关闭本弹窗拍照后再上报，照片作留证。'}
           </Typography.Text>
         </Form>
       </Modal>

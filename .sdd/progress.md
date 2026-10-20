@@ -286,3 +286,73 @@ a19c2a4 + 352d87f review fixes (scoped org trees/roles PUT guard/logout race/UX)
   动态 import 拒绝）。deploy/ 资产（Dockerfile/compose/nginx.conf）本次起入库 git。
 - 线上实测三样片（57de6dc）：00062→62(99%)、0088→88(91%)、全指针 null→服务端兜底。
 - e10 移动抄表 spec 过；window.__meterOcr 诊断钩子可 console 直调。
+
+## 2026-10-19 表务工单模块 (pilot e93b42e, 需求文档 T1-T6/T11/T12 批A)
+- 需求 20261019营销系统表务管理与功能补齐整合需求.docx：T7-T9 换表分段结算早已实现
+  （replaceTx 三要素强制+期中途换多段 component+已结算期阻断，settlement e2e 覆盖），
+  本次落地缺口 = 工单模块 + 统计 + 查询。
+- meter_service_order 表 + RLS + 11 类 SERVICE_TYPE 字典 + metering:service 权限
+  （迁移回填全部存量租户；新租户由 seed.ts 覆盖）。AccountEventType 增 METER_CHECK。
+- 流程：申请 → 审批(tenant_param meterService.requireApproval=false 可旁路) →
+  派单(同事务建 Task type=METER_SERVICE, 复用 task_open_dedupe) → 执行 → 归档；
+  REJECTED/CANCELLED 终态；所有迁移 guarded updateMany（并发负者 409）。
+- 执行域联动（同一事务，失败整体回滚）：PERIODIC_CHECK/DISPUTE_CHECK 写
+  AccountEvent(METER_CHECK)；FAULT → replaceTx(oldFinal/newInitial/newMeterId)；
+  SUSPEND/STOP → suspendTx；RESUME → resumeTx；CLOSE → CloseAccountUseCase
+  （欠款/预存校验内置）；execute 对 EXECUTED/ARCHIVED 幂等返回。
+- T11: GET /service-orders/stats（类型×状态分布+avg处置时长+SLA按期率，
+  tenant_param meterService.slaHours 默认72）；指标字典升 2026-10.v3 增 6 项
+  （工单量/按期率/平均时长/驳回率/归档率/换表处置量）。
+- T12: GET /service-orders/meter-lifecycle/:accountId（装/拆/工单/账户事件合并
+  时间线）；GET /service-orders/replace-records（reason=REPLACE/FAULT 新行反配
+  predecessor，输出 old.finalReading/new.initialReading 分段明细）。
+- 前端：抄表管理→表务工单 /metering/service-orders（perms metering:service）—
+  列表+类型/状态/日期筛选+发起 Modal(户搜索+ACTIVE安装行联动)+详情抽屉
+  状态化动作按钮+按类型执行回填表单+生命周期 Timeline+任务中心 ?focusId 直达。
+- 验证：service-order e2e 10/10；全套 597 通过（仅 e10 版本断言升 v3）；web/api 构建过。
+- 部署坑：compose run api 镜像 tag 受 WATER_RELEASE_SHA 影响 — 迁移前必须显式
+  导出目标 SHA，否则旧镜像里没有新迁移目录会显示 "No pending migrations"。
+- 试点冒烟：cd-water/admin 全流程 create→approve→dispatch→execute→archive 201，
+  METER_CHECK 事件落库，stats/lifecycle 正常。冒烟工单已留库（ARCHIVED 状态）。
+- 批B未动：总分表/库房生命周期/违章用水/银行代扣防重 — 下轮排。
+
+## 2026-10-20 核查报告整改 P0 (需求核查 20261020营销系统整合需求全面核查报告.docx)
+- 先分析再改：核查的"换表分段未实现/统计查询均无"为误判 —— 结算引擎早已按
+  installation 分段（settlement.service.ts 注释+双段 e2e），stats/lifecycle/
+  replace-records 端点已存在；真缺口=呈现层+任务驱动+检定周期+业务触发+
+  执行载荷+一级菜单。
+- 一级菜单：表务工单从抄表管理下提出为「表务管理」/service（ToolOutlined），
+  子页：工单管理 /service/orders、处置统计 /service/stats、换表记录
+  /service/replace-records；旧 /metering/service-orders menuHidden 重定向保留。
+- 任务双节点（task.types.ts 增 SVC_APPROVAL/SVC_EXECUTE，bizRoute 指
+  /service/orders?focusId=）：建单建审批任务、审批/驳回自动完结、派单建
+  执行任务、执行/归档/撤销自动完结 —— 全程走 TaskService dedupe+autoCompleteByBiz。
+- 检定周期：meter + check_period_years/last_check_date（迁移
+  20261020000000_check_fields_order_source）；MeterService.createTx 按口径
+  自动带入（≤25mm→6, 25-50→4, >50→2，25 归小口径档）；检定执行回写
+  lastCheckDate + AccountEvent 全字段（机构/日期/结果/误差/证书/下次日期）。
+- 到期扫描：POST /service-orders/scan-check-due（leadDays 默认30，
+  tenant_param meterService.checkLeadDays 可配）—— lastCheckDate+年限到期即
+  自动建 PERIODIC_CHECK(sourceType=AUTO_CHECK)+审批任务；同表有未完结检定
+  工单跳过；无检定属性的表不生成。e2e 覆盖幂等。
+- 业务触发：order + source_type/source_reading_id/org_unit_id（片区锚点取
+  覆盖册 orgUnitId）；READING_REPORT 校验读数归属户并自动带表位/表；
+  建单未传表位时自动挂最新 ACTIVE 安装行；H5 抄表页加「现场异常上报」
+  （损坏→FAULT/污浊→METER_GROUP_CLEANING/积水→FACILITY_MAINTENANCE/
+  表位不当→SITE_RECTIFICATION），复用压缩照片+离线队列（队列加 url 字段
+  支持 /service-orders 端点）。
+- 执行载荷全补齐（service-order.types.ts 分类型 parse*Payload）：检定
+  机构/日期/结果/误差/证书/下次日期；停复水生效日；限流方式/限值/恢复日期；
+  现场类 content+photoRefs；CLOSE 拆除止码+removedAt（缺→400
+  CLOSE_FINAL_READING_REQUIRED）→ removeTx 拆表 + CloseAccountUseCase 同事务；
+  全类型 photoRefs 并入 linkRef 留证。详情接口注入 targetMeter+installation
+  档案供执行屏展示。
+- 分段呈现：attachDetails 给每个 component 打 segmentRole
+  （removedAt∈结算期→OLD_SEGMENT 老表段 / installedAt∈结算期→NEW_SEGMENT
+  新表段），结算页表号列渲染橙/绿 Tag。
+- 验证：service-order e2e 12/12（任务双节点/检定回写/CLOSE拆表销户/
+  到期扫描幂等/来源自动解析）；回归 settlement+task-center+meter-lifecycle+
+  customer 104/104；全套 599（2 个并发 flake 单跑复绿）；web+api 构建过。
+- 迁移部署记录：测试库 _prisma_migrations 只缺新条目 → SQL 直跑 + 手工登记
+  checksum 行；dev 库照旧手工 SQL。试点部署仍需先导出 WATER_RELEASE_SHA 再
+  compose run api prisma migrate deploy。

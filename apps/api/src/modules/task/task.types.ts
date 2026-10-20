@@ -65,7 +65,20 @@ export const TASK_TYPES: TaskTypeDef[] = [
     code: 'METER_SERVICE',
     name: '表务工单',
     fallbackPerm: 'metering:service',
-    bizRoute: '/metering/service-orders?focusId={bizId}',
+    bizRoute: '/service/orders?focusId={bizId}',
+  },
+  {
+    // 20261020 核查 T2：表务双节点任务 —— 待审批/待执行分别进待办。
+    code: 'SVC_APPROVAL',
+    name: '表务审批',
+    fallbackPerm: 'metering:service',
+    bizRoute: '/service/orders?focusId={bizId}',
+  },
+  {
+    code: 'SVC_EXECUTE',
+    name: '表务处置',
+    fallbackPerm: 'metering:service',
+    bizRoute: '/service/orders?focusId={bizId}',
   },
 ];
 

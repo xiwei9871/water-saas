@@ -630,6 +630,11 @@ model Meter {
   model         String?
   caliber       String?
   maxDial       Decimal?    @map("max_dial") @db.Decimal(18, 4)
+  /** 检定周期年限（20261020 核查 T4）：DN≤25→6 / DN25–50→4 / DN>50→2，
+      入库按口径自动带入、可修正。 */
+  checkPeriodYears Int?     @map("check_period_years")
+  /** 上次检定日期；与 checkPeriodYears 合算出下次检定到期日。 */
+  lastCheckDate   DateTime? @map("last_check_date") @db.Date
   parentMeterId String?     @map("parent_meter_id") @db.Uuid
   status        MeterStatus @default(AVAILABLE)
   createdAt     DateTime    @default(now()) @map("created_at")
@@ -1848,6 +1853,12 @@ model MeterServiceOrder {
   serviceType         String             @map("service_type")
   reason              String?
   payload             Json?              @db.JsonB
+  /** 来源：MANUAL 人工发起 / READING_REPORT 抄表异常上报 / AUTO_CHECK 到期检定扫描。 */
+  sourceType          String             @default("MANUAL") @map("source_type")
+  /** 抄表上报时关联的 meter_reading.id。 */
+  sourceReadingId     String?            @map("source_reading_id") @db.Uuid
+  /** 片区锚点（责任册所属组织）— 统计按时间×片区用，建单时由覆盖册解析。 */
+  orgUnitId           String?            @map("org_unit_id") @db.Uuid
   status              ServiceOrderStatus @default(PENDING_APPROVAL)
   applicantId         String?            @map("applicant_id") @db.Uuid
   appliedAt           DateTime           @default(now()) @map("applied_at")

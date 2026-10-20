@@ -27,6 +27,7 @@ const toMenuItems = (
 ): MenuItem[] =>
   routes
     .filter((r) => {
+      if (r.menuHidden) return false;
       const gate = r.menuPerms ?? r.perms;
       return !gate || hasPerm(...gate);
     })
@@ -161,7 +162,7 @@ export default function AdminLayout() {
           mode="inline"
           items={items}
           selectedKeys={[selectedKeyOf(location.pathname)]}
-          defaultOpenKeys={['/customer', '/metering', '/settlement', '/system']}
+          defaultOpenKeys={['/customer', '/metering', '/service', '/settlement', '/system']}
           onClick={({ key }) => navigate(key)}
         />
       </Sider>

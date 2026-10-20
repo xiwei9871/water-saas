@@ -984,10 +984,35 @@ export class SettlementService {
     const insts = instIds.length
       ? await tx.meterInstallation.findMany({
           where: { tenantId: ctx.tenantId, id: { in: instIds } },
-          select: { id: true, meter: { select: { meterNo: true } } },
+          select: {
+            id: true,
+            installedAt: true,
+            removedAt: true,
+            meter: { select: { meterNo: true } },
+          },
         })
       : [];
+    const instById = new Map(insts.map((i) => [i.id, i]));
     const meterNoByInst = new Map(insts.map((i) => [i.id, i.meter.meterNo]));
+    // 换表分段角色（20261020 核查 T3）：分量所属安装行在结算期内被拆
+    // → 老表段；期内新装 → 新表段；否则整期段（null 不标）。期界按
+    // period=YYYYMM → [当月1日, 次月1日)。
+    const periodOf = new Map(
+      rows.map((r) => [r.id, (r as { period?: string }).period ?? '']),
+    );
+    const segRole = (installationId: string, period: string): string | null => {
+      const inst = instById.get(installationId);
+      if (!inst || !/^\d{6}$/.test(period)) return null;
+      const y = Number(period.slice(0, 4));
+      const m = Number(period.slice(4, 6));
+      const start = new Date(Date.UTC(y, m - 1, 1));
+      const end = new Date(Date.UTC(y, m, 1));
+      if (inst.removedAt && inst.removedAt >= start && inst.removedAt < end) {
+        return 'OLD_SEGMENT';
+      }
+      if (inst.installedAt >= start && inst.installedAt < end) return 'NEW_SEGMENT';
+      return null;
+    };
     const readingIds = [
       ...new Set(
         components
@@ -1013,6 +1038,7 @@ export class SettlementService {
       (bySettlement.get(settlementId) ?? []).map((c) => ({
         ...c,
         meterNo: meterNoByInst.get(c.installationId) ?? null,
+        segmentRole: segRole(c.installationId, periodOf.get(settlementId) ?? ''),
         sourceReading: (c.sourceReadingId && readingById.get(c.sourceReadingId)) ?? null,
       }));
     const streaks = await this.estimateStreaks(

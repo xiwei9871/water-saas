@@ -32,8 +32,10 @@ import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import {
   enumLabel,
+  fmtDate,
   fmtTime,
   newIdemKey,
+  ORDER_SOURCE_LABELS,
   SERVICE_ORDER_STATUS_COLORS,
   SERVICE_ORDER_STATUS_LABELS,
   SERVICE_TYPE_LABELS,
@@ -53,6 +55,8 @@ interface ServiceOrder {
   serviceType: string;
   reason: string | null;
   payload: Record<string, unknown> | null;
+  sourceType: string;
+  sourceReadingId: string | null;
   status: string;
   applicantId: string | null;
   applicantName?: string | null;
@@ -73,6 +77,28 @@ interface ServiceOrder {
   linkRef: Record<string, unknown> | null;
   archivedAt: string | null;
   createdAt: string;
+  /** 详情接口注入（T6 执行屏）：目标表具档案 + 关联表位。 */
+  targetMeter?: {
+    id: string;
+    meterNo: string;
+    serialNo: string | null;
+    caliber: string | null;
+    brand: string | null;
+    model: string | null;
+    maxDial: string | null;
+    checkPeriodYears: number | null;
+    lastCheckDate: string | null;
+    status: string;
+  } | null;
+  installation?: {
+    id: string;
+    status: string;
+    installedAt: string;
+    removedAt: string | null;
+    initialReading: string;
+    finalReading: string | null;
+    locationRemark: string | null;
+  } | null;
 }
 
 interface LifecycleItem {
@@ -92,10 +118,17 @@ const TYPE_OPTIONS = Object.entries(SERVICE_TYPE_LABELS).map(([value, label]) =>
   label,
 }));
 
-/** 需要执行联动表单的类型 → 该类型载荷字段。 */
+/** 需要执行联动表单的类型 → 该类型载荷字段（20261020 核查 T6 全字段）。 */
 const NEEDS_CHECK_RESULT = new Set(['PERIODIC_CHECK', 'DISPUTE_CHECK']);
 const NEEDS_REPLACE_FIELDS = new Set(['FAULT']);
-const IS_STATUS_FLIP = new Set(['SUSPEND', 'STOP', 'RESUME', 'CLOSE']);
+const IS_STATUS_FLIP = new Set(['SUSPEND', 'STOP', 'RESUME']);
+const IS_FLOW_LIMIT = new Set(['FLOW_LIMIT']);
+const IS_SITE_WORK = new Set([
+  'FACILITY_MAINTENANCE',
+  'SITE_RECTIFICATION',
+  'METER_GROUP_CLEANING',
+]);
+const IS_CLOSE = new Set(['CLOSE']);
 
 export default function ServiceOrders() {
   const { message } = AntdApp.useApp();
@@ -199,9 +232,15 @@ export default function ServiceOrders() {
     if (!detail) return;
     const v = await execForm.validateFields();
     const payload: Record<string, unknown> = {};
+    const d = (x?: dayjs.Dayjs) => (x ? x.format('YYYY-MM-DD') : undefined);
     if (NEEDS_CHECK_RESULT.has(detail.serviceType)) {
+      payload.checkOrg = v.checkOrg;
+      payload.checkDate = d(v.checkDate);
       payload.checkResult = v.checkResult;
-      if (v.effectiveDate) payload.effectiveDate = v.effectiveDate.format('YYYY-MM-DD');
+      payload.checkError = v.checkError;
+      payload.certNo = v.certNo;
+      payload.nextCheckDate = d(v.nextCheckDate);
+      payload.effectiveDate = d(v.checkDate ?? v.effectiveDate);
     } else if (NEEDS_REPLACE_FIELDS.has(detail.serviceType)) {
       payload.newMeterId = v.newMeterId;
       payload.oldFinalReading = v.oldFinalReading;
@@ -211,6 +250,23 @@ export default function ServiceOrders() {
     } else if (IS_STATUS_FLIP.has(detail.serviceType)) {
       if (v.effectiveDate) payload.effectiveDate = v.effectiveDate.format('YYYY-MM-DD');
       if (v.remark) payload.remark = v.remark;
+    } else if (IS_FLOW_LIMIT.has(detail.serviceType)) {
+      payload.limitMethod = v.limitMethod;
+      payload.limitValue = v.limitValue;
+      payload.effectiveDate = d(v.effectiveDate);
+      payload.restoreDate = d(v.restoreDate);
+    } else if (IS_SITE_WORK.has(detail.serviceType)) {
+      payload.content = v.content;
+    } else if (IS_CLOSE.has(detail.serviceType)) {
+      payload.finalReading = v.finalReading;
+      payload.removedAt = d(v.removedAt);
+      if (v.installationId) payload.meterInstallationId = v.installationId;
+      if (v.remark) payload.remark = v.remark;
+    }
+    if (v.photoRefs) {
+      payload.photoRefs = String(v.photoRefs)
+        .split(/[\s,，;；]+/)
+        .filter(Boolean);
     }
     try {
       await api.post(
@@ -298,6 +354,12 @@ export default function ServiceOrders() {
             {enumLabel(SERVICE_ORDER_STATUS_LABELS, v)}
           </Tag>
         ),
+      },
+      {
+        title: '来源',
+        dataIndex: 'sourceType',
+        width: 90,
+        render: (v: string) => enumLabel(ORDER_SOURCE_LABELS, v),
       },
       { title: '申请人', dataIndex: 'applicantName', width: 100, render: (v) => v ?? '—' },
       { title: '执行人', dataIndex: 'assigneeName', width: 100, render: (v) => v ?? '—' },
@@ -438,9 +500,23 @@ export default function ServiceOrders() {
               <Descriptions.Item label="服务类型">
                 {enumLabel(SERVICE_TYPE_LABELS, detail.serviceType)}
               </Descriptions.Item>
+              <Descriptions.Item label="来源">
+                <Tag>{enumLabel(ORDER_SOURCE_LABELS, detail.sourceType)}</Tag>
+                {detail.sourceReadingId
+                  ? `读数 ${detail.sourceReadingId.slice(0, 8)}…`
+                  : ''}
+              </Descriptions.Item>
               <Descriptions.Item label="用水户">
                 {detail.waterAccountId.slice(0, 8)}…
               </Descriptions.Item>
+              {detail.targetMeter ? (
+                <Descriptions.Item label="目标表具">
+                  {detail.targetMeter.meterNo} · 口径{' '}
+                  {detail.targetMeter.caliber ?? '—'} · 检定周期{' '}
+                  {detail.targetMeter.checkPeriodYears ?? '未设'}年 · 上次检定{' '}
+                  {fmtDate(detail.targetMeter.lastCheckDate)}
+                </Descriptions.Item>
+              ) : null}
               <Descriptions.Item label="事由">{detail.reason ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="申请">
                 {detail.applicantName ?? '—'} · {fmtTime(detail.appliedAt)}
@@ -585,9 +661,42 @@ export default function ServiceOrders() {
         destroyOnHidden
         width={520}
       >
+        {detail?.targetMeter && (
+          <Card size="small" title="目标表具档案" style={{ marginBottom: 16 }}>
+            <Descriptions column={2} size="small">
+              <Descriptions.Item label="表号">
+                {detail.targetMeter.meterNo}
+              </Descriptions.Item>
+              <Descriptions.Item label="口径">
+                {detail.targetMeter.caliber ?? '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="检定周期">
+                {detail.targetMeter.checkPeriodYears
+                  ? `${detail.targetMeter.checkPeriodYears} 年`
+                  : '未设'}
+              </Descriptions.Item>
+              <Descriptions.Item label="上次检定">
+                {fmtDate(detail.targetMeter.lastCheckDate)}
+              </Descriptions.Item>
+              <Descriptions.Item label="表位读数">
+                始 {detail.installation?.initialReading ?? '—'} / 止{' '}
+                {detail.installation?.finalReading ?? '—'}
+              </Descriptions.Item>
+              <Descriptions.Item label="表位位置">
+                {detail.installation?.locationRemark ?? '—'}
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
+        )}
         <Form form={execForm} layout="vertical">
           {detail && NEEDS_CHECK_RESULT.has(detail.serviceType) && (
             <>
+              <Form.Item name="checkOrg" label="检定机构">
+                <Input placeholder="检定/校准机构名称" />
+              </Form.Item>
+              <Form.Item name="checkDate" label="检定日期">
+                <DatePicker style={{ width: '100%' }} />
+              </Form.Item>
               <Form.Item
                 name="checkResult"
                 label="检定结果"
@@ -601,7 +710,17 @@ export default function ServiceOrders() {
                   ]}
                 />
               </Form.Item>
-              <Form.Item name="effectiveDate" label="生效日期">
+              <Form.Item name="checkError" label="示值误差(%)">
+                <Input placeholder="如 +1.2" />
+              </Form.Item>
+              <Form.Item name="certNo" label="检定证书号">
+                <Input />
+              </Form.Item>
+              <Form.Item
+                name="nextCheckDate"
+                label="下次检定日期"
+                tooltip="缺省按 检定日期+检定周期年限 推算"
+              >
                 <DatePicker style={{ width: '100%' }} />
               </Form.Item>
             </>
@@ -659,6 +778,74 @@ export default function ServiceOrders() {
               </Form.Item>
             </>
           )}
+          {detail && IS_FLOW_LIMIT.has(detail.serviceType) && (
+            <>
+              <Form.Item name="limitMethod" label="限流方式">
+                <Select
+                  allowClear
+                  options={[
+                    { value: 'THROTTLE', label: '阀门节流' },
+                    { value: 'ORIFICE', label: '限流片' },
+                    { value: 'PRESSURE', label: '压力控制' },
+                    { value: 'OTHER', label: '其他' },
+                  ]}
+                />
+              </Form.Item>
+              <Form.Item name="limitValue" label="限流值">
+                <Input placeholder="如 2 m³/h" />
+              </Form.Item>
+              <Form.Item name="effectiveDate" label="限流开始日期">
+                <DatePicker style={{ width: '100%' }} />
+              </Form.Item>
+              <Form.Item name="restoreDate" label="恢复日期">
+                <DatePicker style={{ width: '100%' }} />
+              </Form.Item>
+            </>
+          )}
+          {detail && IS_SITE_WORK.has(detail.serviceType) && (
+            <Form.Item name="content" label="作业内容记录">
+              <Input.TextArea rows={3} placeholder="维护/整改/清洁内容与处理情况" />
+            </Form.Item>
+          )}
+          {detail && IS_CLOSE.has(detail.serviceType) && (
+            <>
+              {!detail.meterInstallationId && (
+                <Form.Item
+                  name="installationId"
+                  label="拆除表位(安装记录)"
+                  tooltip="缺省取该户最新在装表位"
+                >
+                  <Select
+                    allowClear
+                    options={activeInstallations.map((i) => ({
+                      value: i.id,
+                      label: `安装 ${i.id.slice(0, 8)}…`,
+                    }))}
+                  />
+                </Form.Item>
+              )}
+              <Form.Item
+                name="finalReading"
+                label="拆除止码"
+                rules={[{ required: true, message: '必填' }]}
+              >
+                <InputNumber style={{ width: '100%' }} min={0} precision={4} />
+              </Form.Item>
+              <Form.Item name="removedAt" label="拆除日期">
+                <DatePicker style={{ width: '100%' }} />
+              </Form.Item>
+              <Form.Item name="remark" label="备注">
+                <Input />
+              </Form.Item>
+            </>
+          )}
+          <Form.Item
+            name="photoRefs"
+            label="现场照片引用"
+            tooltip="处置前/后照片的上传引用，空格或逗号分隔"
+          >
+            <Input.TextArea rows={2} placeholder="photo-ref-1, photo-ref-2" />
+          </Form.Item>
           <Form.Item name="resultNote" label="处置结果说明">
             <Input.TextArea rows={2} placeholder="现场处置情况" />
           </Form.Item>

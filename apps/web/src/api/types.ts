@@ -533,6 +533,8 @@ export interface ConsumptionComponent {
   sourceReadingId: string | null;
   /** 人读引用（9·30 报告 §3）：表号 + 来源读数概要。 */
   meterNo: string | null;
+  /** 换表分段角色（20261020 核查 T3）：期中途换表 → 老表段/新表段，整期段为 null。 */
+  segmentRole?: 'OLD_SEGMENT' | 'NEW_SEGMENT' | null;
   sourceReading: {
     id: string;
     period: string;

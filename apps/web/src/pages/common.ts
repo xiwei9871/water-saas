@@ -113,6 +113,19 @@ export const SERVICE_ORDER_STATUS_COLORS: Record<string, string> = {
   CANCELLED: 'default',
 };
 
+/** 工单来源（20261020 核查 T5）。 */
+export const ORDER_SOURCE_LABELS: Record<string, string> = {
+  MANUAL: '人工发起',
+  READING_REPORT: '抄表上报',
+  AUTO_CHECK: '到期检定',
+};
+
+/** 结算分量分段角色（20261020 核查 T3）：期中途换表的老/新表段。 */
+export const SEGMENT_ROLE_LABELS: Record<string, string> = {
+  OLD_SEGMENT: '老表段',
+  NEW_SEGMENT: '新表段',
+};
+
 export const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss');
 
 export const fmtDate = (iso?: string | null) =>
