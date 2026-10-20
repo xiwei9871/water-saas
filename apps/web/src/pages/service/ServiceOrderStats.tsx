@@ -89,13 +89,14 @@ export default function ServiceOrderStats() {
       title: '平均处置时长(h)',
       dataIndex: 'avgHours',
       width: 140,
-      render: (v: number | null) => (v === null ? '—' : v.toFixed(1)),
+      render: (v: number | null | undefined) => (v == null ? '—' : v.toFixed(1)),
     },
     {
       title: `按期完成率(≤${slaHours}h)`,
       dataIndex: 'onTimeRate',
       width: 160,
-      render: (v: number | null) => (v === null ? '—' : `${(v * 100).toFixed(1)}%`),
+      render: (v: number | null | undefined) =>
+        v == null ? '—' : `${(v * 100).toFixed(1)}%`,
     },
   ];
 
