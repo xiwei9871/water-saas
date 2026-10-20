@@ -60,7 +60,7 @@ export default function ServiceOrderStats() {
       for (const d of res.data.durations) {
         const t = byType.get(d.service_type);
         if (!t) continue;
-        t.avgHours = d.avg_hours;
+        t.avgHours = d.avg_hours === null ? null : Number(d.avg_hours);
         const done = Number(d.done);
         t.onTimeRate = done > 0 ? Number(d.on_time) / done : null;
       }
