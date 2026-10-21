@@ -1,0 +1,26 @@
+import { chromium } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+const B = 'http://192.168.3.185:5185';
+const path = process.argv[2];
+const mime = path.endsWith('.png') ? 'image/png' : 'image/jpeg';
+const img = readFileSync(path).toString('base64');
+const b = await chromium.launch();
+const p = await b.newPage();
+const logs = [];
+p.on('console', (m) => { const t = m.text(); if (t.includes('[ptr]')) logs.push(t); });
+p.on('pageerror', (e) => console.log('PAGEERR', e.message));
+await p.goto(B + '/login', { waitUntil: 'networkidle' });
+await p.locator('input').nth(0).fill('cd-water');
+await p.locator('input').nth(1).fill('admin');
+await p.locator('input[type="password"]').fill('admin12345');
+await p.click('button[type="submit"]');
+await p.waitForTimeout(2500);
+await p.evaluate(() => { window.__ocrDebug = true; });
+const res = await p.evaluate(async ([b64, m]) => {
+  const hook = window.__meterOcr;
+  if (!hook) return { err: 'no hook' };
+  return await hook.recognizeMeterReading('data:' + m + ';base64,' + b64);
+}, [img, mime]);
+console.log('OCR-RESULT:', path.split('/').pop(), JSON.stringify(res));
+logs.slice(-14).forEach((l) => console.log(l));
+await b.close();

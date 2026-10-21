@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { CustomerModule } from '../customer/customer.module.js';
 import { TaskModule } from '../task/task.module.js';
+import { MeterStockController } from './meter-stock.controller.js';
+import { MeterStockService } from './meter-stock.service.js';
 import { ServiceOrderController } from './service-order.controller.js';
 import { ServiceOrderCron } from './service-order.cron.js';
 import { ServiceOrderService } from './service-order.service.js';
@@ -13,7 +15,7 @@ import { ServiceOrderService } from './service-order.service.js';
  */
 @Module({
   imports: [CustomerModule, TaskModule],
-  controllers: [ServiceOrderController],
-  providers: [ServiceOrderService, ServiceOrderCron],
+  controllers: [ServiceOrderController, MeterStockController],
+  providers: [ServiceOrderService, ServiceOrderCron, MeterStockService],
 })
 export class ServiceOrderModule {}

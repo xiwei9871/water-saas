@@ -30,6 +30,7 @@ import WaterAccounts from './pages/customer/WaterAccounts';
 import Exceptions from './pages/exception/Exceptions';
 import MeterReadings from './pages/metering/MeterReadings';
 import MeterRelations from './pages/metering/MeterRelations';
+import MeterStock from './pages/service/MeterStock';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
 import RemoteDevices from './pages/metering/RemoteDevices';
@@ -283,6 +284,13 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/service/replace-records',
         label: '换表记录',
         element: <ReplaceRecords />,
+      },
+      {
+        // 20261021 整改 任务D：库房全生命周期（入库→货位→领用→安装→报废）。
+        key: 'service-stock',
+        path: '/service/stock',
+        label: '水表库房',
+        element: <MeterStock />,
       },
     ],
   },

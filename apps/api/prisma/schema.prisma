@@ -74,6 +74,9 @@ enum MeterStatus {
   INSTALLED
   MAINTENANCE
   RETIRED
+  /** 20261021 任务D：已领用（出库未装）/ 在途（库间调拨）。 */
+  ISSUED
+  IN_TRANSIT
 }
 
 enum InstallationStatus {
@@ -638,6 +641,9 @@ model Meter {
   /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表(监控表)。 */
   meterRole     String      @default("NORMAL") @map("meter_role")
   parentMeterId String?     @map("parent_meter_id") @db.Uuid
+  /** 20261021 任务D：在库时指向当前库房/货位；领用/安装后清空。 */
+  warehouseId   String?     @map("warehouse_id") @db.Uuid
+  locationId    String?     @map("location_id") @db.Uuid
   status        MeterStatus @default(AVAILABLE)
   createdAt     DateTime    @default(now()) @map("created_at")
   createdBy     String?     @map("created_by") @db.Uuid
@@ -647,11 +653,74 @@ model Meter {
   installations MeterInstallation[]
   masterRelations MeterRelation[] @relation("master")
   subRelations    MeterRelation[] @relation("sub")
+  stockMovements  MeterStockMovement[]
 
   @@unique([tenantId, meterNo])
   @@unique([tenantId, id])
   @@index([tenantId, status])
   @@map("meter")
+}
+
+/** 20261021 任务D：水表库房 — 编号/名称/所属单位。 */
+model MeterWarehouse {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  owner     String?
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  locations MeterWarehouseLocation[]
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@map("meter_warehouse")
+}
+
+/** 任务D：库房货位。 */
+model MeterWarehouseLocation {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  warehouseId String   @map("warehouse_id") @db.Uuid
+  code        String
+  name        String
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  warehouse MeterWarehouse @relation(fields: [tenantId, warehouseId], references: [tenantId, id])
+
+  @@unique([tenantId, warehouseId, code])
+  @@unique([tenantId, id])
+  @@map("meter_warehouse_location")
+}
+
+/** 任务D：出入库流水 — PURCHASE_IN采购/ISSUE_OUT领用/RETURN_IN退库/SCRAP_OUT报废/TRANSFER调拨。 */
+model MeterStockMovement {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  meterId      String   @map("meter_id") @db.Uuid
+  movementType String   @map("movement_type")
+  docNo        String?  @map("doc_no")
+  supplier     String?
+  batchNo      String?  @map("batch_no")
+  warehouseId  String?  @map("warehouse_id") @db.Uuid
+  locationId   String?  @map("location_id") @db.Uuid
+  operatorId   String?  @map("operator_id") @db.Uuid
+  movedAt      DateTime @default(now()) @map("moved_at")
+  remark       String?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  meter Meter @relation(fields: [tenantId, meterId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, meterId, movedAt])
+  @@index([tenantId, docNo])
+  @@map("meter_stock_movement")
 }
 
 /** 20261021 任务C：总分表关系 — 主表挂分表；billing_mode MASTER=按总表计费/SUB=按分表计费。 */
