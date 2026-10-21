@@ -45,7 +45,7 @@ import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { cleanBody, enumLabel, USAGE_CATEGORY_LABELS } from '../common';
 import { EXCEPTION_CODE_LABELS } from '../metering/common';
-import { recognizeMeterReading } from '../../utils/meter-ocr';
+// OCR 识别已统一走服务端 /meter-readings/recognize，浏览器不再加载本地模型。
 
 interface PlanRow {
   id: string;
@@ -700,49 +700,31 @@ export default function MobileReading() {
                         if (Number.isFinite(n)) setReadingValue((v) => v ?? n);
                       }
                     };
-                    // 先走浏览器本地识别；拒识或低置信（指针表门槛更高）时回退服务端——
-                    // 服务端在本地管线之上挂了多模态 LLM 兜底（若已配置）。
-                    const serverFallback = (
-                      local: { value: string | null; confidence: number; method: string; message?: string } | null,
-                    ) => {
-                      api
-                        .post<{
-                          value: string | null;
-                          confidence: number;
-                          method: string;
-                          message?: string;
-                        }>('/meter-readings/recognize', {
-                          image: dataUrl,
-                          prev: Number(current.prevReadingValue) || undefined,
-                        })
-                        .then((r) => {
-                          if (r.data?.value !== null) applyResult(r.data);
-                          else if (local) applyResult(local);
-                          else if (reqId === ocrReq.current) {
-                            setOcr({ value: null, confidence: 0, method: 'none' });
-                          }
-                        })
-                        .catch(() => {
-                          if (reqId !== ocrReq.current) return;
-                          if (local) applyResult(local);
-                          else setOcr({ value: null, confidence: 0, method: 'none' });
-                        })
-                        .finally(() => {
-                          if (reqId === ocrReq.current) setOcrBusy(false);
-                        });
-                    };
-                    recognizeMeterReading(dataUrl)
-                      .then((local) => {
-                        if (reqId !== ocrReq.current) return;
-                        const threshold = local?.method === 'paddle-pointer' ? 80 : 65;
-                        if (local && local.confidence >= threshold) {
-                          applyResult(local);
-                          setOcrBusy(false);
-                        } else {
-                          serverFallback(local);
+                    // 识别统一走服务端（本地管线+多模态兜底在服务端完成）——
+                    // 浏览器不再加载 opencv/ocr 模型，低端设备不会因内存不足闪退。
+                    api
+                      .post<{
+                        value: string | null;
+                        confidence: number;
+                        method: string;
+                        message?: string;
+                      }>('/meter-readings/recognize', {
+                        image: dataUrl,
+                        prev: Number(current.prevReadingValue) || undefined,
+                      })
+                      .then((r) => {
+                        if (r.data?.value !== undefined) applyResult(r.data);
+                        else if (reqId === ocrReq.current) {
+                          setOcr({ value: null, confidence: 0, method: 'none' });
                         }
                       })
-                      .catch(() => serverFallback(null));
+                      .catch(() => {
+                        if (reqId === ocrReq.current) return;
+                        setOcr({ value: null, confidence: 0, method: 'none', message: '识别服务不可用，请人工录入' });
+                      })
+                      .finally(() => {
+                        if (reqId === ocrReq.current) setOcrBusy(false);
+                      });
                   })
                   .catch(() => message.error('照片读取失败'));
                 return false;
