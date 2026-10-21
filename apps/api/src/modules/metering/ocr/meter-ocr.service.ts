@@ -14,7 +14,7 @@ import {
   type RgbImage,
 } from './image-utils.js';
 
-export type MeterOcrMethod = 'roller' | 'pointer' | 'none';
+export type MeterOcrMethod = 'roller' | 'pointer' | 'llm' | 'none';
 
 export interface MeterOcrResult {
   /** Suggested dial reading as a decimal string, or null when unreadable. */
@@ -92,15 +92,28 @@ export class MeterOcrService implements OnModuleDestroy {
     if (this.disabled) {
       return this.empty('OCR_DISABLED', '识别模块已停用，请人工读数');
     }
+    let local: MeterOcrResult;
     try {
-      return await withTimeout(this.pipeline(dataUrl), TIMEOUT_MS);
+      local = await withTimeout(this.pipeline(dataUrl), TIMEOUT_MS);
     } catch (err) {
       this.logger.warn(`meter ocr failed: ${String(err)}`);
-      return this.empty(
+      local = this.empty(
         err instanceof Error && err.message === 'OCR_TIMEOUT' ? 'OCR_TIMEOUT' : 'OCR_FAILED',
         '照片识别失败，请人工读数',
       );
     }
+    // 本地结果足够可信直接返回；低置信/拒识 → 多模态 LLM 兜底（若已配置）
+    if (local.value !== null && local.confidence >= 70) return local;
+    const llm = await this.tryLlm(dataUrl).catch((err) => {
+      this.logger.warn(`meter ocr llm failed: ${String(err)}`);
+      return null;
+    });
+    if (llm) return llm;
+    // LLM 不可用时只余弱本地推断：压置信度到预填阈值（55）以下，避免错值自动入框
+    if (local.value !== null && local.method === 'pointer' && local.confidence < 70) {
+      local.confidence = Math.min(local.confidence, 50);
+    }
+    return local;
   }
 
   private empty(flag: string, message: string): MeterOcrResult {
@@ -306,6 +319,133 @@ export class MeterOcrService implements OnModuleDestroy {
         flags: best.flags,
       },
       message: best.conf < 55 ? '识别置信度低，请仔细核对' : undefined,
+    };
+  }
+
+  /* ---------- path 3: multimodal LLM fallback ---------- */
+
+  private llmCfg(): { baseUrl: string; apiKey: string; model: string } | null {
+    const baseUrl = process.env.METER_OCR_LLM_BASE_URL?.trim();
+    const apiKey = process.env.METER_OCR_LLM_API_KEY?.trim();
+    if (!baseUrl || !apiKey) return null;
+    return {
+      baseUrl: baseUrl.replace(/\/+$/, ''),
+      apiKey,
+      model: process.env.METER_OCR_LLM_MODEL?.trim() || 'gpt-6.1-sol',
+    };
+  }
+
+  /**
+   * 多模态 LLM 兜底：仅当本地管线拒识/低置信且已配置 METER_OCR_LLM_* 时调用。
+   * 结果仍要过机械联动校验（各整数盘的 fractional 位置必须与同一总数自洽），
+   * 不一致只降置信不拒识——本端点是建议性输出，人工总会确认。
+   */
+  private async tryLlm(dataUrl: string): Promise<MeterOcrResult | null> {
+    const cfg = this.llmCfg();
+    if (!cfg) return null;
+    const jpeg = await sharp(Buffer.from(dataUrl, 'base64'), { failOn: 'error' })
+      .rotate()
+      .resize({ width: 1200, withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+    const prompt =
+      '这是一张指针式或字轮式水表照片。指针表每个小表盘下方标有倍率' +
+      '（×1000、×100、×10、×1、×0.1、×0.01等），表盘印有0-9十个数字，' +
+      '指针落在某两个数字之间。请对每个整数位盘（×1000/×100/×10/×1）和×0.1盘' +
+      '判断指针落在哪两个数字之间，报"下限数字.位置"（如在2和3之间偏下报2.4），' +
+      '并用机械联动规则交叉验证（×1盘的小数部分等于总读数的小数部分）。' +
+      '若是字轮表直接读黑色整数轮。只输出JSON：' +
+      '{"x1000":n.n,"x100":n.n,"x10":n.n,"x1":n.n,"x01":n.n,"total":"XXXX.X"}。';
+    const r = await fetch(`${cfg.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        temperature: 0,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              {
+                type: 'image_url',
+                image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}` },
+              },
+            ],
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(75_000),
+    });
+    if (!r.ok) {
+      this.logger.warn(`llm ocr http ${r.status}`);
+      return null;
+    }
+    const j = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const content = j.choices?.[0]?.message?.content ?? '';
+    const m = content.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(m[0]) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    const num = (k: string): number | null => {
+      const v = Number(parsed[k]);
+      return Number.isFinite(v) && v >= 0 && v < 10 ? v : null;
+    };
+    const d1000 = num('x1000');
+    const d100 = num('x100');
+    const d10 = num('x10');
+    const d1 = num('x1');
+    const d01 = num('x01');
+    const total = typeof parsed.total === 'string' ? parsed.total.trim() : '';
+    if (d1000 === null && d100 === null && d10 === null && d1 === null) {
+      // 字轮表回答：total 即整数
+      const t = total.match(/^(\d+)(?:\.(\d))?/);
+      if (!t) return null;
+      const intPart = t[1].replace(/^0+(?=\d)/, '');
+      if (intPart.length > MAX_INT_DIGITS) return null;
+      return {
+        value: t[2] ? `${t[1]}.${t[2]}` : t[1],
+        confidence: 72,
+        method: 'llm',
+        details: { candidates: [], flags: ['LLM_ROLLER'] },
+        message: 'AI 辅助识别结果，请人工核对',
+      };
+    }
+    if (d1000 === null || d100 === null || d10 === null || d1 === null) return null;
+    // 机械链校验：整数位取 floor，小数部分须等于 (T mod m)/m
+    const intStr = `${Math.floor(d1000)}${Math.floor(d100)}${Math.floor(d10)}${Math.floor(d1)}`;
+    const tenth = d01 !== null ? Math.floor(d01) : Math.floor((d1 % 1) * 10 + 0.5) % 10;
+    const T = Number(intStr) + tenth / 10;
+    const flags: string[] = [];
+    let mism = 0;
+    for (const [v, m] of [[d1000, 1000], [d100, 100], [d10, 10]] as const) {
+      const frac = v % 1;
+      const exp = (T % m) / m;
+      let dev = Math.abs(frac - exp);
+      if (dev > 0.5) dev = 1 - dev; // 跨 9→0 边界的环面距离
+      if (dev > 0.22) mism++;
+    }
+    if (mism > 0) flags.push('LLM_CHAIN_MISMATCH');
+    // total 字段与逐盘推导不一致时以逐盘为准并降权
+    const totalNum = Number(total);
+    if (total && Number.isFinite(totalNum) && Math.abs(totalNum - T) > 0.15) {
+      flags.push('LLM_TOTAL_MISMATCH');
+      mism++;
+    }
+    const confidence = Math.max(35, 72 - mism * 15);
+    return {
+      value: `${intStr}.${tenth}`,
+      confidence,
+      method: 'llm',
+      details: { candidates: [], flags },
+      message: `AI 辅助识别 ${intStr}.${tenth}${flags.length ? '（机械校验有偏差）' : ''}，请人工核对`,
     };
   }
 

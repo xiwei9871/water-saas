@@ -700,8 +700,11 @@ export default function MobileReading() {
                         if (Number.isFinite(n)) setReadingValue((v) => v ?? n);
                       }
                     };
-                    // 先走浏览器本地 PaddleOCR（字轮表）；无可靠结果或本地推理失败时回退服务端识别（指针表兜底）
-                    const serverFallback = () => {
+                    // 先走浏览器本地识别；拒识或低置信（指针表门槛更高）时回退服务端——
+                    // 服务端在本地管线之上挂了多模态 LLM 兜底（若已配置）。
+                    const serverFallback = (
+                      local: { value: string | null; confidence: number; method: string; message?: string } | null,
+                    ) => {
                       api
                         .post<{
                           value: string | null;
@@ -709,11 +712,17 @@ export default function MobileReading() {
                           method: string;
                           message?: string;
                         }>('/meter-readings/recognize', { image: dataUrl })
-                        .then((r) => applyResult(r.data))
-                        .catch(() => {
-                          if (reqId === ocrReq.current) {
+                        .then((r) => {
+                          if (r.data?.value !== null) applyResult(r.data);
+                          else if (local) applyResult(local);
+                          else if (reqId === ocrReq.current) {
                             setOcr({ value: null, confidence: 0, method: 'none' });
                           }
+                        })
+                        .catch(() => {
+                          if (reqId !== ocrReq.current) return;
+                          if (local) applyResult(local);
+                          else setOcr({ value: null, confidence: 0, method: 'none' });
                         })
                         .finally(() => {
                           if (reqId === ocrReq.current) setOcrBusy(false);
@@ -722,14 +731,15 @@ export default function MobileReading() {
                     recognizeMeterReading(dataUrl)
                       .then((local) => {
                         if (reqId !== ocrReq.current) return;
-                        if (local) {
+                        const threshold = local?.method === 'paddle-pointer' ? 80 : 65;
+                        if (local && local.confidence >= threshold) {
                           applyResult(local);
                           setOcrBusy(false);
                         } else {
-                          serverFallback();
+                          serverFallback(local);
                         }
                       })
-                      .catch(serverFallback);
+                      .catch(() => serverFallback(null));
                   })
                   .catch(() => message.error('照片读取失败'));
                 return false;
@@ -763,7 +773,7 @@ export default function MobileReading() {
                 type={ocr.value !== null && ocr.confidence >= 55 ? 'success' : 'warning'}
               >
                 {ocr.value !== null && ocr.confidence >= 55
-                  ? `识别参考 ${ocr.value}（置信度 ${ocr.confidence}%${ocr.method === 'paddle-pointer' ? '，本地指针表推断' : ocr.method === 'pointer' ? '，指针表推断' : ocr.method === 'paddle-roller' ? '，本地字轮识别' : ''}），请核对表底后提交`
+                  ? `识别参考 ${ocr.value}（置信度 ${ocr.confidence}%${ocr.method === 'paddle-pointer' ? '，本地指针表推断' : ocr.method === 'llm' ? '，AI辅助识别' : ocr.method === 'pointer' ? '，指针表推断' : ocr.method === 'paddle-roller' ? '，本地字轮识别' : ''}），请核对表底后提交`
                   : ocr.value !== null
                     ? `识别不确定（疑似 ${ocr.value}，置信度 ${ocr.confidence}%），未预填，请人工核对录入`
                     : (ocr.message ?? '未能识别读数，请人工录入')}
