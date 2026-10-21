@@ -590,6 +590,7 @@ model WaterAccount {
   meterInstallations MeterInstallation[]
   householdProfiles  WaterAccountHouseholdProfile[]
   serviceOrders      MeterServiceOrder[]
+  violations         WaterViolation[]
 
   @@unique([tenantId, accountNo])
   @@unique([tenantId, id])
@@ -721,6 +722,46 @@ model MeterStockMovement {
   @@index([tenantId, meterId, movedAt])
   @@index([tenantId, docNo])
   @@map("meter_stock_movement")
+}
+
+/** 20261021 任务E：违章用水 — 稽查登记(INSPECT)/抄表上报(READING→待核实)。 */
+model WaterViolation {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  waterAccountId String    @map("water_account_id") @db.Uuid
+  violationType  String    @map("violation_type")
+  reporterId     String?   @map("reporter_id") @db.Uuid
+  occurredDate   DateTime? @map("occurred_date") @db.Date
+  description    String?
+  photoRefs      Json?     @map("photo_refs") @db.JsonB
+  /** PENDING_REVIEW待核实→PROCESSING处理中→PROCESSED已处理→ARCHIVED已归档；DISMISSED误报。 */
+  status         String    @default("PENDING_REVIEW")
+  sourceType     String    @default("INSPECT") @map("source_type")
+  /** READING 来源时关联 meter_reading.id。 */
+  sourceId       String?   @map("source_id") @db.Uuid
+  penaltyAmount  Decimal?  @map("penalty_amount") @db.Decimal(18, 2)
+  backbillAmount Decimal?  @map("backbill_amount") @db.Decimal(18, 2)
+  processorId    String?   @map("processor_id") @db.Uuid
+  processedAt    DateTime? @map("processed_at")
+  processNote    String?   @map("process_note")
+  /** 归档佐证（现场照片+处罚文书）。 */
+  evidence       Json?     @db.JsonB
+  taskId         String?   @map("task_id") @db.Uuid
+  /** 联动表务工单（停水/拆表处置）。 */
+  serviceOrderId String?   @map("service_order_id") @db.Uuid
+  archivedBy     String?   @map("archived_by") @db.Uuid
+  archivedAt     DateTime? @map("archived_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by") @db.Uuid
+
+  waterAccount WaterAccount @relation(fields: [tenantId, waterAccountId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, waterAccountId])
+  @@index([tenantId, status])
+  @@map("water_violation")
 }
 
 /** 20261021 任务C：总分表关系 — 主表挂分表；billing_mode MASTER=按总表计费/SUB=按分表计费。 */

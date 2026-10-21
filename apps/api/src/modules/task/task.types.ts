@@ -80,6 +80,13 @@ export const TASK_TYPES: TaskTypeDef[] = [
     fallbackPerm: 'metering:service',
     bizRoute: '/service/orders?focusId={bizId}',
   },
+  {
+    // 20261021 整改 任务E：违章处置任务（稽查核实/处理）。
+    code: 'VIOLATION_HANDLE',
+    name: '违章处置',
+    fallbackPerm: 'metering:service',
+    bizRoute: '/service/violations?focusId={bizId}',
+  },
 ];
 
 export const TASK_TYPE_CODES = TASK_TYPES.map((t) => t.code);

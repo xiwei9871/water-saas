@@ -31,6 +31,7 @@ import Exceptions from './pages/exception/Exceptions';
 import MeterReadings from './pages/metering/MeterReadings';
 import MeterRelations from './pages/metering/MeterRelations';
 import MeterStock from './pages/service/MeterStock';
+import Violations from './pages/service/Violations';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
 import RemoteDevices from './pages/metering/RemoteDevices';
@@ -291,6 +292,13 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/service/stock',
         label: '水表库房',
         element: <MeterStock />,
+      },
+      {
+        // 20261021 整改 任务E：违章用水（稽查登记/抄表上报）。
+        key: 'service-violations',
+        path: '/service/violations',
+        label: '违章用水',
+        element: <Violations />,
       },
     ],
   },

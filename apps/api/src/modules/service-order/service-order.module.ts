@@ -6,6 +6,8 @@ import { MeterStockService } from './meter-stock.service.js';
 import { ServiceOrderController } from './service-order.controller.js';
 import { ServiceOrderCron } from './service-order.cron.js';
 import { ServiceOrderService } from './service-order.service.js';
+import { ViolationController } from './violation.controller.js';
+import { ViolationService } from './violation.service.js';
 
 /**
  * 表务管理（20261019 整合需求 T1-T6, T11, T12）— 11 类表务处置统一
@@ -15,7 +17,7 @@ import { ServiceOrderService } from './service-order.service.js';
  */
 @Module({
   imports: [CustomerModule, TaskModule],
-  controllers: [ServiceOrderController, MeterStockController],
-  providers: [ServiceOrderService, ServiceOrderCron, MeterStockService],
+  controllers: [ServiceOrderController, MeterStockController, ViolationController],
+  providers: [ServiceOrderService, ServiceOrderCron, MeterStockService, ViolationService],
 })
 export class ServiceOrderModule {}

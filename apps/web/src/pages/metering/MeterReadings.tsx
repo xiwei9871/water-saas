@@ -8,6 +8,7 @@ import {
   SearchOutlined,
   SettingOutlined,
   UploadOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import {
   Alert,
@@ -116,6 +117,9 @@ export default function MeterReadings() {
 
   const [supersedeTarget, setSupersedeTarget] = useState<MeterReading | null>(null);
   const [supersedeIdemKey, setSupersedeIdemKey] = useState('');
+  // 20261021 整改 任务E：抄表员上报疑似违章（→ PENDING_REVIEW，派发稽查任务）。
+  const [violationTarget, setViolationTarget] = useState<MeterReading | null>(null);
+  const [violationForm] = Form.useForm<{ violationType: string; description?: string; photoRefs?: string }>();
   const [saving, setSaving] = useState(false);
   const [supersedeForm] = Form.useForm<SupersedeFormValues>();
 
@@ -441,6 +445,19 @@ export default function MeterReadings() {
                 更正
               </Button>
             )}
+            {canWrite && (
+              <Button
+                size="small"
+                danger
+                icon={<WarningOutlined />}
+                onClick={() => {
+                  violationForm.resetFields();
+                  setViolationTarget(record);
+                }}
+              >
+                上报违章
+              </Button>
+            )}
           </Space>
         );
       },
@@ -613,6 +630,53 @@ export default function MeterReadings() {
           </Form.Item>
           <Form.Item name="readDate" label="抄表日期" extra="留空取当前时间">
             <DatePicker style={{ width: '100%' }} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 上报疑似违章（20261021 任务E：READING 来源，进入待核实） */}
+      <Modal
+        maskClosable={false}
+        open={violationTarget !== null}
+        title="上报疑似违章（转稽查核实）"
+        okText="上报"
+        cancelText="取消"
+        onOk={async () => {
+          const v = await violationForm.validateFields();
+          try {
+            await api.post(`/meter-readings/${violationTarget!.id}/report-violation`, {
+              violationType: v.violationType,
+              description: v.description,
+              photoRefs: String(v.photoRefs ?? '')
+                .split(/[\s,，;；]+/)
+                .filter(Boolean),
+            });
+            message.success('已上报，稽查岗将在待办中核实');
+            setViolationTarget(null);
+          } catch (e) {
+            message.error(apiErrorText(e));
+          }
+        }}
+        onCancel={() => setViolationTarget(null)}
+        destroyOnHidden
+      >
+        <Form form={violationForm} layout="vertical">
+          <Form.Item name="violationType" label="疑似违章类型" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 'THEFT', label: '盗窃用水' },
+                { value: 'PRIVATE_CONN', label: '私自接水' },
+                { value: 'TAMPER', label: '破坏表计' },
+                { value: 'SEAL_BROKEN', label: '破坏铅封' },
+                { value: 'CATEGORY_MISUSE', label: '擅自改变用水性质' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="description" label="现场描述">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+          <Form.Item name="photoRefs" label="现场照片引用（空格分隔，可选）">
+            <Input.TextArea rows={2} />
           </Form.Item>
         </Form>
       </Modal>
