@@ -1,5 +1,5 @@
 import { ReloadOutlined } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, DatePicker, Space, Table } from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Space, Statistic, Table } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
@@ -24,7 +24,25 @@ interface StatsResp {
     on_time: string | number;
     done: string | number;
   }[];
+  /** 20261021 整改 任务G：文档口径 6 表务指标 */
+  metrics?: {
+    replaceRate: number | null;
+    faultReplaceRate: number | null;
+    checkDoneRate: number | null;
+    checkPassRate: number | null;
+    resumeOnTimeRate: number | null;
+    svcOnTimeRate: number | null;
+  };
 }
+
+const KPI_DEFS: { key: keyof NonNullable<StatsResp['metrics']>; name: string }[] = [
+  { key: 'replaceRate', name: '换表率' },
+  { key: 'faultReplaceRate', name: '故障换表率' },
+  { key: 'checkDoneRate', name: '周期检定完成率' },
+  { key: 'checkPassRate', name: '检定合格率' },
+  { key: 'resumeOnTimeRate', name: '复水及时率' },
+  { key: 'svcOnTimeRate', name: '表务处置及时率' },
+];
 
 const OPEN_STATUSES = new Set(['PENDING_APPROVAL', 'APPROVED', 'DISPATCHED']);
 
@@ -33,6 +51,7 @@ export default function ServiceOrderStats() {
   const { message } = AntdApp.useApp();
   const [range, setRange] = useState<[dayjs.Dayjs | null, dayjs.Dayjs | null] | null>(null);
   const [rows, setRows] = useState<TypeStat[]>([]);
+  const [metrics, setMetrics] = useState<StatsResp['metrics']>();
   const [slaHours, setSlaHours] = useState(72);
   const [loading, setLoading] = useState(false);
 
@@ -65,6 +84,7 @@ export default function ServiceOrderStats() {
         t.onTimeRate = done > 0 ? Number(d.on_time) / done : null;
       }
       setRows([...byType.values()]);
+      setMetrics(res.data.metrics);
     } catch (e) {
       message.error(apiErrorText(e));
     } finally {
@@ -110,6 +130,22 @@ export default function ServiceOrderStats() {
         </Space>
       }
     >
+      {metrics && (
+        <Space wrap size="middle" style={{ marginBottom: 16 }}>
+          {KPI_DEFS.map((d) => {
+            const v = metrics[d.key];
+            return (
+              <Card key={d.key} size="small" style={{ minWidth: 140 }}>
+                <Statistic
+                  title={d.name}
+                  value={v === null || v === undefined ? '—' : (v * 100).toFixed(1)}
+                  suffix={v === null || v === undefined ? undefined : '%'}
+                />
+              </Card>
+            );
+          })}
+        </Space>
+      )}
       <Table<TypeStat>
         rowKey="serviceType"
         size="small"

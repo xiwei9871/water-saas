@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuditInterceptor } from './common/audit.interceptor.js';
@@ -25,6 +26,7 @@ import { ServiceOrderModule } from './modules/service-order/service-order.module
 
 @Module({
   imports: [
+    ScheduleModule.forRoot(),
     CommonModule,
     IamModule,
     CustomerModule,

@@ -15,6 +15,7 @@ import { MeterInstallationService } from '../customer/meter-installation.service
 import { WaterAccountService, type EventBody } from '../customer/water-account.service.js';
 import { TaskService } from '../task/task.service.js';
 import {
+  ARCHIVE_EVIDENCE,
   parseCheckPayload,
   parseClosePayload,
   parseDate,
@@ -22,6 +23,7 @@ import {
   parseSitePayload,
   parseStatusPayload,
   SERVICE_TYPES,
+  type ServiceType,
 } from './service-order.types.js';
 
 type Tx = Prisma.TransactionClient;
@@ -478,6 +480,7 @@ export class ServiceOrderService {
       meterInstallationId: string | null;
       meterId: string | null;
       serviceType: string;
+      payload?: Prisma.JsonValue | null;
     },
     body: ExecuteBody,
     req: Request,
@@ -495,6 +498,40 @@ export class ServiceOrderService {
         : (ref as Prisma.InputJsonValue | undefined);
 
     if (t === 'PERIODIC_CHECK' || t === 'DISPUTE_CHECK') {
+      // 在网表到期检定 = 先换表后送检（20261021 整改 任务B）：工单 payload
+      // 标记 needReplace 时，执行需同时传换表三要素 + 检定载荷。
+      const needReplace =
+        (order.payload as Record<string, unknown> | null)?.needReplace === true;
+      let replaceRef: Record<string, unknown> | undefined;
+      if (needReplace) {
+        const fp = parseFaultPayload(body.payload);
+        const installationId =
+          order.meterInstallationId ??
+          (typeof body.payload?.meterInstallationId === 'string'
+            ? body.payload.meterInstallationId
+            : null);
+        if (!installationId) {
+          throw new BadRequestException({ code: 'FAULT_INSTALLATION_REQUIRED' });
+        }
+        const result = await this.installations.replaceTx(
+          tx,
+          ctx,
+          installationId,
+          {
+            newMeterId: fp.newMeterId,
+            oldFinalReading: new Prisma.Decimal(fp.oldFinalReading),
+            newInitialReading: new Prisma.Decimal(fp.newInitialReading),
+            replacedAt: parseDate(fp.replacedAt, 'REPLACED_AT_INVALID'),
+            reason: 'PERIODIC_CHECK',
+          },
+          req,
+        );
+        replaceRef = {
+          removedInstallationId: installationId,
+          newInstallationId: result.installed?.id ?? null,
+          newMeterId: fp.newMeterId,
+        };
+      }
       const p = parseCheckPayload(body.payload);
       const ev = await tx.accountEvent.create({
         data: {
@@ -526,7 +563,11 @@ export class ServiceOrderService {
           data: { lastCheckDate: checkDay, updatedBy: ctx.staffId },
         });
       }
-      return withPhotos({ accountEventId: ev.id, nextCheckDate: p.nextCheckDate ?? null });
+      return withPhotos({
+        accountEventId: ev.id,
+        nextCheckDate: p.nextCheckDate ?? null,
+        ...(replaceRef ? { replace: replaceRef } : {}),
+      });
     }
     if (t === 'FAULT') {
       const p = parseFaultPayload(body.payload);
@@ -636,8 +677,43 @@ export class ServiceOrderService {
   // ------------------------------------------------------------------
   // 归档 / 撤销
   // ------------------------------------------------------------------
-  archiveTx(tx: Tx, ctx: TenantCtx, id: string, req: Request) {
+  archiveTx(tx: Tx, ctx: TenantCtx, id: string, body: { photoRefs?: unknown }, req: Request) {
     return this.transition(tx, ctx, id, 'EXECUTED', 'ARCHIVED', req, async (t) => {
+      // 20261021 整改 任务A：归档前强制佐证校验 —— linkRef.photoRefs ∪
+      // 归档补传 photoRefs，数量按处置类型清单核对，不足拒绝归档。
+      const cur = await t.meterServiceOrder.findUniqueOrThrow({
+        where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+        select: { serviceType: true, linkRef: true },
+      });
+      const spec = ARCHIVE_EVIDENCE[cur.serviceType as ServiceType];
+      if (spec) {
+        const stored = (cur.linkRef as Record<string, unknown> | null)?.photoRefs;
+        const merged = new Set<string>(
+          [
+            ...(Array.isArray(stored) ? stored : []),
+            ...(Array.isArray(body.photoRefs) ? body.photoRefs : []),
+          ].filter((x): x is string => typeof x === 'string' && x.trim() !== ''),
+        );
+        if (merged.size < spec.min) {
+          throw new BadRequestException({
+            code: 'EVIDENCE_REQUIRED',
+            need: spec.items,
+            got: merged.size,
+            message: `归档需佐证资料：${spec.items.join('、')}（至少 ${spec.min} 项，当前 ${merged.size} 项）`,
+          });
+        }
+        if (Array.isArray(body.photoRefs) && body.photoRefs.length) {
+          await t.meterServiceOrder.update({
+            where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+            data: {
+              linkRef: {
+                ...((cur.linkRef as Record<string, unknown> | null) ?? {}),
+                photoRefs: [...merged],
+              } as Prisma.InputJsonValue,
+            },
+          });
+        }
+      }
       const row = await t.meterServiceOrder.update({
         where: { tenantId_id: { tenantId: ctx.tenantId, id } },
         data: { archivedBy: ctx.staffId, archivedAt: new Date() },
@@ -829,10 +905,13 @@ export class ServiceOrderService {
         const order = await this.createTx(tx, ctx, {
           waterAccountId: d.water_account_id,
           serviceType: 'PERIODIC_CHECK',
-          reason: `水表 ${d.meter_no} 检定到期（下次检定日 ${d.next_check_date.toISOString().slice(0, 10)}）`,
+          // 在网表周期检定 = 换表+送检（20261021 整改 任务B）：执行时须
+          // 先完成换表三要素，再录检定结果。
+          reason: `水表 ${d.meter_no} 检定到期（下次检定日 ${d.next_check_date.toISOString().slice(0, 10)}，在网表需先换表后送检）`,
           meterInstallationId: d.installation_id,
           meterId: d.meter_id,
           sourceType: 'AUTO_CHECK',
+          payload: { needReplace: true },
         });
         created.push({
           orderId: order.id,
@@ -887,7 +966,102 @@ export class ServiceOrderService {
           AND (${to ?? null}::timestamptz IS NULL OR applied_at <= ${to ?? null}::timestamptz)
         GROUP BY service_type`;
 
-      return { slaHours, byTypeStatus, durations: dur };
+      // ---- 20261021 整改 任务G：文档口径 6 表务指标 ----
+      const periodEnd = to ?? new Date();
+      const kpis = await tx.$queryRaw<
+        {
+          replaced: bigint;
+          fault_replaced: bigint;
+          active_total: bigint;
+          due_total: bigint;
+          checked: bigint;
+          check_pass: bigint;
+          check_total: bigint;
+          resume_on_time: bigint;
+          resume_total: bigint;
+          svc_on_time: bigint;
+          svc_total: bigint;
+        }[]
+      >`
+        WITH repl AS (
+          SELECT reason, count(*)::bigint n
+          FROM meter_installation
+          WHERE tenant_id = ${ctx.tenantId}::uuid
+            AND reason IN ('REPLACE', 'FAULT', 'PERIODIC_CHECK')
+            AND installed_at <= ${periodEnd}
+            AND (${from ?? null}::timestamptz IS NULL OR installed_at >= ${from ?? null}::timestamptz)
+          GROUP BY reason
+        ),
+        due AS (
+          SELECT count(*)::bigint n FROM meter m
+          WHERE m.tenant_id = ${ctx.tenantId}::uuid
+            AND m.check_period_years IS NOT NULL
+            AND m.last_check_date IS NOT NULL
+            AND m.last_check_date + make_interval(years => m.check_period_years) <= ${periodEnd}
+        ),
+        checked AS (
+          SELECT count(DISTINCT so.meter_id)::bigint n
+          FROM meter_service_order so
+          WHERE so.tenant_id = ${ctx.tenantId}::uuid
+            AND so.service_type IN ('PERIODIC_CHECK','DISPUTE_CHECK')
+            AND so.status IN ('EXECUTED','ARCHIVED')
+            AND so.executed_at <= ${periodEnd}
+            AND (${from ?? null}::timestamptz IS NULL OR so.executed_at >= ${from ?? null}::timestamptz)
+        ),
+        chk AS (
+          SELECT count(*)::bigint total,
+                 count(*) FILTER (WHERE payload->>'checkResult' IN ('PASS','ADJUSTED'))::bigint pass
+          FROM account_event
+          WHERE tenant_id = ${ctx.tenantId}::uuid
+            AND type = 'METER_CHECK'
+            AND effective_date <= ${periodEnd}
+            AND (${from ?? null}::timestamptz IS NULL OR effective_date >= ${from ?? null}::timestamptz)
+        ),
+        svc AS (
+          SELECT count(*)::bigint total,
+                 count(*) FILTER (WHERE executed_at - applied_at <= make_interval(hours => ${slaHours}::int))::bigint on_time,
+                 count(*) FILTER (WHERE service_type = 'RESUME')::bigint resume_total,
+                 count(*) FILTER (WHERE service_type = 'RESUME'
+                   AND executed_at - applied_at <= make_interval(hours => ${slaHours}::int))::bigint resume_on_time
+          FROM meter_service_order
+          WHERE tenant_id = ${ctx.tenantId}::uuid
+            AND executed_at IS NOT NULL
+            AND applied_at <= ${periodEnd}
+            AND (${from ?? null}::timestamptz IS NULL OR applied_at >= ${from ?? null}::timestamptz)
+        )
+        SELECT
+          COALESCE((SELECT sum(n) FROM repl), 0) AS replaced,
+          COALESCE((SELECT n FROM repl WHERE reason = 'FAULT'), 0) AS fault_replaced,
+          (SELECT count(*)::bigint FROM meter_installation
+            WHERE tenant_id = ${ctx.tenantId}::uuid AND status = 'ACTIVE') AS active_total,
+          (SELECT n FROM due) AS due_total,
+          (SELECT n FROM checked) AS checked,
+          (SELECT pass FROM chk) AS check_pass,
+          (SELECT total FROM chk) AS check_total,
+          (SELECT resume_on_time FROM svc) AS resume_on_time,
+          (SELECT resume_total FROM svc) AS resume_total,
+          (SELECT on_time FROM svc) AS svc_on_time,
+          (SELECT total FROM svc) AS svc_total`;
+
+      const k = kpis[0];
+      const ratio = (a: bigint | number, b: bigint | number) =>
+        Number(b) > 0 ? Number(a) / Number(b) : null;
+      const metrics = {
+        /** 换表率 = 本期换表数 ÷ 在装表总数 */
+        replaceRate: ratio(k.replaced, k.active_total),
+        /** 故障换表率 = 故障换表 ÷ 换表总数 */
+        faultReplaceRate: ratio(k.fault_replaced, k.replaced),
+        /** 周期检定完成率 = 期内已执行检定处置 ÷ 到期应检表数 */
+        checkDoneRate: ratio(k.checked, k.due_total),
+        /** 检定合格率 = PASS/ADJUSTED ÷ 检定事件总数 */
+        checkPassRate: ratio(k.check_pass, k.check_total),
+        /** 复水及时率 = 时限内复水 ÷ 应复水 */
+        resumeOnTimeRate: ratio(k.resume_on_time, k.resume_total),
+        /** 表务处置及时率 = 时限内完成 ÷ 完成总数 */
+        svcOnTimeRate: ratio(k.svc_on_time, k.svc_total),
+      };
+
+      return { slaHours, byTypeStatus, durations: dur, metrics };
     });
   }
 

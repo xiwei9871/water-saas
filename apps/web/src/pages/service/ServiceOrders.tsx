@@ -9,6 +9,7 @@ import {
   ToolOutlined,
 } from '@ant-design/icons';
 import {
+  Alert,
   App as AntdApp,
   Button,
   Card,
@@ -117,6 +118,21 @@ const TYPE_OPTIONS = Object.entries(SERVICE_TYPE_LABELS).map(([value, label]) =>
   value,
   label,
 }));
+
+/** 20261021 整改：归档佐证必传清单（与后端 ARCHIVE_EVIDENCE 对齐，仅作提示用） */
+const ARCHIVE_EVIDENCE_HINT: Record<string, { min: number; items: string[] }> = {
+  FAULT: { min: 3, items: ['新表铭牌照片', '旧表拆表止码照片', '新表装表始码照片'] },
+  PERIODIC_CHECK: { min: 1, items: ['检定证书照片/扫描件 + 检定结果'] },
+  DISPUTE_CHECK: { min: 1, items: ['检定证书照片/扫描件 + 检定结果'] },
+  SUSPEND: { min: 1, items: ['停水现场照片（阀门操作照）'] },
+  STOP: { min: 1, items: ['停水现场照片（阀门操作照）'] },
+  RESUME: { min: 1, items: ['复水现场照片（阀门操作照）'] },
+  FLOW_LIMIT: { min: 1, items: ['限流装置照片'] },
+  FACILITY_MAINTENANCE: { min: 2, items: ['整改前照片', '整改后照片'] },
+  SITE_RECTIFICATION: { min: 2, items: ['整改前照片', '整改后照片'] },
+  METER_GROUP_CLEANING: { min: 2, items: ['清洁前照片', '清洁后照片'] },
+  CLOSE: { min: 2, items: ['拆除水表照片', '拆除读数照片'] },
+};
 
 /** 需要执行联动表单的类型 → 该类型载荷字段（20261020 核查 T6 全字段）。 */
 const NEEDS_CHECK_RESULT = new Set(['PERIODIC_CHECK', 'DISPUTE_CHECK']);
@@ -233,6 +249,9 @@ export default function ServiceOrders() {
     const v = await execForm.validateFields();
     const payload: Record<string, unknown> = {};
     const d = (x?: dayjs.Dayjs) => (x ? x.format('YYYY-MM-DD') : undefined);
+    // 在网表检定单（needReplace）= 先换表后送检：两类字段都要填。
+    const needReplace =
+      NEEDS_REPLACE_FIELDS.has(detail.serviceType) || detail.payload?.needReplace === true;
     if (NEEDS_CHECK_RESULT.has(detail.serviceType)) {
       payload.checkOrg = v.checkOrg;
       payload.checkDate = d(v.checkDate);
@@ -241,7 +260,8 @@ export default function ServiceOrders() {
       payload.certNo = v.certNo;
       payload.nextCheckDate = d(v.nextCheckDate);
       payload.effectiveDate = d(v.checkDate ?? v.effectiveDate);
-    } else if (NEEDS_REPLACE_FIELDS.has(detail.serviceType)) {
+    }
+    if (needReplace) {
       payload.newMeterId = v.newMeterId;
       payload.oldFinalReading = v.oldFinalReading;
       payload.newInitialReading = v.newInitialReading;
@@ -581,7 +601,7 @@ export default function ServiceOrders() {
                 </Button>
               )}
               {detail.status === 'EXECUTED' && (
-                <Button type="primary" onClick={() => void doAction('archive')}>
+                <Button type="primary" onClick={() => setAction('archive')}>
                   归档
                 </Button>
               )}
@@ -617,7 +637,7 @@ export default function ServiceOrders() {
         )}
       </Drawer>
 
-      {/* 审批/驳回/派单/撤销 轻表单 */}
+      {/* 审批/驳回/派单/撤销/归档 轻表单 */}
       <Modal
         title={
           action === 'approve'
@@ -626,7 +646,9 @@ export default function ServiceOrders() {
               ? '驳回工单'
               : action === 'dispatch'
                 ? '派单'
-                : '撤销工单'
+                : action === 'archive'
+                  ? '归档工单'
+                  : '撤销工单'
         }
         open={action !== null && action !== 'execute'}
         onOk={() => {
@@ -636,6 +658,12 @@ export default function ServiceOrders() {
           if (action === 'dispatch')
             return doAction('dispatch', { assigneeId: v.assigneeId, note: v.note });
           if (action === 'cancel') return doAction('cancel', { reason: v.note });
+          if (action === 'archive') {
+            const refs = String(v.photoRefs ?? '')
+              .split(/[\s,，;；]+/)
+              .filter(Boolean);
+            return doAction('archive', { photoRefs: refs });
+          }
         }}
         onCancel={() => setAction(null)}
         destroyOnHidden
@@ -646,9 +674,32 @@ export default function ServiceOrders() {
               <StaffSelect placeholder="执行人（可选）" />
             </Form.Item>
           )}
-          <Form.Item name="note" label="备注">
-            <Input.TextArea rows={2} />
-          </Form.Item>
+          {action === 'archive' && detail && (
+            <>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={`归档须佐证：${ARCHIVE_EVIDENCE_HINT[detail.serviceType]?.items.join('、') ?? '现场照片'}（已有 ${
+                  Array.isArray(detail.linkRef?.photoRefs)
+                    ? (detail.linkRef!.photoRefs as unknown[]).length
+                    : 0
+                } 项）`}
+              />
+              <Form.Item
+                name="photoRefs"
+                label="补充佐证照片引用"
+                tooltip="上传接口返回的引用，空格或逗号分隔；已有佐证不足时将拒绝归档"
+              >
+                <Input.TextArea rows={2} placeholder="photo-ref-1, photo-ref-2" />
+              </Form.Item>
+            </>
+          )}
+          {action !== 'archive' && (
+            <Form.Item name="note" label="备注">
+              <Input.TextArea rows={2} />
+            </Form.Item>
+          )}
         </Form>
       </Modal>
 
@@ -725,7 +776,9 @@ export default function ServiceOrders() {
               </Form.Item>
             </>
           )}
-          {detail && NEEDS_REPLACE_FIELDS.has(detail.serviceType) && (
+          {detail &&
+            (NEEDS_REPLACE_FIELDS.has(detail.serviceType) ||
+              detail.payload?.needReplace === true) && (
             <>
               {!detail.meterInstallationId && (
                 <Form.Item

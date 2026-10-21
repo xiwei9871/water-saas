@@ -33,6 +33,24 @@ export const LINKAGE_TYPES = new Set<ServiceType>([
   'CLOSE',
 ]);
 
+/**
+ * 归档佐证强制校验（20261021 整改 任务A）：工单不得以「点回执/点完成」
+ * 归档 —— 各处置类型必须带够佐证照片引用（linkRef.photoRefs ∪ 归档时补充）。
+ */
+export const ARCHIVE_EVIDENCE: Record<ServiceType, { min: number; items: string[] }> = {
+  FAULT: { min: 3, items: ['新表铭牌照片', '旧表拆表止码照片', '新表装表始码照片'] },
+  PERIODIC_CHECK: { min: 1, items: ['检定证书照片/扫描件 + 检定结果'] },
+  DISPUTE_CHECK: { min: 1, items: ['检定证书照片/扫描件 + 检定结果'] },
+  SUSPEND: { min: 1, items: ['停水现场照片（阀门操作照）'] },
+  STOP: { min: 1, items: ['停水现场照片（阀门操作照）'] },
+  RESUME: { min: 1, items: ['复水现场照片（阀门操作照）'] },
+  FLOW_LIMIT: { min: 1, items: ['限流装置照片'] },
+  FACILITY_MAINTENANCE: { min: 2, items: ['整改前照片', '整改后照片'] },
+  SITE_RECTIFICATION: { min: 2, items: ['整改前照片', '整改后照片'] },
+  METER_GROUP_CLEANING: { min: 2, items: ['清洁前照片', '清洁后照片'] },
+  CLOSE: { min: 2, items: ['拆除水表照片', '拆除读数照片'] },
+};
+
 // ---- 20261020 核查 T6：各处置类型执行回填载荷 ----
 
 /** 换表（故障）执行载荷 — replaceTx 三要素 + 新表唯一标识。 */

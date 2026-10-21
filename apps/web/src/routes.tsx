@@ -177,10 +177,12 @@ export const APP_ROUTES: AppRoute[] = [
         element: <SettleAccounts />,
       },
       {
+        // 20261021 整改 1.1：水表档案迁往「表务管理」——旧路径重定向保留。
         key: 'customer-meters',
         path: '/customer/meters',
         label: '水表管理',
-        element: <Meters />,
+        menuHidden: true,
+        element: <Navigate to="/service/meters" replace />,
       },
     ],
   },
@@ -245,8 +247,17 @@ export const APP_ROUTES: AppRoute[] = [
     path: '/service',
     label: '表务管理',
     icon: <ToolOutlined />,
-    perms: ['metering:service'],
+    // 水表档案迁入后，客户只读角色也要能进该分组（只能看到水表档案子项）。
+    perms: ['metering:service', 'customer:read'],
     children: [
+      {
+        // 20261021 整改 1.1：水表档案/台账是表务管理核心对象（采购→入库→安装→检定→换表→报废）。
+        key: 'service-meters',
+        path: '/service/meters',
+        label: '水表档案',
+        perms: ['metering:service', 'customer:read'],
+        element: <Meters />,
+      },
       {
         key: 'service-orders',
         path: '/service/orders',

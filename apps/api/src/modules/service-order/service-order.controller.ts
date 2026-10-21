@@ -211,6 +211,7 @@ export class ServiceOrderController {
   @Permissions('metering:service')
   archive(
     @Param('id') id: string,
+    @Body() body: { photoRefs?: unknown },
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
   ) {
@@ -219,8 +220,8 @@ export class ServiceOrderController {
       this.prisma,
       this.idem,
       ctx,
-      { key, method: 'POST', route: req.path, body: {} },
-      (tx) => this.svc.archiveTx(tx, ctx, assertUuid(id), req),
+      { key, method: 'POST', route: req.path, body: { photoRefs: body?.photoRefs } },
+      (tx) => this.svc.archiveTx(tx, ctx, assertUuid(id), body ?? {}, req),
     );
   }
 
