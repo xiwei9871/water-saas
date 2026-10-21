@@ -102,7 +102,7 @@ export class NoticeController {
           AND (${like}::text IS NULL OR wa.account_no ILIKE ${like}
                OR c.name ILIKE ${like} OR wa.addr ILIKE ${like} OR c.customer_no ILIKE ${like})
         GROUP BY b.water_account_id, wa.account_no, wa.addr, c.name, c.customer_no, c.phone
-        HAVING sum(GREATEST(b.total_amount - COALESCE(a.paid,0),0)) >= ${minAmtFen}
+        HAVING sum(GREATEST(b.total_amount - COALESCE(a.paid,0),0)) >= ${Math.max(minAmtFen, 1)}
            AND (${minDays} = 0 OR
                 max(CURRENT_DATE - b.due_date)
                   FILTER (WHERE b.due_date IS NOT NULL AND b.due_date < CURRENT_DATE) >= ${minDays})
