@@ -321,6 +321,8 @@ export interface Meter {
   caliber: string | null;
   /** Decimal column — serialized as a string on the wire. */
   maxDial: string | null;
+  /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表。 */
+  meterRole?: string;
   parentMeterId: string | null;
   status: MeterStatus;
   /** List-only: account the device is currently mounted on (ACTIVE install). */

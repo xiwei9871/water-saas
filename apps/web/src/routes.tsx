@@ -29,6 +29,7 @@ import SettleAccounts from './pages/customer/SettleAccounts';
 import WaterAccounts from './pages/customer/WaterAccounts';
 import Exceptions from './pages/exception/Exceptions';
 import MeterReadings from './pages/metering/MeterReadings';
+import MeterRelations from './pages/metering/MeterRelations';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
 import RemoteDevices from './pages/metering/RemoteDevices';
@@ -210,6 +211,13 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/metering/readings',
         label: '抄表记录',
         element: <MeterReadings />,
+      },
+      {
+        // 20261021 整改 任务C：总分表关系维护 + 漏损分析。
+        key: 'metering-relations',
+        path: '/metering/relations',
+        label: '总分表关系',
+        element: <MeterRelations />,
       },
       {
         // 20261020 核查：表务工单提为一级「表务管理」——旧路径保留

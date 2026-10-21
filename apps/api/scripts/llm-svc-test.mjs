@@ -1,0 +1,13 @@
+import { readFileSync } from 'node:fs';
+const secrets = JSON.parse(readFileSync('/Users/xiwei/.openclaw/secrets/local-secrets.json','utf8'));
+process.env.METER_OCR_LLM_BASE_URL = 'https://www.shenlanqaq.com/v1';
+process.env.METER_OCR_LLM_API_KEY = secrets.models.providers.openai.apiKey;
+process.env.METER_OCR_LLM_MODEL = 'gpt-6.1-sol';
+const { MeterOcrService } = await import('../dist/modules/metering/ocr/meter-ocr.service.js');
+const svc = new MeterOcrService();
+const b64 = readFileSync(process.argv[2]).toString('base64');
+const t0 = Date.now();
+const r = await svc.recognize(b64, 232);
+console.log(`[${Date.now()-t0}ms]`, JSON.stringify(r));
+await svc.onModuleDestroy();
+process.exit(0);

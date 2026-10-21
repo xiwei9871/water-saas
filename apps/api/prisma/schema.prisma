@@ -635,6 +635,8 @@ model Meter {
   checkPeriodYears Int?     @map("check_period_years")
   /** 上次检定日期；与 checkPeriodYears 合算出下次检定到期日。 */
   lastCheckDate   DateTime? @map("last_check_date") @db.Date
+  /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表(监控表)。 */
+  meterRole     String      @default("NORMAL") @map("meter_role")
   parentMeterId String?     @map("parent_meter_id") @db.Uuid
   status        MeterStatus @default(AVAILABLE)
   createdAt     DateTime    @default(now()) @map("created_at")
@@ -643,11 +645,35 @@ model Meter {
   updatedBy     String?     @map("updated_by") @db.Uuid
 
   installations MeterInstallation[]
+  masterRelations MeterRelation[] @relation("master")
+  subRelations    MeterRelation[] @relation("sub")
 
   @@unique([tenantId, meterNo])
   @@unique([tenantId, id])
   @@index([tenantId, status])
   @@map("meter")
+}
+
+/** 20261021 任务C：总分表关系 — 主表挂分表；billing_mode MASTER=按总表计费/SUB=按分表计费。 */
+model MeterRelation {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  masterMeterId String    @map("master_meter_id") @db.Uuid
+  subMeterId    String    @map("sub_meter_id") @db.Uuid
+  billingMode   String    @default("SUB") @map("billing_mode")
+  effectiveDate DateTime  @map("effective_date") @db.Date
+  expiredDate   DateTime? @map("expired_date") @db.Date
+  createdAt     DateTime  @default(now()) @map("created_at")
+  createdBy     String?   @map("created_by") @db.Uuid
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  updatedBy     String?   @map("updated_by") @db.Uuid
+
+  masterMeter Meter @relation("master", fields: [tenantId, masterMeterId], references: [tenantId, id])
+  subMeter    Meter @relation("sub", fields: [tenantId, subMeterId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, masterMeterId])
+  @@map("meter_relation")
 }
 
 model MeterInstallation {

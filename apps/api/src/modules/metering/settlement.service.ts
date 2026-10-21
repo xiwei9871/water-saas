@@ -388,7 +388,7 @@ export class SettlementService {
     // Installations contributing to the period: lifetime intersects
     // [start,end) — still ACTIVE, or REMOVED during/after the period (an
     // install removed in a LATER period was active throughout this one).
-    const installations = await tx.meterInstallation.findMany({
+    const allInstallations = await tx.meterInstallation.findMany({
       where: {
         tenantId: ctx.tenantId,
         waterAccountId: body.waterAccountId,
@@ -403,13 +403,40 @@ export class SettlementService {
         initialReading: true,
         finalReading: true,
         status: true,
-        meter: { select: { maxDial: true } },
+        meter: { select: { id: true, maxDial: true, meterRole: true } },
       },
       orderBy: [{ installedAt: 'asc' }, { id: 'asc' }],
     });
-    if (installations.length === 0) {
+    if (allInstallations.length === 0) {
       throw new BadRequestException({
         code: 'NO_INSTALLATION_IN_PERIOD',
+        waterAccountId: body.waterAccountId,
+        period: body.period,
+      });
+    }
+    // 20261021 整改 任务C：总分表/考核表计费排除 —
+    //  CHECK考核表永不计费；billing_mode=MASTER 时分表安装行不计费（挂总表户）；
+    //  billing_mode=SUB 时总表安装行不计费（各分表户自负）。
+    const meterIds = allInstallations.map((i) => i.meterId);
+    const rels = await tx.meterRelation.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        expiredDate: null,
+        OR: [{ masterMeterId: { in: meterIds } }, { subMeterId: { in: meterIds } }],
+      },
+      select: { masterMeterId: true, subMeterId: true, billingMode: true },
+    });
+    const excludedMeterIds = new Set<string>();
+    for (const r of rels) {
+      if (r.billingMode === 'MASTER') excludedMeterIds.add(r.subMeterId);
+      else excludedMeterIds.add(r.masterMeterId);
+    }
+    const installations = allInstallations.filter(
+      (i) => i.meter.meterRole !== 'CHECK' && !excludedMeterIds.has(i.meterId),
+    );
+    if (installations.length === 0) {
+      throw new BadRequestException({
+        code: 'ACCOUNT_BILLING_EXCLUDED',
         waterAccountId: body.waterAccountId,
         period: body.period,
       });
