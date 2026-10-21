@@ -80,12 +80,29 @@ export class InstallController {
 
   @Post(':id/transition')
   @Permissions('install:write')
-  transition(@Param('id') id: string, @Body() body: { to?: string; note?: string }) {
+  transition(
+    @Param('id') id: string,
+    @Body() body: { to?: string; note?: string; installInitialReading?: unknown },
+  ) {
     const to = body?.to;
     if (!to || !STATUSES.has(to)) throw new BadRequestException({ code: 'APPLY_TARGET_INVALID' });
+    const iir =
+      body?.installInitialReading === undefined || body.installInitialReading === null
+        ? undefined
+        : Number(body.installInitialReading);
+    if (iir !== undefined && (!Number.isFinite(iir) || iir < 0)) {
+      throw new BadRequestException({ code: 'INSTALL_READING_INVALID' });
+    }
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      this.svc.transitionTx(tx, ctx, assertUuid(id, 'id'), to as InstallApplyStatus, body.note),
+      this.svc.transitionTx(
+        tx,
+        ctx,
+        assertUuid(id, 'id'),
+        to as InstallApplyStatus,
+        body.note,
+        iir,
+      ),
     );
   }
 

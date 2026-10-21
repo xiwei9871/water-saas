@@ -181,11 +181,26 @@ export default function BankDebit() {
     }
   };
 
+  const EXPORT_FIELD_LABELS: Record<string, string> = {
+    itemId: '明细序号',
+    settleNo: '结算户号',
+    holder: '户名',
+    amount: '金额(元)',
+    period: '期间',
+    status: '扣款结果',
+    bankSerialNo: '银行流水号',
+    failReason: '失败原因',
+    executedAt: '执行时间',
+    payAmount: '销账金额',
+    payStatus: '收款状态',
+    receivedAt: '收款时间',
+  };
+
   const agCols: ColumnsType<Agreement> = [
     {
       title: '结算户',
       render: (_, r) =>
-        r.settleAccount ? `${r.settleAccount.settleNo} ${r.settleAccount.name}` : `${r.settleAccountId.slice(0, 8)}…`,
+        r.settleAccount ? `${r.settleAccount.settleNo} ${r.settleAccount.name}` : '—',
     },
     { title: '卡号(掩码)', dataIndex: 'cardNoMasked' },
     { title: '开户行', dataIndex: 'bankCode', render: (v: string) => BANK_LABEL[v] ?? v },
@@ -252,7 +267,7 @@ export default function BankDebit() {
   ];
 
   const itemCols: ColumnsType<Item> = [
-    { title: '结算户号', render: (_, r) => r.settle?.settleNo ?? r.settleAccountId.slice(0, 8) },
+    { title: '结算户号', render: (_, r) => (r.settle ? `${r.settle.settleNo} ${r.settle.name}` : '—') },
     { title: '金额', dataIndex: 'amount', render: (v: string) => yuan(v) },
     {
       title: '结果',
@@ -348,9 +363,26 @@ export default function BankDebit() {
         footer={null}
         width={720}
       >
-        <pre style={{ maxHeight: 480, overflow: 'auto', fontSize: 12 }}>
-          {exportRows ? JSON.stringify(exportRows.rows, null, 2) : ''}
-        </pre>
+        {exportRows && (
+          <Table
+            rowKey={(_, i) => String(i)}
+            size="small"
+            pagination={false}
+            scroll={{ y: 440 }}
+            columns={
+              exportRows.rows.length
+                ? Object.keys(exportRows.rows[0])
+                    .filter((k) => k !== 'itemId')
+                    .map((k) => ({
+                      title: EXPORT_FIELD_LABELS[k] ?? k,
+                      dataIndex: k,
+                      render: (v: unknown) => (v === null || v === undefined ? '—' : String(v)),
+                    }))
+                : []
+            }
+            dataSource={exportRows.rows}
+          />
+        )}
       </Modal>
     </Card>
   );

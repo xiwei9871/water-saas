@@ -757,11 +757,6 @@ export default function MeterReadings() {
               { key: 'address', label: '用水地址', children: detail.account?.addr ?? '—' },
               { key: 'meterNo', label: '表号', children: detail.meterNo ?? '—' },
               {
-                key: 'id',
-                label: '记录 ID',
-                children: <span style={{ fontFamily: 'monospace' }}>{detail.id}</span>,
-              },
-              {
                 key: 'result',
                 label: '抄表结果',
                 children: (
@@ -799,12 +794,17 @@ export default function MeterReadings() {
               },
               {
                 key: 'tech',
-                label: '技术标识',
+                label: '技术信息',
                 children: (
-                  <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                    明细 {detail.planItemId ?? '无（计划外录入）'} · 安装{' '}
-                    {detail.installationId} · 表计 {detail.meterId}
-                  </span>
+                  <details>
+                    <summary style={{ cursor: 'pointer', color: '#888' }}>
+                      展开查看（排查用）
+                    </summary>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                      记录 {detail.id} · 明细 {detail.planItemId ?? '无（计划外录入）'} ·
+                      安装 {detail.installationId} · 表计 {detail.meterId}
+                    </span>
+                  </details>
                 ),
               },
               {

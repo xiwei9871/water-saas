@@ -11,6 +11,7 @@ import {
   Modal,
   Select,
   Space,
+  Steps,
   Table,
   Tag,
   Typography,
@@ -37,6 +38,7 @@ interface Apply {
   status: ApplyStatus;
   surveyNote: string | null;
   installNote: string | null;
+  installInitialReading?: string | null;
   rejectReason: string | null;
   waterAccountId: string | null;
   waterAccountNo?: string | null;
@@ -46,6 +48,10 @@ interface Apply {
 const STATUS_LABELS: Record<ApplyStatus, string> = {
   SUBMITTED: '已提交', SURVEYED: '已勘察', APPROVED: '已审批',
   INSTALLING: '装表中', COMPLETED: '已归档', REJECTED: '已驳回', CANCELLED: '已取消',
+};
+const STATUS_STEP: Record<ApplyStatus, number> = {
+  SUBMITTED: 0, SURVEYED: 1, APPROVED: 2, INSTALLING: 3, COMPLETED: 4,
+  REJECTED: 0, CANCELLED: 0,
 };
 const STATUS_COLORS: Record<ApplyStatus, string> = {
   SUBMITTED: 'processing', SURVEYED: 'cyan', APPROVED: 'geekblue',
@@ -113,8 +119,15 @@ export default function InstallApplications() {
 
   const transition = async () => {
     const note = noteForm.getFieldValue('note') as string | undefined;
+    const iir = noteForm.getFieldValue('installInitialReading') as number | undefined;
     try {
-      await api.post(`/install/applications/${noteFor!.app.id}/transition`, { to: noteFor!.to, note });
+      await api.post(`/install/applications/${noteFor!.app.id}/transition`, {
+        to: noteFor!.to,
+        note,
+        ...(noteFor!.to === 'INSTALLING' && iir !== undefined && iir !== null
+          ? { installInitialReading: iir }
+          : {}),
+      });
       message.success(`已流转至「${STATUS_LABELS[noteFor!.to]}」`);
       setNoteFor(null);
       noteForm.resetFields();
@@ -241,6 +254,15 @@ export default function InstallApplications() {
         destroyOnHidden
       >
         <Form form={noteForm} layout="vertical">
+          {noteFor?.to === 'INSTALLING' && (
+            <Form.Item
+              name="installInitialReading"
+              label="装表初始读数（m³）"
+              tooltip="装表完成那一刻的表码。立户时会与「水表起始读数」对比，若起始读数更大将提示核实装表后至立户期间的用水量。"
+            >
+              <InputNumber min={0} precision={2} style={{ width: 200 }} placeholder="如 0" />
+            </Form.Item>
+          )}
           <Form.Item name="note" label={noteFor?.to === 'REJECTED' ? '驳回原因' : '办理备注'} rules={noteFor?.to === 'REJECTED' ? [{ required: true }] : []}>
             <Input.TextArea rows={3} maxLength={300} />
           </Form.Item>
@@ -268,13 +290,55 @@ export default function InstallApplications() {
           <Form.Item name="meterId" label="选用库存表（可选，不选则新建表号）">
             <MeterSelect status="AVAILABLE" />
           </Form.Item>
-          <Form.Item name="initialReading" label="水表起始读数（m³）" rules={[{ required: true }]}>
+          <Form.Item
+            name="initialReading"
+            label="水表起始读数（m³）"
+            rules={[{ required: true }]}
+            extra="此处填写装表完成后水表的当前读数（表底），即安装完成那一刻的表码，一般不是 0。"
+          >
             <InputNumber min={0} precision={2} style={{ width: 200 }} />
           </Form.Item>
+          {archiveFor?.installInitialReading != null && (
+            <Form.Item noStyle shouldUpdate>
+              {() => {
+                const start = Number(archForm.getFieldValue('initialReading'));
+                const init = Number(archiveFor.installInitialReading);
+                return Number.isFinite(start) && start > init ? (
+                  <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                    起始读数比装表初始读数（{init}）多 {(start - init).toFixed(2)} m³ ——
+                    请核实装表后至立户期间是否存在用水、阀门未关或漏水。
+                  </Typography.Text>
+                ) : null;
+              }}
+            </Form.Item>
+          )}
         </Form>
       </Modal>
 
       <Drawer title={`申请详情 ${detail?.applyNo ?? ''}`} open={!!detail} onClose={() => setDetail(null)} width={520}>
+        {detail && (
+          <>
+            <Steps
+              size="small"
+              style={{ marginBottom: 16 }}
+              current={STATUS_STEP[detail.status] ?? 0}
+              status={['REJECTED', 'CANCELLED'].includes(detail.status) ? 'error' : 'process'}
+              items={[
+                { title: '申请', description: '提交报装' },
+                { title: '勘察', description: '现场勘察' },
+                { title: '审批', description: '审核批准' },
+                { title: '装表', description: '安装水表' },
+                { title: '归档', description: '立户归档' },
+              ]}
+            />
+            {['REJECTED', 'CANCELLED'].includes(detail.status) && (
+              <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
+                流程已{detail.status === 'REJECTED' ? '驳回' : '取消'}
+                {detail.rejectReason ? `：${detail.rejectReason}` : ''}
+              </Typography.Text>
+            )}
+          </>
+        )}
         {detail && (
           <Descriptions column={1} size="small" bordered>
             <Descriptions.Item label="申请人">{detail.applicantName}</Descriptions.Item>
@@ -284,6 +348,9 @@ export default function InstallApplications() {
             <Descriptions.Item label="状态"><Tag color={STATUS_COLORS[detail.status]}>{STATUS_LABELS[detail.status]}</Tag></Descriptions.Item>
             {detail.surveyNote && <Descriptions.Item label="勘察备注">{detail.surveyNote}</Descriptions.Item>}
             {detail.installNote && <Descriptions.Item label="装表备注">{detail.installNote}</Descriptions.Item>}
+            {detail.installInitialReading != null && (
+              <Descriptions.Item label="装表初始读数">{detail.installInitialReading} m³</Descriptions.Item>
+            )}
             {detail.rejectReason && <Descriptions.Item label="驳回原因">{detail.rejectReason}</Descriptions.Item>}
             {detail.waterAccountId && <Descriptions.Item label="已归档户号">{detail.waterAccountNo ?? detail.waterAccountId}</Descriptions.Item>}
             <Descriptions.Item label="备注">{detail.remark ?? '—'}</Descriptions.Item>

@@ -23,6 +23,7 @@ import { WaterAccountSearchSelect } from '../pickers';
 interface Violation {
   id: string;
   waterAccountId: string;
+  waterAccount?: { accountNo: string; customer: { customerNo: string; name: string } } | null;
   violationType: string;
   status: string;
   sourceType: string;
@@ -143,9 +144,11 @@ export default function Violations() {
   const columns: ColumnsType<Violation> = [
     {
       title: '用水户',
-      dataIndex: 'waterAccountId',
-      width: 110,
-      render: (v: string) => `${v.slice(0, 8)}…`,
+      width: 190,
+      render: (_, r) =>
+        r.waterAccount
+          ? `${r.waterAccount.accountNo} ${r.waterAccount.customer.name}`
+          : '—',
     },
     {
       title: '类型',

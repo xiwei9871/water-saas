@@ -11,12 +11,14 @@ import {
   Drawer,
   Form,
   Input,
+  InputNumber,
   Modal,
   Select,
   Space,
   Spin,
   Table,
   Tag,
+  Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -24,6 +26,7 @@ import { Link } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   AccountStatus,
+  PayChannel,
   PrepaymentBalance,
   PrepaymentEntriesPage,
   SettleAccount,
@@ -41,7 +44,7 @@ import {
   newIdemKey,
   USAGE_CATEGORY_LABELS,
 } from '../common';
-import { PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from '../payment/common';
+import { PAY_CHANNEL_LABELS, PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from '../payment/common';
 import { AccountStatusTag } from '../pickers';
 
 interface SettleFormValues {
@@ -82,6 +85,14 @@ export default function SettleAccounts() {
   // E6：详情抽屉联动的预存余额 + 最近流水。
   const [prepay, setPrepay] = useState<PrepaymentBalance | null>(null);
   const [prepayEntries, setPrepayEntries] = useState<PrepaymentEntriesPage | null>(null);
+  // 预存退款快捷入口（列表行内直达，不必进收费台详情）
+  const [refundFor, setRefundFor] = useState<SettleAccount | null>(null);
+  const [refundBalance, setRefundBalance] = useState<string | null>(null);
+  const [refundAmount, setRefundAmount] = useState<number | null>(null);
+  const [refundChannel, setRefundChannel] = useState<PayChannel>('CASH');
+  const [refundReason, setRefundReason] = useState('');
+  const [refundBusy, setRefundBusy] = useState(false);
+  const [refundKey, setRefundKey] = useState('');
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -234,10 +245,62 @@ export default function SettleAccounts() {
               编辑
             </Button>
           )}
+          {record.status !== 'CLOSED' && (
+            <Button size="small" danger onClick={() => void openRefund(record)}>
+              预存退款
+            </Button>
+          )}
         </Space>
       ),
     },
   ];
+
+  const openRefund = async (row: SettleAccount) => {
+    setRefundFor(row);
+    setRefundAmount(null);
+    setRefundReason('');
+    setRefundKey(newIdemKey());
+    try {
+      const res = await api.get<{ balance: string }>(
+        `/prepayments/balance?settleAccountId=${row.id}`,
+      );
+      setRefundBalance(res.data.balance);
+    } catch {
+      setRefundBalance(null);
+    }
+  };
+
+  const submitRefund = async () => {
+    if (!refundFor) return;
+    const cent = Math.round((refundAmount ?? 0) * 100);
+    if (!Number.isFinite(cent) || cent <= 0) {
+      message.warning('请输入退款金额');
+      return;
+    }
+    if (!refundReason.trim()) {
+      message.warning('请填写退款原因');
+      return;
+    }
+    setRefundBusy(true);
+    try {
+      await api.post(
+        '/prepayments/refunds',
+        {
+          settleAccountId: refundFor.id,
+          channel: refundChannel,
+          amount: String(cent),
+          reason: refundReason.trim(),
+        },
+        { headers: { 'Idempotency-Key': refundKey } },
+      );
+      message.success('预存退款已完成');
+      setRefundFor(null);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setRefundBusy(false);
+    }
+  };
 
   const accountColumns: ColumnsType<WaterAccountRef> = [
     {
@@ -483,6 +546,56 @@ export default function SettleAccounts() {
           </>
         )}
       </Drawer>
+
+      <Modal
+        maskClosable={false}
+        title={refundFor ? `预存退款 — ${refundFor.settleNo} ${refundFor.name}` : ''}
+        open={!!refundFor}
+        onOk={() => void submitRefund()}
+        onCancel={() => setRefundFor(null)}
+        confirmLoading={refundBusy}
+        okText="确认退款"
+        destroyOnHidden
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          当前预存余额：{refundBalance !== null ? fmtCent(refundBalance) : '查询中…'}
+          。退款按充值批次 FIFO 拆行，产生一笔负收款进入当日日结。
+        </Typography.Paragraph>
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <div>
+            退款金额（元）
+            <InputNumber
+              style={{ width: '100%', marginTop: 4 }}
+              min={0.01}
+              precision={2}
+              value={refundAmount}
+              onChange={(v) => setRefundAmount(v)}
+            />
+          </div>
+          <div>
+            退款渠道
+            <Select
+              style={{ width: '100%', marginTop: 4 }}
+              value={refundChannel}
+              onChange={(v) => setRefundChannel(v)}
+              options={(['CASH', 'POS', 'TRANSFER'] as PayChannel[]).map((c) => ({
+                value: c,
+                label: enumLabel(PAY_CHANNEL_LABELS, c),
+              }))}
+            />
+          </div>
+          <div>
+            退款原因
+            <Input
+              style={{ marginTop: 4 }}
+              maxLength={120}
+              value={refundReason}
+              onChange={(e) => setRefundReason(e.target.value)}
+              placeholder="如：销户退款 / 客户申请退回预存"
+            />
+          </div>
+        </Space>
+      </Modal>
     </Card>
   );
 }

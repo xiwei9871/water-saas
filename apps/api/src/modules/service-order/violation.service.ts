@@ -51,6 +51,14 @@ export class ViolationService {
           orderBy: { createdAt: 'desc' },
           take: q.take,
           skip: q.skip,
+          include: {
+            waterAccount: {
+              select: {
+                accountNo: true,
+                customer: { select: { customerNo: true, name: true } },
+              },
+            },
+          },
         }),
       ]);
       return { total, items };

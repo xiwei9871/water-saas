@@ -24,6 +24,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   AccountOutstanding,
@@ -74,7 +75,11 @@ export default function Cashier() {
   const canCustomerRead = hasPerm('customer:read');
 
   const [customerId, setCustomerId] = useState<string | undefined>(undefined);
-  const [waterAccountId, setWaterAccountId] = useState<string | undefined>(undefined);
+  const [params] = useSearchParams();
+  const seedAccount = params.get('accountId') ?? undefined;
+  const seedAction = params.get('action') ?? undefined;
+  const [waterAccountId, setWaterAccountId] = useState<string | undefined>(seedAccount);
+  const seededRefund = useRef(false);
 
   const [outstanding, setOutstanding] = useState<AccountOutstanding | null>(null);
   const [loading, setLoading] = useState(false);
@@ -127,6 +132,14 @@ export default function Cashier() {
         );
         if (seq !== fetchSeq.current) return;
         setOutstanding(res.data);
+        // 直达入口：?action=refund 自动打开预存退款弹窗（销户退费联动）
+        if (seedAction === 'refund' && !seededRefund.current) {
+          seededRefund.current = true;
+          setRefundAmount(null);
+          setRefundReason('');
+          setRefundKey(newIdemKey());
+          setRefundOpen(true);
+        }
         // 默认每张可缴账单全额分摊 —— 柜台最常见动作；可逐行改。
         const fill: Record<string, number> = {};
         for (const it of res.data.items) {

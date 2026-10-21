@@ -1095,6 +1095,10 @@ export class ServiceOrderService {
             initialReading: true,
             reason: true,
             status: true,
+            waterAccount: {
+              select: { accountNo: true, customer: { select: { name: true, customerNo: true } } },
+            },
+            meter: { select: { meterNo: true, serialNo: true } },
           },
           orderBy: { installedAt: 'desc' },
           take: q.take,
@@ -1119,6 +1123,7 @@ export class ServiceOrderService {
           removedAt: true,
           initialReading: true,
           finalReading: true,
+          meter: { select: { meterNo: true, serialNo: true } },
         },
       });
       const prev = new Map(
@@ -1130,11 +1135,16 @@ export class ServiceOrderService {
           newInstallationId: r.id,
           removedInstallationId: old?.id ?? null,
           waterAccountId: r.waterAccountId,
+          waterAccountLabel: r.waterAccount
+            ? `${r.waterAccount.accountNo} ${r.waterAccount.customer.name}`
+            : null,
           reason: r.reason,
           replacedAt: r.installedAt,
           oldMeter: old
             ? {
                 meterId: old.meterId,
+                meterNo: old.meter.meterNo,
+                serialNo: old.meter.serialNo,
                 finalReading: old.finalReading,
                 installedAt: old.installedAt,
                 initialReading: old.initialReading,
@@ -1142,6 +1152,8 @@ export class ServiceOrderService {
             : null,
           newMeter: {
             meterId: r.meterId,
+            meterNo: r.meter.meterNo,
+            serialNo: r.meter.serialNo,
             initialReading: r.initialReading,
             status: r.status,
           },
@@ -1195,6 +1207,9 @@ export class ServiceOrderService {
       approverId?: string | null;
       assigneeId?: string | null;
       executedBy?: string | null;
+      waterAccountId?: string | null;
+      meterId?: string | null;
+      sourceReadingId?: string | null;
     }[],
   ) {
     const ids = [
@@ -1204,19 +1219,74 @@ export class ServiceOrderService {
           .filter((x): x is string => Boolean(x)),
       ),
     ];
-    if (!ids.length) return;
-    const staff = await tx.staff.findMany({
-      where: { id: { in: ids } },
-      select: { id: true, name: true },
-    });
-    const names = new Map(staff.map((s) => [s.id, s.name]));
-    for (const i of items) {
-      Object.assign(i, {
-        applicantName: i.applicantId ? (names.get(i.applicantId) ?? '—') : null,
-        approverName: i.approverId ? (names.get(i.approverId) ?? '—') : null,
-        assigneeName: i.assigneeId ? (names.get(i.assigneeId) ?? '—') : null,
-        executedByName: i.executedBy ? (names.get(i.executedBy) ?? '—') : null,
+    if (ids.length) {
+      const staff = await tx.staff.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, name: true },
       });
+      const names = new Map(staff.map((s) => [s.id, s.name]));
+      for (const i of items) {
+        Object.assign(i, {
+          applicantName: i.applicantId ? (names.get(i.applicantId) ?? '—') : null,
+          approverName: i.approverId ? (names.get(i.approverId) ?? '—') : null,
+          assigneeName: i.assigneeId ? (names.get(i.assigneeId) ?? '—') : null,
+          executedByName: i.executedBy ? (names.get(i.executedBy) ?? '—') : null,
+        });
+      }
+    }
+    // 展示层取值规范：用水户/表具/读数一律回填业务编号，前端不得拼截断 UUID
+    const accIds = [
+      ...new Set(items.map((i) => i.waterAccountId).filter((x): x is string => Boolean(x))),
+    ];
+    if (accIds.length) {
+      const accs = await tx.waterAccount.findMany({
+        where: { id: { in: accIds } },
+        select: {
+          id: true,
+          accountNo: true,
+          addr: true,
+          customer: { select: { name: true, customerNo: true } },
+        },
+      });
+      const accMap = new Map(accs.map((a) => [a.id, a]));
+      for (const i of items) {
+        const a = i.waterAccountId ? accMap.get(i.waterAccountId) : null;
+        Object.assign(i, {
+          waterAccountLabel: a
+            ? `${a.accountNo} ${a.customer.name}（${a.addr}）`
+            : null,
+        });
+      }
+    }
+    const meterIds = [
+      ...new Set(items.map((i) => i.meterId).filter((x): x is string => Boolean(x))),
+    ];
+    if (meterIds.length) {
+      const meters = await tx.meter.findMany({
+        where: { id: { in: meterIds } },
+        select: { id: true, meterNo: true, serialNo: true },
+      });
+      const mMap = new Map(meters.map((m) => [m.id, m]));
+      for (const i of items) {
+        const m = i.meterId ? mMap.get(i.meterId) : null;
+        Object.assign(i, { meterLabel: m ? `${m.meterNo}${m.serialNo ? ` / ${m.serialNo}` : ''}` : null });
+      }
+    }
+    const readingIds = [
+      ...new Set(items.map((i) => i.sourceReadingId).filter((x): x is string => Boolean(x))),
+    ];
+    if (readingIds.length) {
+      const readings = await tx.meterReading.findMany({
+        where: { id: { in: readingIds } },
+        select: { id: true, readingValue: true, readingDate: true },
+      });
+      const rMap = new Map(readings.map((r) => [r.id, r]));
+      for (const i of items) {
+        const r = i.sourceReadingId ? rMap.get(i.sourceReadingId) : null;
+        Object.assign(i, {
+          sourceReadingLabel: r ? `读数 ${r.readingValue}` : null,
+        });
+      }
     }
   }
 }

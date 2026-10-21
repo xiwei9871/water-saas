@@ -80,6 +80,7 @@ export class InstallService {
     id: string,
     to: InstallApplyStatus,
     note?: string,
+    installInitialReading?: number,
   ) {
     const app = await tx.installApplication.findFirst({
       where: { tenantId: ctx.tenantId, id },
@@ -93,6 +94,9 @@ export class InstallService {
       updatedBy: ctx.staffId,
       ...(to === 'SURVEYED' && note !== undefined ? { surveyNote: note } : {}),
       ...(to === 'INSTALLING' && note !== undefined ? { installNote: note } : {}),
+      ...(to === 'INSTALLING' && installInitialReading !== undefined
+        ? { installInitialReading }
+        : {}),
       ...(to === 'REJECTED' ? { rejectReason: note ?? '' } : {}),
     };
     const updated = await tx.installApplication.update({ where: { id: app.id }, data: patch });

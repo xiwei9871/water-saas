@@ -2017,6 +2017,9 @@ model InstallApplication {
   orgUnitId      String?            @map("org_unit_id") @db.Uuid
   surveyNote     String?            @map("survey_note")
   installNote    String?            @map("install_note")
+  /** 装表环节记录的表底读数（APPROVED→INSTALLING 流转时录入），
+      归档时与立户「水表起始读数」联动校验：起始>初始说明装表后有水量。 */
+  installInitialReading Decimal?     @map("install_initial_reading") @db.Decimal(18, 4)
   rejectReason   String?            @map("reject_reason")
   waterAccountId String?            @map("water_account_id") @db.Uuid
   createdAt      DateTime           @default(now()) @map("created_at")

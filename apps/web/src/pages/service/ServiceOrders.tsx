@@ -78,6 +78,10 @@ interface ServiceOrder {
   linkRef: Record<string, unknown> | null;
   archivedAt: string | null;
   createdAt: string;
+  /** 后端注入的展示标签（户号+客户名+地址 / 表号 / 来源读数）。 */
+  waterAccountLabel?: string | null;
+  meterLabel?: string | null;
+  sourceReadingLabel?: string | null;
   /** 详情接口注入（T6 执行屏）：目标表具档案 + 关联表位。 */
   targetMeter?: {
     id: string;
@@ -167,8 +171,20 @@ export default function ServiceOrders() {
     null | 'approve' | 'reject' | 'dispatch' | 'execute' | 'cancel' | 'archive'
   >(null);
   const [activeInstallations, setActiveInstallations] = useState<
-    { id: string; meterId: string }[]
+    {
+      id: string;
+      meterId: string;
+      installedAt?: string;
+      initialReading?: string;
+      meter?: { meterNo: string; serialNo: string | null } | null;
+    }[]
   >([]);
+  const instLabel = (i: {
+    installedAt?: string;
+    initialReading?: string;
+    meter?: { meterNo: string; serialNo: string | null } | null;
+  }) =>
+    `表 ${i.meter?.meterNo ?? '?'}${i.installedAt ? ` · 装于 ${fmtDate(i.installedAt)}` : ''}`;
   const [form] = Form.useForm();
   const [execForm] = Form.useForm();
 
@@ -376,6 +392,13 @@ export default function ServiceOrders() {
         ),
       },
       {
+        title: '用水户',
+        dataIndex: 'waterAccountLabel',
+        width: 210,
+        ellipsis: true,
+        render: (v) => v ?? '—',
+      },
+      {
         title: '来源',
         dataIndex: 'sourceType',
         width: 90,
@@ -483,7 +506,7 @@ export default function ServiceOrders() {
                     allowClear
                     options={activeInstallations.map((i) => ({
                       value: i.id,
-                      label: `安装 ${i.id.slice(0, 8)}…`,
+                      label: instLabel(i),
                     }))}
                     placeholder="故障换表等类型建议关联"
                   />
@@ -522,12 +545,10 @@ export default function ServiceOrders() {
               </Descriptions.Item>
               <Descriptions.Item label="来源">
                 <Tag>{enumLabel(ORDER_SOURCE_LABELS, detail.sourceType)}</Tag>
-                {detail.sourceReadingId
-                  ? `读数 ${detail.sourceReadingId.slice(0, 8)}…`
-                  : ''}
+                {detail.sourceReadingLabel ?? ''}
               </Descriptions.Item>
               <Descriptions.Item label="用水户">
-                {detail.waterAccountId.slice(0, 8)}…
+                {detail.waterAccountLabel ?? '—'}
               </Descriptions.Item>
               {detail.targetMeter ? (
                 <Descriptions.Item label="目标表具">
@@ -789,7 +810,7 @@ export default function ServiceOrders() {
                   <Select
                     options={activeInstallations.map((i) => ({
                       value: i.id,
-                      label: `安装 ${i.id.slice(0, 8)}…`,
+                      label: instLabel(i),
                     }))}
                     placeholder="选择要拆除的安装记录"
                   />
@@ -872,7 +893,7 @@ export default function ServiceOrders() {
                     allowClear
                     options={activeInstallations.map((i) => ({
                       value: i.id,
-                      label: `安装 ${i.id.slice(0, 8)}…`,
+                      label: instLabel(i),
                     }))}
                   />
                 </Form.Item>

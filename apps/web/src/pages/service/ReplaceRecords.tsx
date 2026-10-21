@@ -10,16 +10,21 @@ interface ReplaceRecord {
   newInstallationId: string;
   removedInstallationId: string | null;
   waterAccountId: string;
+  waterAccountLabel?: string | null;
   reason: string;
   replacedAt: string;
   oldMeter: {
     meterId: string;
+    meterNo?: string;
+    serialNo?: string | null;
     finalReading: string | null;
     installedAt: string;
     initialReading: string;
   } | null;
   newMeter: {
     meterId: string;
+    meterNo?: string;
+    serialNo?: string | null;
     initialReading: string;
     status: string;
   };
@@ -79,23 +84,23 @@ export default function ReplaceRecords() {
     },
     {
       title: '用水户',
-      dataIndex: 'waterAccountId',
-      width: 120,
-      render: (v: string) => `${v.slice(0, 8)}…`,
+      dataIndex: 'waterAccountLabel',
+      width: 180,
+      render: (v) => v ?? '—',
     },
     {
       title: '老表段',
       key: 'old',
       render: (_, r) =>
         r.oldMeter
-          ? `表 ${r.oldMeter.meterId.slice(0, 8)}… · 始码 ${r.oldMeter.initialReading} → 止码 ${r.oldMeter.finalReading ?? '—'}`
+          ? `表 ${r.oldMeter.meterNo ?? '—'} · 始码 ${r.oldMeter.initialReading} → 止码 ${r.oldMeter.finalReading ?? '—'}`
           : '—',
     },
     {
       title: '新表段',
       key: 'new',
       render: (_, r) =>
-        `表 ${r.newMeter.meterId.slice(0, 8)}… · 始码 ${r.newMeter.initialReading}`,
+        `表 ${r.newMeter.meterNo ?? '—'} · 始码 ${r.newMeter.initialReading}`,
     },
   ];
 
