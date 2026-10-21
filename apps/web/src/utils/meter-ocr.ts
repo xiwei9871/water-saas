@@ -217,11 +217,95 @@ export function pickRollerDigits(items: OcrResultItem[], img: ImageData, imgW: n
 const PTR_LEFT_MULTS = [1, 10, 100, 1000];
 
 const ptrDbg = (m: string, v?: unknown) => {
-  if (typeof window !== 'undefined' && (window as unknown as { __ocrDebug?: boolean }).__ocrDebug) {
+  if (typeof window === 'undefined' || (window as unknown as { __ocrDebug?: boolean }).__ocrDebug) {
     // eslint-disable-next-line no-console
     console.log('[ptr]', m, typeof v === 'object' ? JSON.stringify(v) : (v ?? ''));
   }
 };
+
+// ---------- OpenCV.js：表盘倾斜校正的现成轮子（浏览器本地 /opencv/opencv.js）----------
+let cvPromise: Promise<any> | null = null;
+let cvInjected: any = null;
+/** Emscripten Module 是 thenable（带 .then）——过 Promise.resolve 会被吞并永不返回，包原型层屏蔽 */
+function unwrapThenable(mod: any): any {
+  const api = Object.create(mod);
+  api.then = undefined;
+  return api;
+}
+/** 测试/Node 复算注入已初始化的 cv 实例（生产浏览器走 script 标签自动加载） */
+export function __setCvForTest(cv: any): void {
+  cvInjected = cv && cv.then ? unwrapThenable(cv) : cv;
+}
+function getCv(): Promise<any> {
+  if (cvInjected) return Promise.resolve(cvInjected);
+  if (cvPromise) return cvPromise;
+  cvPromise = (async () => {
+    const w = window as any;
+    if (w.cv?.Mat) return unwrapThenable(w.cv);
+    await new Promise<void>((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/opencv/opencv.js';
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('opencv.js load failed'));
+      document.head.appendChild(s);
+    });
+    const t0 = Date.now();
+    while (!w.cv?.Mat) {
+      if (Date.now() - t0 > 30000) throw new Error('opencv init timeout');
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return unwrapThenable(w.cv);
+  })().catch((e) => { cvPromise = null; throw e; });
+  return cvPromise;
+}
+
+/** 旋转椭圆（cv.fitEllipse RotatedRect）：p = c + R(φ)·(u·w/2, v·h/2) */
+interface DialEllipse { cx: number; cy: number; aw: number; ah: number; phi: number }
+function ellNorm(e: DialEllipse, x: number, y: number): [number, number] {
+  const dx = x - e.cx;
+  const dy = y - e.cy;
+  const c = Math.cos(e.phi);
+  const s = Math.sin(e.phi);
+  return [(dx * c + dy * s) / e.aw, (-dx * s + dy * c) / e.ah];
+}
+/** 表盘空间角 θ（0=表心正上, 顺+）：归一化后 atan2(u,-v) */
+function ellTheta(e: DialEllipse, x: number, y: number): number {
+  const [u, v] = ellNorm(e, x, y);
+  return ((Math.atan2(u, -v) * 180) / Math.PI + 360) % 360;
+}
+/** 表盘空间角 → 椭圆上的原始图像坐标 */
+function ellPoint(e: DialEllipse, thetaDeg: number): [number, number] {
+  const t = (thetaDeg * Math.PI) / 180;
+  const u = Math.sin(t) * e.aw;
+  const v = -Math.cos(t) * e.ah;
+  const c = Math.cos(e.phi);
+  const s = Math.sin(e.phi);
+  return [e.cx + u * c - v * s, e.cy + u * s + v * c];
+}
+/** 表盘空间角 → 原始图像中的单位方向向量（针头朝向） */
+function ellDir(e: DialEllipse, thetaDeg: number): [number, number] {
+  const t = (thetaDeg * Math.PI) / 180;
+  const u = Math.sin(t) * e.aw;
+  const v = -Math.cos(t) * e.ah;
+  const c = Math.cos(e.phi);
+  const s = Math.sin(e.phi);
+  const dx = u * c - v * s;
+  const dy = u * s + v * c;
+  const l = Math.hypot(dx, dy) || 1;
+  return [dx / l, dy / l];
+}
+function cvFitEllipse(cv: any, pts: { cx: number; cy: number }[]): DialEllipse | null {
+  if (pts.length < 5) return null;
+  const m = cv.matFromArray(pts.length, 1, cv.CV_32SC2, pts.flatMap((p) => [Math.round(p.cx), Math.round(p.cy)]));
+  try {
+    const rr = cv.fitEllipse(m);
+    return { cx: rr.center.x, cy: rr.center.y, aw: rr.size.width / 2, ah: rr.size.height / 2, phi: (rr.angle * Math.PI) / 180 };
+  } catch {
+    return null;
+  } finally {
+    m.delete();
+  }
+}
 
 function imgToCanvas(img: ImageData): HTMLCanvasElement {
   const cv = document.createElement('canvas');
@@ -229,6 +313,22 @@ function imgToCanvas(img: ImageData): HTMLCanvasElement {
   cv.height = img.height;
   cv.getContext('2d')!.putImageData(img, 0, 0);
   return cv;
+}
+
+/** Sobel 边缘图（纯函数，Node 可复算） */
+export function sobelGray(gray: Uint8Array | Uint8ClampedArray, w: number, h: number): Uint8Array {
+  const edge = new Uint8Array(w * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const gx =
+        -gray[i - w - 1] - 2 * gray[i - 1] - gray[i + w - 1] + gray[i - w + 1] + 2 * gray[i + 1] + gray[i + w + 1];
+      const gy =
+        -gray[i - w + 1] - 2 * gray[i - w] - gray[i + w + 1] + gray[i + w + 1] + 2 * gray[i + w] + gray[i + w + 1];
+      if (gx * gx + gy * gy > 8100) edge[i] = 1; // |g|>90
+    }
+  }
+  return edge;
 }
 
 /** 降采样灰度 + Sobel 边缘图 */
@@ -244,18 +344,7 @@ function edgeMap(img: ImageData, targetW = 480): { w: number; h: number; edge: U
   const ds = ctx.getImageData(0, 0, w, h).data;
   const gray = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) gray[i] = (ds[i * 4] * 3 + ds[i * 4 + 1] * 4 + ds[i * 4 + 2]) >> 3;
-  const edge = new Uint8Array(w * h);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      const gx =
-        -gray[i - w - 1] - 2 * gray[i - 1] - gray[i + w - 1] + gray[i - w + 1] + 2 * gray[i + 1] + gray[i + w + 1];
-      const gy =
-        -gray[i - w - 1] - 2 * gray[i - w] - gray[i - w + 1] + gray[i + w - 1] + 2 * gray[i + w] + gray[i + w + 1];
-      if (gx * gx + gy * gy > 8100) edge[i] = 1; // |g|>90
-    }
-  }
-  return { w, h, edge };
+  return { w, h, edge: sobelGray(gray, w, h) };
 }
 
 interface Circle { cx: number; cy: number; r: number; cover: number }
@@ -392,7 +481,8 @@ function refineCircle(edge: Uint8Array, w: number, h: number, c: Circle): Circle
 
 /** 倍率标签解析（容忍 OCR 噪声与倒置文本） */
 function parseMultLabel(t0: string): number | null {
-  const t = t0.toUpperCase().replace(/×|Ｘ/g, 'X').replace(/[，,]/g, '.').replace(/\s/g, '');
+  let t = t0.toUpperCase().replace(/×|Ｘ/g, 'X').replace(/[，,]/g, '.').replace(/\s/g, '');
+  if (/^\+/.test(t)) t = 'X' + t.slice(1); // "×" 被 OCR 误读为 "+"
   if (!/X/.test(t)) return null;
   if (t === 'XI' || t === 'XL' || t === 'XI.') return 1;
   if (!/\d/.test(t)) return null;
@@ -409,28 +499,208 @@ function parseMultLabel(t0: string): number | null {
   return null;
 }
 
-/**
- * 指针表读数：Hough 圆检定位表盘 → 像素射线采样定指针角度 →
- * OCR 刻度数字回归判顺/逆时针 → 标签+列约定分配倍率 → 组合整数 + ×0.1 小数。
- * 不确定一律返回 null。
- */
-function readPointerDials(items: OcrResultItem[], img: ImageData): { value: string; confidence: number } | null {
-  const { w, h, edge } = edgeMap(img);
-  const scale = img.width / w;
-  const circles = detectCircles(edge, w, h)
-    .map((c) => ({ cx: c.cx * scale, cy: c.cy * scale, r: c.r * scale, cover: c.cover }))
-    .filter((c) => c.r > 14 && c.r < img.width * 0.16);
-  ptrDbg('circles', circles.map((c) => [Math.round(c.cx), Math.round(c.cy), Math.round(c.r), +c.cover.toFixed(2)]));
-  if (circles.length < 4) return null;
+type Px = (x: number, y: number) => readonly [number, number, number];
 
+function makePx(img: ImageData): Px {
   const { width: W, height: H, data } = img;
-  const px = (x: number, y: number) => {
+  return (x, y) => {
     const xx = Math.max(0, Math.min(W - 1, Math.round(x)));
     const yy = Math.max(0, Math.min(H - 1, Math.round(y)));
     const i = (yy * W + xx) * 4;
     return [data[i], data[i + 1], data[i + 2]] as const;
   };
+}
 
+interface PtrDial {
+  cx: number;
+  cy: number;
+  r: number;
+  cw: boolean | null;
+  mult: number | null;
+}
+
+/**
+ * 指针角度采样：自适应暗度阈值（针+刻字≈盘面最暗20%），红针盘改红色掩码；
+ * 逐角度射线采样取径向最长连续命中，峰邻域加权质心精化。
+ * ell = 表盘环椭圆（cv.fitEllipse 倾斜校正）；正拍/无拟合时按圆形映射。
+ */
+function readNeedle(px: Px, d: PtrDial, ell?: DialEllipse | null): { digit: number; sharp: number; v: number; ang: number } {
+  const rStat = d.r * 0.7;
+  const lumas: number[] = [];
+  let reds = 0;
+  let total = 0;
+  for (let y = Math.floor(d.cy - rStat); y <= d.cy + rStat; y++) {
+    for (let x = Math.floor(d.cx - rStat); x <= d.cx + rStat; x++) {
+      const dx = x - d.cx;
+      const dy = y - d.cy;
+      if (Math.hypot(dx, dy) > rStat) continue;
+      total++;
+      const [pr, pg, pb] = px(x, y);
+      lumas.push(Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2));
+      if (pr - pg > 30 && pr - pb > 15 && pr > 80) reds++;
+    }
+  }
+  lumas.sort((a, b) => a - b);
+  const isRedDial = reds > total * 0.06;
+  const thr = Math.min(95, lumas[Math.floor(lumas.length * 0.2)] + 8);
+
+  const isInk = (x: number, y: number) => {
+    const [pr, pg, pb] = px(x, y);
+    return isRedDial
+      ? pr - pg > 30 && pr - pb > 15 && pr > 80
+      : Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2) < thr;
+  };
+  // 针=径向连续长线；内环=切向短段 → 评分 = 径向最长连续命中
+  const rA = d.r * 0.25;
+  const rB = d.r * 0.8;
+  const rStep = 1.6;
+  const nSmp = Math.floor((rB - rA) / rStep);
+  const scores = new Float32Array(180); // 2° 步长
+  for (let deg = 0; deg < 360; deg += 2) {
+    // 表盘空间角度 → 原图方向（旋转椭圆投影反变换）
+    const [dx, dy] = ell
+      ? ellDir(ell, deg)
+      : (() => { const rad = (deg * Math.PI) / 180; return [Math.sin(rad), -Math.cos(rad)] as [number, number]; })();
+    let run = 0;
+    let bestRun = 0;
+    for (let k = 0; k < nSmp; k++) {
+      const rr = rA + k * rStep;
+      let hit = 0;
+      for (const o of [-1, 0, 1]) {
+        const ox = -dy * o;
+        const oy = dx * o;
+        if (isInk(d.cx + dx * rr + ox, d.cy + dy * rr + oy)) hit = 1;
+      }
+      if (hit) {
+        run++;
+        if (run > bestRun) bestRun = run;
+      } else run = 0;
+    }
+    scores[deg / 2] = bestRun;
+  }
+  // 环形平滑（±4°）找峰，再对峰邻域（score≥0.7·max）做加权质心精化
+  const sm = new Float32Array(180);
+  let best = 0;
+  let bestS = -1;
+  let sum = 0;
+  for (let i = 0; i < 180; i++) {
+    for (let o = -2; o <= 2; o++) sm[i] += scores[(i + o + 180) % 180];
+    sum += sm[i];
+    if (sm[i] > bestS) {
+      bestS = sm[i];
+      best = i;
+    }
+  }
+  let wNum = 0;
+  let wDen = 0;
+  let off = 0;
+  while (off < 20 && sm[(best + off) % 180] >= bestS * 0.7) {
+    wNum += sm[(best + off) % 180] * off;
+    wDen += sm[(best + off) % 180];
+    off++;
+  }
+  off = -1;
+  while (off > -20 && sm[(best + off + 180) % 180] >= bestS * 0.7) {
+    wNum += sm[(best + off + 180) % 180] * off;
+    wDen += sm[(best + off + 180) % 180];
+    off--;
+  }
+  const bestA = (((best + (wDen ? wNum / wDen : 0)) * 2) % 360 + 360) % 360;
+  const sharp = bestS / (sum / 180 || 1);
+  const cw = d.cw ?? true;
+  const v = cw ? bestA / 36 : (360 - bestA) / 36;
+  const digit = ((Math.floor(v) % 10) + 10) % 10;
+  ptrDbg('needle', { mult: d.mult, cx: Math.round(d.cx), cy: Math.round(d.cy), deg: +bestA.toFixed(1), digit, v: +v.toFixed(2), sharp: +sharp.toFixed(2), thr, red: isRedDial });
+  return { digit, sharp, v, ang: cw ? bestA : (360 - bestA) % 360 };
+}
+
+interface PtrPart {
+  mult: number;
+  digit: number;
+  sharp: number;
+  v: number;
+  ang: number;
+}
+
+/**
+ * 机械联动枚举裁决：每盘"针落在哪两个数字之间"取整（floor），frac 贴近整界
+ *（≥0.78/≤0.22）时附加相邻数字作借位候选；联合枚举全局相位 δ（吸收照片 roll/表盘零位偏差）
+ * 与整数位数字组合，使各盘量测针位尽量落在机械期望区间 [digit+(T mod m)/m, +1/m) 内——
+ * ×1 盘区间宽 1（只约束整数位，小数 slack 天然吸收）。总分/单盘偏差超标 → null 拒识。
+ */
+function pointerChain(
+  parts: PtrPart[],
+  tenthRead: { digit: number; sharp: number; v: number; ang: number } | null,
+): { value: string; confidence: number } | null {
+  const ints = parts.filter((p) => p.mult >= 1).sort((a, b) => a.mult - b.mult); // ×1→×1000
+  if (ints.length < 3) return null;
+  const norm10 = (x: number) => ((x % 10) + 10) % 10;
+  // v 到环上区间 [lo, lo+w) 的距离（内部→0）
+  const segDev = (v: number, lo: number, w: number) => {
+    const dIn = norm10(v - lo);
+    return dIn < w ? 0 : Math.min(dIn - w, 10 - dIn);
+  };
+  const n = ints.length;
+  type Sol = { score: number; maxDev: number; digits: number[]; delta: number };
+  const box: { best: Sol | null } = { best: null };
+  for (let delta = -30; delta <= 30; delta += 3) {
+    const vs = ints.map((p) => norm10(p.ang / 36 - delta / 36));
+    const cands = vs.map((v) => {
+      const fl = ((Math.floor(v) % 10) + 10) % 10;
+      const fr = v - Math.floor(v);
+      const c = [fl];
+      if (fr >= 0.78) c.push((fl + 1) % 10);
+      if (fr <= 0.22) c.push((fl + 9) % 10);
+      return c;
+    });
+    const dig = new Array<number>(n);
+    const dfs = (i: number, t: number, score: number, mx: number) => {
+      if (box.best && score >= box.best.score) return;
+      if (i === n) {
+        box.best = { score, maxDev: mx, digits: [...dig], delta };
+        return;
+      }
+      const m = ints[i].mult;
+      const lower = t / m; // 低位盘合计占本盘周期比例（t<m 恒成立）
+      for (const d of cands[i]) {
+        const dev = segDev(vs[i], norm10(d + lower), 1 / m);
+        dig[i] = d;
+        dfs(i + 1, t + d * m, score + dev, Math.max(mx, dev));
+      }
+    };
+    dfs(0, 0, 0, 0);
+    ptrDbg('cal-δ', { delta, cands });
+  }
+  const best = box.best;
+  if (!best) return null;
+  const avg = best.score / n;
+  if (avg > 0.34 || best.maxDev > 0.56) {
+    ptrDbg('chain-reject', { score: +best.score.toFixed(2), avg: +avg.toFixed(2), maxDev: +best.maxDev.toFixed(2), digits: best.digits, delta: best.delta });
+    return null;
+  }
+  const intStr = ints
+    .slice()
+    .sort((a, b) => b.mult - a.mult)
+    .map((p) => String(best.digits[ints.indexOf(p)]))
+    .join('');
+  let tenth: number | null = null;
+  if (tenthRead) tenth = ((Math.floor(norm10((tenthRead.ang - best.delta) / 36)) % 10) + 10) % 10;
+  else {
+    const v1 = ints.find((p) => p.mult === 1);
+    if (v1) {
+      const f = norm10(v1.ang / 36 - best.delta / 36);
+      tenth = Math.round((f - Math.floor(f)) * 10) % 10;
+    }
+  }
+  const value = tenth != null ? `${intStr}.${tenth}` : intStr;
+  const minSharp = Math.min(...parts.map((p) => p.sharp));
+  const confidence = Math.round(Math.max(35, Math.min(85, 72 - best.score * 22 + Math.min(12, minSharp * 3))));
+  ptrDbg('read', { intStr, tenth, value, conf: confidence, score: +best.score.toFixed(2), delta: best.delta });
+  return { value, confidence };
+}
+
+/** OCR 文本框 → 刻度数字点 + 倍率标签 */
+function pointerOcrParts(items: OcrResultItem[]): { digitPts: { v: number; cx: number; cy: number }[]; labels: { cx: number; cy: number; mult: number }[] } {
   const digitPts: { v: number; cx: number; cy: number }[] = [];
   const labels: { cx: number; cy: number; mult: number }[] = [];
   for (const it of items) {
@@ -447,37 +717,61 @@ function readPointerDials(items: OcrResultItem[], img: ImageData): { value: stri
     if (mult != null) labels.push({ cx, cy, mult });
   }
   ptrDbg('labels', labels.map((l) => [l.mult, Math.round(l.cx), Math.round(l.cy)]));
+  return { digitPts, labels };
+}
 
-  interface Dial extends Circle { mult: number | null; cw: boolean | null }
-  const dials: Dial[] = [];
+/** 刻度数字点角度回归判表盘顺/逆时针 */
+function dialCw(digitPts: { v: number; cx: number; cy: number }[], cx: number, cy: number, r: number): boolean | null {
+  const ring = digitPts.filter((d) => {
+    const dist = Math.hypot(d.cx - cx, d.cy - cy);
+    return dist > r * 0.45 && dist < r * 1.35;
+  });
+  if (ring.length < 4) return null;
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  const n = ring.length;
+  const meanD = ring.reduce((s, d) => s + d.v, 0) / n;
+  const meanT = ring.reduce((s, d) => s + ((Math.atan2(d.cx - cx, cy - d.cy) * 180) / Math.PI + 360) % 360, 0) / n;
+  for (const d of ring) {
+    const th = ((Math.atan2(d.cx - cx, cy - d.cy) * 180) / Math.PI + 360) % 360;
+    const thu = th - Math.round((th - meanT) / 360) * 360;
+    sxy += (d.v - meanD) * (thu - meanT);
+    syy += (thu - meanT) * (thu - meanT);
+    sxx += (d.v - meanD) * (d.v - meanD);
+  }
+  if (sxx > 1 && syy > 1) {
+    const fit = sxy / Math.sqrt(sxx * syy);
+    if (Math.abs(fit) > 0.6) return fit > 0;
+  }
+  return null;
+}
+
+/**
+ * 指针表读数：Hough 圆检定位表盘 → 像素射线采样定指针角度 →
+ * OCR 刻度数字回归判顺/逆时针 → 标签+列约定分配倍率 → 组合整数 + ×0.1 小数。
+ * 不确定一律返回 null。
+ */
+function readPointerDialsGrid(items: OcrResultItem[], img: ImageData, edgeIn?: { w: number; h: number; edge: Uint8Array }): { value: string; confidence: number } | null {
+  const { w, h, edge } = edgeIn ?? edgeMap(img);
+  const scale = img.width / w;
+  const circles = detectCircles(edge, w, h)
+    .map((c) => ({ cx: c.cx * scale, cy: c.cy * scale, r: c.r * scale, cover: c.cover }))
+    .filter((c) => c.r > 14 && c.r < img.width * 0.16);
+  ptrDbg('circles', circles.map((c) => [Math.round(c.cx), Math.round(c.cy), Math.round(c.r), +c.cover.toFixed(2)]));
+  if (circles.length < 4) return null;
+
+  const px = makePx(img);
+  const { digitPts, labels } = pointerOcrParts(items);
+
+  const dials: PtrDial[] = [];
   for (const c of circles) {
     const ring = digitPts.filter((d) => {
       const dist = Math.hypot(d.cx - c.cx, d.cy - c.cy);
       return dist > c.r * 0.45 && dist < c.r * 1.25;
     });
     if (ring.length < 3 && !(c.r >= img.width * 0.05 && c.cover >= 0.45)) continue;
-    let cw: boolean | null = null;
-    if (ring.length >= 4) {
-      let sxx = 0;
-      let sxy = 0;
-      let syy = 0;
-      const n = ring.length;
-      const meanD = ring.reduce((s, d) => s + d.v, 0) / n;
-      const meanT =
-        ring.reduce((s, d) => s + ((Math.atan2(d.cx - c.cx, c.cy - d.cy) * 180) / Math.PI + 360) % 360, 0) / n;
-      for (const d of ring) {
-        const th = ((Math.atan2(d.cx - c.cx, c.cy - d.cy) * 180) / Math.PI + 360) % 360;
-        const thu = th - Math.round((th - meanT) / 360) * 360;
-        sxy += (d.v - meanD) * (thu - meanT);
-        syy += (thu - meanT) * (thu - meanT);
-        sxx += (d.v - meanD) * (d.v - meanD);
-      }
-      if (sxx > 1 && syy > 1) {
-        const fit = sxy / Math.sqrt(sxx * syy);
-        if (Math.abs(fit) > 0.6) cw = fit > 0;
-      }
-    }
-    dials.push({ ...c, mult: null, cw });
+    dials.push({ ...c, mult: null, cw: dialCw(digitPts, c.cx, c.cy, c.r) });
   }
   ptrDbg('dials', dials.map((d) => [Math.round(d.cx), Math.round(d.cy), Math.round(d.r), d.cw === null ? '?' : d.cw ? 'cw' : 'ccw']));
   if (dials.length < 4) return null;
@@ -520,7 +814,7 @@ function readPointerDials(items: OcrResultItem[], img: ImageData): { value: stri
     const l01 = labels.find((l) => l.mult === 0.1);
     if (l01) {
       const rMed = members.map((m) => m.r).sort((a, b) => a - b)[Math.floor(members.length / 2)] ?? img.width * 0.065;
-      dec01Dial = { cx: l01.cx, cy: l01.cy - rMed * 1.25, r: rMed, cover: 0, mult: 0.1, cw: null };
+      dec01Dial = { cx: l01.cx, cy: l01.cy - rMed * 1.25, r: rMed, mult: 0.1, cw: null };
       ptrDbg('synthetic-0.1', { cx: Math.round(l01.cx), cy: Math.round(l01.cy - rMed * 1.25), r: Math.round(rMed) });
     }
   }
@@ -529,138 +823,363 @@ function readPointerDials(items: OcrResultItem[], img: ImageData): { value: stri
   ptrDbg('mult', members.map((d) => [d.mult, Math.round(d.cx), Math.round(d.cy)]));
   if (!need.every((k) => intDials.some((d) => d.mult === k))) return null;
 
-  const readOne = (d: Dial): { digit: number; sharp: number; v: number } => {
-    // 自适应暗度阈值：针+刻字约占盘面最暗 20%；红针盘改用红色掩码。
-    const rStat = d.r * 0.7;
-    const lumas: number[] = [];
+  const parts = intDials
+    .filter((d) => need.includes(d.mult!))
+    .map((d) => ({ mult: d.mult!, ...readNeedle(px, d) }))
+    .sort((a, b) => b.mult - a.mult);
+  const tenthRead = dec01Dial ? readNeedle(px, dec01Dial) : null;
+  return pointerChain(parts, tenthRead);
+}
+
+
+/**
+ * 表盘环路径：指针表盘环绕表心一圈，沿顺时针方向每步倍率 ÷10
+ *（×1→×0.1→×0.01→×0.001→×0.0001→×1000→×100→×10→回 ×1）。
+ * 流程：圆检候选 → 同中心去重 → 轴对齐椭圆拟合（抗倾斜投影）→ 归一化角排序 →
+ * 等角槽位补齐缺失盘 → 倍率标签/红黑色弧锚定 → 针角采样 → 机械链裁决。
+ * 任一环节不确定 → null（调用方回退网格路径）。
+ */
+async function readPointerDialsRing(
+  items: OcrResultItem[],
+  img: ImageData,
+  edgeIn?: { w: number; h: number; edge: Uint8Array },
+): Promise<{ value: string; confidence: number } | null> {
+  ptrDbg('ring:enter');
+  let cv: any;
+  try {
+    cv = await getCv();
+  } catch (e) {
+    ptrDbg('ring:opencv-unavailable', (e as Error).message);
+    return null;
+  }
+  ptrDbg('ring:cv-ready');
+  const { w, h, edge } = edgeIn ?? edgeMap(img);
+  const scale = img.width / w;
+  const px = makePx(img);
+  const circles = detectCircles(edge, w, h)
+    .map((c) => ({ cx: c.cx * scale, cy: c.cy * scale, r: c.r * scale, cover: c.cover }))
+    .filter((c) => c.r > 11 && c.r < img.width * 0.16);
+  ptrDbg('r-circles', circles.map((c) => [Math.round(c.cx), Math.round(c.cy), Math.round(c.r), +c.cover.toFixed(2)]));
+  if (circles.length < 5) return null;
+
+  // 同中心合并：毂部小圆若落在某大圆内则是同一表盘
+  const byR = [...circles].sort((a, b) => b.r - a.r);
+  const cands: typeof circles = [];
+  for (const c of byR) {
+    if (cands.some((k) => Math.hypot(k.cx - c.cx, k.cy - c.cy) < Math.max(k.r, c.r) * 0.55)) continue;
+    cands.push(c);
+  }
+  if (cands.length < 5) return null;
+
+  // 离群剔除 ①：环内杂点（中央齿轮/星形件）—— 到质心距离 < 中位距 0.45
+  const cx0 = [...cands].sort((p, q) => p.cx - q.cx)[Math.floor(cands.length / 2)].cx;
+  const cy0 = [...cands].sort((p, q) => p.cy - q.cy)[Math.floor(cands.length / 2)].cy;
+  const dists = cands.map((c) => Math.hypot(c.cx - cx0, c.cy - cy0)).sort((a, b) => a - b);
+  const dMed = dists[Math.floor(dists.length / 2)];
+  const near = cands.filter((c) => Math.hypot(c.cx - cx0, c.cy - cy0) > dMed * 0.45);
+
+  // 离群剔除 ②：证据加权 NMS —— 真表盘中心必有深色针毂或红针；空白板上的假圆没有。
+  // 分高的先占坑，0.6·盘距内的低分候选剔除。
+  const rBigs = near.map((c) => c.r).filter((r) => r > img.width * 0.04).sort((a, b) => a - b);
+  const rBig = rBigs[Math.floor(rBigs.length / 2)] ?? Math.max(...near.map((c) => c.r));
+  const minSep = Math.max(40, rBig * 2.6);
+  const scored = near
+    .map((c) => {
+      // 中心毂区暗/红占比 + 局部底版亮度自适应
+      const rr = c.r * 0.38;
+      let dark = 0;
+      let reds = 0;
+      let tot = 0;
+      const bg: number[] = [];
+      for (let y = Math.floor(c.cy - c.r * 1.7); y <= c.cy + c.r * 1.7; y += 2) {
+        for (let x = Math.floor(c.cx - c.r * 1.7); x <= c.cx + c.r * 1.7; x += 2) {
+          const dd = Math.hypot(x - c.cx, y - c.cy);
+          if (dd > c.r * 1.25 && dd < c.r * 1.7) {
+            const [pr, pg, pb] = px(x, y);
+            bg.push(pr * 0.3 + pg * 0.5 + pb * 0.2);
+          }
+          if (dd <= rr) {
+            tot++;
+            const [pr, pg, pb] = px(x, y);
+            if (pr * 0.3 + pg * 0.5 + pb * 0.2 < 90) dark++;
+            if (pr - pg > 30 && pr - pb > 15 && pr > 80) reds++;
+          }
+        }
+      }
+      bg.sort((a, b) => a - b);
+      const bgMed = bg[Math.floor(bg.length / 2)] ?? 120;
+      void bgMed;
+      const score = dark / (tot || 1) + (reds / (tot || 1)) * 1.6 + c.cover * 0.15;
+      return { c, score };
+    })
+    .sort((a, b) => b.score - a.score);
+  let keep: typeof circles = [];
+  for (const s of scored) {
+    if (keep.some((k) => Math.hypot(k.cx - s.c.cx, k.cy - s.c.cy) < minSep * 0.6)) continue;
+    keep.push(s.c);
+    if (keep.length >= 9) break;
+  }
+  ptrDbg('keep', keep.map((c) => [Math.round(c.cx), Math.round(c.cy), Math.round(c.r)]));
+  if (keep.length < 4) return null;
+
+  // ---- cv.fitEllipse 倾斜校正：盘心点集 → 旋转椭圆（RANSAC 抗离群）----
+  if (keep.length < 5) return null;
+  const sane = (e: DialEllipse | null) =>
+    !!e &&
+    Math.min(e.aw, e.ah) > img.width * 0.1 &&
+    Math.max(e.aw, e.ah) < img.width * 0.75 &&
+    Math.min(e.aw, e.ah) / Math.max(e.aw, e.ah) > 0.4; // 倾角 <~66°
+  const inliersOf = (e: DialEllipse, cs: typeof keep) =>
+    cs.filter((c) => {
+      const [u, v] = ellNorm(e, c.cx, c.cy);
+      return Math.abs(Math.hypot(u, v) - 1) < 0.14;
+    });
+  let best: { ell: DialEllipse; inl: typeof keep } | null = null;
+  const tries = keep.length <= 8 ? 120 : 200;
+  for (let t = 0; t < tries; t++) {
+    const sample = [...keep].sort(() => Math.random() - 0.5).slice(0, 5);
+    const e = cvFitEllipse(cv, sample);
+    if (!sane(e)) continue;
+    const inl = inliersOf(e!, keep);
+    if (!best || inl.length > best.inl.length) best = { ell: e!, inl };
+  }
+  // 内点角度覆盖检验：拟合椭圆要求内点大致环绕整圈（最大顺时角隙 <160°）
+  const maxGap = (e: DialEllipse, cs: typeof keep) => {
+    const ths = cs.map((c) => ellTheta(e, c.cx, c.cy)).sort((a, b) => a - b);
+    let g = 0;
+    for (let i = 0; i < ths.length; i++) g = Math.max(g, (ths[(i + 1) % ths.length] - ths[i] + 360) % 360);
+    return g;
+  };
+  if (best && (best.inl.length < 5 || !sane(best.ell) || maxGap(best.ell, best.inl) > 160)) best = null;
+  let ell: DialEllipse | null = null;
+  if (best) {
+    const e2 = cvFitEllipse(cv, best.inl);
+    ell = sane(e2) ? e2 : best.ell;
+    keep = best.inl;
+  }
+  if (!ell) {
+    ptrDbg('ring-fit', 'failed');
+    return null; // 无倾斜校正 → 拒识（不再退质心坐标系硬读）
+  }
+  const E = ell;
+  ptrDbg('ring-fit', { cx: Math.round(E.cx), cy: Math.round(E.cy), aw: Math.round(E.aw), ah: Math.round(E.ah), deg: Math.round((E.phi * 180) / Math.PI), n: keep.length });
+  const onRing = keep
+    .map((c) => {
+      const [u, v] = ellNorm(E, c.cx, c.cy);
+      return { c, rn: Math.hypot(u, v), th: ellTheta(E, c.cx, c.cy) };
+    })
+    .sort((a, b) => a.th - b.th);
+  ptrDbg('onRing', onRing.map((e) => [Math.round(e.c.cx), Math.round(e.c.cy), Math.round(e.th), +e.rn.toFixed(2)]));
+  if (onRing.length < 4) return null;
+
+  // 同槽多检去重（角距 <14°）
+  const pts: typeof onRing = [];
+  for (const e of onRing) {
+    const last = pts[pts.length - 1];
+    if (last && e.th - last.th < 14) {
+      if (e.c.r > last.c.r) pts[pts.length - 1] = e;
+      continue;
+    }
+    pts.push(e);
+  }
+  if (pts.length > 1 && pts[0].th + 360 - pts[pts.length - 1].th < 14) {
+    if (pts[pts.length - 1].c.r > pts[0].c.r) pts.shift();
+    else pts.pop();
+  }
+  if (pts.length < 4) return null;
+
+  // ---- 倍率环序锚定：标签钉绝对位，颜色沿钉整数/小数边界，锚点间步差决定隐藏盘 ----
+  const { digitPts, labels } = pointerOcrParts(items);
+  const rReal = pts.map((e) => e.c.r).filter((r) => r > img.width * 0.04).sort((a, b) => a - b);
+  const rMed = rReal[Math.floor(rReal.length / 2)] ?? 28;
+  const redFracOf = (cx: number, cy: number, r: number) => {
     let reds = 0;
     let total = 0;
-    for (let y = Math.floor(d.cy - rStat); y <= d.cy + rStat; y++) {
-      for (let x = Math.floor(d.cx - rStat); x <= d.cx + rStat; x++) {
-        const dx = x - d.cx;
-        const dy = y - d.cy;
-        if (Math.hypot(dx, dy) > rStat) continue;
+    const rr = r * 0.6;
+    for (let y = Math.floor(cy - rr); y <= cy + rr; y += 1) {
+      for (let x = Math.floor(cx - rr); x <= cx + rr; x += 1) {
+        if (Math.hypot(x - cx, y - cy) > rr) continue;
         total++;
         const [pr, pg, pb] = px(x, y);
-        lumas.push(Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2));
         if (pr - pg > 30 && pr - pb > 15 && pr > 80) reds++;
       }
     }
-    lumas.sort((a, b) => a - b);
-    const isRedDial = reds > total * 0.06;
-    const thr = Math.min(95, lumas[Math.floor(lumas.length * 0.2)] + 8);
-
-    // 射线法：越过针毂（0.32r 起）到数字环下沿（0.62r），
-    // 逐角度统计暗/红像素占比 —— 指针射线全程连续命中，数字只覆盖局部。
-    const isInk = (x: number, y: number) => {
-      const [pr, pg, pb] = px(x, y);
-      return isRedDial
-        ? pr - pg > 30 && pr - pb > 15 && pr > 80
-        : Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2) < thr;
-    };
-    // 针=径向连续长线；内环=切向短段 → 评分 = 径向最长连续命中
-    const rA = d.r * 0.25;
-    const rB = d.r * 0.80;
-    const rStep = 1.6;
-    const nSmp = Math.floor((rB - rA) / rStep);
-    const scores = new Float32Array(180); // 2° 步长
-    for (let deg = 0; deg < 360; deg += 2) {
-      const rad = (deg * Math.PI) / 180;
-      const dx = Math.sin(rad);
-      const dy = -Math.cos(rad);
-      let run = 0;
-      let bestRun = 0;
-      for (let k = 0; k < nSmp; k++) {
-        const rr = rA + k * rStep;
-        let hit = 0;
-        for (const o of [-1, 0, 1]) {
-          const ox = -dy * o;
-          const oy = dx * o;
-          if (isInk(d.cx + dx * rr + ox, d.cy + dy * rr + oy)) hit = 1;
-        }
-        if (hit) {
-          run++;
-          if (run > bestRun) bestRun = run;
-        } else run = 0;
-      }
-      scores[deg / 2] = bestRun;
-    }
-    // 环形平滑（±4°）找峰，再对峰邻域（score≥0.7·max）做加权质心精化
-    const sm = new Float32Array(180);
-    let best = 0;
-    let bestS = -1;
-    let sum = 0;
-    for (let i = 0; i < 180; i++) {
-      for (let o = -2; o <= 2; o++) sm[i] += scores[(i + o + 180) % 180];
-      sum += sm[i];
-      if (sm[i] > bestS) {
-        bestS = sm[i];
-        best = i;
-      }
-    }
-    // 峰邻域环形质心：连续高分扇区取加权平均角
-    let wNum = 0;
-    let wDen = 0;
-    let off = 0;
-    while (off < 20 && sm[(best + off) % 180] >= bestS * 0.7) {
-      wNum += sm[(best + off) % 180] * off;
-      wDen += sm[(best + off) % 180];
-      off++;
-    }
-    off = -1;
-    while (off > -20 && sm[(best + off + 180) % 180] >= bestS * 0.7) {
-      wNum += sm[(best + off + 180) % 180] * off;
-      wDen += sm[(best + off + 180) % 180];
-      off--;
-    }
-    const bestA = (((best + (wDen ? wNum / wDen : 0)) * 2) % 360 + 360) % 360;
-    const sharp = bestS / (sum / 180 || 1);
-    const cw = d.cw ?? true;
-    const v = cw ? bestA / 36 : (360 - bestA) / 36;
-    const digit = ((Math.floor(v) % 10) + 10) % 10;
-    ptrDbg('needle', { mult: d.mult, cx: Math.round(d.cx), cy: Math.round(d.cy), deg: +bestA.toFixed(1), digit, v: +v.toFixed(2), sharp: +sharp.toFixed(2), thr, red: isRedDial });
-    return { digit, sharp, v };
+    return total ? reds / total : 0;
   };
+  // 盘序：θ 升序（顺时针）逐一走，每步倍率 ÷10
+  interface Slot {
+    cx: number;
+    cy: number;
+    th: number;
+    real: (typeof circles)[number] | null;
+    idx: number; // seqIdx（相对标准 8 环）
+    redFrac: number;
+    cw: boolean | null;
+  }
+  const dials = pts.map((e) => ({ c: e.c, th: e.th }));
+  for (const d of dials) (d as any).redFrac = redFracOf(d.c.cx, d.c.cy, d.c.r > rMed * 0.6 ? d.c.r : rMed);
+  ptrDbg('dial-colors', dials.map((d) => [Math.round(d.th), (d as any).redFrac > 0.05 ? 'R' : (d as any).redFrac < 0.02 ? 'B' : '?']));
 
-  const parts = intDials
-    .filter((d) => need.includes(d.mult!))
-    .map((d) => ({ mult: d.mult!, ...readOne(d) }))
-    .sort((a, b) => b.mult - a.mult);
-  const tenthRead = dec01Dial ? readOne(dec01Dial) : null;
-  const tenth = tenthRead ? tenthRead.digit : null;
-  // 机械联动裁决（自 ×0.1 向高位逐级）：高位盘 frac 应 ≈ 低位组合占本盘周期比例。
-  // 实测 frac>0.7 而低位显示接近周期开头（<0.35）→ 针刚越界 → +1；
-  // frac<0.3 而低位接近周期末尾（>0.65）→ 针未越界 → -1。
-  const asc = [...parts].sort((a, b) => a.mult - b.mult); // ×1 → ×1000
-  const chain = tenthRead ? [{ mult: 0.1, ...tenthRead }, ...asc] : asc;
-  let lowerVal = 0;
-  let prevMult = 0;
-  for (const p of chain) {
-    if (prevMult > 0) {
-      const frac = p.v - Math.floor(p.v);
-      // 低位组合占本盘周期的比例（×10 盘 ← 个位值/10；×100 盘 ← 低两位/100 …）
-      const expFrac = (lowerVal % p.mult) / p.mult;
-      if (frac > 0.7 && expFrac < 0.35) {
-        p.digit = (Math.floor(p.v) + 1) % 10;
-        ptrDbg('carry+', { mult: p.mult, v: +p.v.toFixed(2), expFrac: +expFrac.toFixed(2), digit: p.digit });
-      } else if (frac < 0.3 && expFrac > 0.65) {
-        p.digit = (Math.floor(p.v) + 9) % 10;
-        ptrDbg('carry-', { mult: p.mult, v: +p.v.toFixed(2), expFrac: +expFrac.toFixed(2), digit: p.digit });
+  // 环序候选：标准 8 盘 → 7 盘（无×0.0001）→ 6 盘（无×0.001），取首个锚点自洽方案
+  const SEQ_CANDIDATES = [
+    [1, 0.1, 0.01, 0.001, 0.0001, 1000, 100, 10],
+    [1, 0.1, 0.01, 0.001, 1000, 100, 10],
+    [1, 0.1, 0.01, 1000, 100, 10],
+  ];
+  interface Anchor { th: number; idx: number; kind: string }
+  const color = dials.map((d) => ((d as any).redFrac > 0.05 ? 'R' : (d as any).redFrac < 0.02 ? 'B' : '?'));
+  const nD = dials.length;
+  const trySeq = (SEQ: number[]): { slots: Slot[]; anchors: Anchor[] } | null => {
+    const N = SEQ.length;
+    const idx1000 = SEQ.indexOf(1000);
+    const anchors: Anchor[] = [];
+    const usedDial = new Set<number>();
+    for (const l of labels) {
+      const idx = SEQ.indexOf(l.mult);
+      if (idx < 0) continue;
+      const near = dials
+        .map((d, i) => ({ i, dist: Math.hypot(d.c.cx - l.cx, d.c.cy - l.cy) }))
+        .filter((e) => e.dist < rMed * 2.0 && !usedDial.has(e.i))
+        .sort((a, b) => a.dist - b.dist)[0];
+      if (!near) continue;
+      usedDial.add(near.i);
+      anchors.push({ th: dials[near.i].th, idx, kind: `label:${l.mult}` });
+    }
+    // 颜色沿：B→R 边界 = ×1→×0.1（前盘 idx0）；R→B = ×0.001→×1000（后盘 idx1000）
+    for (let i = 0; i < nD; i++) {
+      const a = color[i];
+      const b2 = color[(i + 1) % nD];
+      if (a === 'B' && b2 === 'R') anchors.push({ th: dials[i].th, idx: 0, kind: 'color:BR' });
+      else if (a === 'R' && b2 === 'B') anchors.push({ th: dials[(i + 1) % nD].th, idx: idx1000, kind: 'color:RB' });
+    }
+    anchors.sort((a, b) => a.th - b.th);
+    // 同位锚点合并：θ 相同的锚须 idx 一致；冲突时保留 label，双 label/双 color 冲突→矛盾
+    const merged: Anchor[] = [];
+    for (const a of anchors) {
+      const prev = merged[merged.length - 1];
+      if (prev && Math.abs(a.th - prev.th) < 3) {
+        if (prev.idx === a.idx) continue;
+        const pL = prev.kind.startsWith('label');
+        const aL = a.kind.startsWith('label');
+        if (pL !== aL) {
+          if (aL) merged[merged.length - 1] = a;
+          continue;
+        }
+        return null;
+      }
+      merged.push(a);
+    }
+    if (merged.length < 2) return null;
+
+    // 一致性：相邻锚点步差 d 须 ≥ 其间已检盘数+1，且均分步距 ≥18°（过挤=锚点矛盾）
+    const slots: Slot[] = [];
+    const seenIdx = new Set<number>();
+    for (let i = 0; i < anchors.length; i++) {
+      const a1 = anchors[i];
+      const a2 = anchors[(i + 1) % anchors.length];
+      const d = ((a2.idx - a1.idx) % N + N) % N || N;
+      const g = (a2.th - a1.th + 360) % 360;
+      if (g / d < 18) return null;
+      const inGap = dials.filter((dd) => {
+        const rel = (dd.th - a1.th + 360) % 360;
+        return rel > 1e-6 && rel < g;
+      });
+      if (d < inGap.length + 1) return null;
+      const taken = new Set<number>();
+      for (const dd of inGap) {
+        const step = Math.max(1, Math.min(d - 1, Math.round(((dd.th - a1.th + 360) % 360) / (g / d))));
+        taken.add(step);
+        const idx = (a1.idx + step) % N;
+        if (seenIdx.has(idx)) return null;
+        seenIdx.add(idx);
+        slots.push({ cx: dd.c.cx, cy: dd.c.cy, th: dd.th, real: dd.c, idx, redFrac: (dd as any).redFrac, cw: null });
+      }
+      const synthN = d - 1 - inGap.length;
+      for (let s = 1; s <= synthN; s++) {
+        let step = s;
+        while (taken.has(step)) step++;
+        taken.add(step);
+        const idx = (a1.idx + step) % N;
+        if (seenIdx.has(idx)) return null;
+        seenIdx.add(idx);
+        const th = a1.th + (g * step) / d;
+        const [cx, cy] = ellPoint(E, th);
+        slots.push({ cx, cy, th: th % 360, real: null, idx, redFrac: redFracOf(cx, cy, rMed), cw: null });
+        ptrDbg('synth-slot', { idx, th: Math.round(th % 360), cx: Math.round(cx), cy: Math.round(cy) });
+      }
+      const ra = dials.filter((dd) => Math.abs(dd.th - a1.th) < 0.5)[0];
+      if (seenIdx.has(a1.idx)) return null;
+      seenIdx.add(a1.idx);
+      if (ra) slots.push({ cx: ra.c.cx, cy: ra.c.cy, th: ra.th, real: ra.c, idx: a1.idx, redFrac: (ra as any).redFrac, cw: null });
+      else {
+        const [cx, cy] = ellPoint(E, a1.th);
+        slots.push({ cx, cy, th: a1.th, real: null, idx: a1.idx, redFrac: redFracOf(cx, cy, rMed), cw: null });
       }
     }
-    lowerVal += p.digit * p.mult;
-    prevMult = p.mult;
+    if (slots.length !== N) return null; // 槽位总数须正好一环
+    return { slots, anchors };
+  };
+  let SEQ = SEQ_CANDIDATES[0];
+  let anchored: { slots: Slot[]; anchors: Anchor[] } | null = null;
+  for (const cand of SEQ_CANDIDATES) {
+    anchored = trySeq(cand);
+    if (anchored) {
+      SEQ = cand;
+      break;
+    }
   }
-  const intStr = asc
-    .slice()
-    .sort((a, b) => b.mult - a.mult)
-    .map((p) => String(p.digit))
-    .join('');
-  const value = tenth != null ? `${intStr}.${tenth}` : intStr;
-  const minSharp = Math.min(...parts.map((p) => p.sharp));
-  const confidence = Math.round(Math.max(30, Math.min(85, 40 + minSharp * 16)));
-  ptrDbg('read', { intStr, tenth, value, conf: confidence });
-  return { value, confidence };
+  if (!anchored) return null;
+  const { slots, anchors } = anchored;
+  ptrDbg('anchors', anchors.map((a) => [a.kind, 'th', Math.round(a.th), 'idx', a.idx]));
+  ptrDbg('slots', slots.map((s) => ['idx' + s.idx, 'th' + Math.round(s.th), 'mult' + SEQ[s.idx], s.real ? 'real' : 'synth']));
+
+  for (const s of slots) {
+    const r = s.real && s.real.r > rMed * 0.6 ? s.real.r : rMed;
+    s.cw = dialCw(digitPts, s.cx, s.cy, r);
+  }
+
+  const needInt = [1000, 100, 10, 1].filter((k) => SEQ.includes(k));
+  const readSlots = slots.filter((s) => needInt.includes(SEQ[s.idx]) || SEQ[s.idx] === 0.1);
+  if (!needInt.every((k) => readSlots.some((s) => SEQ[s.idx] === k))) return null;
+
+  const reads: { mult: number; ang: number; sharp: number; synth: boolean }[] = [];
+  for (const s of readSlots) {
+    const mult = SEQ[s.idx];
+    const r = s.real && s.real.r > rMed * 0.6 ? s.real.r : rMed;
+    const rd = readNeedle(px, { cx: s.cx, cy: s.cy, r, cw: s.cw, mult });
+    if (rd.sharp < 1.04) {
+      ptrDbg('needle-weak', { mult, sharp: +rd.sharp.toFixed(2) });
+      if (mult >= 1) return null; // 整数位读不出 → 拒识
+      continue;
+    }
+    reads.push({ mult, ang: rd.ang, sharp: rd.sharp, synth: !s.real });
+  }
+  // ---- 机械链枚举裁决：δ相位×逐位取整组合联合搜索（详见 pointerChain）----
+  const intReads = reads.filter((r) => r.mult >= 1);
+  const tenthRead0 = reads.find((r) => r.mult === 0.1) ?? null;
+  const parts: PtrPart[] = intReads.map((r) => {
+    const v = ((r.ang / 36) % 10 + 10) % 10;
+    return { mult: r.mult, digit: Math.floor(v) % 10, sharp: r.sharp, v, ang: r.ang };
+  });
+  const out = pointerChain(parts, tenthRead0 && tenthRead0.sharp >= 1.15
+    ? { digit: 0, sharp: tenthRead0.sharp, v: 0, ang: tenthRead0.ang }
+    : null);
+  if (!out) return null;
+  const synthCnt = readSlots.filter((s) => !s.real).length;
+  const anchoredByLabel = anchors.some((a) => a.kind.startsWith('label'));
+  const conf = Math.round(out.confidence - synthCnt * 6 - (anchoredByLabel ? 0 : 6));
+  return { value: out.value, confidence: Math.max(30, conf) };
+}
+
+/** 指针表读数分发：优先环模型（cv 倾斜校正/缺盘合成），失败回退网格路径 */
+async function readPointerDials(
+  items: OcrResultItem[],
+  img: ImageData,
+  edgeIn?: { w: number; h: number; edge: Uint8Array },
+): Promise<{ value: string; confidence: number } | null> {
+  const ring = await readPointerDialsRing(items, img, edgeIn);
+  if (ring) return ring;
+  return readPointerDialsGrid(items, img, edgeIn);
 }
 
 /**
@@ -676,7 +1195,7 @@ export async function recognizeMeterReading(image: Blob | string): Promise<Meter
   if (!res || !res.items.length) return null;
   const picked = pickRollerDigits(res.items, imgData, res.image.width, res.image.height);
   if (!picked) {
-    const pointer = readPointerDials(res.items, imgData);
+    const pointer = await readPointerDials(res.items, imgData);
     if (!pointer) return null;
     return {
       value: pointer.value,
@@ -727,7 +1246,7 @@ export async function debugPointerOverlay(image: Blob | string): Promise<string 
     ctx.arc(c.cx, c.cy, c.r, 0, Math.PI * 2);
     ctx.stroke();
   }
-  readPointerDials(res.items, imgData);
+  await readPointerDials(res.items, imgData);
   return cv.toDataURL('image/jpeg', 0.85);
 }
 
@@ -742,4 +1261,13 @@ export async function rawPredict(image: Blob | string): Promise<OcrResultItem[]>
 // 诊断钩子：console/自动化测试可直接调用 __meterOcr.recognizeMeterReading(dataUrl)
 if (typeof window !== 'undefined') {
   (window as unknown as { __meterOcr?: unknown }).__meterOcr = { recognizeMeterReading, warmupMeterOcr, rawPredict };
+}
+
+/** Node 侧调试：注入预计算边缘图跑指针读数全链路（仅测试用） */
+export function __debugPointerRead(
+  items: OcrResultItem[],
+  img: ImageData,
+  edge: { w: number; h: number; edge: Uint8Array },
+): Promise<{ value: string; confidence: number } | null> {
+  return readPointerDials(items, img, edge);
 }

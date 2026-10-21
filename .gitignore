@@ -39,3 +39,4 @@ scripts/pilot/lib/**/*.js
 scripts/pilot/lib/**/*.js.map
 scripts/pilot/lib/**/*.d.ts
 artifacts/t19/
+apps/api/scripts/ptr-bundle.mjs
