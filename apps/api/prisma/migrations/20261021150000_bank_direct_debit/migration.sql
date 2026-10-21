@@ -26,6 +26,7 @@ CREATE UNIQUE INDEX bank_debit_agreement_tenant_id_key ON bank_debit_agreement (
 CREATE UNIQUE INDEX bank_debit_agreement_live_uniq
   ON bank_debit_agreement (tenant_id, settle_account_id) WHERE status = 'ACTIVE';
 ALTER TABLE bank_debit_agreement ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank_debit_agreement FORCE ROW LEVEL SECURITY;
 CREATE POLICY bank_debit_agreement_tenant ON bank_debit_agreement
   USING (tenant_id = current_setting('app.tenant_id')::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);
@@ -46,6 +47,7 @@ CREATE TABLE bank_debit_batch (
 CREATE UNIQUE INDEX bank_debit_batch_tenant_id_key ON bank_debit_batch (tenant_id, id);
 CREATE INDEX bank_debit_batch_period ON bank_debit_batch (tenant_id, period);
 ALTER TABLE bank_debit_batch ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank_debit_batch FORCE ROW LEVEL SECURITY;
 CREATE POLICY bank_debit_batch_tenant ON bank_debit_batch
   USING (tenant_id = current_setting('app.tenant_id')::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);
@@ -77,6 +79,7 @@ CREATE UNIQUE INDEX bank_debit_item_pending_uniq
 CREATE UNIQUE INDEX bank_debit_item_success_uniq
   ON bank_debit_item (tenant_id, settle_account_id, period) WHERE status = 'SUCCESS';
 ALTER TABLE bank_debit_item ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bank_debit_item FORCE ROW LEVEL SECURITY;
 CREATE POLICY bank_debit_item_tenant ON bank_debit_item
   USING (tenant_id = current_setting('app.tenant_id')::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);

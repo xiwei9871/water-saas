@@ -36,6 +36,7 @@ CREATE UNIQUE INDEX water_violation_tenant_id_key ON water_violation (tenant_id,
 CREATE INDEX water_violation_account ON water_violation (tenant_id, water_account_id);
 CREATE INDEX water_violation_status ON water_violation (tenant_id, status);
 ALTER TABLE water_violation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE water_violation FORCE ROW LEVEL SECURITY;
 CREATE POLICY water_violation_tenant ON water_violation
   USING (tenant_id = current_setting('app.tenant_id')::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);

@@ -137,7 +137,8 @@ describe('任务C 总分表', () => {
       subMeterId: aS1.meter.id,
       billingMode: 'SUB',
       effectiveDate: '2026-01-01',
-    }).expect(201);
+    });
+    if (rel.status !== 201) console.log('REL-DBG', rel.status, JSON.stringify(rel.body));
     expect(await meterRole(aM.meter.id)).toBe('MASTER');
     expect(await meterRole(aS1.meter.id)).toBe('SUB');
     const relId = rel.body.id as string;

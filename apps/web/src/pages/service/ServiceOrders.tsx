@@ -164,7 +164,7 @@ export default function ServiceOrders() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [lifecycle, setLifecycle] = useState<LifecycleItem[] | null>(null);
   const [action, setAction] = useState<
-    null | 'approve' | 'reject' | 'dispatch' | 'execute' | 'cancel'
+    null | 'approve' | 'reject' | 'dispatch' | 'execute' | 'cancel' | 'archive'
   >(null);
   const [activeInstallations, setActiveInstallations] = useState<
     { id: string; meterId: string }[]

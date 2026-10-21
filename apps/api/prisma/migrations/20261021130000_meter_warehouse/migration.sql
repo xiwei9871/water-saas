@@ -23,6 +23,7 @@ CREATE TABLE meter_warehouse (
 );
 CREATE UNIQUE INDEX meter_warehouse_tenant_id_key ON meter_warehouse (tenant_id, id);
 ALTER TABLE meter_warehouse ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meter_warehouse FORCE ROW LEVEL SECURITY;
 CREATE POLICY meter_warehouse_tenant ON meter_warehouse
   USING (tenant_id = current_setting('app.tenant_id')::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);
@@ -43,6 +44,7 @@ CREATE TABLE meter_warehouse_location (
 );
 CREATE UNIQUE INDEX meter_location_tenant_id_key ON meter_warehouse_location (tenant_id, id);
 ALTER TABLE meter_warehouse_location ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meter_warehouse_location FORCE ROW LEVEL SECURITY;
 CREATE POLICY meter_location_tenant ON meter_warehouse_location
   USING (tenant_id = current_setting('app.tenant_id')::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);
@@ -70,6 +72,7 @@ CREATE UNIQUE INDEX meter_movement_tenant_id_key ON meter_stock_movement (tenant
 CREATE INDEX meter_movement_meter ON meter_stock_movement (tenant_id, meter_id, moved_at);
 CREATE INDEX meter_movement_doc ON meter_stock_movement (tenant_id, doc_no);
 ALTER TABLE meter_stock_movement ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meter_stock_movement FORCE ROW LEVEL SECURITY;
 CREATE POLICY meter_movement_tenant ON meter_stock_movement
   USING (tenant_id = current_setting('app.tenant_id')::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);

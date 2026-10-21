@@ -1,4 +1,4 @@
-import { PlusOutlined, ReloadOutlined, SwapOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
   App as AntdApp,
   Button,

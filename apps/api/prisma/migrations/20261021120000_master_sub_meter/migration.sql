@@ -28,6 +28,7 @@ CREATE UNIQUE INDEX meter_relation_sub_live ON meter_relation (tenant_id, sub_me
   WHERE expired_date IS NULL;
 CREATE INDEX meter_relation_master ON meter_relation (tenant_id, master_meter_id);
 ALTER TABLE meter_relation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meter_relation FORCE ROW LEVEL SECURITY;
 CREATE POLICY meter_relation_tenant ON meter_relation
   USING (tenant_id = current_setting('app.tenant_id')::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid);
