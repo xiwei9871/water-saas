@@ -282,18 +282,6 @@ function ellPoint(e: DialEllipse, thetaDeg: number): [number, number] {
   const s = Math.sin(e.phi);
   return [e.cx + u * c - v * s, e.cy + u * s + v * c];
 }
-/** 表盘空间角 → 原始图像中的单位方向向量（针头朝向） */
-function ellDir(e: DialEllipse, thetaDeg: number): [number, number] {
-  const t = (thetaDeg * Math.PI) / 180;
-  const u = Math.sin(t) * e.aw;
-  const v = -Math.cos(t) * e.ah;
-  const c = Math.cos(e.phi);
-  const s = Math.sin(e.phi);
-  const dx = u * c - v * s;
-  const dy = u * s + v * c;
-  const l = Math.hypot(dx, dy) || 1;
-  return [dx / l, dy / l];
-}
 function cvFitEllipse(cv: any, pts: { cx: number; cy: number }[]): DialEllipse | null {
   if (pts.length < 5) return null;
   const m = cv.matFromArray(pts.length, 1, cv.CV_32SC2, pts.flatMap((p) => [Math.round(p.cx), Math.round(p.cy)]));
@@ -524,7 +512,7 @@ interface PtrDial {
  * 逐角度射线采样取径向最长连续命中，峰邻域加权质心精化。
  * ell = 表盘环椭圆（cv.fitEllipse 倾斜校正）；正拍/无拟合时按圆形映射。
  */
-function readNeedle(px: Px, d: PtrDial, ell?: DialEllipse | null): { digit: number; sharp: number; v: number; ang: number } {
+function readNeedle(px: Px, d: PtrDial): { digit: number; sharp: number; v: number; ang: number } {
   const rStat = d.r * 0.7;
   const lumas: number[] = [];
   let reds = 0;
@@ -550,63 +538,124 @@ function readNeedle(px: Px, d: PtrDial, ell?: DialEllipse | null): { digit: numb
       ? pr - pg > 30 && pr - pb > 15 && pr > 80
       : Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2) < thr;
   };
-  // 针=径向连续长线；内环=切向短段 → 评分 = 径向最长连续命中
-  const rA = d.r * 0.25;
-  const rB = d.r * 0.8;
-  const rStep = 1.6;
-  const nSmp = Math.floor((rB - rA) / rStep);
-  const scores = new Float32Array(180); // 2° 步长
-  for (let deg = 0; deg < 360; deg += 2) {
-    // 表盘空间角度 → 原图方向（旋转椭圆投影反变换）
-    const [dx, dy] = ell
-      ? ellDir(ell, deg)
-      : (() => { const rad = (deg * Math.PI) / 180; return [Math.sin(rad), -Math.cos(rad)] as [number, number]; })();
-    let run = 0;
-    let bestRun = 0;
-    for (let k = 0; k < nSmp; k++) {
-      const rr = rA + k * rStep;
-      let hit = 0;
-      for (const o of [-1, 0, 1]) {
-        const ox = -dy * o;
-        const oy = dx * o;
-        if (isInk(d.cx + dx * rr + ox, d.cy + dy * rr + oy)) hit = 1;
+  // 宽松墨判定：接回阈值附近断开的细针杆（洪泛蔓延用；种子仍用严格阈值）
+  const isInkLoose = (x: number, y: number) => {
+    const [pr, pg, pb] = px(x, y);
+    return isRedDial
+      ? pr - pg > 24 && pr - pb > 10 && pr > 70
+      : Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2) < thr + 25;
+  };
+  // 针形隔离：从毂心最近的墨像素洪泛出"针+毂"连通域——盘面数字是独立连通域、
+  // 不与毂相连，天然排除。方向 = 离毂最远端像素簇（maxDist×0.85）的质心——
+  // 球状毂+短尖的水滴针，分位数簇会被球肩拉偏，只有极值簇落在真针尖上。
+  // 两档阈值：严格掩码优先；尖端伸展不足时用宽松掩码重试（限 0.6r 内防桥接数字）。
+  let cx = d.cx;
+  let cy = d.cy;
+  const rBox = Math.ceil(d.r * 0.85);
+  const x0 = Math.floor(cx - rBox);
+  const y0 = Math.floor(cy - rBox);
+  const bw = rBox * 2 + 1;
+  let needleAng = -1;
+  let needleN = 0;
+  let needleTip = 0;
+  let needleProm = 0;
+  for (const [ink, rLim] of [[isInk, 0.78], [isInkLoose, 0.6]] as const) {
+    const mask = new Uint8Array(bw * bw); // 1=ink
+    const seen = new Uint8Array(bw * bw);
+    for (let y = 0; y < bw; y++) {
+      for (let x = 0; x < bw; x++) {
+        const gx = x0 + x;
+        const gy = y0 + y;
+        if (Math.hypot(gx - cx, gy - cy) > d.r * rLim) continue;
+        if (ink(gx, gy)) mask[y * bw + x] = 1;
       }
-      if (hit) {
-        run++;
-        if (run > bestRun) bestRun = run;
-      } else run = 0;
     }
-    scores[deg / 2] = bestRun;
-  }
-  // 环形平滑（±4°）找峰，再对峰邻域（score≥0.7·max）做加权质心精化
-  const sm = new Float32Array(180);
-  let best = 0;
-  let bestS = -1;
-  let sum = 0;
-  for (let i = 0; i < 180; i++) {
-    for (let o = -2; o <= 2; o++) sm[i] += scores[(i + o + 180) % 180];
-    sum += sm[i];
-    if (sm[i] > bestS) {
-      bestS = sm[i];
-      best = i;
+    // 毂心种子：内环 0.3r 内最近的严格墨点
+    const rSeed = d.r * 0.3;
+    let sx = -1;
+    let sy = -1;
+    let sD = 1e9;
+    for (let y = 0; y < bw; y++) {
+      for (let x = 0; x < bw; x++) {
+        const gx = x0 + x;
+        const gy = y0 + y;
+        const dist = Math.hypot(gx - cx, gy - cy);
+        if (dist > rSeed || !isInk(gx, gy)) continue;
+        if (dist < sD) { sD = dist; sx = x; sy = y; }
+      }
     }
+    if (sx < 0) continue;
+    // BFS 收集针组件
+    const compX: number[] = [];
+    const compY: number[] = [];
+    const stack = [sy * bw + sx];
+    seen[sy * bw + sx] = 1;
+    while (stack.length) {
+      const idx = stack.pop()!;
+      const yy = (idx / bw) | 0;
+      const xx = idx % bw;
+      compX.push(x0 + xx);
+      compY.push(y0 + yy);
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const nx = xx + ox;
+          const ny = yy + oy;
+          if (nx < 0 || ny < 0 || nx >= bw || ny >= bw) continue;
+          const ni = ny * bw + nx;
+          if (mask[ni] && !seen[ni]) { seen[ni] = 1; stack.push(ni); }
+        }
+      }
+    }
+    // 毂心修正：组件内距原点<0.3r 的像素质心
+    let hX = 0, hY = 0, hN = 0;
+    for (let i = 0; i < compX.length; i++) {
+      if (Math.hypot(compX[i] - d.cx, compY[i] - d.cy) < d.r * 0.3) { hX += compX[i]; hY += compY[i]; hN++; }
+    }
+    if (hN > 5) { cx = hX / hN; cy = hY / hN; }
+    // 径向剖面法：每 2° bin 取组件像素最大距 → ±4° 平滑 →
+    // prominence = 峰值 − 两侧 ±10~60° 最小值。针尖=狭窄突出（两侧骤降），
+    // 毂缘=宽平台 prominence≈0 → 峰即针尖方向
+    const prof = new Float32Array(180);
+    let maxD = 0;
+    for (let i = 0; i < compX.length; i++) {
+      const dx = compX[i] - cx;
+      const dy = compY[i] - cy;
+      const dd = Math.hypot(dx, dy);
+      if (dd > maxD) maxD = dd;
+      const th = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360;
+      const bi = Math.floor(th / 2) % 180;
+      if (dd > prof[bi]) prof[bi] = dd;
+    }
+    const sm = new Float32Array(180);
+    for (let i = 0; i < 180; i++) for (let o = -2; o <= 2; o++) sm[i] += prof[(i + o + 180) % 180];
+    let pk = -1;
+    let pkP = 0;
+    for (let i = 0; i < 180; i++) {
+      let side = Infinity;
+      for (let o = -30; o <= -5; o++) side = Math.min(side, sm[(i + o + 180) % 180]);
+      for (let o = 5; o <= 30; o++) side = Math.min(side, sm[(i + o + 180) % 180]);
+      const pr = sm[i] - side;
+      if (pr > pkP) { pkP = pr; pk = i; }
+    }
+    if (pk >= 0 && pkP > 2) {
+      // 峰邻域（≥70% 峰）加权质心精化
+      let wN = 0, wD = 0;
+      let off = 0;
+      while (off < 12 && sm[(pk + off) % 180] >= sm[pk] * 0.7) { wN += sm[(pk + off) % 180] * off; wD += sm[(pk + off) % 180]; off++; }
+      off = -1;
+      while (off > -12 && sm[(pk + off + 180) % 180] >= sm[pk] * 0.7) { wN += sm[(pk + off + 180) % 180] * off; wD += sm[(pk + off + 180) % 180]; off--; }
+      const th = (((pk + (wD ? wN / wD : 0)) * 2) % 360 + 360) % 360;
+      needleAng = th;
+      needleN = compX.length;
+      needleTip = maxD;
+      needleProm = pkP;
+      ptrDbg('needle-comp', { mult: d.mult, n: compX.length, th: +th.toFixed(1), tip: +needleTip.toFixed(1), prom: +pkP.toFixed(1) });
+    }
+    if (needleTip >= d.r * 0.42) break; // 尖端伸展足够 → 不再用宽松掩码
   }
-  let wNum = 0;
-  let wDen = 0;
-  let off = 0;
-  while (off < 20 && sm[(best + off) % 180] >= bestS * 0.7) {
-    wNum += sm[(best + off) % 180] * off;
-    wDen += sm[(best + off) % 180];
-    off++;
-  }
-  off = -1;
-  while (off > -20 && sm[(best + off + 180) % 180] >= bestS * 0.7) {
-    wNum += sm[(best + off + 180) % 180] * off;
-    wDen += sm[(best + off + 180) % 180];
-    off--;
-  }
-  const bestA = (((best + (wDen ? wNum / wDen : 0)) * 2) % 360 + 360) % 360;
-  const sharp = bestS / (sum / 180 || 1);
+  // sharp：组件有规模 + 径向剖面有真突起（prominence）+ 尖端伸展 ≥0.45r
+  const bestA = needleAng;
+  const sharp = needleN >= 12 && bestA >= 0 && needleProm > 12 ? needleTip / (d.r * 0.45) : 0;
   const cw = d.cw ?? true;
   const v = cw ? bestA / 36 : (360 - bestA) / 36;
   const digit = ((Math.floor(v) % 10) + 10) % 10;
