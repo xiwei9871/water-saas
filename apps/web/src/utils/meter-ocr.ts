@@ -538,13 +538,15 @@ function readNeedle(px: Px, d: PtrDial): { digit: number; sharp: number; v: numb
       ? pr - pg > 30 && pr - pb > 15 && pr > 80
       : Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2) < thr;
   };
-  // 宽松墨判定：接回阈值附近断开的细针杆（洪泛蔓延用；种子仍用严格阈值）
-  const isInkLoose = (x: number, y: number) => {
+  // 递进墨判定：接回阈值附近断开的细针杆（洪泛蔓延用；种子仍用严格阈值）
+  const mkLoose = (dL: number, dR: number, dB: number, dP: number) => (x: number, y: number) => {
     const [pr, pg, pb] = px(x, y);
     return isRedDial
-      ? pr - pg > 24 && pr - pb > 10 && pr > 70
-      : Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2) < thr + 25;
+      ? pr - pg > dR && pr - pb > dB && pr > dP
+      : Math.round(pr * 0.3 + pg * 0.5 + pb * 0.2) < thr + dL;
   };
+  const isInk15 = mkLoose(15, 28, 13, 75);
+  const isInk30 = mkLoose(30, 22, 8, 65);
   // 针形隔离：从毂心最近的墨像素洪泛出"针+毂"连通域——盘面数字是独立连通域、
   // 不与毂相连，天然排除。方向 = 离毂最远端像素簇（maxDist×0.85）的质心——
   // 球状毂+短尖的水滴针，分位数簇会被球肩拉偏，只有极值簇落在真针尖上。
@@ -559,7 +561,8 @@ function readNeedle(px: Px, d: PtrDial): { digit: number; sharp: number; v: numb
   let needleN = 0;
   let needleTip = 0;
   let needleProm = 0;
-  for (const [ink, rLim] of [[isInk, 0.78], [isInkLoose, 0.6]] as const) {
+  // 三档递进阈值：针杆完全桥接时真尖伸展最远——取尖端伸展最大档的结果
+  for (const [ink, rLim] of [[isInk, 0.78], [isInk15, 0.68], [isInk30, 0.6]] as const) {
     const mask = new Uint8Array(bw * bw); // 1=ink
     const seen = new Uint8Array(bw * bw);
     for (let y = 0; y < bw; y++) {
@@ -668,13 +671,16 @@ function readNeedle(px: Px, d: PtrDial): { digit: number; sharp: number; v: numb
       off = -1;
       while (off > -12 && sm[(pk + off + 180) % 180] >= sm[pk] * 0.7) { wN += sm[(pk + off + 180) % 180] * off; wD += sm[(pk + off + 180) % 180]; off--; }
       const th = (((pk + (wD ? wN / wD : 0)) * 2) % 360 + 360) % 360;
-      needleAng = th;
-      needleN = compX.length;
-      needleTip = maxD;
-      needleProm = pkP;
-      ptrDbg('needle-comp', { mult: d.mult, n: compX.length, th: +th.toFixed(1), tip: +needleTip.toFixed(1), prom: +pkP.toFixed(1) });
+      // 取尖端伸展最远档：针杆完全桥接时真尖才出现（仅当超出现档 ≥1.5px 才覆盖，
+      // 否则保留较严档的结果——宽松档易把邻近数字桥进来）
+      if (maxD > needleTip + 1.5 || needleAng < 0) {
+        needleAng = th;
+        needleN = compX.length;
+        needleTip = maxD;
+        needleProm = pkP;
+      }
+      ptrDbg('needle-comp', { mult: d.mult, n: compX.length, th: +th.toFixed(1), tip: +maxD.toFixed(1), prom: +pkP.toFixed(1) });
     }
-    if (needleTip >= d.r * 0.42) break; // 尖端伸展足够 → 不再用宽松掩码
   }
   // sharp：组件有规模 + 径向剖面有真突起（prominence）+ 尖端伸展 ≥0.45r
   const bestA = needleAng;
