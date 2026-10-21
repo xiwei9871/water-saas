@@ -17,6 +17,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { newIdemKey } from '../common';
+import { SettleAccountSelect } from '../pickers';
 
 interface Agreement {
   id: string;
@@ -27,6 +28,7 @@ interface Agreement {
   holderName: string | null;
   status: string;
   signDate: string | null;
+  settleAccount?: { id: string; settleNo: string; name: string | null } | null;
 }
 interface Batch {
   id: string;
@@ -180,7 +182,11 @@ export default function BankDebit() {
   };
 
   const agCols: ColumnsType<Agreement> = [
-    { title: '结算户', dataIndex: 'settleAccountId', render: (v: string) => `${v.slice(0, 8)}…` },
+    {
+      title: '结算户',
+      render: (_, r) =>
+        r.settleAccount ? `${r.settleAccount.settleNo} ${r.settleAccount.name}` : `${r.settleAccountId.slice(0, 8)}…`,
+    },
     { title: '卡号(掩码)', dataIndex: 'cardNoMasked' },
     { title: '开户行', dataIndex: 'bankCode', render: (v: string) => BANK_LABEL[v] ?? v },
     { title: '户名', dataIndex: 'holderName', render: (v) => v ?? '—' },
@@ -292,8 +298,8 @@ export default function BankDebit() {
 
       <Modal title="签约代扣协议" open={agModal} onOk={() => void createAgreement()} onCancel={() => setAgModal(false)} destroyOnHidden>
         <Form form={agForm} layout="vertical">
-          <Form.Item name="settleAccountId" label="结算户ID" rules={[{ required: true }]}>
-            <Input placeholder="结算户 UUID" />
+          <Form.Item name="settleAccountId" label="结算户" rules={[{ required: true }]}>
+            <SettleAccountSelect />
           </Form.Item>
           <Form.Item name="cardNo" label="银行卡号" rules={[{ required: true }]}>
             <Input placeholder="16-19位卡号，仅存掩码" />

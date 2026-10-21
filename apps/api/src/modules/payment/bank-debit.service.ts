@@ -46,6 +46,7 @@ export class BankDebitService {
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       tx.bankDebitAgreement.findMany({
         where: { tenantId: ctx.tenantId, ...(q.status ? { status: q.status } : {}) },
+        include: { settleAccount: { select: { id: true, settleNo: true, name: true } } },
         orderBy: { createdAt: 'desc' },
       }),
     );
