@@ -267,7 +267,7 @@ export class MeterReadingController {
    */
   @Post('recognize')
   @Permissions('metering:write')
-  recognize(@Body() body: { image?: unknown }) {
+  recognize(@Body() body: { image?: unknown; prev?: unknown }) {
     if (typeof body?.image !== 'string' || body.image.length < 100) {
       throw new BadRequestException({ code: 'IMAGE_REQUIRED' });
     }
@@ -277,7 +277,9 @@ export class MeterReadingController {
     if (b64.length > 1_900_000 || !/^[A-Za-z0-9+/=\s]+$/.test(b64)) {
       throw new BadRequestException({ code: 'IMAGE_INVALID' });
     }
-    return this.ocr.recognize(b64);
+    // 上期止度（可选）：供 LLM 兜底裁决指针边界位（9→0 跳变）
+    const prev = Number(body.prev);
+    return this.ocr.recognize(b64, Number.isFinite(prev) && prev >= 0 ? prev : undefined);
   }
 
   /**

@@ -88,7 +88,7 @@ export class MeterOcrService implements OnModuleDestroy {
   }
 
   /** Entry point — `dataUrl` is the mobile client's compressed jpeg. */
-  async recognize(dataUrl: string): Promise<MeterOcrResult> {
+  async recognize(dataUrl: string, prev?: number): Promise<MeterOcrResult> {
     if (this.disabled) {
       return this.empty('OCR_DISABLED', '识别模块已停用，请人工读数');
     }
@@ -104,7 +104,7 @@ export class MeterOcrService implements OnModuleDestroy {
     }
     // 本地结果足够可信直接返回；低置信/拒识 → 多模态 LLM 兜底（若已配置）
     if (local.value !== null && local.confidence >= 70) return local;
-    const llm = await this.tryLlm(dataUrl).catch((err) => {
+    const llm = await this.tryLlm(dataUrl, prev).catch((err) => {
       this.logger.warn(`meter ocr llm failed: ${String(err)}`);
       return null;
     });
@@ -340,7 +340,7 @@ export class MeterOcrService implements OnModuleDestroy {
    * 结果仍要过机械联动校验（各整数盘的 fractional 位置必须与同一总数自洽），
    * 不一致只降置信不拒识——本端点是建议性输出，人工总会确认。
    */
-  private async tryLlm(dataUrl: string): Promise<MeterOcrResult | null> {
+  private async tryLlm(dataUrl: string, prev?: number): Promise<MeterOcrResult | null> {
     const cfg = this.llmCfg();
     if (!cfg) return null;
     const jpeg = await sharp(Buffer.from(dataUrl, 'base64'), { failOn: 'error' })
@@ -420,10 +420,46 @@ export class MeterOcrService implements OnModuleDestroy {
     }
     if (d1000 === null || d100 === null || d10 === null || d1 === null) return null;
     // 机械链校验：整数位取 floor，小数部分须等于 (T mod m)/m
-    const intStr = `${Math.floor(d1000)}${Math.floor(d100)}${Math.floor(d10)}${Math.floor(d1)}`;
+    const baseDigits = [d1000, d100, d10, d1].map(Math.floor);
+    let intStr = baseDigits.join('');
     const tenth = d01 !== null ? Math.floor(d01) : Math.floor((d1 % 1) * 10 + 0.5) % 10;
-    const T = Number(intStr) + tenth / 10;
     const flags: string[] = [];
+    // 上期止度约束：针贴数字边界（frac≤0.18/≥0.82）时该位 floor 歧义，
+    // 枚举翻位后取 ≥prev 且离 prev 最近的自洽读数（消掉 9→0 边界跳变）
+    if (typeof prev === 'number' && Number.isFinite(prev) && prev >= 0) {
+      const ambig = [d1000, d100, d10, d1].map((v) => {
+        const f = v % 1;
+        return f <= 0.18 || f >= 0.82;
+      });
+      if (ambig.some(Boolean)) {
+        const vals = [d1000, d100, d10, d1];
+        const mults = [1000, 100, 10, 1];
+        let bestT = Number(intStr) + tenth / 10;
+        let bestDist = Math.abs(bestT - prev);
+        for (let mask = 0; mask < 16; mask++) {
+          let t = tenth / 10;
+          for (let i = 0; i < 4; i++) {
+            let dg = baseDigits[i];
+            if (ambig[i] && (mask >> i) & 1) {
+              // 针贴数字边界：frac≥.82 也可能已越过下一数字（取+1）；frac≤.18 也可能尚未到达（取-1）
+              dg = (dg + (vals[i] % 1 >= 0.82 ? 1 : -1) + 10) % 10;
+            }
+            t += dg * mults[i];
+          }
+          const p = prev;
+          if (t >= p - 0.05 && t - p <= Math.max(500, p * 0.5) && Math.abs(t - p) < bestDist) {
+            bestDist = Math.abs(t - p);
+            bestT = t;
+          }
+        }
+        const altStr = String(Math.floor(bestT)).padStart(intStr.length, '0');
+        if (altStr !== intStr) {
+          flags.push('LLM_PREV_ADJUSTED');
+          intStr = altStr;
+        }
+      }
+    }
+    const T = Number(intStr) + tenth / 10;
     let mism = 0;
     for (const [v, m] of [[d1000, 1000], [d100, 100], [d10, 10]] as const) {
       const frac = v % 1;

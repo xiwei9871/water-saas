@@ -711,7 +711,10 @@ export default function MobileReading() {
                           confidence: number;
                           method: string;
                           message?: string;
-                        }>('/meter-readings/recognize', { image: dataUrl })
+                        }>('/meter-readings/recognize', {
+                          image: dataUrl,
+                          prev: Number(current.prevReadingValue) || undefined,
+                        })
                         .then((r) => {
                           if (r.data?.value !== null) applyResult(r.data);
                           else if (local) applyResult(local);
