@@ -43,23 +43,6 @@ export class NoticeController {
     });
   }
 
-  @Get(':id')
-  @Permissions('payment:read')
-  detail(@Param('id') id: string) {
-    const ctx = currentTenant();
-    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      const row = await tx.collectionNotice.findFirst({
-        where: { tenantId: ctx.tenantId, id: assertUuid(id, 'id') },
-      });
-      if (!row) throw new BadRequestException({ code: 'NOTICE_NOT_FOUND' });
-      const acc = await tx.waterAccount.findFirst({
-        where: { tenantId: ctx.tenantId, id: row.waterAccountId },
-        select: { accountNo: true, addr: true, customer: { select: { name: true } } },
-      });
-      return { ...row, account: acc };
-    });
-  }
-
   /**
    * GET /payments/collection-notices/arrears — 待催缴户清单：
    * 欠费(POSTED/PARTIAL_PAID 未清)按用水户聚合，含户号/户名/电话/地址/
@@ -141,6 +124,23 @@ export class NoticeController {
           overdueDays: r.overdue_days ?? 0,
         })),
       };
+    });
+  }
+
+  @Get(':id')
+  @Permissions('payment:read')
+  detail(@Param('id') id: string) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const row = await tx.collectionNotice.findFirst({
+        where: { tenantId: ctx.tenantId, id: assertUuid(id, 'id') },
+      });
+      if (!row) throw new BadRequestException({ code: 'NOTICE_NOT_FOUND' });
+      const acc = await tx.waterAccount.findFirst({
+        where: { tenantId: ctx.tenantId, id: row.waterAccountId },
+        select: { accountNo: true, addr: true, customer: { select: { name: true } } },
+      });
+      return { ...row, account: acc };
     });
   }
 
