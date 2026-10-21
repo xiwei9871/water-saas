@@ -18,7 +18,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import { enumLabel, newIdemKey } from '../common';
-import { WaterAccountSelect } from '../pickers';
+import { WaterAccountSearchSelect } from '../pickers';
 
 interface Violation {
   id: string;
@@ -234,7 +234,7 @@ export default function Violations() {
           {action === 'create' && (
             <>
               <Form.Item name="waterAccountId" label="用水户" rules={[{ required: true }]}>
-                <WaterAccountSelect />
+                <WaterAccountSearchSelect />
               </Form.Item>
               <Form.Item name="violationType" label="违章类型" rules={[{ required: true }]}>
                 <Select
