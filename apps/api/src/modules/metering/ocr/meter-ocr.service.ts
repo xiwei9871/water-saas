@@ -424,38 +424,41 @@ export class MeterOcrService implements OnModuleDestroy {
     let intStr = baseDigits.join('');
     const tenth = d01 !== null ? Math.floor(d01) : Math.floor((d1 % 1) * 10 + 0.5) % 10;
     const flags: string[] = [];
-    // 上期止度约束：针贴数字边界（frac≤0.18/≥0.82）时该位 floor 歧义，
-    // 枚举翻位后取 ≥prev 且离 prev 最近的自洽读数（消掉 9→0 边界跳变）
+    // 上期止度约束：仅当逐盘推导的读数相对上期"不合理"（回退或用量跳变超上限）
+    // 时，枚举各整数位 ±1 翻位取可行域内离上期最近的读数——修正 LLM 把整位
+    // 读错一格的情况（9→0 边界尤甚）。base 已合理时不动，避免上期值拉歪真值。
     if (typeof prev === 'number' && Number.isFinite(prev) && prev >= 0) {
-      const ambig = [d1000, d100, d10, d1].map((v) => {
-        const f = v % 1;
-        return f <= 0.18 || f >= 0.82;
-      });
-      if (ambig.some(Boolean)) {
-        const vals = [d1000, d100, d10, d1];
+      const cap = Math.max(500, prev * 0.5); // 期用量上限：居民远小于此，异常跳变判不合理
+      const baseT = Number(intStr) + tenth / 10;
+      const plausible = baseT >= prev - 0.05 && baseT - prev <= cap;
+      if (!plausible) {
         const mults = [1000, 100, 10, 1];
-        let bestT = Number(intStr) + tenth / 10;
-        let bestDist = Math.abs(bestT - prev);
-        for (let mask = 0; mask < 16; mask++) {
-          let t = tenth / 10;
-          for (let i = 0; i < 4; i++) {
-            let dg = baseDigits[i];
-            if (ambig[i] && (mask >> i) & 1) {
-              // 针贴数字边界：frac≥.82 也可能已越过下一数字（取+1）；frac≤.18 也可能尚未到达（取-1）
-              dg = (dg + (vals[i] % 1 >= 0.82 ? 1 : -1) + 10) % 10;
-            }
-            t += dg * mults[i];
-          }
-          const p = prev;
-          if (t >= p - 0.05 && t - p <= Math.max(500, p * 0.5) && Math.abs(t - p) < bestDist) {
-            bestDist = Math.abs(t - p);
-            bestT = t;
-          }
-        }
+        let bestT = baseT;
+        let bestDist = Infinity;
+        for (let m0 = -1; m0 <= 1; m0++)
+          for (let m1 = -1; m1 <= 1; m1++)
+            for (let m2 = -1; m2 <= 1; m2++)
+              for (let m3 = -1; m3 <= 1; m3++) {
+                const sh = [m0, m1, m2, m3];
+                let t = tenth / 10;
+                for (let i = 0; i < 4; i++) {
+                  // 表盘数字 0-9 环形：9+1 回绕为 0，0-1 回绕为 9
+                  const dg = (baseDigits[i] + sh[i] + 10) % 10;
+                  t += dg * mults[i];
+                }
+                if (t < prev - 0.05 || t - prev > cap) continue;
+                const dist = Math.abs(t - prev);
+                if (dist < bestDist) {
+                  bestDist = dist;
+                  bestT = t;
+                }
+              }
         const altStr = String(Math.floor(bestT)).padStart(intStr.length, '0');
-        if (altStr !== intStr) {
+        if (altStr !== intStr && Number.isFinite(bestDist)) {
           flags.push('LLM_PREV_ADJUSTED');
           intStr = altStr;
+        } else {
+          flags.push('LLM_IMPLAUSIBLE');
         }
       }
     }
