@@ -1030,8 +1030,22 @@ async function readPointerDialsRing(
     keep = best.inl;
   }
   if (!ell) {
-    ptrDbg('ring-fit', 'failed');
-    return null; // 无倾斜校正 → 拒识（不再退质心坐标系硬读）
+    // 退化路径：质心 + 中位半径的圆模型（照片倾斜不严重时与椭圆等价；
+    // ellNorm/ellTheta/ellPoint 在 aw=ah 时退化为普通极坐标）
+    const mx = keep.reduce((s, c) => s + c.cx, 0) / keep.length;
+    const my = keep.reduce((s, c) => s + c.cy, 0) / keep.length;
+    const rads = keep.map((c) => Math.hypot(c.cx - mx, c.cy - my)).sort((a, b) => a - b);
+    const rm = rads[Math.floor(rads.length / 2)] ?? 0;
+    const inlC = rm > 0 ? keep.filter((c) => Math.abs(Math.hypot(c.cx - mx, c.cy - my) - rm) < rm * 0.35) : [];
+    const ths = inlC.map((c) => ((Math.atan2(c.cx - mx, my - c.cy) * 180) / Math.PI + 360) % 360).sort((a, b) => a - b);
+    let g = 0;
+    for (let i = 0; i < ths.length; i++) g = Math.max(g, (ths[(i + 1) % ths.length] - ths[i] + 360) % 360);
+    if (inlC.length < 5 || g > 170) {
+      ptrDbg('ring-fit', 'failed');
+      return null;
+    }
+    ell = { cx: mx, cy: my, aw: rm, ah: rm, phi: 0 };
+    keep = inlC;
   }
   const E = ell;
   ptrDbg('ring-fit', { cx: Math.round(E.cx), cy: Math.round(E.cy), aw: Math.round(E.aw), ah: Math.round(E.ah), deg: Math.round((E.phi * 180) / Math.PI), n: keep.length });
