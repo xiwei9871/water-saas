@@ -40,6 +40,7 @@ import RemoteSources from './pages/metering/RemoteSources';
 import ServiceOrders from './pages/service/ServiceOrders';
 import ServiceOrderStats from './pages/service/ServiceOrderStats';
 import ReplaceRecords from './pages/service/ReplaceRecords';
+import BankDebit from './pages/payment/BankDebit';
 import Cashier from './pages/payment/Cashier';
 import CollectionNotices from './pages/payment/CollectionNotices';
 import DayClose from './pages/payment/DayClose';
@@ -414,6 +415,13 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/payment/receipt-docs',
         label: '票据台账',
         element: <ReceiptDocs />,
+      },
+      {
+        // 20261021 整改 任务F：银行代扣（协议/批次/PKMX·PKJG·DZMX）。
+        key: 'payment-bank-debit',
+        path: '/payment/bank-debit',
+        label: '银行代扣',
+        element: <BankDebit />,
       },
     ],
   },

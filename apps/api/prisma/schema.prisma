@@ -560,6 +560,8 @@ model SettleAccount {
   waterAccounts     WaterAccount[]
   bills             Bill[]
   prepaymentEntries PrepaymentLedgerEntry[]
+  debitAgreements   BankDebitAgreement[]
+  debitItems        BankDebitItem[]
 
   @@unique([tenantId, settleNo])
   @@unique([tenantId, id])
@@ -722,6 +724,76 @@ model MeterStockMovement {
   @@index([tenantId, meterId, movedAt])
   @@index([tenantId, docNo])
   @@map("meter_stock_movement")
+}
+
+/** 20261021 任务F：银行代扣协议 — 每户至多一条 ACTIVE（partial unique）。 */
+model BankDebitAgreement {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  settleAccountId String    @map("settle_account_id") @db.Uuid
+  cardNoMasked    String    @map("card_no_masked")
+  cardLast4       String    @map("card_last4")
+  bankCode        String    @map("bank_code")
+  holderName      String?   @map("holder_name")
+  signDate        DateTime? @map("sign_date") @db.Date
+  status          String    @default("ACTIVE")
+  cancelledAt     DateTime? @map("cancelled_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by") @db.Uuid
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  updatedBy       String?   @map("updated_by") @db.Uuid
+
+  settleAccount SettleAccount @relation(fields: [tenantId, settleAccountId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@map("bank_debit_agreement")
+}
+
+/** 任务F：代扣批次（PKMX 扣款明细文件的一批次）。 */
+model BankDebitBatch {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  period      String   @db.Char(6)
+  totalCount  Int      @default(0) @map("total_count")
+  totalAmount BigInt   @default(0) @map("total_amount")
+  status      String   @default("GENERATED")
+  generatedBy String?  @map("generated_by") @db.Uuid
+  executedAt  DateTime? @map("executed_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  createdBy   String?  @map("created_by") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  items BankDebitItem[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, period])
+  @@map("bank_debit_batch")
+}
+
+/** 任务F：扣款明细 — 防御③ partial unique：同户同期至多一条 PENDING / 一条 SUCCESS。 */
+model BankDebitItem {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  batchId         String    @map("batch_id") @db.Uuid
+  settleAccountId String    @map("settle_account_id") @db.Uuid
+  period          String    @db.Char(6)
+  /** 分（bigint 与 bill.total_amount 一致）。 */
+  amount          BigInt
+  status          String    @default("PENDING")
+  bankSerialNo    String?   @map("bank_serial_no")
+  failReason      String?   @map("fail_reason")
+  /** 扣款成功自动销账生成的 payment。 */
+  paymentId       String?   @map("payment_id") @db.Uuid
+  executedAt      DateTime? @map("executed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  batch         BankDebitBatch @relation(fields: [tenantId, batchId], references: [tenantId, id])
+  settleAccount SettleAccount @relation(fields: [tenantId, settleAccountId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, batchId])
+  @@map("bank_debit_item")
 }
 
 /** 20261021 任务E：违章用水 — 稽查登记(INSPECT)/抄表上报(READING→待核实)。 */
