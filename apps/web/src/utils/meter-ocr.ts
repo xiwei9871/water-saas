@@ -585,17 +585,15 @@ function readNeedle(px: Px, d: PtrDial): { digit: number; sharp: number; v: numb
       }
     }
     if (sx < 0) continue;
-    // BFS 收集针组件
-    const compX: number[] = [];
-    const compY: number[] = [];
+    // BFS 收集针组件（bw 网格索引）
+    const compSet = new Set<number>();
     const stack = [sy * bw + sx];
     seen[sy * bw + sx] = 1;
     while (stack.length) {
       const idx = stack.pop()!;
+      compSet.add(idx);
       const yy = (idx / bw) | 0;
       const xx = idx % bw;
-      compX.push(x0 + xx);
-      compY.push(y0 + yy);
       for (let oy = -1; oy <= 1; oy++) {
         for (let ox = -1; ox <= 1; ox++) {
           const nx = xx + ox;
@@ -606,12 +604,37 @@ function readNeedle(px: Px, d: PtrDial): { digit: number; sharp: number; v: numb
         }
       }
     }
-    // 毂心修正：组件内距原点<0.3r 的像素质心
-    let hX = 0, hY = 0, hN = 0;
-    for (let i = 0; i < compX.length; i++) {
-      if (Math.hypot(compX[i] - d.cx, compY[i] - d.cy) < d.r * 0.3) { hX += compX[i]; hY += compY[i]; hN++; }
+    // 毂心 = 组件两轮 8 邻域腐蚀后的"深内核"质心——对检出圆心偏移完全钝感
+    let core = compSet;
+    for (let pass = 0; pass < 2 && core.size >= 4; pass++) {
+      const nxt = new Set<number>();
+      for (const i of core) {
+        const yy = (i / bw) | 0;
+        const xx = i % bw;
+        let ok = true;
+        for (let oy = -1; oy <= 1 && ok; oy++) {
+          for (let ox = -1; ox <= 1 && ok; ox++) {
+            if (!core.has((yy + oy) * bw + xx + ox)) ok = false;
+          }
+        }
+        if (ok) nxt.add(i);
+      }
+      if (nxt.size >= 4) core = nxt;
     }
-    if (hN > 5) { cx = hX / hN; cy = hY / hN; }
+    let hX = 0;
+    let hY = 0;
+    for (const i of core) {
+      hX += i % bw;
+      hY += (i / bw) | 0;
+    }
+    cx = x0 + hX / core.size;
+    cy = y0 + hY / core.size;
+    const compX: number[] = [];
+    const compY: number[] = [];
+    for (const i of compSet) {
+      compX.push(x0 + (i % bw));
+      compY.push(y0 + ((i / bw) | 0));
+    }
     // 径向剖面法：每 2° bin 取组件像素最大距 → ±4° 平滑 →
     // prominence = 峰值 − 两侧 ±10~60° 最小值。针尖=狭窄突出（两侧骤降），
     // 毂缘=宽平台 prominence≈0 → 峰即针尖方向
