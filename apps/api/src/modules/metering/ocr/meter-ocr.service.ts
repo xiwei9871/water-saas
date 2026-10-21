@@ -121,10 +121,22 @@ export class MeterOcrService implements OnModuleDestroy {
   }
 
   private async pipeline(dataUrl: string): Promise<MeterOcrResult> {
-    const img = sharp(Buffer.from(dataUrl, 'base64'), { failOn: 'error' }).rotate();
-    const meta = await img.metadata();
+    const base = sharp(Buffer.from(dataUrl, 'base64'), { failOn: 'error' }).rotate();
+    const meta = await base.metadata();
     if (!meta.width || !meta.height) return this.empty('IMAGE_INVALID', '图片无法解析，请人工读数');
 
+    // 手机拍表经常 180° 倒置或侧旋——各方向都试，取置信最高者；
+    // 正立照片第一轮即达标返回，无额外开销。
+    let best: MeterOcrResult | null = null;
+    for (const deg of [0, 180, 90, 270] as const) {
+      const r = await this.pipelineRotated(deg === 0 ? base : base.clone().rotate(deg));
+      if (!best || r.confidence > best.confidence) best = r;
+      if (r.value !== null && r.confidence >= 70) break;
+    }
+    return best ?? this.empty('OCR_FAILED', '照片识别失败，请人工读数');
+  }
+
+  private async pipelineRotated(img: Sharp): Promise<MeterOcrResult> {
     const resized = img.clone().resize({ width: 1500, withoutEnlargement: true });
     const [{ data: rgbData, info: rgbInfo }, { data: grayData, info: grayInfo }, pngBuf] =
       await Promise.all([
@@ -147,13 +159,14 @@ export class MeterOcrService implements OnModuleDestroy {
     const circles = detectCircles(sGrayI_, { limit: 12 });
     // Strong circles only — a real pointer plate has many large dials whose
     // rims vote heavily; mixed meters' tiny sub-dials / noise stay weak.
+    const pngScale = sGrayI_.width / rgbInfo.width;
     const strong = circles.filter((c) => c.score >= 20);
-    if (strong.length >= 6) return this.tryPointer(sGrayI_, sRgb_);
+    if (strong.length >= 6) return this.tryPointer(sGrayI_, sRgb_, pngBuf, pngScale);
 
     const roller = await this.tryRoller(pngBuf, gray, rgb);
     if (roller) return roller;
 
-    return this.tryPointer(sGrayI_, sRgb_);
+    return this.tryPointer(sGrayI_, sRgb_, pngBuf, pngScale);
   }
 
   /* ---------- path 1: roller window ---------- */
@@ -490,8 +503,13 @@ export class MeterOcrService implements OnModuleDestroy {
 
   /* ---------- path 2: pointer dials ---------- */
 
-  private tryPointer(gray: GrayImage, rgb: RgbImage): MeterOcrResult {
-    const circles = detectCircles(gray, { limit: 10 });
+  private async tryPointer(
+    gray: GrayImage,
+    rgb: RgbImage,
+    png1500?: Buffer,
+    pngScale = 0.5,
+  ): Promise<MeterOcrResult> {
+    const circles = detectCircles(gray, { limit: 12 });
     if (circles.length < 4) {
       return this.empty('NO_DIALS', '未能识别字轮或表盘，请人工读数');
     }
@@ -502,6 +520,12 @@ export class MeterOcrService implements OnModuleDestroy {
         const { pos, peak } = pointerPosition(gray, rgb, c);
         return { x: c.x, y: c.y, r: c.r, pos, peak };
       });
+    // 优先路径：tesseract 读出盘面倍率标签（×1000/×0.1…）→ 圆盘就近配对 →
+    // 不再靠猜 LXSC 布局，网格/环形盘面也能读对。
+    if (png1500) {
+      const labeled = await this.tryPointerLabeled(gray, rgb, dials, png1500, pngScale);
+      if (labeled) return labeled;
+    }
     const composed = composePointerInteger(dials);
     if (!composed) {
       return {
@@ -522,6 +546,126 @@ export class MeterOcrService implements OnModuleDestroy {
         flags: ['POINTER_INFERRED_LAYOUT'],
       },
       message: '指针表识别为推断结果，务必人工核对',
+    };
+  }
+
+  /**
+   * 倍率标签定位法：tesseract 全图扫出 "x1000 / x0.1 …" 字样 → 每个圆盘
+   * 配对最近的标签 → 各盘指针位置按真实倍率合成读数，并用机械进位链
+   * 交叉校验（高位盘的小数位置 = 低位读数 / 该盘倍率）。不再假设 LXSC
+   * 左列布局——网格/环形排布的盘面也能读对。
+   */
+  private async tryPointerLabeled(
+    gray: GrayImage,
+    rgb: RgbImage,
+    dials: Array<{ x: number; y: number; r: number; pos: number; peak: number }>,
+    png1500: Buffer,
+    pngScale: number,
+  ): Promise<MeterOcrResult | null> {
+    let worker: Worker;
+    try {
+      worker = await this.worker();
+    } catch {
+      return null;
+    }
+    await worker.setParameters({
+      tessedit_char_whitelist: 'xX×*·0123456789.,',
+      tessedit_pageseg_mode: PSM.SINGLE_LINE,
+    });
+    const png = sharp(png1500);
+    const pngMeta = await png.metadata();
+    const pngW = pngMeta.width ?? 0;
+    const pngH = pngMeta.height ?? 0;
+    if (!pngW || !pngH) return null;
+    const toPng = (v: number) => v / pngScale; // 小图坐标 → png1500 坐标
+    const parseLabel = (text: string): number | null => {
+      const t = text
+        .toLowerCase()
+        .replace(/\s+/g, '')
+        .replace(/[×*·]/g, 'x')
+        .replace(/,/g, '.')
+        .replace(/o/g, '0');
+      const m = t.match(/^x?(\d{1,5}(?:\.\d{1,3})?)$/);
+      if (!m) return null;
+      const mult = Number(m[1]);
+      if (!Number.isFinite(mult) || mult <= 0) return null;
+      const e = Math.log10(mult);
+      return Math.abs(e - Math.round(e)) < 0.001 ? mult : null;
+    };
+    // 逐盘在上下两个标位裁剪小条 OCR——倍率标签通常印在盘缘外侧
+    const paired: Array<{ mult: number; pos: number }> = [];
+    for (const d of dials) {
+      const cx = toPng(d.x);
+      const cy = toPng(d.y);
+      const rr = toPng(d.r);
+      let found: number | null = null;
+      for (const off of [1.45, -1.45, 1.9, -1.9]) {
+        const left = Math.max(0, Math.round(cx - rr * 1.5));
+        const top = Math.max(0, Math.round(cy + rr * off - rr * 0.5));
+        const width = Math.min(pngW - left, Math.round(rr * 3));
+        const height = Math.min(pngH - top, Math.round(rr * 1.0));
+        if (width < 20 || height < 12) continue;
+        const crop = await png
+          .clone()
+          .extract({ left, top, width, height })
+          .resize({ height: 60 })
+          .greyscale()
+          .normalise()
+          .png()
+          .toBuffer();
+        const out = await worker.recognize(crop);
+        const text = out.data.text.trim();
+        const mult = parseLabel(text) ?? parseLabel(text.replace(/[^xX×*·\d.,]/g, ''));
+        if (mult !== null) {
+          found = mult;
+          break;
+        }
+      }
+      if (found !== null) paired.push({ mult: found, pos: d.pos });
+    }
+    const ints = paired.filter((p) => p.mult >= 1 && p.mult <= 10000);
+    const decs = paired.filter((p) => p.mult < 1 && p.mult >= 0.001);
+    if (ints.length < 3) return null;
+
+    // 合成：pos 0..10，取 floor 为当前位数字
+    const digit = (pos: number) => Math.min(9, Math.max(0, Math.floor(pos)));
+    let intSum = 0;
+    for (const p of ints) intSum += digit(p.pos) * p.mult;
+    let decSum = 0;
+    for (const p of decs) decSum += digit(p.pos) * p.mult;
+    // 小数部分按最低位盘精度取整
+    const decDigits = decs.length ? Math.max(...decs.map((p) => Math.round(-Math.log10(p.mult)))) : 0;
+    const T = intSum + Number(decSum.toFixed(decDigits));
+
+    // 机械链校验：高位盘小数位置 ≈ (T mod m)/m（环面距离）
+    let mism = 0;
+    const flags = ['POINTER_LABELED'];
+    for (const p of ints) {
+      if (p.mult <= 1) continue;
+      const frac = p.pos - Math.floor(p.pos);
+      const exp = (T % p.mult) / p.mult;
+      let dev = Math.abs(frac - exp);
+      if (dev > 0.5) dev = 1 - dev;
+      if (dev > 0.25) mism++;
+    }
+    if (mism > 0) flags.push('CHAIN_MISMATCH');
+    const confidence = Math.max(
+      40,
+      Math.min(88, 62 + ints.length * 4 + decs.length * 2 - mism * 15),
+    );
+    const value = decDigits ? `${intSum}.${decSum.toFixed(decDigits).slice(2)}` : String(intSum);
+    return {
+      value,
+      confidence,
+      method: 'pointer',
+      details: {
+        candidates: [],
+        dials: dials.map(({ x, y, r: rr, pos }) => ({ x, y, r: rr, pos: Math.round(pos * 100) / 100 })),
+        flags,
+      },
+      message: mism
+        ? '指针表识别（含校验偏差），务必人工核对'
+        : '指针表识别结果，请人工核对',
     };
   }
 }
