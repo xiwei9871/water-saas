@@ -307,6 +307,41 @@ describe('表务工单全流程', () => {
     await post(`/service-orders/${id}/cancel`, {}).expect(409);
   });
 
+  it('佐证强制归档：换表缺佐证→400 EVIDENCE_REQUIRED；补齐→201', async () => {
+    const a = await onboard('evi');
+    const spare = await newMeter();
+    const created = await createOrder({
+      waterAccountId: a.waterAccount.id,
+      serviceType: 'FAULT',
+      reason: '故障换表',
+      meterInstallationId: a.installation.id,
+    }).expect(201);
+    const id = created.body.id as string;
+    await post(`/service-orders/${id}/approve`, {}).expect(201);
+    await post(`/service-orders/${id}/dispatch`, {}).expect(201);
+    // 执行时只传 1 张现场照 —— 归档时应判定佐证不足（换表需 3 张）
+    const executed = await post(`/service-orders/${id}/execute`, {
+      payload: {
+        newMeterId: spare.id,
+        oldFinalReading: 100,
+        newInitialReading: 0,
+        photoRefs: ['old-final-photo'],
+      },
+    }).expect(201);
+    expect(executed.body.status).toBe('EXECUTED');
+
+    const denied = await post(`/service-orders/${id}/archive`, {});
+    expect(denied.status).toBe(400);
+    expect(denied.body.code ?? denied.body.message?.code).toBe('EVIDENCE_REQUIRED');
+
+    // 归档时补传 → 合并达标 → 201
+    const ok = await post(`/service-orders/${id}/archive`, {
+      photoRefs: ['new-plate-photo', 'new-init-photo'],
+    }).expect(201);
+    expect(ok.body.status).toBe('ARCHIVED');
+    expect(ok.body.linkRef.photoRefs).toHaveLength(3);
+  });
+
   it('requireApproval=false → 申请即 APPROVED', async () => {
     await owner.query(
       `INSERT INTO tenant_param (tenant_id, key, value, created_at, updated_at)
