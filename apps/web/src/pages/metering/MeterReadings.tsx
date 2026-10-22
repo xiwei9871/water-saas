@@ -215,7 +215,12 @@ export default function MeterReadings() {
 
   // U2 任务分组：默认「未完成」，任务全部办结的记录归入「已完成」。
   const taskGroup = useTaskGroup<MeterReading>('meterReading', rows, (r) => r.id);
-  const shownRows = taskGroup.filtered;
+  // U1：聚焦记录不在当前页时置顶插入（高亮样式由 rowClassName 给）。
+  const shownRows = useMemo(() => {
+    const base = taskGroup.filtered;
+    if (!focusRecord || base.some((r) => r.id === focusRecord.id)) return base;
+    return [focusRecord, ...base];
+  }, [taskGroup.filtered, focusRecord]);
 
   // 聚焦行进入视口即高亮滚动到位。
   useEffect(() => {
