@@ -36,6 +36,7 @@ import type {
   RunStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import { useTaskGroup } from '../../components/TaskFocus';
 import {
   enumLabel,
   fmtCent,
@@ -74,6 +75,9 @@ export default function BillingRuns() {
   const [status, setStatus] = useState<RunStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // U2 任务分组：批次任务经其账单上的任务回联。
+  const taskGroup = useTaskGroup<BillingRun>('billingRun', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
 
   const [detail, setDetail] = useState<BillingRunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -440,12 +444,13 @@ export default function BillingRuns() {
         </Space>
       }
     >
+      {taskGroup.tabs}
       <Table<BillingRun>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         pagination={{
           current: page,
           pageSize,

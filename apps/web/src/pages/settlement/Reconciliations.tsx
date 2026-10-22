@@ -44,7 +44,7 @@ import {
 import { RESULT_TYPE_LABELS } from '../metering/common';
 import { BillingAccountSelect, CustomerSelect, WaterAccountSelect } from '../pickers';
 import { RECON_STATUS_COLORS, RECON_STATUS_LABELS } from './common';
-import { useSearchParams } from 'react-router-dom';
+import { FocusTaskBar, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
 
 interface CreateFormValues {
   customerId?: string; // 仅级联过滤
@@ -252,17 +252,20 @@ export default function Reconciliations() {
     [page, pageSize, rows.length],
   );
 
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
 
-  // 任务直达 ?focusId=（bizId=用水户）→ 按户过滤补差列表。
+  // 任务直达 ?focusId=（bizId=用水户）→ 按户过滤补差列表 + 置顶警示条。
   useEffect(() => {
     if (focusId && focusDone.current !== focusId) {
       focusDone.current = focusId;
       setWaterAccountId(focusId);
     }
   }, [focusId]);
+
+  // U2 任务分组：任务挂在用水户上——该户仍有未完成任务即入「未完成」。
+  const taskGroup = useTaskGroup<Reconciliation>('waterAccount', rows, (r) => r.waterAccountId);
+  const shownRows = taskGroup.filtered;
 
   const openDetail = async (row: Reconciliation) => {
     setDetailLoading(true);
@@ -521,12 +524,23 @@ export default function Reconciliations() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>已按用水户过滤本页补差记录</span>}
+          onClose={() => {
+            clearFocus();
+            setWaterAccountId(undefined);
+          }}
+        />
+      )}
+      {taskGroup.tabs}
       <Table<Reconciliation>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         // 列宽总和超过视口 —— scroll.x 让溢出发生在表格内而不是整页。
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{

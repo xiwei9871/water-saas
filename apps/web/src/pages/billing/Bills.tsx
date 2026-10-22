@@ -34,6 +34,7 @@ import type {
   BillStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import { useTaskGroup } from '../../components/TaskFocus';
 import { PREPAY_ENTRY_LABELS } from '../payment/common';
 import {
   DECIMAL_RULE,
@@ -93,6 +94,9 @@ export default function Bills() {
   const [status, setStatus] = useState<BillStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // U2 任务分组：账单任务挂在账单上。
+  const taskGroup = useTaskGroup<Bill>('bill', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
 
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -511,12 +515,13 @@ export default function Bills() {
         </Space>
       }
     >
+      {taskGroup.tabs}
       <Table<Bill>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,

@@ -15,7 +15,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { FOCUS_ROW_CLASS, FocusTaskBar, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
 import { api, apiErrorText } from '../../api/client';
 import { enumLabel, newIdemKey } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
@@ -68,7 +68,6 @@ export default function Violations() {
   const [action, setAction] = useState<'create' | 'verify' | 'process' | 'archive' | null>(null);
   const [cur, setCur] = useState<Violation | null>(null);
   const [form] = Form.useForm();
-  const [params] = useSearchParams();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -140,7 +139,10 @@ export default function Violations() {
     }
   };
 
-  const focusId = params.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
+  // U2 任务分组：违章处置任务挂在违章单上。
+  const taskGroup = useTaskGroup<Violation>('violation', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
   const columns: ColumnsType<Violation> = [
     {
       title: '用水户',
@@ -208,14 +210,22 @@ export default function Violations() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该违章单已在列表中高亮，请核实/处理/归档</span>}
+          onClose={clearFocus}
+        />
+      )}
+      {taskGroup.tabs}
       <Table<Violation>
         rowKey="id"
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         pagination={{ pageSize: 20 }}
-        rowClassName={(r) => (r.id === focusId ? 'ant-table-row-selected' : '')}
+        rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
       />
 
       <Modal

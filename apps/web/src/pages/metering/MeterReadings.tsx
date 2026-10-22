@@ -58,7 +58,12 @@ import {
   RESULT_TYPE_COLORS,
   RESULT_TYPE_LABELS,
 } from './common';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 
 type QcAction = 'pass' | 'reject' | 'review';
 
@@ -170,9 +175,9 @@ export default function MeterReadings() {
     [page, pageSize, rows.length],
   );
 
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
+  const [focusRecord, setFocusRecord] = useState<MeterReading | null>(null);
 
   const openDetail = async (reading: MeterReading) => {
     setDetailLoading(true);
@@ -187,13 +192,39 @@ export default function MeterReadings() {
     }
   };
 
-  // 任务直达 ?focusId= → 自动打开该条读数详情（层面一定位）。
+  // U1 任务直达 ?focusId= → 定位到"该条"记录：置顶警示条 + 行高亮 + 自动开详情。
   useEffect(() => {
-    if (focusId && focusDone.current !== focusId) {
-      focusDone.current = focusId;
-      void openDetail({ id: focusId } as MeterReading);
+    if (!focusId) {
+      setFocusRecord(null);
+      focusDone.current = null;
+      return;
     }
+    if (focusDone.current === focusId) return;
+    focusDone.current = focusId;
+    void (async () => {
+      try {
+        const res = await api.get<MeterReading>(`/meter-readings/${focusId}`);
+        setFocusRecord(res.data);
+      } catch {
+        setFocusRecord(null);
+      }
+      await openDetail({ id: focusId } as MeterReading);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId]);
+
+  // U2 任务分组：默认「未完成」，任务全部办结的记录归入「已完成」。
+  const taskGroup = useTaskGroup<MeterReading>('meterReading', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
+
+  // 聚焦行进入视口即高亮滚动到位。
+  useEffect(() => {
+    if (!focusId) return;
+    const t = window.setTimeout(() => {
+      document.querySelector(`.${FOCUS_ROW_CLASS}`)?.scrollIntoView({ block: 'center' });
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [focusId, shownRows.length]);
 
   const doQc = async (reading: MeterReading, action: QcAction) => {
     setActing(reading.id);
@@ -593,12 +624,32 @@ export default function MeterReadings() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={
+            focusRecord ? (
+              <span>
+                户号 {focusRecord.account?.accountNo ?? '—'} · 账期 {focusRecord.period} · 读数{' '}
+                {String(focusRecord.readingValue ?? '—')} · 质检{' '}
+                {enumLabel(QC_STATUS_LABELS, focusRecord.qcStatus)}
+              </span>
+            ) : (
+              <span>记录 {focusId.slice(0, 8)}…</span>
+            )
+          }
+          onOpenDetail={() => void openDetail({ id: focusId } as MeterReading)}
+          onClose={clearFocus}
+        />
+      )}
+      {taskGroup.tabs}
       <Table<MeterReading>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
+        rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         scroll={{ x: 1900, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,

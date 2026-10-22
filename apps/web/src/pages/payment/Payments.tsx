@@ -43,7 +43,12 @@ import {
   PREPAY_ENTRY_COLORS,
   PREPAY_ENTRY_LABELS,
 } from './common';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 
 
 
@@ -112,9 +117,9 @@ export default function Payments() {
 
   const detailSeq = useRef(0);
 
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
+  const focusRow = rows.find((r) => r.id === focusId);
 
   const openDetail = async (row: Payment) => {
     const seq = ++detailSeq.current;
@@ -151,17 +156,22 @@ export default function Payments() {
     } finally {
       setActing(null);
       await load(page, pageSize);
-  // 任务直达 ?focusId= → 自动打开该笔收款详情。
+      if (detail?.id === p.id) void openDetail(p);
+    }
+  };
+
+  // U1 任务直达 ?focusId= → 置顶警示条 + 行高亮 + 自动打开该笔收款详情。
   useEffect(() => {
     if (focusId && focusDone.current !== focusId) {
       focusDone.current = focusId;
       void openDetail({ id: focusId } as Payment);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId]);
 
-      if (detail?.id === p.id) void openDetail(p);
-    }
-  };
+  // U2 任务分组：任务挂在收款单上。
+  const taskGroup = useTaskGroup<Payment>('payment', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
 
   const print = async (receipt: Receipt) => {
     setPrinting(true);
@@ -360,12 +370,22 @@ export default function Payments() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该笔收款单已定位（单号 {focusRow?.paymentNo ?? '…'}）</span>}
+          onOpenDetail={() => void openDetail({ id: focusId } as Payment)}
+          onClose={clearFocus}
+        />
+      )}
+      {taskGroup.tabs}
       <Table<Payment>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
+        rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         pagination={{
           current: page,
           pageSize,

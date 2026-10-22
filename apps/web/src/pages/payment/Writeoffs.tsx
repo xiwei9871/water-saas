@@ -21,7 +21,12 @@ import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { fmtCent, fmtDate } from '../common';
 import { BillingAccountSelect, SettleAccountLookupSelect } from '../pickers';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 
 interface DictItem {
   id: string;
@@ -47,8 +52,7 @@ interface Writeoff {
 /** G2 坏账核销登记（轻量版）：登记 + 原因字典 + 留痕；不做账务冲销，
  *  应收数据原样保留，报表层（年报/欠费清单）标注扣减。 */
 export default function Writeoffs() {
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const [rows, setRows] = useState<Writeoff[]>([]);
@@ -58,6 +62,8 @@ export default function Writeoffs() {
   const [modal, setModal] = useState(false);
   const [form] = Form.useForm();
   const canWrite = hasPerm('payment:write');
+  const taskGroup = useTaskGroup<Writeoff>('badDebtWriteoff', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -196,13 +202,21 @@ export default function Writeoffs() {
           </Button>
         )}
       </Space>
-      {/* 任务直达 ?focusId= 行级高亮 */}
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该笔核销记录已在列表中高亮</span>}
+          onClose={clearFocus}
+        />
+      )}
+      {taskGroup.tabs}
+      {/* U1 任务直达 ?focusId= 行级高亮 + 置顶警示条 */}
       <Table<Writeoff>
         size="small"
         rowKey="id"
-        rowClassName={(r: Writeoff) => (r.id === focusId ? 'ant-table-row-selected' : '')}
+        rowClassName={(r: Writeoff) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         loading={loading}
         pagination={{ pageSize: 50 }}
       />

@@ -166,7 +166,13 @@ export default function Tasks() {
       const v = ctx[k];
       return v == null ? '' : String(v);
     });
-    navigate(route);
+    // U1：携带完整定位参数（户号/账期便于目标页与人工核对）。
+    const extra = new URLSearchParams();
+    const wa = ctx.waterAccountNo ?? ctx.settleNo ?? null;
+    if (wa != null && wa !== '') extra.set('wa', String(wa));
+    if (ctx.period != null && ctx.period !== '') extra.set('period', String(ctx.period));
+    const sep = route.includes('?') ? '&' : '?';
+    navigate(extra.size ? `${route}${sep}${extra.toString()}` : route);
   };
 
   const columns: ColumnsType<TaskItem> = [

@@ -89,3 +89,10 @@ body {
     justify-content: flex-start;
   }
 }
+
+/* U1 任务聚焦行高亮 */
+.task-focus-row > td {
+  background: #fff7e6 !important;
+  border-top: 2px solid #faad14 !important;
+  border-bottom: 2px solid #faad14 !important;
+}

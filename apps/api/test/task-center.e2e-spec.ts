@@ -664,3 +664,33 @@ describe('T16 出账批次阻断 + T17 超期升级 + T11 无候选告警 + badg
     expect(after.completedBy).not.toBeNull();
   });
 });
+
+describe('U2 业务页任务分组：GET /tasks/biz-flags', () => {
+  it('返回 open/done 两桶且互斥，完成后记录移入 done', async () => {
+    const bizId = randomUUID();
+    const mk = (status: 'PENDING' | 'DONE') =>
+      owner.task.create({
+        data: {
+          tenantId: T,
+          type: 'SVC_EXECUTE',
+          title: 't',
+          bizType: 'service_order',
+          bizId,
+          reason: 'r',
+          requiredPerm: 'service:write',
+          status,
+          priority: 'NORMAL',
+          candidateCount: 1,
+        },
+      });
+    await mk('PENDING');
+    let flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).toContain(bizId);
+    expect(flags.doneIds).not.toContain(bizId);
+    // 全部办结 → 移入 done
+    await owner.task.updateMany({ where: { bizId, tenantId: T }, data: { status: 'DONE' } });
+    flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).not.toContain(bizId);
+    expect(flags.doneIds).toContain(bizId);
+  });
+});

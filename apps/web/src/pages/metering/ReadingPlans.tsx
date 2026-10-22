@@ -61,6 +61,7 @@ import {
   RESULT_TYPE_LABELS,
 } from './common';
 import { ReadingBookSelect, StaffSelect } from '../pickers';
+import { useTaskGroup } from '../../components/TaskFocus';
 
 interface GenerateFormValues {
   bookId: string;
@@ -111,6 +112,9 @@ export default function ReadingPlans() {
   const [status, setStatus] = useState<PlanStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // U2 任务分组：计划任务经其读数上的任务回联。
+  const taskGroup = useTaskGroup<ReadingPlan>('readingPlan', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
 
   const [progressMap, setProgressMap] = useState<Map<string, ReadingPlanProgress>>(
     new Map(),
@@ -717,12 +721,13 @@ export default function ReadingPlans() {
         </Space>
       }
     >
+      {taskGroup.tabs}
       <Table<ReadingPlan>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         scroll={{ x: 1300, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,

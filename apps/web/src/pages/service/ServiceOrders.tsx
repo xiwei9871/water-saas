@@ -29,7 +29,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { FOCUS_ROW_CLASS, FocusTaskBar, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
 import { api, apiErrorText } from '../../api/client';
 import {
   enumLabel,
@@ -152,8 +152,7 @@ const IS_CLOSE = new Set(['CLOSE']);
 
 export default function ServiceOrders() {
   const { message } = AntdApp.useApp();
-  const [searchParams] = useSearchParams();
-  const focusId = searchParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
 
   const [items, setItems] = useState<ServiceOrder[]>([]);
   const [total, setTotal] = useState(0);
@@ -240,6 +239,10 @@ export default function ServiceOrders() {
   useEffect(() => {
     if (focusId) void openDetail(focusId);
   }, [focusId, openDetail]);
+
+  // U2 任务分组：工单任务挂在工单上。
+  const taskGroup = useTaskGroup<ServiceOrder>('service_order', items, (r) => r.id);
+  const shownItems = taskGroup.filtered;
 
   const doAction = async (
     verb: 'approve' | 'reject' | 'dispatch' | 'cancel' | 'archive',
@@ -455,12 +458,22 @@ export default function ServiceOrders() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该张工单已定位并打开详情</span>}
+          onOpenDetail={() => void openDetail(focusId)}
+          onClose={clearFocus}
+        />
+      )}
+      {taskGroup.tabs}
       <Table<ServiceOrder>
         rowKey="id"
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={items}
+        dataSource={shownItems}
+        rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         pagination={{
           current: page,
           total,

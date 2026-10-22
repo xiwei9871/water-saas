@@ -301,6 +301,58 @@ export class TaskService {
     });
   }
 
+  /** 业务页任务分组（U2）：返回该 bizType 下 bizId 两桶——
+      openIds：仍有未完成任务；doneIds：任务全部办结/取消。两桶互斥。
+      虚拟 bizType：readingPlan=抄表计划（经读数回联）、billingRun=开账批次（经账单回联）、
+      settlement=结算水量（任务挂在用水户上，返回的是 waterAccountId）。 */
+  async bizFlags(ctx: TenantCtx, bizType: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const virtual = bizType === 'readingPlan' || bizType === 'billingRun';
+      const realType = bizType === 'readingPlan' ? 'meterReading' : bizType === 'billingRun' ? 'bill' : bizType;
+      const rows = await tx.task.findMany({
+        where: { tenantId: ctx.tenantId, bizType: realType },
+        select: { bizId: true, status: true },
+      });
+      const open = new Set<string>();
+      const all = new Set<string>();
+      for (const r of rows) {
+        all.add(r.bizId);
+        if (r.status === 'PENDING' || r.status === 'CLAIMED') open.add(r.bizId);
+      }
+      if (virtual && all.size) {
+        // 把实体 bizId 映射为页面行 id：读数→抄表计划 / 账单→开账批次。
+        const ids = [...all];
+        const links =
+          bizType === 'readingPlan'
+            ? await tx.$queryRaw<{ pid: string; rid: string }[]>`
+                SELECT pi.plan_id AS pid, r.id AS rid
+                FROM meter_reading r
+                JOIN reading_plan_item pi
+                  ON pi.tenant_id = r.tenant_id AND pi.id = r.plan_item_id
+                WHERE r.tenant_id = ${ctx.tenantId}::uuid AND r.id = ANY(${ids}::uuid[])`
+            : await tx.$queryRaw<{ pid: string; rid: string }[]>`
+                SELECT b.billing_run_id AS pid, b.id AS rid
+                FROM bill b
+                WHERE b.tenant_id = ${ctx.tenantId}::uuid AND b.id = ANY(${ids}::uuid[])
+                  AND b.billing_run_id IS NOT NULL`;
+        const openP = new Set<string>();
+        const allP = new Set<string>();
+        for (const l of links) {
+          allP.add(l.pid);
+          if (open.has(l.rid)) openP.add(l.pid);
+        }
+        return {
+          openIds: [...openP],
+          doneIds: [...allP].filter((id) => !openP.has(id)),
+        };
+      }
+      return {
+        openIds: [...all].filter((id) => open.has(id)),
+        doneIds: [...all].filter((id) => !open.has(id)),
+      };
+    });
+  }
+
   async getById(ctx: TenantCtx, perms: string[] | undefined, id: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const row = await tx.task.findFirst({

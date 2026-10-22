@@ -16,7 +16,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent, fmtPeriod } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
-import { useSearchParams } from 'react-router-dom';
+import { FocusTaskBar, FOCUS_ROW_CLASS, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
 
 interface NoticeBill {
   period: string;
@@ -42,6 +42,7 @@ interface Notice {
   noticeNo: string;
   waterAccountId: string;
   waterAccountLabel: string | null;
+  settleAccountId: string | null;
   periodFrom: string;
   periodTo: string;
   amountDue: string;
@@ -55,8 +56,7 @@ interface Notice {
 /** G4 催缴通知单：欠费户生成/打印/留痕，同时挂催缴任务。 */
 export default function CollectionNotices() {
   const { message } = AntdApp.useApp();
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const [rows, setRows] = useState<Notice[]>([]);
   const [loading, setLoading] = useState(false);
   const [accountId, setAccountId] = useState<string>();
@@ -70,6 +70,9 @@ export default function CollectionNotices() {
   const [arrearsQ, setArrearsQ] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [batching, setBatching] = useState(false);
+  // U2 任务分组：催缴任务挂在结算户上。
+  const taskGroup = useTaskGroup<Notice>('settleAccount', rows, (r) => r.settleAccountId ?? r.id);
+  const shownRows = taskGroup.filtered;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -285,7 +288,15 @@ export default function CollectionNotices() {
                       生成通知单
                     </Button>
                   </Space>
-                  <Table rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.id === focusId ? 'ant-table-row-selected' : '')} dataSource={rows} loading={loading} pagination={false} />
+                  {focusId && (
+                    <FocusTaskBar
+                      focusId={focusId}
+                      summary={<span>该结算户的催缴单已高亮（若尚无通知单请先生成）</span>}
+                      onClose={clearFocus}
+                    />
+                  )}
+                  {taskGroup.tabs}
+                  <Table rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.settleAccountId === focusId || r.id === focusId ? FOCUS_ROW_CLASS : '')} dataSource={shownRows} loading={loading} pagination={false} />
                 </>
               ),
             },

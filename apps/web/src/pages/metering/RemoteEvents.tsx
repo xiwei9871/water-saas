@@ -19,6 +19,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { FOCUS_ROW_CLASS, FocusTaskBar } from '../../components/TaskFocus';
 
 /** canonicalPayload 常见字段的中文名（原始报文逐字段业务化展示）。 */
 const REMOTE_PAYLOAD_LABELS: Record<string, string> = {
@@ -78,7 +79,7 @@ export default function RemoteEvents() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canManage = hasPerm('metering:remote:manage');
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
 
   const [sources, setSources] = useState<RemoteSource[]>([]);
   const [sourceId, setSourceId] = useState<string | undefined>(
@@ -146,14 +147,14 @@ export default function RemoteEvents() {
     }
   };
 
-  // 任务直达 ?focusId= → 自动打开该事件详情。
+  // 任务直达 ?focusId= → 置顶警示条 + 行高亮 + 自动打开该事件详情。
+  const focusId = params.get('focusId');
   useEffect(() => {
-    const focusId = params.get('focusId');
     if (focusId && focusDone.current !== focusId) {
       focusDone.current = focusId;
       void openDetail(focusId);
     }
-  }, [params]);
+  }, [focusId, params]);
 
   const replay = async (id: string) => {
     setReplaying(true);
@@ -279,12 +280,25 @@ export default function RemoteEvents() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该远传事件已定位并打开详情</span>}
+          onOpenDetail={() => void openDetail(focusId)}
+          onClose={() => {
+            const next = new URLSearchParams(params);
+            next.delete('focusId');
+            setParams(next, { replace: true });
+          }}
+        />
+      )}
       <Table
         rowKey="id"
         size="small"
         loading={loading}
         columns={columns}
         dataSource={rows}
+        rowClassName={(r: RawRemoteEvent) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         pagination={{
           current: page,
           pageSize,

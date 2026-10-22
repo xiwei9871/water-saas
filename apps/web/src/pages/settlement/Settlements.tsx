@@ -64,6 +64,7 @@ import {
   SETTLEMENT_STATUS_LABELS,
 } from './common';
 import { EXCEPTION_CODE_LABELS } from '../metering/common';
+import { useTaskGroup } from '../../components/TaskFocus';
 
 interface GenerateFormValues {
   customerId?: string; // 仅级联过滤
@@ -117,6 +118,9 @@ export default function Settlements() {
   const [isEstimated, setIsEstimated] = useState<boolean | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // U2 任务分组：结算任务挂在用水户上。
+  const taskGroup = useTaskGroup<ConsumptionSettlement>('waterAccount', rows, (r) => r.waterAccountId);
+  const shownRows = taskGroup.filtered;
 
   const [detail, setDetail] = useState<ConsumptionSettlement | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -702,12 +706,13 @@ export default function Settlements() {
         </Space>
       }
     >
+      {taskGroup.tabs}
       <Table<ConsumptionSettlement>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         scroll={{ x: 1100, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
