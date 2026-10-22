@@ -1,4 +1,3 @@
-import { TaskContextBanner } from '../../components/TaskContextBanner';
 import {
   CheckOutlined,
   CloseOutlined,
@@ -32,7 +31,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api, apiErrorText, toApiError } from '../../api/client';
 import type {
@@ -59,6 +58,7 @@ import {
   RESULT_TYPE_COLORS,
   RESULT_TYPE_LABELS,
 } from './common';
+import { useSearchParams } from 'react-router-dom';
 
 type QcAction = 'pass' | 'reject' | 'review';
 
@@ -170,6 +170,10 @@ export default function MeterReadings() {
     [page, pageSize, rows.length],
   );
 
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
+  const focusDone = useRef<string | null>(null);
+
   const openDetail = async (reading: MeterReading) => {
     setDetailLoading(true);
     setDetail(null);
@@ -182,6 +186,14 @@ export default function MeterReadings() {
       setDetailLoading(false);
     }
   };
+
+  // 任务直达 ?focusId= → 自动打开该条读数详情（层面一定位）。
+  useEffect(() => {
+    if (focusId && focusDone.current !== focusId) {
+      focusDone.current = focusId;
+      void openDetail({ id: focusId } as MeterReading);
+    }
+  }, [focusId]);
 
   const doQc = async (reading: MeterReading, action: QcAction) => {
     setActing(reading.id);
@@ -477,7 +489,6 @@ export default function MeterReadings() {
 
   return (
     <>
-      <TaskContextBanner />
       <Card
       title="抄表记录 / 质检"
       extra={

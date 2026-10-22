@@ -10,6 +10,7 @@ import {
 } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
+import { TaskBanner } from '../components/TaskBanner';
 import { APP_ROUTES, leafRoutes } from '../routes';
 import type { AppRoute } from '../routes';
 
@@ -213,6 +214,7 @@ export default function AdminLayout() {
           </Space>
         </Header>
         <Content className="page-content" style={{ margin: 16 }}>
+          <TaskBanner />
           <Outlet />
         </Content>
       </Layout>

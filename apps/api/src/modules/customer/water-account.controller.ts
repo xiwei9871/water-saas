@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   Get,
   Headers,
@@ -30,6 +31,7 @@ import {
 } from './water-account.service.js';
 
 import { parseOnboardWire, type OnboardWireBody } from './onboard-wire.js';
+import { TaskService } from '../task/task.service.js';
 
 const ACCOUNT_STATUSES = new Set(['NORMAL', 'SUSPENDED', 'CLOSED']);
 
@@ -55,6 +57,7 @@ export class WaterAccountController {
     private readonly closeAccount: CloseAccountUseCase,
     private readonly prisma: TenantPrismaService,
     private readonly idem: IdempotencyService,
+    private readonly tasks: TaskService,
   ) {}
 
   /**
@@ -181,7 +184,68 @@ export class WaterAccountController {
       this.idem,
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
-      (tx) => this.svc.onboardTx(tx, ctx, parsed),
+      async (tx) => {
+        const result = await this.svc.onboardTx(tx, ctx, parsed);
+        // 报装纳入（2.2）：向导带来源单号时，同事务办结该申请——
+        // 正向回写户/结算户/表号 + INSTALL_REVIEW 任务自动完成。
+        // 与 archive 同链路：挂接向导不再要求操作员回申请页补归档动作。
+        if (parsed.sourceApplyNo) {
+          const app = await tx.installApplication.findFirst({
+            where: { tenantId: ctx.tenantId, applyNo: parsed.sourceApplyNo },
+            select: { id: true, status: true, applyNo: true },
+          });
+          if (!app) throw new BadRequestException({ code: 'SOURCE_APPLY_NOT_FOUND' });
+          if (['COMPLETED', 'REJECTED', 'CANCELLED'].includes(app.status)) {
+            throw new ConflictException({ code: 'SOURCE_APPLY_CLOSED', status: app.status });
+          }
+          await tx.installApplication.update({
+            where: { tenantId_id: { tenantId: ctx.tenantId, id: app.id } },
+            data: {
+              status: 'COMPLETED',
+              waterAccountId: result.waterAccount.id,
+              settleAccountId: result.settleAccount.id,
+              meterNo: result.meter.meterNo,
+              updatedBy: ctx.staffId,
+            },
+          });
+          await this.tasks.autoCompleteByBiz(
+            tx,
+            ctx,
+            'INSTALL_REVIEW',
+            'INSTALL_APPLICATION',
+            app.id,
+            '立户向导带入归档完成',
+          );
+          // V7 工程费闭环：应收>实收差额 → 催缴任务（与归档路径同口径）。
+          const fees = await tx.installApplication.findFirst({
+            where: { tenantId: ctx.tenantId, id: app.id },
+            select: { applyNo: true, feeRequired: true, feeReceived: true },
+          });
+          if (fees?.feeRequired) {
+            const deficit = fees.feeRequired.minus(fees.feeReceived ?? 0);
+            if (deficit.gt(0)) {
+              await this.tasks.createTask(tx, ctx, {
+                type: 'COLLECTION',
+                title: `工程费补收：${fees.applyNo} 差额 ¥${deficit.toFixed(2)}`,
+                bizType: 'settleAccount',
+                bizId: result.settleAccount.id,
+                bizLabel: result.settleAccount.settleNo,
+                reason: `报装 ${fees.applyNo} 工程费应收 ¥${fees.feeRequired} 实收 ¥${fees.feeReceived ?? 0}，差额随户挂账`,
+                context: {
+                  settleNo: result.settleAccount.settleNo,
+                  arrearsCent: deficit.mul(100).toFixed(0),
+                  overdueDays: 0,
+                  feeApplyNo: fees.applyNo,
+                  feeRequired: fees.feeRequired.toString(),
+                  feeReceived: fees.feeReceived?.toString() ?? '0',
+                },
+                orgUnitId: null,
+              });
+            }
+          }
+        }
+        return result;
+      },
     );
   }
 

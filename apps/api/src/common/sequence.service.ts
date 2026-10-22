@@ -40,6 +40,25 @@ export interface SeqSlot {
 
 @Injectable()
 export class SequenceService {
+  /** 2.4 编号规则：doc_no_rule 已配前缀覆盖调用方默认前缀（一次查询缓存到
+      调用域 Map——同事务内多次取号只查一次）。 */
+  private async prefixFor(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    seqKey: string,
+    fallback: string,
+    cache: Map<string, string>,
+  ): Promise<string> {
+    const ck = `${tenantId}:${seqKey}`;
+    if (cache.has(ck)) return cache.get(ck)!;
+    const rows = await tx.$queryRaw<{ prefix: string }[]>`
+      SELECT prefix FROM doc_no_rule
+      WHERE tenant_id = ${tenantId}::uuid AND seq_key = ${seqKey} LIMIT 1`;
+    const p = rows[0]?.prefix ?? fallback;
+    cache.set(ck, p);
+    return p;
+  }
+
   async nextFormatted(
     tx: Prisma.TransactionClient,
     tenantId: string,
@@ -48,6 +67,7 @@ export class SequenceService {
     staffId?: string,
   ): Promise<string> {
     const period = currentPeriod();
+    const effPrefix = await this.prefixFor(tx, tenantId, seqKey, prefix, new Map());
     const rows = await tx.$queryRaw<{ cur_val: bigint }[]>`
       INSERT INTO sys_sequence (id, tenant_id, seq_key, period, cur_val,
                                 created_at, created_by, updated_at, updated_by)
@@ -58,7 +78,7 @@ export class SequenceService {
                     updated_at = now(),
                     updated_by = ${staffId ?? null}::uuid
       RETURNING cur_val`;
-    return `${prefix}${period}${rows[0].cur_val.toString().padStart(6, '0')}`;
+    return `${effPrefix}${period}${rows[0].cur_val.toString().padStart(6, '0')}`;
   }
 
   /**
@@ -81,7 +101,14 @@ export class SequenceService {
   ): Promise<string[]> {
     if (slots.length === 0) return [];
     const period = currentPeriod();
-    for (const s of slots) {
+    const cache = new Map<string, string>();
+    const resolved = await Promise.all(
+      slots.map(async (s) => ({
+        ...s,
+        prefix: await this.prefixFor(tx, tenantId, s.seqKey, s.prefix, cache),
+      })),
+    );
+    for (const s of resolved) {
       await tx.$executeRaw`
         INSERT INTO sys_sequence (id, tenant_id, seq_key, period, cur_val,
                                   created_at, created_by, updated_at, updated_by)
@@ -93,17 +120,17 @@ export class SequenceService {
     const rows = await tx.$queryRaw<{ seq_key: string; cur_val: bigint }[]>`
       SELECT seq_key, cur_val FROM sys_sequence
       WHERE tenant_id = ${tenantId}::uuid AND period = ${period}::char(6)
-        AND seq_key IN (${Prisma.join(slots.map((s) => s.seqKey))})
+        AND seq_key IN (${Prisma.join(resolved.map((s) => s.seqKey))})
       ORDER BY seq_key FOR UPDATE`;
     const cur = new Map(rows.map((r) => [r.seq_key, Number(r.cur_val)]));
-    let target = Math.max(...slots.map((s) => cur.get(s.seqKey) ?? 0)) + 1;
+    let target = Math.max(...resolved.map((s) => cur.get(s.seqKey) ?? 0)) + 1;
     let attempts = 0;
     for (;;) {
-      const candidates = slots.map(
+      const candidates = resolved.map(
         (s) => `${s.prefix}${period}${String(target).padStart(6, '0')}`,
       );
       const taken = await Promise.all(
-        slots.map((s, i) =>
+        resolved.map((s, i) =>
           s.exists ? s.exists(candidates[i]) : Promise.resolve(false),
         ),
       );
@@ -115,7 +142,7 @@ export class SequenceService {
       }
       target += 1;
     }
-    for (const s of slots) {
+    for (const s of resolved) {
       await tx.$executeRaw`
         UPDATE sys_sequence
         SET cur_val = ${target}, updated_at = now(),
@@ -123,7 +150,7 @@ export class SequenceService {
         WHERE tenant_id = ${tenantId}::uuid AND seq_key = ${s.seqKey}
           AND period = ${period}::char(6)`;
     }
-    return slots.map(
+    return resolved.map(
       (s) => `${s.prefix}${period}${String(target).padStart(6, '0')}`,
     );
   }

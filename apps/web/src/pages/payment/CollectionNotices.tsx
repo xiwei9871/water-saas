@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent, fmtPeriod } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
+import { useSearchParams } from 'react-router-dom';
 
 interface NoticeBill {
   period: string;
@@ -54,6 +55,8 @@ interface Notice {
 /** G4 催缴通知单：欠费户生成/打印/留痕，同时挂催缴任务。 */
 export default function CollectionNotices() {
   const { message } = AntdApp.useApp();
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
   const [rows, setRows] = useState<Notice[]>([]);
   const [loading, setLoading] = useState(false);
   const [accountId, setAccountId] = useState<string>();
@@ -282,7 +285,7 @@ export default function CollectionNotices() {
                       生成通知单
                     </Button>
                   </Space>
-                  <Table rowKey="id" size="small" columns={cols} dataSource={rows} loading={loading} pagination={false} />
+                  <Table rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.id === focusId ? 'ant-table-row-selected' : '')} dataSource={rows} loading={loading} pagination={false} />
                 </>
               ),
             },

@@ -87,7 +87,7 @@ export class ViolationService {
     // 违章类型以 VIOLATION_TYPE 字典为准
     const dict = await tx.sysDict.findFirst({
       where: { tenantId: ctx.tenantId, category: 'VIOLATION_TYPE', code: vtype, status: 'ACTIVE' },
-      select: { code: true },
+      select: { code: true, name: true },
     });
     if (!dict) throw bad('VIOLATION_TYPE_INVALID', { violationType: vtype });
 
@@ -134,12 +134,24 @@ export class ViolationService {
       },
     });
     // 违章处置任务（稽查岗 metering:service）——两条来源都要。
+    const wa = await tx.waterAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: waId },
+      select: { accountNo: true },
+    });
     const t = await this.tasks.createTask(tx, ctx, {
       type: 'VIOLATION_HANDLE',
-      title: `违章处置：${vtype} 户${waId.slice(0, 8)}`,
+      title: `违章处置：${dict.name ?? vtype} 户 ${wa?.accountNo ?? ''}`.trim(),
       bizType: 'violation',
       bizId: row.id,
       reason: (body.description as string) ?? '违章用水登记/上报',
+      context: {
+        waterAccountNo: wa?.accountNo ?? null,
+        violationType: vtype,
+        violationTypeName: dict.name ?? vtype,
+        sourceType,
+        description: (body.description as string) ?? null,
+        occurredDate: row.occurredDate?.toISOString().slice(0, 10) ?? null,
+      },
     });
     await tx.waterViolation.updateMany({
       where: { tenantId: ctx.tenantId, id: row.id },

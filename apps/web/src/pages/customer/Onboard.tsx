@@ -15,8 +15,8 @@ import {
   Steps,
 } from 'antd';
 import dayjs from 'dayjs';
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type { InstallReason, OnboardResult } from '../../api/types';
 import {
@@ -34,6 +34,24 @@ import UsageCategoryInput from './UsageCategoryInput';
 type CustMode = 'new' | 'existing';
 type SettleMode = 'default' | 'new' | 'existing';
 type MeterMode = 'new' | 'existing';
+
+/** 报装申请（立户向导来源选择所需的最小字段集）。 */
+interface ApplyLite {
+  id: string;
+  applyNo: string;
+  contractNo?: string | null;
+  applicantName: string;
+  custType: string;
+  contactPhone: string | null;
+  addr: string;
+  usageCategory: string;
+  caliberReq: string | null;
+  status: string;
+  installMeterNo?: string | null;
+  installCaliber?: string | null;
+  installInitialReading?: string | null;
+  installCompletedAt?: string | null;
+}
 
 interface WizardValues {
   custMode: CustMode;
@@ -90,6 +108,11 @@ export default function Onboard() {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<OnboardResult | null>(null);
   const [form] = Form.useForm<WizardValues>();
+  const [params] = useSearchParams();
+  /** 报装纳入（C1）：来源报装单——选中后带入申请人/地址/口径/表号/初始读数，
+      立户成功同时办结该申请（同事务回写 户号/结算户/表号）。 */
+  const [applyOptions, setApplyOptions] = useState<{ value: string; label: string; raw: ApplyLite }[]>([]);
+  const [sourceApply, setSourceApply] = useState<ApplyLite | null>(null);
 
   const custMode = Form.useWatch('custMode', form) ?? 'new';
   const settleMode = Form.useWatch('settleMode', form) ?? 'default';
@@ -133,6 +156,69 @@ export default function Onboard() {
   };
 
   const currentContent = visibleSteps[safeStep].content;
+
+  // 加载待立户报装单（装表中/已审批），供"来源报装单"选择。
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const [a, b] = await Promise.all([
+          api.get<ApplyLite[]>('/install/applications', { params: { status: 'INSTALLING' } }),
+          api.get<ApplyLite[]>('/install/applications', { params: { status: 'APPROVED' } }),
+        ]);
+        if (!alive) return;
+        const list = [...a.data, ...b.data].filter((x) => !x.status.startsWith('COMPLETED'));
+        const opts = list.map((x) => ({
+          value: x.id,
+          label: `${x.applyNo} · ${x.applicantName}${x.contractNo ? ` · ${x.contractNo}` : ''}`,
+          raw: x,
+        }));
+        setApplyOptions(opts);
+        const preset = params.get('applyId');
+        if (preset) {
+          const hit = opts.find((o) => o.value === preset) ?? null;
+          if (hit) pickApply(hit.raw);
+          else {
+            // 列表外（如刚流转）——直接拉详情带入。
+            const d = await api.get<ApplyLite>(`/install/applications/${preset}`);
+            if (alive) pickApply(d.data);
+          }
+        }
+      } catch {
+        /* 无 install:read 权限时隐藏选择器，向导照常可用 */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 选中报装单 → 带入可改写的默认值（申请人→客户、地址→用水地址、
+      口径/表号/初始读数→水表步）。 */
+  const pickApply = (app: ApplyLite) => {
+    setSourceApply(app);
+    form.setFieldsValue({
+      custMode: 'new',
+      custName: app.applicantName,
+      custType: (app.custType as 'PERSONAL' | 'ORG') ?? 'PERSONAL',
+      custPhone: app.contactPhone ?? undefined,
+      custAddr: app.addr,
+      acctUsageCategory: app.usageCategory,
+      acctAddr: app.addr,
+      meterMode: 'new',
+      meterNo: app.installMeterNo ?? undefined,
+      caliber: app.installCaliber ?? app.caliberReq ?? undefined,
+      initialReading: app.installInitialReading ?? '0',
+      installedAt: app.installCompletedAt ? dayjs(app.installCompletedAt) : undefined,
+      reason: 'NEW',
+    });
+  };
+
+  const clearApply = () => {
+    setSourceApply(null);
+    form.resetFields();
+  };
 
   const next = async () => {
     try {
@@ -207,6 +293,8 @@ export default function Onboard() {
     } else {
       body.meterId = values.meterId;
     }
+    // 报装纳入：来源单号随向导提交 → 服务端同事务办结该申请。
+    if (sourceApply) body.sourceApplyNo = sourceApply.applyNo;
 
     setSubmitting(true);
     try {
@@ -225,6 +313,7 @@ export default function Onboard() {
   /** 新一轮立户：清表、回到第一步并换新幂等键。 */
   const resetWizard = () => {
     form.resetFields();
+    setSourceApply(null);
     setIdemKey(newIdemKey());
     setStep(0);
     setResult(null);
@@ -286,6 +375,38 @@ export default function Onboard() {
     <Card title="立户向导">
       {/* 各步常驻挂载（隐藏而非卸载），提交时 validateFields 才能覆盖全部字段；
           模式互斥的字段仍随 radio 卸载，从而不被误校验。 */}
+      {/* 报装纳入（C1）：有在途申请时提供"来源报装单"选择，带入要素并联动办结。 */}
+      {applyOptions.length > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={
+            <Space wrap>
+              <span>来源报装单（可选）</span>
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder="选择待立户的报装申请"
+                style={{ minWidth: 340 }}
+                value={sourceApply?.id}
+                options={applyOptions}
+                onChange={(v) => {
+                  const hit = applyOptions.find((o) => o.value === v);
+                  if (hit) pickApply(hit.raw);
+                  else clearApply();
+                }}
+              />
+            </Space>
+          }
+          description={
+            sourceApply
+              ? `已带入申请 ${sourceApply.applyNo}${sourceApply.contractNo ? `（合同 ${sourceApply.contractNo}）` : ''} 的申请人/地址/表号/初始读数——提交后该申请自动办结归档。`
+              : '报装受理的户可在此选择申请单自动带入要素；直接手工立户则留空。'
+          }
+        />
+      )}
       <Form
         form={form}
         layout="vertical"

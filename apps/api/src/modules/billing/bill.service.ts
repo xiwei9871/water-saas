@@ -330,6 +330,10 @@ export class BillService {
       context: {
         reversalBillId: reversal.id,
         originalBillId: original.id,
+        // REVERSAL_APPROVAL 必要要素（账单无独立单号，用 户号·账期 作可读标识）。
+        reversalPaymentNo: `账单 ${billLabel} 红冲`,
+        originalPaymentNo: `账单 ${billLabel}`,
+        amountCent: original.totalAmount.toString(),
         waterAccountId: original.waterAccountId,
         waterAccountNo: acctNo?.accountNo ?? null,
         period: original.period,

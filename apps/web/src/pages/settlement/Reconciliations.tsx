@@ -1,4 +1,3 @@
-import { TaskContextBanner } from '../../components/TaskContextBanner';
 import {
   PlusOutlined,
   ReloadOutlined,
@@ -23,7 +22,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type {
   MeterReading,
@@ -45,6 +44,7 @@ import {
 import { RESULT_TYPE_LABELS } from '../metering/common';
 import { BillingAccountSelect, CustomerSelect, WaterAccountSelect } from '../pickers';
 import { RECON_STATUS_COLORS, RECON_STATUS_LABELS } from './common';
+import { useSearchParams } from 'react-router-dom';
 
 interface CreateFormValues {
   customerId?: string; // 仅级联过滤
@@ -252,6 +252,18 @@ export default function Reconciliations() {
     [page, pageSize, rows.length],
   );
 
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
+  const focusDone = useRef<string | null>(null);
+
+  // 任务直达 ?focusId=（bizId=用水户）→ 按户过滤补差列表。
+  useEffect(() => {
+    if (focusId && focusDone.current !== focusId) {
+      focusDone.current = focusId;
+      setWaterAccountId(focusId);
+    }
+  }, [focusId]);
+
   const openDetail = async (row: Reconciliation) => {
     setDetailLoading(true);
     setDetail(null);
@@ -397,7 +409,6 @@ export default function Reconciliations() {
 
   return (
     <>
-      <TaskContextBanner />
       {driftHints.length > 0 && (
         <Alert
           type="warning"

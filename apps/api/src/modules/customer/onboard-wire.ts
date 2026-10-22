@@ -28,6 +28,8 @@ export interface OnboardWireBody {
     installedAt?: unknown;
     reason?: string;
   };
+  /** 报装纳入：来源报装单号（可选，回写户/客户/表 source_apply_no）。 */
+  sourceApplyNo?: string;
 }
 
 /**
@@ -122,5 +124,6 @@ export function parseOnboardWire(
       installedAt: assertOptionalDate(body.installation.installedAt, 'installation.installedAt'),
       reason: body.installation.reason as OnboardBody['installation']['reason'],
     },
+    sourceApplyNo: body.sourceApplyNo?.trim() || undefined,
   };
 }

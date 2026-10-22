@@ -73,12 +73,19 @@ export class TaskController {
     return this.svc.claim(currentTenant(), TaskController.perms(req), id);
   }
 
-  /** POST /tasks/:id/complete — {note?}：认领人完成 → 解锁后续流程。 */
+  /** POST /tasks/:id/complete — {note, evidenceRefs[]}：认领人完成 → 解锁后续流程。
+   *  处理结果必填；现场类任务必须带佐证（evidenceRefs 非空）。 */
   @Post(':id/complete')
-  complete(@Param('id') id: string, @Body() body: { note?: string }) {
+  complete(
+    @Param('id') id: string,
+    @Body() body: { note?: string; evidenceRefs?: unknown },
+  ) {
     assertUuid(id, 'id');
     const note = typeof body?.note === 'string' ? body.note.slice(0, 500) : undefined;
-    return this.svc.complete(currentTenant(), id, note);
+    const evidenceRefs = Array.isArray(body?.evidenceRefs)
+      ? body.evidenceRefs.slice(0, 10).map((x) => (typeof x === 'string' ? x.slice(0, 800_000) : x))
+      : undefined;
+    return this.svc.complete(currentTenant(), id, note, evidenceRefs);
   }
 
   /** POST /tasks/:id/cancel — {reason}：取消任务（仅 iam:write/管理员）。 */

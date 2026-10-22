@@ -356,15 +356,48 @@ export class ServiceOrderService {
     // 20261020 核查 T2：待审批节点自动建审批任务进待办中心
     // （dedupe 由 task_open_dedupe 兜底）。
     if (requireApproval) {
+      const svcCtx = await this.taskContext(tx, ctx, {
+        orderNo,
+        serviceType: body.serviceType,
+        waterAccountId: body.waterAccountId,
+        meterId,
+        reason: body.reason ?? null,
+      });
       await this.tasks.createTask(tx, ctx, {
         type: 'SVC_APPROVAL',
         title: `表务工单待审批 ${orderNo}`,
         bizType: 'service_order',
         bizId: order.id,
         reason: body.reason ?? '表务工单申请',
+        context: svcCtx,
       });
     }
     return order;
+  }
+
+  /** 表务任务上下文：水合业务要素（户号/表号），供结构化要素卡展示。 */
+  private async taskContext(
+    tx: Tx,
+    ctx: TenantCtx,
+    p: { orderNo: string; serviceType: string; waterAccountId: string; meterId: string | null; reason: string | null },
+  ) {
+    const [wa, meter] = await Promise.all([
+      tx.waterAccount.findFirst({
+        where: { tenantId: ctx.tenantId, id: p.waterAccountId },
+        select: { accountNo: true, addr: true },
+      }),
+      p.meterId
+        ? tx.meter.findFirst({ where: { tenantId: ctx.tenantId, id: p.meterId }, select: { meterNo: true } })
+        : Promise.resolve(null),
+    ]);
+    return {
+      orderNo: p.orderNo,
+      serviceType: p.serviceType,
+      waterAccountNo: wa?.accountNo ?? null,
+      meterNo: meter?.meterNo ?? null,
+      addr: wa?.addr ?? null,
+      reason: p.reason,
+    };
   }
 
   // ------------------------------------------------------------------
@@ -409,12 +442,26 @@ export class ServiceOrderService {
     req: Request,
   ) {
     return this.transition(tx, ctx, id, 'APPROVED', 'DISPATCHED', req, async (t) => {
+      const ord = await t.meterServiceOrder.findFirst({
+        where: { tenantId: ctx.tenantId, id },
+        select: { orderNo: true, serviceType: true, waterAccountId: true, meterId: true },
+      });
+      const svcCtx = ord
+        ? await this.taskContext(t, ctx, {
+            orderNo: ord.orderNo,
+            serviceType: ord.serviceType,
+            waterAccountId: ord.waterAccountId,
+            meterId: ord.meterId,
+            reason: body.note ?? null,
+          })
+        : undefined;
       const task = await this.tasks.createTask(t, ctx, {
         type: 'SVC_EXECUTE',
-        title: `表务工单待执行`,
+        title: `表务工单待执行${ord ? ` ${ord.orderNo}` : ''}`,
         bizType: 'service_order',
         bizId: id,
         reason: body.note ?? '表务派单',
+        ...(svcCtx ? { context: svcCtx } : {}),
       });
       return t.meterServiceOrder.update({
         where: { tenantId_id: { tenantId: ctx.tenantId, id } },

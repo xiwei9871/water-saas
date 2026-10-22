@@ -201,7 +201,13 @@ export class NoticeController {
         waterAccountId: waId,
         status: { in: ['POSTED', 'PARTIAL_PAID'] },
       },
-      select: { id: true, period: true, totalAmount: true, allocs: { select: { amount: true } } },
+      select: {
+        id: true,
+        period: true,
+        totalAmount: true,
+        dueDate: true,
+        allocs: { select: { amount: true } },
+      },
       orderBy: { period: 'asc' },
     });
     const unpaid = bills
@@ -231,6 +237,16 @@ export class NoticeController {
         updatedBy: ctx.staffId,
       },
     });
+    // 3.3 建单要素：COLLECTION 必带 结算户号/欠费额/逾期天数。
+    const settle = await tx.settleAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: account.settleAccountId },
+      select: { settleNo: true },
+    });
+    const today = new Date();
+    const overdueDays = unpaid.reduce((m, b) => {
+      if (!b.dueDate || b.dueDate >= today) return m;
+      return Math.max(m, Math.floor((today.getTime() - b.dueDate.getTime()) / 86400_000));
+    }, 0);
     const t = await this.tasks.createTask(tx, ctx, {
       type: 'COLLECTION',
       title: `催缴：户 ${account.accountNo} ${account.customer.name}（欠费 ${unpaid.length} 期 ${(Number(amountDue) / 100).toFixed(2)} 元）`,
@@ -238,7 +254,14 @@ export class NoticeController {
       bizId: account.settleAccountId,
       bizLabel: `结算户 ${account.accountNo}`,
       reason: `已出具催缴通知单 ${noticeNo}`,
-      context: { noticeId: notice.id, noticeNo, amountDue: amountDue.toString(), billCount: unpaid.length },
+      context: {
+        noticeId: notice.id,
+        noticeNo,
+        settleNo: settle?.settleNo ?? account.settleAccountId,
+        arrearsCent: amountDue.toString(),
+        overdueDays,
+        billCount: unpaid.length,
+      },
       orgUnitId: null,
     });
     return { ...notice, taskId: t.id || null };

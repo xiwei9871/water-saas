@@ -502,6 +502,21 @@ model SysSequence {
   @@map("sys_sequence")
 }
 
+/** 2.4 单据编号规则：租户级前缀覆盖（未配置走代码默认前缀）。 */
+model DocNoRule {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  seqKey    String   @map("seq_key")
+  label     String
+  prefix    String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, seqKey])
+  @@map("doc_no_rule")
+}
+
 model TenantParam {
   tenantId  String   @map("tenant_id") @db.Uuid
   key       String
@@ -532,6 +547,8 @@ model Customer {
   // Stable identity for system-owned customers (e.g. 'MONITORING_INTERNAL').
   // Regular customers keep NULL — Postgres unique treats NULLs as distinct.
   systemKey  String?  @map("system_key")
+  /** 报装纳入：来源报装单号。 */
+  sourceApplyNo String? @map("source_apply_no")
   createdAt  DateTime @default(now()) @map("created_at")
   createdBy  String?  @map("created_by") @db.Uuid
   updatedAt  DateTime @updatedAt @map("updated_at")
@@ -580,6 +597,8 @@ model WaterAccount {
   billable        Boolean       @default(true)
   openedAt        DateTime?     @map("opened_at") @db.Date
   closedAt        DateTime?     @map("closed_at") @db.Date
+  /** 报装纳入：来源报装单号（营业厅/电话报装→立户的反向关联）。 */
+  sourceApplyNo   String?       @map("source_apply_no")
   createdAt       DateTime      @default(now()) @map("created_at")
   createdBy       String?       @map("created_by") @db.Uuid
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -643,6 +662,8 @@ model Meter {
   lastCheckDate   DateTime? @map("last_check_date") @db.Date
   /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表(监控表)。 */
   meterRole     String      @default("NORMAL") @map("meter_role")
+  /** 报装纳入：来源报装单号。 */
+  sourceApplyNo String?     @map("source_apply_no")
   parentMeterId String?     @map("parent_meter_id") @db.Uuid
   /** 20261021 任务D：在库时指向当前库房/货位；领用/安装后清空。 */
   warehouseId   String?     @map("warehouse_id") @db.Uuid
@@ -1763,6 +1784,9 @@ model Task {
   escalatedAt    DateTime?    @map("escalated_at")
   completedAt    DateTime?    @map("completed_at")
   completedBy    String?      @map("completed_by") @db.Uuid
+  /** 完成标准回填（3.4）：处理结果说明（必填）+ 佐证引用（照片/单据 dataURL 或 ref）。 */
+  resultNote     String?      @map("result_note")
+  resultEvidence Json?        @map("result_evidence") @db.JsonB
   cancelledAt    DateTime?    @map("cancelled_at")
   cancelReason   String?      @map("cancel_reason")
   createdAt      DateTime     @default(now()) @map("created_at")
@@ -2020,6 +2044,20 @@ model InstallApplication {
   /** 装表环节记录的表底读数（APPROVED→INSTALLING 流转时录入），
       归档时与立户「水表起始读数」联动校验：起始>初始说明装表后有水量。 */
   installInitialReading Decimal?     @map("install_initial_reading") @db.Decimal(18, 4)
+  /** 受理时生成的供用水合同号（HT+流水）。 */
+  contractNo     String?            @map("contract_no")
+  /** 归档后回写：立户产生的结算户/表号（双向关联 2.2）。 */
+  settleAccountId String?           @map("settle_account_id") @db.Uuid
+  meterNo        String?            @map("meter_no")
+  /** 装表环节接收的完成信息（2.1 接收完成信息）。 */
+  installMeterNo String?            @map("install_meter_no")
+  installCaliber String?            @map("install_caliber")
+  installCompletedAt DateTime?      @map("install_completed_at")
+  feeRequired    Decimal?           @map("fee_required") @db.Decimal(18, 2)
+  feeReceived    Decimal?           @map("fee_received") @db.Decimal(18, 2)
+  feeNote        String?            @map("fee_note")
+  /** V6 合同扫描件：dataURL/引用数组（与任务佐证同口径存 JSONB）。 */
+  contractScan   Json?              @map("contract_scan") @db.JsonB
   rejectReason   String?            @map("reject_reason")
   waterAccountId String?            @map("water_account_id") @db.Uuid
   createdAt      DateTime           @default(now()) @map("created_at")

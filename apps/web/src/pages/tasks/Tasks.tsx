@@ -1,6 +1,7 @@
 import {
   CheckOutlined,
   EyeOutlined,
+  PlusOutlined,
   LinkOutlined,
   ReloadOutlined,
   StopOutlined,
@@ -12,13 +13,16 @@ import {
   Badge,
   Button,
   Card,
-  Collapse,
   Descriptions,
   Drawer,
+  Form,
+  Input,
+  Modal,
   Space,
   Table,
   Tabs,
   Tag,
+  Upload,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
@@ -33,7 +37,7 @@ import {
   type TaskItem,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { enumLabel, fmtTime, taskContextText } from '../common';
+import { enumLabel, fmtTime, taskContextFields, taskContextText } from '../common';
 
 const PRIORITY_COLOR: Record<string, string> = {
   LOW: 'default',
@@ -57,6 +61,10 @@ export default function Tasks() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [detail, setDetail] = useState<TaskItem | null>(null);
+  const [completeFor, setCompleteFor] = useState<TaskItem | null>(null);
+  const [completeForm] = Form.useForm<{ note: string }>();
+  const [evidence, setEvidence] = useState<string[]>([]);
+  const [completing, setCompleting] = useState(false);
 
   const canAlert = hasPerm('iam:write');
 
@@ -103,14 +111,34 @@ export default function Tasks() {
     }
   };
 
-  const complete = async (id: string) => {
+  /** 完成弹窗（3.4）：处理结果必填；现场类任务必须带佐证。 */
+  const openComplete = (t: TaskItem) => {
+    setCompleteFor(t);
+    completeForm.resetFields();
+    setEvidence([]);
+  };
+
+  const submitComplete = async () => {
+    if (!completeFor) return;
+    const v = await completeForm.validateFields();
+    if (completeFor.evidenceRequired && !evidence.length) {
+      message.warning('现场类任务完成须上传佐证（照片/单据）');
+      return;
+    }
+    setCompleting(true);
     try {
-      await api.post(`/tasks/${id}/complete`, {});
+      await api.post(`/tasks/${completeFor.id}/complete`, {
+        note: v.note.trim(),
+        evidenceRefs: evidence,
+      });
       message.success('已完成');
+      setCompleteFor(null);
       setDetail(null);
       void load(box, page, pageSize);
     } catch (err) {
       message.error(apiErrorText(err));
+    } finally {
+      setCompleting(false);
     }
   };
 
@@ -131,7 +159,14 @@ export default function Tasks() {
       message.warning('该任务类型暂无直达页面');
       return;
     }
-    navigate(tpl.replace('{bizId}', t.bizId).replace('{taskId}', t.id));
+    const ctx = (t.context ?? {}) as Record<string, unknown>;
+    const route = tpl.replace(/\{(\w+)\}/g, (_m, k) => {
+      if (k === 'bizId') return t.bizId;
+      if (k === 'taskId') return t.id;
+      const v = ctx[k];
+      return v == null ? '' : String(v);
+    });
+    navigate(route);
   };
 
   const columns: ColumnsType<TaskItem> = [
@@ -208,7 +243,7 @@ export default function Tasks() {
             </Button>
           )}
           {box === 'todo' && r.status === 'CLAIMED' && (
-            <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => void complete(r.id)}>
+            <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => openComplete(r)}>
               完成
             </Button>
           )}
@@ -318,25 +353,45 @@ export default function Tasks() {
                   ? detail.candidates.map((c) => c.name).join('、')
                   : '—'}
               </Descriptions.Item>
-              {detail.context && (
-                <Descriptions.Item label="业务上下文">
-                  {taskContextText(detail.type, detail.context) ?? '—'}
-                  <Collapse
-                    ghost
-                    style={{ marginTop: 4 }}
-                    items={[
-                      {
-                        key: 'tech',
-                        label: '技术详情',
-                        children: (
-                          <pre style={{ margin: 0, fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                            {JSON.stringify(detail.context, null, 2)}
-                          </pre>
-                        ),
-                      },
-                    ]}
-                  />
+              {detail.guide && (
+                <Descriptions.Item label="操作指引">
+                  <Alert type="info" showIcon message={detail.guide} style={{ padding: '4px 8px' }} />
                 </Descriptions.Item>
+              )}
+              {detail.context && (
+                <Descriptions.Item label="业务要素">
+                  {taskContextText(detail.type, detail.context) && (
+                    <div style={{ marginBottom: 6, color: '#555' }}>
+                      {taskContextText(detail.type, detail.context)}
+                    </div>
+                  )}
+                  <Descriptions column={1} size="small" bordered>
+                    {taskContextFields(detail.context).map((f) => (
+                      <Descriptions.Item key={f.key} label={f.label}>
+                        {f.text}
+                      </Descriptions.Item>
+                    ))}
+                  </Descriptions>
+                </Descriptions.Item>
+              )}
+              {detail.status === 'DONE' && (
+                <>
+                  <Descriptions.Item label="处理结果">
+                    {detail.resultNote ?? '—'}
+                  </Descriptions.Item>
+                  {Array.isArray(detail.resultEvidence) && detail.resultEvidence.length > 0 && (
+                    <Descriptions.Item label="佐证">
+                      {detail.resultEvidence.length} 项
+                      {detail.resultEvidence.slice(0, 4).map((ev, i) =>
+                        typeof ev === 'string' && ev.startsWith('data:image') ? (
+                          <img key={i} src={ev} alt={`佐证${i + 1}`} style={{ display: 'block', maxWidth: 160, marginTop: 4, borderRadius: 4 }} />
+                        ) : (
+                          <Tag key={i} style={{ marginLeft: 4 }}>佐证{i + 1}</Tag>
+                        ),
+                      )}
+                    </Descriptions.Item>
+                  )}
+                </>
               )}
               <Descriptions.Item label="创建时间">{fmtTime(detail.createdAt)}</Descriptions.Item>
               {detail.dueAt && (
@@ -353,7 +408,7 @@ export default function Tasks() {
                 </Button>
               )}
               {detail.status === 'CLAIMED' && (
-                <Button type="primary" icon={<CheckOutlined />} onClick={() => void complete(detail.id)}>
+                <Button type="primary" icon={<CheckOutlined />} onClick={() => openComplete(detail)}>
                   标记完成
                 </Button>
               )}
@@ -366,6 +421,62 @@ export default function Tasks() {
           </Space>
         )}
       </Drawer>
+
+      <Modal
+        maskClosable={false}
+        title={completeFor ? `完成任务：${completeFor.title}` : ''}
+        open={!!completeFor}
+        onOk={() => void submitComplete()}
+        onCancel={() => setCompleteFor(null)}
+        confirmLoading={completing}
+        okText="确认完成"
+        destroyOnHidden
+      >
+        {completeFor?.guide && (
+          <Alert type="info" showIcon style={{ marginBottom: 12 }} message={completeFor.guide} />
+        )}
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="完成前请确认业务动作已实际达成——系统会校验完成标准，未达成将拦截。"
+        />
+        <Form form={completeForm} layout="vertical">
+          <Form.Item
+            name="note"
+            label="处理结果（必填）"
+            rules={[{ required: true, whitespace: true, message: '请填写处理结果' }]}
+          >
+            <Input.TextArea rows={3} maxLength={480} placeholder="如：已现场换表，新表号 M…，起度 0；客户已签字确认。" />
+          </Form.Item>
+          <Form.Item
+            label={completeFor?.evidenceRequired ? '佐证照片/单据（必填）' : '佐证照片/单据（可后补）'}
+            required={completeFor?.evidenceRequired}
+          >
+            <Upload
+              accept="image/*,.pdf"
+              multiple
+              beforeUpload={(file) => {
+                const reader = new FileReader();
+                reader.onload = () => setEvidence((prev) => [...prev, String(reader.result)]);
+                reader.readAsDataURL(file);
+                return false;
+              }}
+              onRemove={(file) => {
+                setEvidence((prev) => prev.filter((_, i) => i !== Number(file.uid) - 1));
+                return true;
+              }}
+              fileList={evidence.map((_, i) => ({ uid: String(i + 1), name: `佐证 ${i + 1}` }) as never)}
+              listType="text"
+            >
+              <Button icon={<PlusOutlined />}>添加佐证</Button>
+            </Upload>
+            <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
+              支持照片/单据，多选；已选 {evidence.length} 项。
+            </div>
+          </Form.Item>
+        </Form>
+      </Modal>
     </Card>
   );
 }

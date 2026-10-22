@@ -18,10 +18,10 @@ import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
-import { TaskContextBanner } from '../../components/TaskContextBanner';
 import { useAuth } from '../../auth/AuthContext';
 import { fmtCent, fmtDate } from '../common';
 import { BillingAccountSelect, SettleAccountLookupSelect } from '../pickers';
+import { useSearchParams } from 'react-router-dom';
 
 interface DictItem {
   id: string;
@@ -47,6 +47,8 @@ interface Writeoff {
 /** G2 坏账核销登记（轻量版）：登记 + 原因字典 + 留痕；不做账务冲销，
  *  应收数据原样保留，报表层（年报/欠费清单）标注扣减。 */
 export default function Writeoffs() {
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const [rows, setRows] = useState<Writeoff[]>([]);
@@ -163,7 +165,6 @@ export default function Writeoffs() {
 
   return (
     <>
-      <TaskContextBanner />
       <Card title="坏账核销">
       <Space style={{ marginBottom: 16 }} wrap>
         <Select
@@ -195,9 +196,11 @@ export default function Writeoffs() {
           </Button>
         )}
       </Space>
+      {/* 任务直达 ?focusId= 行级高亮 */}
       <Table<Writeoff>
         size="small"
         rowKey="id"
+        rowClassName={(r: Writeoff) => (r.id === focusId ? 'ant-table-row-selected' : '')}
         columns={columns}
         dataSource={rows}
         loading={loading}

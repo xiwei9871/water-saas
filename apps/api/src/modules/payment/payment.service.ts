@@ -469,7 +469,7 @@ export class PaymentService {
       reason,
       context: {
         settleAccountId,
-        settleNo: settle_no,
+        settleNo: settle_no ?? settleAccountId,
         arrearsCent: arrears.toString(),
         overdueBillCount: overdue.toString(),
         thresholdCent: threshold.toString(),

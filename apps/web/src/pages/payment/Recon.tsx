@@ -14,9 +14,10 @@ import {
   Upload,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent } from '../common';
+import { useSearchParams } from 'react-router-dom';
 
 interface ReconBatch {
   id: string;
@@ -99,6 +100,10 @@ export default function Recon() {
     }
   };
 
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
+  const focusDone = useRef<string | null>(null);
+
   const openDetail = async (id: string) => {
     try {
       const res = await api.get<ReconBatch & { rows: ReconRow[] }>(`/payments/recon/${id}`);
@@ -107,6 +112,14 @@ export default function Recon() {
       message.error(apiErrorText(err));
     }
   };
+
+  // 任务直达 ?focusId= → 自动打开该批次明细。
+  useEffect(() => {
+    if (focusId && focusDone.current !== focusId) {
+      focusDone.current = focusId;
+      void openDetail(focusId);
+    }
+  }, [focusId]);
 
   const batchCols: ColumnsType<ReconBatch> = [
     { title: '渠道', dataIndex: 'channel', render: (c: string) => CHANNEL_LABELS[c] ?? c },

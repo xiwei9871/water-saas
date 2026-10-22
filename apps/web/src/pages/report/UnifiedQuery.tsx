@@ -1,4 +1,3 @@
-import { TaskContextBanner } from '../../components/TaskContextBanner';
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
@@ -474,7 +473,6 @@ function DetailQuery() {
 
   return (
     <>
-      <TaskContextBanner />
       <Card
         title="统一数据查询"
         size="small"

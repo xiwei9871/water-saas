@@ -42,6 +42,7 @@ export const WATER_ACCOUNT_SELECT = {
   billable: true,
   openedAt: true,
   closedAt: true,
+  sourceApplyNo: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.WaterAccountSelect;
@@ -122,6 +123,9 @@ export interface OnboardBody {
     installedAt?: Date;
     reason?: 'NEW' | 'REPLACE' | 'FAULT' | 'PERIODIC_CHECK';
   };
+  /** 报装纳入（2.2）：来源报装单号——立户后写入 户/客户/表的
+      source_apply_no，申请单反向可查"这户是哪个报装来的"。 */
+  sourceApplyNo?: string;
 }
 
 /** Stable system-customer key for monitoring accounts (漏损分析计量点). */
@@ -832,6 +836,32 @@ export class WaterAccountService {
       installedAt: body.installation.installedAt,
       reason: body.installation.reason,
     });
+
+    // 5b. 报装纳入：来源单号反写到本次链路实体——户总是写；
+    //     客户/表只在"本事务新建"时写（挂接存量客户/表不污染其来源）。
+    if (body.sourceApplyNo) {
+      const src = await tx.installApplication.findFirst({
+        where: { tenantId: ctx.tenantId, applyNo: body.sourceApplyNo },
+        select: { id: true },
+      });
+      if (!src) throw new BadRequestException({ code: 'SOURCE_APPLY_NOT_FOUND' });
+      await tx.waterAccount.update({
+        where: { tenantId_id: { tenantId: ctx.tenantId, id: waterAccount.id } },
+        data: { sourceApplyNo: body.sourceApplyNo },
+      });
+      if (!body.customerId && !isMonitoring) {
+        await tx.customer.update({
+          where: { tenantId_id: { tenantId: ctx.tenantId, id: customer.id } },
+          data: { sourceApplyNo: body.sourceApplyNo },
+        });
+      }
+      if (!body.meterId) {
+        await tx.meter.update({
+          where: { tenantId_id: { tenantId: ctx.tenantId, id: meter.id } },
+          data: { sourceApplyNo: body.sourceApplyNo },
+        });
+      }
+    }
 
     return {
       customer,

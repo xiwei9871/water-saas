@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -137,6 +138,15 @@ export class TaskService {
   // ------------------------------------------------------------------
   async createTask(tx: Tx, ctx: TenantCtx, input: CreateTaskInput): Promise<CreatedTask> {
     const rule = await this.resolveRule(tx, ctx, input.type);
+    // 建单必要要素（3.3）：缺 context 必填键即拒——操作员没要素不知做什么。
+    const required = TASK_TYPES.find((t) => t.code === input.type)?.requiredContext;
+    if (required?.length) {
+      const c = (input.context ?? {}) as Record<string, unknown>;
+      const missing = required.filter((k) => c[k] === undefined || c[k] === null || c[k] === '');
+      if (missing.length) {
+        throw new BadRequestException({ code: 'TASK_CONTEXT_MISSING', type: input.type, missing });
+      }
+    }
     const candidates = await this.resolveCandidates(tx, ctx, rule.perm, input.orgUnitId);
     const dueAt =
       input.dueDays === 0
@@ -271,7 +281,7 @@ export class TaskService {
         }),
         tx.task.count({ where }),
       ]);
-      return { items: await this.hydrateNames(tx, ctx, items), total };
+      return { items: this.decorate(await this.hydrateNames(tx, ctx, items)), total };
     });
   }
 
@@ -304,12 +314,32 @@ export class TaskService {
         p.has(row.requiredPerm) &&
         (ctx.scope === 'ALL' || !row.orgUnitId || ctx.orgScope.includes(row.orgUnitId));
       const typeName = (await this.resolveRule(tx, ctx, row.type)).name;
-      const [hydrated] = await this.hydrateNames(tx, ctx, [row]);
+      const [hydrated] = this.decorate(await this.hydrateNames(tx, ctx, [row]));
       return { ...hydrated, typeName, candidates, canClaim: row.status === 'PENDING' && isCandidate };
     });
   }
 
   /** assignee/completedBy → 姓名（无 staff 关系，手动水合；缺名显 '—' 不裸 ID）。 */
+  /** 3.4 操作指引：模板 {key} 从 context/bizLabel 渲染；缺 def 则 null。 */
+  private renderGuide(row: { type: string; bizLabel: string | null; context: Prisma.JsonValue | null }): string | null {
+    const tpl = TASK_TYPES.find((t) => t.code === row.type)?.guide;
+    if (!tpl) return null;
+    const c = (row.context ?? {}) as Record<string, unknown>;
+    return tpl.replace(/\{(\w+)\}/g, (m, k) => {
+      if (k === 'bizLabel') return row.bizLabel ?? m;
+      const v = c[k];
+      return v == null ? m : String(v);
+    });
+  }
+
+  private decorate<T extends { type: string; bizLabel: string | null; context: Prisma.JsonValue | null }>(items: T[]) {
+    return items.map((i) => ({
+      ...i,
+      guide: this.renderGuide(i),
+      evidenceRequired: TASK_TYPES.find((t) => t.code === i.type)?.evidenceRequired === true,
+    }));
+  }
+
   private async hydrateNames<T extends { assigneeId: string | null; completedBy: string | null }>(
     tx: Tx,
     ctx: TenantCtx,
@@ -359,27 +389,51 @@ export class TaskService {
     });
   }
 
-  async complete(ctx: TenantCtx, id: string, note?: string) {
+  /**
+   * 完成（3.4）：三闭环最后一环——
+   *  1. 处理结果必填（result_note）；
+   *  2. 现场类任务必须上传佐证（result_evidence 非空）；
+   *  3. 完成标准校验：业务动作未达成 → TASK_NOT_DONE 拦截。
+   */
+  async complete(
+    ctx: TenantCtx,
+    id: string,
+    note?: string,
+    evidenceRefs?: unknown[],
+  ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const row = await tx.task.findFirst({
         where: { tenantId: ctx.tenantId, id },
         select: { id: true, status: true, assigneeId: true, context: true, type: true, bizType: true, bizId: true },
       });
       if (!row) throw new NotFoundException({ code: 'TASK_NOT_FOUND' });
+      const def = TASK_TYPES.find((t) => t.code === row.type);
+      const trimmed = note?.trim() ?? '';
+      if (!trimmed) {
+        throw new BadRequestException({ code: 'TASK_RESULT_REQUIRED', message: '请填写处理结果' });
+      }
+      const ev = Array.isArray(evidenceRefs) ? evidenceRefs.filter((x) => x != null && x !== '') : [];
+      if (def?.evidenceRequired && ev.length === 0) {
+        throw new BadRequestException({
+          code: 'TASK_EVIDENCE_REQUIRED',
+          message: '现场类任务完成须上传佐证（照片/单据）',
+        });
+      }
+      await this.assertDoneStandard(tx, ctx, row);
       const context =
-        note && row.context && typeof row.context === 'object' && !Array.isArray(row.context)
-          ? { ...(row.context as Record<string, unknown>), completionNote: note }
-          : note
-            ? { completionNote: note }
-            : undefined;
+        row.context && typeof row.context === 'object' && !Array.isArray(row.context)
+          ? { ...(row.context as Record<string, unknown>), completionNote: trimmed }
+          : { completionNote: trimmed };
       const flipped = await tx.task.updateMany({
         where: { tenantId: ctx.tenantId, id, status: 'CLAIMED', assigneeId: ctx.staffId },
         data: {
           status: 'DONE',
           completedAt: new Date(),
           completedBy: ctx.staffId,
+          resultNote: trimmed,
+          ...(ev.length ? { resultEvidence: ev as Prisma.InputJsonValue } : {}),
+          context,
           updatedBy: ctx.staffId,
-          ...(context ? { context } : {}),
         },
       });
       if (flipped.count === 0) {
@@ -387,6 +441,122 @@ export class TaskService {
       }
       return tx.task.findUniqueOrThrow({ where: { id }, select: TASK_SELECT });
     });
+  }
+
+  /**
+   * 完成标准（3.4）：空点「完成」不允许——业务侧必须已有对应终态。
+   * 自动完结路径（业务动作本身触发 autoCompleteByBiz）不受此校验。
+   */
+  private async assertDoneStandard(
+    tx: Tx,
+    ctx: TenantCtx,
+    row: { type: string; bizType: string; bizId: string; context: Prisma.JsonValue | null },
+  ): Promise<void> {
+    const fail = (code: string, message: string) => {
+      throw new ConflictException({ code, message });
+    };
+    switch (row.type) {
+      case 'METER_REVIEW': {
+        const r = await tx.meterReading.findFirst({
+          where: { tenantId: ctx.tenantId, id: row.bizId },
+          select: { qcStatus: true },
+        });
+        if (r && !['PASSED', 'REJECTED'].includes(r.qcStatus)) {
+          fail('TASK_NOT_DONE', '尚未对该读数提交质检结论');
+        }
+        break;
+      }
+      case 'SUPPLEMENT': {
+        const c = (row.context ?? {}) as Record<string, unknown>;
+        const waId = c.waterAccountId as string | undefined;
+        const period = c.period as string | undefined;
+        if (!waId || !period) break;
+        // 补差落地形态：reconciliation 终态单（APPLIED/ABSORBED）或其产生的 ADJUSTMENT 账单。
+        const [recon, adj] = await Promise.all([
+          tx.reconciliation.findFirst({
+            where: {
+              tenantId: ctx.tenantId,
+              waterAccountId: waId,
+              toPeriod: period,
+              status: { in: ['APPLIED', 'ABSORBED'] },
+            },
+            select: { id: true },
+          }),
+          tx.bill.findFirst({
+            where: { tenantId: ctx.tenantId, waterAccountId: waId, period, billKind: 'ADJUSTMENT' },
+            select: { id: true },
+          }),
+        ]);
+        if (!recon && !adj) fail('TASK_NOT_DONE', '尚未生成该期补差单');
+        break;
+      }
+      case 'COLLECTION': {
+        const c = (row.context ?? {}) as Record<string, unknown>;
+        if (c.noticeId) break; // 走通知单流程创建的任务：单据已生成
+        const notice = await tx.collectionNotice.findFirst({
+          where: { tenantId: ctx.tenantId, id: (c.noticeId as string) ?? row.bizId },
+          select: { id: true },
+        });
+        if (!notice) fail('TASK_NOT_DONE', '尚未生成催缴通知单');
+        break;
+      }
+      case 'SVC_APPROVAL': {
+        const o = await tx.meterServiceOrder.findFirst({
+          where: { tenantId: ctx.tenantId, id: row.bizId },
+          select: { status: true },
+        });
+        if (o?.status === 'PENDING_APPROVAL') fail('TASK_NOT_DONE', '工单尚未审批');
+        break;
+      }
+      case 'SVC_EXECUTE':
+      case 'METER_SERVICE': {
+        const o = await tx.meterServiceOrder.findFirst({
+          where: { tenantId: ctx.tenantId, id: row.bizId },
+          select: { status: true },
+        });
+        if (o && !['EXECUTED', 'ARCHIVED', 'REJECTED', 'CANCELLED'].includes(o.status)) {
+          fail('TASK_NOT_DONE', '工单尚未执行归档（含佐证）');
+        }
+        break;
+      }
+      case 'VIOLATION_HANDLE': {
+        const v = await tx.waterViolation.findFirst({
+          where: { tenantId: ctx.tenantId, id: row.bizId },
+          select: { status: true },
+        });
+        if (v && !['PROCESSED', 'ARCHIVED', 'DISMISSED'].includes(v.status)) {
+          fail('TASK_NOT_DONE', '违章尚未核实处置并归档');
+        }
+        break;
+      }
+      case 'INSTALL_REVIEW': {
+        const a = await tx.installApplication.findFirst({
+          where: { tenantId: ctx.tenantId, id: row.bizId },
+          select: { status: true },
+        });
+        if (a && !['COMPLETED', 'REJECTED', 'CANCELLED'].includes(a.status)) {
+          fail('TASK_NOT_DONE', '报装申请尚未归档或驳回');
+        }
+        break;
+      }
+      case 'RECON_HANDLE': {
+        const b = await tx.channelReconBatch.findFirst({
+          where: { tenantId: ctx.tenantId, id: row.bizId },
+          select: { id: true, mismatched: true, missingInFile: true },
+        });
+        if (b) {
+          const open = await tx.channelReconRow.count({
+            where: { tenantId: ctx.tenantId, batchId: row.bizId, matchStatus: { not: 'MATCHED' } },
+          });
+          if (open > 0) fail('TASK_NOT_DONE', `对账批次尚有 ${open} 行差异未处理`);
+        }
+        break;
+      }
+      case 'WRITEOFF_APPROVAL':
+      case 'REVERSAL_APPROVAL':
+      default:
+        break; // 复核/审批类：处理结果+佐证即完成，业务终态不反向校验
+    }
   }
 
   async cancel(ctx: TenantCtx, perms: string[] | undefined, id: string, reason?: string) {

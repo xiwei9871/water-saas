@@ -36,14 +36,23 @@ export class InstallController {
         take: Math.min(parseInt(take ?? '50', 10) || 50, 200),
       });
       const waIds = rows.map((r) => r.waterAccountId).filter((v): v is string => !!v);
-      const was = await tx.waterAccount.findMany({
-        where: { tenantId: ctx.tenantId, id: { in: waIds } },
-        select: { id: true, accountNo: true },
-      });
+      const saIds = rows.map((r) => r.settleAccountId).filter((v): v is string => !!v);
+      const [was, sas] = await Promise.all([
+        tx.waterAccount.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: waIds } },
+          select: { id: true, accountNo: true },
+        }),
+        tx.settleAccount.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: saIds } },
+          select: { id: true, settleNo: true },
+        }),
+      ]);
       const noOf = new Map(was.map((w) => [w.id, w.accountNo]));
+      const settleOf = new Map(sas.map((s) => [s.id, s.settleNo]));
       return rows.map((r) => ({
         ...r,
         waterAccountNo: r.waterAccountId ? (noOf.get(r.waterAccountId) ?? null) : null,
+        settleNo: r.settleAccountId ? (settleOf.get(r.settleAccountId) ?? null) : null,
       }));
     });
   }
@@ -63,7 +72,13 @@ export class InstallController {
             select: { accountNo: true },
           })
         : null;
-      return { ...app, waterAccountNo: wa?.accountNo ?? null };
+      const sa = app.settleAccountId
+        ? await tx.settleAccount.findFirst({
+            where: { tenantId: ctx.tenantId, id: app.settleAccountId },
+            select: { settleNo: true },
+          })
+        : null;
+      return { ...app, waterAccountNo: wa?.accountNo ?? null, settleNo: sa?.settleNo ?? null };
     });
   }
 
@@ -82,7 +97,18 @@ export class InstallController {
   @Permissions('install:write')
   transition(
     @Param('id') id: string,
-    @Body() body: { to?: string; note?: string; installInitialReading?: unknown },
+    @Body()
+    body: {
+      to?: string;
+      note?: string;
+      installInitialReading?: unknown;
+      installMeterNo?: string;
+      installCaliber?: string;
+      installCompletedAt?: string;
+      feeRequired?: unknown;
+      feeReceived?: unknown;
+      feeNote?: string;
+    },
   ) {
     const to = body?.to;
     if (!to || !STATUSES.has(to)) throw new BadRequestException({ code: 'APPLY_TARGET_INVALID' });
@@ -93,6 +119,24 @@ export class InstallController {
     if (iir !== undefined && (!Number.isFinite(iir) || iir < 0)) {
       throw new BadRequestException({ code: 'INSTALL_READING_INVALID' });
     }
+    const num = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : Number(v));
+    const feeRequired = num(body?.feeRequired);
+    const feeReceived = num(body?.feeReceived);
+    if ((feeRequired !== undefined && !Number.isFinite(feeRequired)) ||
+        (feeReceived !== undefined && !Number.isFinite(feeReceived))) {
+      throw new BadRequestException({ code: 'FEE_INVALID' });
+    }
+    const installInfo =
+      to === 'INSTALLING'
+        ? {
+            meterNo: body?.installMeterNo?.trim() || undefined,
+            caliber: body?.installCaliber?.trim() || undefined,
+            completedAt: body?.installCompletedAt ? new Date(body.installCompletedAt) : undefined,
+            feeRequired,
+            feeReceived,
+            feeNote: body?.feeNote?.trim() || undefined,
+          }
+        : undefined;
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
       this.svc.transitionTx(
@@ -102,8 +146,31 @@ export class InstallController {
         to as InstallApplyStatus,
         body.note,
         iir,
+        installInfo,
       ),
     );
+  }
+
+  /** V6 合同扫描件：{scans: dataURL[]} 覆盖写入（≤3 张，与任务佐证同口径）。 */
+  @Post(':id/contract-scan')
+  @Permissions('install:write')
+  contractScan(@Param('id') id: string, @Body() body: { scans?: unknown }) {
+    const scans = Array.isArray(body?.scans)
+      ? body.scans.filter((s): s is string => typeof s === 'string').slice(0, 3).map((s) => s.slice(0, 900_000))
+      : null;
+    if (!scans) throw new BadRequestException({ code: 'SCAN_BODY_INVALID' });
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const app = await tx.installApplication.findFirst({
+        where: { tenantId: ctx.tenantId, id: assertUuid(id, 'id') },
+        select: { id: true },
+      });
+      if (!app) throw new BadRequestException({ code: 'APPLY_NOT_FOUND' });
+      return tx.installApplication.update({
+        where: { id: app.id },
+        data: { contractScan: scans, updatedBy: ctx.staffId },
+      });
+    });
   }
 
   /** 归档：按立户向导体创建 客户/结算户/用水户/表/安装，回写户号。
