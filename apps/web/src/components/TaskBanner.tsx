@@ -41,10 +41,7 @@ export function TaskBanner() {
     };
   }, [taskId]);
 
-  if (!taskId || !task) return null;
-  const summary = taskContextText(task.type, task.context);
-  const done = ['DONE', 'CANCELLED'].includes(task.status);
-
+  const done = !!task && ['DONE', 'CANCELLED'].includes(task.status);
   const dismiss = () => {
     const next = new URLSearchParams(params);
     for (const k of ['taskId', 'focusId', 'wa', 'period']) next.delete(k);
@@ -52,12 +49,16 @@ export function TaskBanner() {
   };
 
   // U1-4：任务办结后自动解除聚焦与筛选——先显「已办结」5 秒再恢复常规列表。
+  // 注意：Hook 须在 return null 之前无条件调用。
   useEffect(() => {
     if (!done) return;
     const t = window.setTimeout(dismiss, 5000);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [done]);
+
+  if (!taskId || !task) return null;
+  const summary = taskContextText(task.type, task.context);
 
   return (
     <Alert
