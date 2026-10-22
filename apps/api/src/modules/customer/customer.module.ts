@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { BillingModule } from '../billing/billing.module.js';
 import { BillingFinancePort } from '../billing/billing-finance.port.js';
+import { TaskModule } from '../task/task.module.js';
 import { CustomerController } from './customer.controller.js';
 import { CustomerService } from './customer.service.js';
 import { MeterController } from './meter.controller.js';
@@ -31,7 +32,7 @@ import { WaterAccountService } from './water-account.service.js';
  * consume it without importing customer).
  */
 @Module({
-  imports: [BillingModule],
+  imports: [BillingModule, TaskModule],
   controllers: [
     CustomerController,
     SettleAccountController,
@@ -48,7 +49,8 @@ import { WaterAccountService } from './water-account.service.js';
     CloseAccountUseCase,
     { provide: FinancePort, useExisting: BillingFinancePort },
   ],
-  // 报装模块（S1 独立域）归档时复用立户向导事务
-  exports: [WaterAccountService],
+  // 报装模块（S1 独立域）归档时复用立户向导事务；
+  // 表务工单执行联动复用 suspend/resume/close/replace 事务件
+  exports: [WaterAccountService, MeterInstallationService, CloseAccountUseCase],
 })
 export class CustomerModule {}

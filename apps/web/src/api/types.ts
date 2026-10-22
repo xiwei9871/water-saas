@@ -237,6 +237,8 @@ export interface WaterAccount {
   status: AccountStatus;
   openedAt: string | null;
   closedAt: string | null;
+  /** 报装纳入：来源报装单号（营业厅/电话报装→立户的反向关联）。 */
+  sourceApplyNo?: string | null;
   createdAt: string;
   updatedAt: string;
   customer: { id: string; customerNo: string; name: string; custType: CustType };
@@ -321,6 +323,8 @@ export interface Meter {
   caliber: string | null;
   /** Decimal column — serialized as a string on the wire. */
   maxDial: string | null;
+  /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表。 */
+  meterRole?: string;
   parentMeterId: string | null;
   status: MeterStatus;
   /** List-only: account the device is currently mounted on (ACTIVE install). */
@@ -533,6 +537,8 @@ export interface ConsumptionComponent {
   sourceReadingId: string | null;
   /** 人读引用（9·30 报告 §3）：表号 + 来源读数概要。 */
   meterNo: string | null;
+  /** 换表分段角色（20261020 核查 T3）：期中途换表 → 老表段/新表段，整期段为 null。 */
+  segmentRole?: 'OLD_SEGMENT' | 'NEW_SEGMENT' | null;
   sourceReading: {
     id: string;
     period: string;
@@ -1452,6 +1458,13 @@ export type TaskItem = {
   createdAt: string;
   canClaim?: boolean;
   candidates?: { id: string; name: string }[];
+  /** 3.4 操作指引（服务端按类型模板渲染）。 */
+  guide?: string | null;
+  /** 现场类任务完成必须上传佐证。 */
+  evidenceRequired?: boolean;
+  /** 完成回填：处理结果 + 佐证引用。 */
+  resultNote?: string | null;
+  resultEvidence?: unknown[] | null;
 };
 
 export type TaskBadge = { todo: number; escalated: number; alerts: number };
@@ -1464,6 +1477,10 @@ export const TASK_TYPE_LABELS: Record<string, string> = {
   WRITEOFF_APPROVAL: '核销审批',
   INSTALL_REVIEW: '报装审批',
   RECON_HANDLE: '对账差异处理',
+  METER_SERVICE: '表务工单',
+  SVC_APPROVAL: '表务审批',
+  SVC_EXECUTE: '表务处置',
+  VIOLATION_HANDLE: '违章处置',
 };
 
 export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
@@ -1481,10 +1498,20 @@ export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
 };
 
 /** bizType → 直达路由（{bizId}/{taskId} 占位替换）。与后端 task.types.ts 对齐。 */
+/**
+ * 任务直达路由（3.2 层面一）：focusId=bizId 定位到"该条"记录，
+ * taskId 供 TaskBanner 常驻提示；{key} 占位符可从 context 取值。
+ */
 export const TASK_BIZ_ROUTES: Record<string, string> = {
-  SUPPLEMENT: '/settlement/reconciliations?waterAccountId={bizId}&taskId={taskId}',
-  METER_REVIEW: '/metering/readings?taskId={taskId}',
-  COLLECTION: '/report/query/unified?taskId={taskId}',
-  REVERSAL_APPROVAL: '/payment/payments?taskId={taskId}',
-  WRITEOFF_APPROVAL: '/payment/writeoffs?taskId={taskId}',
+  SUPPLEMENT: '/settlement/reconciliations?focusId={bizId}&taskId={taskId}',
+  METER_REVIEW: '/metering/readings?focusId={bizId}&taskId={taskId}',
+  COLLECTION: '/payment/collection-notices?focusId={bizId}&taskId={taskId}',
+  REVERSAL_APPROVAL: '/payment/payments?focusId={bizId}&taskId={taskId}',
+  WRITEOFF_APPROVAL: '/payment/writeoffs?focusId={bizId}&taskId={taskId}',
+  INSTALL_REVIEW: '/install/applications?focusId={bizId}&taskId={taskId}',
+  RECON_HANDLE: '/payment/recon?focusId={bizId}&taskId={taskId}',
+  METER_SERVICE: '/service/orders?focusId={bizId}&taskId={taskId}',
+  SVC_APPROVAL: '/service/orders?focusId={bizId}&taskId={taskId}',
+  SVC_EXECUTE: '/service/orders?focusId={bizId}&taskId={taskId}',
+  VIOLATION_HANDLE: '/service/violations?focusId={bizId}&taskId={taskId}',
 };

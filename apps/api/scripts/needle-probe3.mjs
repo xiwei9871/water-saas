@@ -1,0 +1,39 @@
+import sharp from 'sharp';
+const { data: rgba, info } = await sharp('/tmp/meter-bad.png').rotate().ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+const { width: W, height: H } = info;
+const px = (x, y) => { const i = (Math.max(0,Math.min(H-1,Math.round(y))) * W + Math.max(0,Math.min(W-1,Math.round(x)))) * 4; return [rgba[i], rgba[i+1], rgba[i+2]]; };
+const dials = [
+  ['x1000',218,264,27],['x100',169,222,28],['x10',156,157,28],['x1',186,102,28],
+  ['x0.1',251,82,24],['x0.01',300,110,26],['x0.001',325,155,26],['x0.0001',342,219,28],
+];
+for (const [name, cx, cy, r] of dials) {
+  const lumas=[];
+  for (let y=Math.floor(cy-r*0.72);y<=cy+r*0.72;y++)for(let x=Math.floor(cx-r*0.72);x<=cx+r*0.72;x++){
+    if(Math.hypot(x-cx,y-cy)>r*0.72)continue;const[p,q,b]=px(x,y);lumas.push(p*0.3+q*0.5+b*0.2);
+  }
+  lumas.sort((a,b)=>a-b);
+  const thr=Math.min(95,lumas[Math.floor(lumas.length*0.2)]+8);
+  let reds=0,tot=0;
+  for (let y=Math.floor(cy-r*0.7);y<=cy+r*0.7;y++)for(let x=Math.floor(cx-r*0.7);x<=cx+r*0.7;x++){
+    if(Math.hypot(x-cx,y-cy)>r*0.7)continue;tot++;const[p,q,b]=px(x,y);if(p-q>30&&p-b>15&&p>80)reds++;
+  }
+  const isRed=reds>tot*0.06;
+  const isInk=(x,y)=>{const[p,q,b]=px(x,y);return isRed?(p-q>30&&p-b>15&&p>80):(p*0.3+q*0.5+b*0.2<thr);};
+  // 最大延伸：每角度射线上允许1格缺口的最远命中半径
+  const reach=new Float64Array(180);
+  for(let deg=0;deg<360;deg+=2){
+    const rad=deg*Math.PI/180,dx=Math.sin(rad),dy=-Math.cos(rad);
+    let maxR=0,gap=0;
+    for(let rr=r*0.22;rr<r*0.78;rr+=1.2){
+      let hit=0;
+      for(const o of[-1.5,0,1.5]){if(isInk(cx+dx*rr-dy*o,cy+dy*rr+dx*o))hit=1;}
+      if(hit){maxR=rr;gap=0;} else if(++gap>2) break; // 连续2格断档就停
+    }
+    reach[deg/2]=maxR;
+  }
+  const sm=new Float64Array(180);let bi=0;
+  for(let i=0;i<180;i++){for(let o=-2;o<=2;o++)sm[i]+=reach[(i+o+180)%180];if(sm[i]>sm[bi])bi=i;}
+  const top=[...sm.keys()].sort((a,b)=>sm[b]-sm[a]).slice(0,3).map(j=>`${j*2}°/${(sm[j]/ (r*0.78)).toFixed(2)}`);
+  console.log(name.padEnd(7),'red?',isRed,'reach→',bi*2,'° v≈',(bi*2/36).toFixed(2),'top:',top.join(' '));
+}
+process.exit(0);

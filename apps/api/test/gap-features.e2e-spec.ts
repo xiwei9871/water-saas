@@ -278,6 +278,8 @@ describe('S1 报装', () => {
     }).expect(201);
     appId = res.body.id;
     expect(res.body.applyNo).toMatch(/^BZ\d+/);
+    // 2.2 受理即生成供用水合同号
+    expect(res.body.contractNo).toMatch(/^HT\d+/);
     expect(res.body.status).toBe('SUBMITTED');
     const tasks = ((await get('/tasks?type=INSTALL_REVIEW')).body as { items: { type: string; bizId: string }[] }).items;
     expect(tasks.some((t) => t.bizId === appId)).toBe(true);
@@ -288,9 +290,19 @@ describe('S1 报装', () => {
     expect(bad.body.code).toBe('INVALID_APPLY_TRANSITION');
     await post(`/install/applications/${appId}/transition`, { to: 'SURVEYED', note: '现场可装' }).expect(201);
     await post(`/install/applications/${appId}/transition`, { to: 'APPROVED' }).expect(201);
-    await post(`/install/applications/${appId}/transition`, { to: 'INSTALLING', note: '派工' }).expect(201);
+    // 2.1 接收完成信息：表号/口径/完成日期/工程费随装表流转登记。
+    await post(`/install/applications/${appId}/transition`, {
+      to: 'INSTALLING', note: '派工',
+      installInitialReading: 5,
+      installMeterNo: 'MTG-BZ-001', installCaliber: 'DN20',
+      installCompletedAt: '2026-01-15',
+      feeRequired: 300, feeReceived: 300, feeNote: '一次收讫',
+    }).expect(201);
     const app2 = (await get(`/install/applications/${appId}`)).body;
     expect(app2.status).toBe('INSTALLING');
+    expect(app2.installMeterNo).toBe('MTG-BZ-001');
+    expect(app2.installCaliber).toBe('DN20');
+    expect(Number(app2.feeReceived)).toBe(300);
   });
 
   it('归档 → COMPLETED + 回写户号 + 任务办结', async () => {
@@ -301,9 +313,98 @@ describe('S1 报装', () => {
     }).expect(201);
     expect(res.body.status).toBe('COMPLETED');
     expect(res.body.waterAccountId).toBeTruthy();
+    // 2.2 正向回写：结算户 + 表号落到申请单。
+    expect(res.body.settleAccountId).toBeTruthy();
+    expect(res.body.meterNo).toBeTruthy();
     const wa = (await get(`/water-accounts/${res.body.waterAccountId}`)).body;
     expect(wa.addr).toBe('TG 新址 9 号');
+    // 反向关联：户的 source_apply_no 记来源单号。
+    expect(wa.sourceApplyNo).toMatch(/^BZ\d+/);
     const tasks = ((await get('/tasks?type=INSTALL_REVIEW&box=done')).body as { items: { type: string; bizId: string; status: string }[] }).items;
     expect(tasks.some((t) => t.bizId === appId && t.status === 'DONE')).toBe(true);
+  });
+
+  it('C1 立户向导带来源单号 → 同事务办结申请 + 反向来源标记', async () => {
+    const res = await post('/install/applications', {
+      applicantName: '向导带入户', addr: 'TG 向导路 1 号', usageCategory: 'RES_METERED',
+    }).expect(201);
+    const applyNo = res.body.applyNo as string;
+    const done = await post('/water-accounts/onboard', {
+      customer: { name: '向导带入户', custType: 'PERSONAL' },
+      account: { usageCategory: 'RES_METERED', addr: 'TG 向导路 1 号' },
+      meter: { meterNo: 'MTG-WIZ-001', caliber: 'DN15' },
+      installation: { initialReading: 0 },
+      sourceApplyNo: applyNo,
+    }).expect(201);
+    const appAfter = (await get(`/install/applications/${res.body.id}`)).body;
+    expect(appAfter.status).toBe('COMPLETED');
+    expect(appAfter.waterAccountNo).toBe(done.body.waterAccount.accountNo);
+    expect(appAfter.meterNo).toBe('MTG-WIZ-001');
+    // 来源标记落在新户/新表上
+    const wa = (await get(`/water-accounts/${done.body.waterAccount.id}`)).body;
+    expect(wa.sourceApplyNo).toBe(applyNo);
+    // 已办结申请不能再被向导复用
+    const again = await post('/water-accounts/onboard', {
+      customer: { name: '重复户', custType: 'PERSONAL' },
+      account: { usageCategory: 'RES_METERED', addr: 'TG 向导路 2 号' },
+      meter: { caliber: 'DN15' },
+      installation: { initialReading: 0 },
+      sourceApplyNo: applyNo,
+    });
+    expect(again.status).toBe(409);
+    expect(again.body.code).toBe('SOURCE_APPLY_CLOSED');
+    // 不存在的单号被拒
+    const missing = await post('/water-accounts/onboard', {
+      customer: { name: '幽灵户', custType: 'PERSONAL' },
+      account: { usageCategory: 'RES_METERED', addr: 'x' },
+      meter: { caliber: 'DN15' },
+      installation: { initialReading: 0 },
+      sourceApplyNo: 'BZ-NOPE-999',
+    });
+    expect(missing.status).toBe(400);
+  });
+
+  it('P2 编号规则：前缀配置即刻生效于新单号', async () => {
+    // 先把报装申请号前缀改成 ZZ，新建申请必须用 ZZ 而非 BZ。
+    await put('/iam/doc-rules/install_apply', { prefix: 'ZZ' }).expect(200);
+    const res = await post('/install/applications', {
+      applicantName: '规则验证户', addr: 'TG 规则路', usageCategory: 'RES_METERED',
+    }).expect(201);
+    expect(res.body.applyNo).toMatch(/^ZZ\d+/);
+    // 还原默认，避免影响其他用例
+    await put('/iam/doc-rules/install_apply', { prefix: 'BZ' }).expect(200);
+    const rules = (await get('/iam/doc-rules')).body as { seqKey: string; prefix: string; customized: boolean }[];
+    expect(rules.find((r) => r.seqKey === 'install_apply')?.prefix).toBe('BZ');
+  });
+
+  it('P2 合同扫描件 + 工程费差额催缴任务', async () => {
+    const res = await post('/install/applications', {
+      applicantName: '欠费报装户', addr: 'TG 费控路', usageCategory: 'RES_METERED',
+    }).expect(201);
+    const appId2 = res.body.id as string;
+    // 扫描件 ≤3 张
+    const scan = await post(`/install/applications/${appId2}/contract-scan`, {
+      scans: ['data:image/png;base64,AAA', 'data:image/png;base64,BBB'],
+    }).expect(201);
+    expect(scan.body.contractScan).toHaveLength(2);
+    // 审批→装表（应收 300 实收 100 → 差额 200）
+    await post(`/install/applications/${appId2}/transition`, { to: 'SURVEYED' }).expect(201);
+    await post(`/install/applications/${appId2}/transition`, { to: 'APPROVED' }).expect(201);
+    await post(`/install/applications/${appId2}/transition`, {
+      to: 'INSTALLING', feeRequired: 300, feeReceived: 100,
+    }).expect(201);
+    const arch = await post(`/install/applications/${appId2}/archive`, {
+      account: { usageCategory: 'RES_METERED', addr: 'TG 费控路' },
+      meter: { caliber: 'DN15' },
+      installation: { initialReading: 0 },
+    }).expect(201);
+    // V7：差额自动生成 COLLECTION 任务，挂到新结算户
+    const colTasks = ((await get('/tasks?type=COLLECTION&box=todo')).body as {
+      items: { bizId: string; reason: string; context: Record<string, unknown> }[];
+    }).items;
+    const feeTask = colTasks.find((t) => t.context?.feeApplyNo === res.body.applyNo);
+    expect(feeTask).toBeTruthy();
+    expect(feeTask!.bizId).toBe(arch.body.settleAccountId);
+    expect(feeTask!.context.arrearsCent).toBe('20000');
   });
 });

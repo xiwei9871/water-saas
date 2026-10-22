@@ -152,10 +152,40 @@ export class MeterInstallationService {
     if (!meter) {
       throw new BadRequestException({ code: 'METER_NOT_FOUND' });
     }
-    if (meter.status !== 'AVAILABLE') {
+    // 20261021 整改 任务D：租户已建库房时，安装必须从库存选表（在库=有 warehouseId）。
+    // 在库表自动记一条领用出库流水（ISSUE_OUT），装表即用。
+    const warehouseCount = await tx.meterWarehouse.count({
+      where: { tenantId: ctx.tenantId },
+    });
+    if (warehouseCount > 0 && !meter.warehouseId && meter.status !== 'ISSUED') {
+      throw new ConflictException({
+        code: 'METER_NOT_IN_STOCK',
+        status: meter.status,
+        hint: '租户已启用库房管理，请先将水表采购入库再领用安装',
+      });
+    }
+    // 在库 AVAILABLE 或已领用 ISSUED 可装；其余状态（在用/在途/维修/报废）拒装。
+    if (meter.status !== 'AVAILABLE' && meter.status !== 'ISSUED') {
       throw new ConflictException({
         code: 'METER_NOT_AVAILABLE',
         status: meter.status,
+      });
+    }
+    if (meter.warehouseId) {
+      await tx.meterStockMovement.create({
+        data: {
+          tenantId: ctx.tenantId,
+          meterId: meter.id,
+          movementType: 'ISSUE_OUT',
+          warehouseId: meter.warehouseId,
+          locationId: meter.locationId,
+          operatorId: ctx.staffId,
+          remark: '装表自动领用出库',
+        },
+      });
+      await tx.meter.updateMany({
+        where: { tenantId: ctx.tenantId, id: meter.id },
+        data: { warehouseId: null, locationId: null, updatedBy: ctx.staffId },
       });
     }
 
@@ -177,7 +207,11 @@ export class MeterInstallationService {
     // on the same meter loses the race here (count=0) instead of silently
     // producing two ACTIVE installations.
     const flipped = await tx.meter.updateMany({
-      where: { tenantId: ctx.tenantId, id: body.meterId, status: 'AVAILABLE' },
+      where: {
+        tenantId: ctx.tenantId,
+        id: body.meterId,
+        status: { in: ['AVAILABLE', 'ISSUED'] },
+      },
       data: { status: 'INSTALLED', updatedBy: ctx.staffId },
     });
     if (flipped.count === 0) {
@@ -300,7 +334,15 @@ export class MeterInstallationService {
       where: { tenantId: ctx.tenantId, id: body.newMeterId },
     });
     if (!newMeter) throw new BadRequestException({ code: 'METER_NOT_FOUND' });
-    if (newMeter.status !== 'AVAILABLE') {
+    // 20261021 整改 任务D：换表同样须从库存/领用选表；在库新表自动记领用出库。
+    const whCount = await tx.meterWarehouse.count({ where: { tenantId: ctx.tenantId } });
+    if (whCount > 0 && !newMeter.warehouseId && newMeter.status !== 'ISSUED') {
+      throw new ConflictException({
+        code: 'METER_NOT_IN_STOCK',
+        status: newMeter.status,
+      });
+    }
+    if (newMeter.status !== 'AVAILABLE' && newMeter.status !== 'ISSUED') {
       throw new ConflictException({
         code: 'METER_NOT_AVAILABLE',
         status: newMeter.status,
@@ -332,11 +374,33 @@ export class MeterInstallationService {
       throw new ConflictException({ code: 'METER_NOT_INSTALLED' });
     }
     const newFlip = await tx.meter.updateMany({
-      where: { tenantId: ctx.tenantId, id: body.newMeterId, status: 'AVAILABLE' },
-      data: { status: 'INSTALLED', updatedBy: ctx.staffId },
+      where: {
+        tenantId: ctx.tenantId,
+        id: body.newMeterId,
+        status: { in: ['AVAILABLE', 'ISSUED'] },
+      },
+      data: {
+        status: 'INSTALLED',
+        warehouseId: null,
+        locationId: null,
+        updatedBy: ctx.staffId,
+      },
     });
     if (newFlip.count === 0) {
       throw new ConflictException({ code: 'METER_NOT_AVAILABLE' });
+    }
+    if (newMeter.warehouseId) {
+      await tx.meterStockMovement.create({
+        data: {
+          tenantId: ctx.tenantId,
+          meterId: newMeter.id,
+          movementType: 'ISSUE_OUT',
+          warehouseId: newMeter.warehouseId,
+          locationId: newMeter.locationId,
+          operatorId: ctx.staffId,
+          remark: '换表自动领用出库',
+        },
+      });
     }
     await this.closeBindingsTx(tx, ctx, id, at);
     const installation = await tx.meterInstallation.create({

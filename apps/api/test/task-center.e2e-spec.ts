@@ -397,6 +397,18 @@ describe('T12 METER_REVIEW 抄表异常复核', () => {
     // qc 是候选人；billerA 无 metering:qc → 不可领。
     await post(`/tasks/${task.id}/claim`, {}, tokens.billerA).expect(403);
     await post(`/tasks/${task.id}/claim`, {}, tokens.qc).expect(201);
+
+    // 3.4 完成标准：未提交质检结论 → TASK_NOT_DONE；缺处理结果 → TASK_RESULT_REQUIRED。
+    const premature = await post(`/tasks/${task.id}/complete`, { note: 'x' }, tokens.qc);
+    expect(premature.status).toBe(409);
+    expect(premature.body.code ?? premature.body.message).toContain('TASK_NOT_DONE');
+
+    // 复核动作落地：qc 对该读数提交质检结论（倒挂 → 驳回）。
+    await post(`/meter-readings/${task.bizId}/qc`, { action: 'reject' }, tokens.qc).expect(201);
+
+    const noNote = await post(`/tasks/${task.id}/complete`, {}, tokens.qc);
+    expect(noNote.status).toBe(400);
+
     const done = await post(
       `/tasks/${task.id}/complete`,
       { note: '现场核实为换表' },
@@ -405,7 +417,7 @@ describe('T12 METER_REVIEW 抄表异常复核', () => {
     expect(done.status).toBe(201);
     const after = await owner.task.findUniqueOrThrow({ where: { id: task.id } });
     expect(after.status).toBe('DONE');
-    expect((after.context as Record<string, unknown>).completionNote).toBe('现场核实为换表');
+    expect(after.resultNote).toBe('现场核实为换表');
     const doneBox = (await get('/tasks?box=done', tokens.qc).expect(200)).body.items;
     expect(doneBox.map((t: { id: string }) => t.id)).toContain(task.id);
   }, 60_000);
@@ -610,5 +622,45 @@ describe('T16 出账批次阻断 + T17 超期升级 + T11 无候选告警 + badg
     expect(badge.alerts).toBeGreaterThanOrEqual(1);
     const plainTodo = (await get('/tasks?box=todo', tokens.plain).expect(200)).body.items;
     expect(plainTodo.map((t: { id: string }) => t.id)).not.toContain(ghost.id);
+  });
+
+  it('现场类任务：缺佐证 400 + 完成回填 resultNote/resultEvidence + guide 注入响应', async () => {
+    const t = await owner.task.create({
+      data: {
+        tenantId: T,
+        type: 'SVC_EXECUTE',
+        title: '表务工单执行（佐证验证）',
+        bizType: 'service_order',
+        bizId: randomUUID(),
+        reason: '测试注入',
+        requiredPerm: 'metering:qc',
+        status: 'PENDING',
+        priority: 'NORMAL',
+        candidateCount: 1,
+        context: { orderNo: 'GD-TEST-1', serviceType: 'REPLACE', waterAccountNo: 'A-TEST' },
+      },
+    });
+    // 3.4 操作指引随响应下发（模板已用 context 渲染出工单号）。
+    const detail = (await get(`/tasks/${t.id}`, tokens.qc).expect(200)).body;
+    expect(detail.guide).toContain('GD-TEST-1');
+    expect(detail.evidenceRequired).toBe(true);
+
+    await post(`/tasks/${t.id}/claim`, {}, tokens.qc).expect(201);
+    // 佐证必填：evidenceRefs 空 → 400（先于完成标准校验）。
+    const noEv = await post(`/tasks/${t.id}/complete`, { note: '已换表' }, tokens.qc);
+    expect(noEv.status).toBe(400);
+    expect(JSON.stringify(noEv.body)).toContain('TASK_EVIDENCE_REQUIRED');
+    // 带佐证完成 → 201；处理结果+佐证落库可回查。
+    const withEv = await post(
+      `/tasks/${t.id}/complete`,
+      { note: '已换表', evidenceRefs: ['data:image/png;base64,AAA'] },
+      tokens.qc,
+    );
+    expect(withEv.status).toBe(201);
+    const after = await owner.task.findUniqueOrThrow({ where: { id: t.id } });
+    expect(after.status).toBe('DONE');
+    expect(after.resultNote).toBe('已换表');
+    expect(after.resultEvidence).toEqual(['data:image/png;base64,AAA']);
+    expect(after.completedBy).not.toBeNull();
   });
 });

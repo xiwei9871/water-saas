@@ -12,6 +12,7 @@ import type {
 } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { fmtMoney } from '../utils/numfmt';
+import { PAY_CHANNEL_LABELS } from './payment/common';
 
 /** 跨页面共享的枚举中文标签 / 颜色 / 小工具。 */
 
@@ -78,6 +79,54 @@ export const INSTALL_REASON_LABELS: Record<InstallReason, string> = {
   PERIODIC_CHECK: '周期检定',
 };
 
+/** 表务工单服务类型（SERVICE_TYPE 字典镜像，20261019 需求 T1）。 */
+export const SERVICE_TYPE_LABELS: Record<string, string> = {
+  PERIODIC_CHECK: '周期校验',
+  DISPUTE_CHECK: '争议检定',
+  FAULT: '水表故障(换表)',
+  SUSPEND: '暂停供水(报停)',
+  STOP: '停水',
+  RESUME: '复水',
+  FLOW_LIMIT: '限流',
+  FACILITY_MAINTENANCE: '表位设施维护',
+  SITE_RECTIFICATION: '表位整改',
+  METER_GROUP_CLEANING: '表组清洁',
+  CLOSE: '销户(拆表销户)',
+};
+
+export const SERVICE_ORDER_STATUS_LABELS: Record<string, string> = {
+  PENDING_APPROVAL: '待审批',
+  APPROVED: '已审批',
+  DISPATCHED: '已派单',
+  EXECUTED: '已执行',
+  ARCHIVED: '已归档',
+  REJECTED: '已驳回',
+  CANCELLED: '已撤销',
+};
+
+export const SERVICE_ORDER_STATUS_COLORS: Record<string, string> = {
+  PENDING_APPROVAL: 'gold',
+  APPROVED: 'blue',
+  DISPATCHED: 'cyan',
+  EXECUTED: 'green',
+  ARCHIVED: 'default',
+  REJECTED: 'red',
+  CANCELLED: 'default',
+};
+
+/** 工单来源（20261020 核查 T5）。 */
+export const ORDER_SOURCE_LABELS: Record<string, string> = {
+  MANUAL: '人工发起',
+  READING_REPORT: '抄表上报',
+  AUTO_CHECK: '到期检定',
+};
+
+/** 结算分量分段角色（20261020 核查 T3）：期中途换表的老/新表段。 */
+export const SEGMENT_ROLE_LABELS: Record<string, string> = {
+  OLD_SEGMENT: '老表段',
+  NEW_SEGMENT: '新表段',
+};
+
 export const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss');
 
 export const fmtDate = (iso?: string | null) =>
@@ -120,8 +169,12 @@ export const taskContextText = (type: string, ctx: unknown): string | null => {
     const v = c[k];
     return v == null ? null : fmtCent(String(v));
   };
-  const num = (k: string, unit: string, label: string) =>
-    s(k) == null ? null : `${label} ${s(k)} ${unit}`;
+  const num = (k: string, unit: string, label: string) => {
+    const v = s(k);
+    if (v == null) return null;
+    const n = Number(v);
+    return `${label} ${Number.isFinite(n) ? String(Math.round(n * 100) / 100) : v} ${unit}`;
+  };
   const join = (parts: (string | null | false | undefined)[]) =>
     parts.filter((x): x is string => !!x).join(' · ');
   let text = '';
@@ -192,6 +245,99 @@ export const taskContextText = (type: string, ctx: unknown): string | null => {
     .filter(([k]) => s(k) != null)
     .map(([k, label]) => `${label} ${k === 'period' ? fmtPeriod(s(k)) : s(k)}`);
   return parts.length ? parts.join(' · ') : null;
+};
+
+/**
+ * 任务上下文结构化要素卡：context 字段 → 中文标签 + 格式化。
+ * 展示层规范（原则一）：不打印原始 JSON，不裸显 UUID。
+ * Cent 后缀字段转元、period 转 yyyy-MM、其余原样；技术主键一律跳过。
+ */
+export const TASK_CONTEXT_FIELD_LABELS: Record<string, string> = {
+  waterAccountNo: '户号',
+  accountNo: '户号',
+  settleNo: '结算户',
+  customerName: '客户名称',
+  period: '账期',
+  planPeriod: '计划账期',
+  readingValue: '本期读数(m³)',
+  prevReadingValue: '上期止度(m³)',
+  usageQty: '本期用量(m³)',
+  avgUsage3: '近3期均值(m³)',
+  estimatedReadingValue: '估计止度(m³)',
+  actualReadingValue: '实抄止度(m³)',
+  diff: '差额(m³)',
+  arrearsCent: '欠费金额',
+  amountDue: '欠费金额',
+  thresholdCent: '催缴阈值',
+  overdueBillCount: '逾期账单(笔)',
+  billCount: '欠费笔数',
+  overdueDays: '逾期天数',
+  noticeNo: '通知单号',
+  applyNo: '申请号',
+  applicantName: '申请人',
+  usageCategory: '用水性质',
+  addr: '地址',
+  orderNo: '工单号',
+  serviceType: '处置类型',
+  meterNo: '表号',
+  needReplace: '需换表',
+  violationType: '违章类型',
+  violationTypeName: '违章类型',
+  sourceType: '来源',
+  description: '描述',
+  occurredDate: '发生日期',
+  writeoffNo: '核销单号',
+  amountCent: '金额',
+  totalAmountCent: '金额',
+  reasonName: '事由',
+  reasonCode: '事由编码',
+  reason: '原因',
+  effectiveDate: '生效日期',
+  originalPaymentNo: '原收款单号',
+  reversalPaymentNo: '红冲收款单号',
+  paymentNo: '收款单号',
+  billNo: '账单号',
+  batchNo: '批次号',
+  batchId: '批次',
+  channel: '渠道',
+  mismatched: '差异笔数',
+  missingInFile: '文件缺失笔数',
+  missingRefs: '缺失单号',
+  completionNote: '完成备注',
+};
+
+/** 分→元字段（context 值是字符串分的按 fmtCent 格式化）。 */
+const TASK_CONTEXT_CENT_KEYS = /Cent$|^amountDue$/;
+
+/** context → {label, text} 列表；技术主键（*Id/UUID）不返回。 */
+export const taskContextFields = (
+  ctx: unknown,
+): { key: string; label: string; text: string }[] => {
+  if (!ctx || typeof ctx !== 'object' || Array.isArray(ctx)) return [];
+  const out: { key: string; label: string; text: string }[] = [];
+  for (const [k, v] of Object.entries(ctx as Record<string, unknown>)) {
+    if (v == null || v === '') continue;
+    if (k.endsWith('Id') || k === 'id' || k.endsWith('Ids')) continue;
+    const label = TASK_CONTEXT_FIELD_LABELS[k];
+    if (!label) continue;
+    const str = Array.isArray(v) ? v.join('、') : String(v);
+    let text = str;
+    if (TASK_CONTEXT_CENT_KEYS.test(k)) {
+      text = fmtCent(str);
+    } else if (k === 'period' || k === 'planPeriod') {
+      text = fmtPeriod(str) ?? str;
+    } else if (k === 'serviceType') {
+      text = enumLabel(SERVICE_TYPE_LABELS, str) ?? str;
+    } else if (k === 'sourceType') {
+      text = enumLabel({ MANUAL: '人工登记', READING: '抄表上报', INSPECT: '稽查发现', IMPORT: '导入' }, str) ?? str;
+    } else if (k === 'channel') {
+      text = enumLabel(PAY_CHANNEL_LABELS as Record<string, string>, str) ?? str;
+    } else if (k === 'usageCategory') {
+      text = enumLabel(USAGE_CATEGORY_LABELS as Record<string, string>, str) ?? str;
+    }
+    out.push({ key: k, label, text });
+  }
+  return out;
 };
 
 /** 水表读数等非负 Decimal 输入的表单校验（最多 4 位小数）。 */

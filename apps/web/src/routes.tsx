@@ -9,8 +9,11 @@ import {
   SearchOutlined,
   SettingOutlined,
   TeamOutlined,
+  ToolOutlined,
   TransactionOutlined,
 } from '@ant-design/icons';
+
+import { Navigate } from 'react-router-dom';
 
 import type { ReactNode } from 'react';
 import Home from './pages/Home';
@@ -26,11 +29,18 @@ import SettleAccounts from './pages/customer/SettleAccounts';
 import WaterAccounts from './pages/customer/WaterAccounts';
 import Exceptions from './pages/exception/Exceptions';
 import MeterReadings from './pages/metering/MeterReadings';
+import MeterRelations from './pages/metering/MeterRelations';
+import MeterStock from './pages/service/MeterStock';
+import Violations from './pages/service/Violations';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
 import RemoteDevices from './pages/metering/RemoteDevices';
 import RemoteEvents from './pages/metering/RemoteEvents';
 import RemoteSources from './pages/metering/RemoteSources';
+import ServiceOrders from './pages/service/ServiceOrders';
+import ServiceOrderStats from './pages/service/ServiceOrderStats';
+import ReplaceRecords from './pages/service/ReplaceRecords';
+import BankDebit from './pages/payment/BankDebit';
 import Cashier from './pages/payment/Cashier';
 import CollectionNotices from './pages/payment/CollectionNotices';
 import DayClose from './pages/payment/DayClose';
@@ -80,6 +90,8 @@ export interface AppRoute {
    * 重定向到 /workbench——路由不拦，菜单用 menuPerms 隐藏。
    */
   menuPerms?: string[];
+  /** 菜单隐藏但路由保留（旧路径重定向等）。 */
+  menuHidden?: boolean;
   element?: ReactNode;
   children?: AppRoute[];
 }
@@ -117,6 +129,24 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <FileTextOutlined />,
     element: <Tasks />,
   },
+  // S1 报装管理：独立于营销菜单组的业扩域（申请→勘察→审批→装表→归档），
+  // 业务流上先于客户建档，故排在客户管理之前。
+  {
+    key: 'install',
+    path: '/install',
+    label: '报装管理',
+    icon: <FileTextOutlined />,
+    perms: ['install:read'],
+    children: [
+      {
+        key: 'install-applications',
+        path: '/install/applications',
+        label: '报装申请',
+        perms: ['install:read'],
+        element: <InstallApplications />,
+      },
+    ],
+  },
   {
     key: 'customer',
     path: '/customer',
@@ -151,10 +181,12 @@ export const APP_ROUTES: AppRoute[] = [
         element: <SettleAccounts />,
       },
       {
+        // 20261021 整改 1.1：水表档案迁往「表务管理」——旧路径重定向保留。
         key: 'customer-meters',
         path: '/customer/meters',
         label: '水表管理',
-        element: <Meters />,
+        menuHidden: true,
+        element: <Navigate to="/service/meters" replace />,
       },
     ],
   },
@@ -184,6 +216,23 @@ export const APP_ROUTES: AppRoute[] = [
         element: <MeterReadings />,
       },
       {
+        // 20261021 整改 任务C：总分表关系维护 + 漏损分析。
+        key: 'metering-relations',
+        path: '/metering/relations',
+        label: '总分表关系',
+        element: <MeterRelations />,
+      },
+      {
+        // 20261020 核查：表务工单提为一级「表务管理」——旧路径保留
+        // 重定向但不在菜单显示。
+        key: 'metering-service-orders',
+        path: '/metering/service-orders',
+        label: '表务工单',
+        perms: ['metering:service'],
+        menuHidden: true,
+        element: <Navigate to="/service/orders" replace />,
+      },
+      {
         key: 'metering-remote-sources',
         path: '/metering/remote-sources',
         label: '远传数据源',
@@ -200,6 +249,57 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/metering/remote-events',
         label: '远传事件',
         element: <RemoteEvents />,
+      },
+    ],
+  },
+  {
+    // 20261020 核查：表务管理提为独立一级模块（原挂抄表管理下）。
+    key: 'service',
+    path: '/service',
+    label: '表务管理',
+    icon: <ToolOutlined />,
+    // 水表档案迁入后，客户只读角色也要能进该分组（只能看到水表档案子项）。
+    perms: ['metering:service', 'customer:read'],
+    children: [
+      {
+        // 20261021 整改 1.1：水表档案/台账是表务管理核心对象（采购→入库→安装→检定→换表→报废）。
+        key: 'service-meters',
+        path: '/service/meters',
+        label: '水表档案',
+        perms: ['metering:service', 'customer:read'],
+        element: <Meters />,
+      },
+      {
+        key: 'service-orders',
+        path: '/service/orders',
+        label: '表务工单',
+        element: <ServiceOrders />,
+      },
+      {
+        key: 'service-stats',
+        path: '/service/stats',
+        label: '处置统计',
+        element: <ServiceOrderStats />,
+      },
+      {
+        key: 'service-replace-records',
+        path: '/service/replace-records',
+        label: '换表记录',
+        element: <ReplaceRecords />,
+      },
+      {
+        // 20261021 整改 任务D：库房全生命周期（入库→货位→领用→安装→报废）。
+        key: 'service-stock',
+        path: '/service/stock',
+        label: '水表库房',
+        element: <MeterStock />,
+      },
+      {
+        // 20261021 整改 任务E：违章用水（稽查登记/抄表上报）。
+        key: 'service-violations',
+        path: '/service/violations',
+        label: '违章用水',
+        element: <Violations />,
       },
     ],
   },
@@ -316,22 +416,12 @@ export const APP_ROUTES: AppRoute[] = [
         label: '票据台账',
         element: <ReceiptDocs />,
       },
-    ],
-  },
-  // S1 报装管理：独立于营销菜单组的业扩域（申请→勘察→审批→装表→归档）。
-  {
-    key: 'install',
-    path: '/install',
-    label: '报装管理',
-    icon: <FileTextOutlined />,
-    perms: ['install:read'],
-    children: [
       {
-        key: 'install-applications',
-        path: '/install/applications',
-        label: '报装申请',
-        perms: ['install:read'],
-        element: <InstallApplications />,
+        // 20261021 整改 任务F：银行代扣（协议/批次/PKMX·PKJG·DZMX）。
+        key: 'payment-bank-debit',
+        path: '/payment/bank-debit',
+        label: '银行代扣',
+        element: <BankDebit />,
       },
     ],
   },

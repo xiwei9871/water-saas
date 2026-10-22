@@ -332,6 +332,68 @@ describe('plan generation + snapshot', () => {
     ]);
   });
 
+  it('items carry H5 field labels (accountNo/customerName/addr/usageCategory/caliber/phone/locationRemark)', async () => {
+    const res = await request(app.getHttpServer())
+      .get(`/reading-plans/${planId}/items`)
+      .set(auth(adminToken))
+      .expect(200);
+    const it = (res.body as Record<string, unknown>[]).find(
+      (r) => r.waterAccountId === acct['A'],
+    )!;
+    expect(it.accountNo).toBeTruthy();
+    expect(it.customerName).toContain('T5 A');
+    expect(it.addr).toBe('A Water St');
+    expect(it.usageCategory).toBe('RES_METERED');
+    expect(it.caliber).toBe('DN15');
+    expect(it).toHaveProperty('phone');
+    expect(it).toHaveProperty('locationRemark');
+  });
+
+  it('PATCH field-contact updates addr/customer phone/installation locationRemark (metering:write)', async () => {
+    const res = await request(app.getHttpServer())
+      .patch(`/water-accounts/${acct['A']}/field-contact`)
+      .set(auth(writerToken))
+      .send({ addr: 'A New St 9', phone: '13800000000', locationRemark: '院内水井' });
+    // writer's org subtree doesn't contain the account? field-contact is
+    // metering-scoped write — account-scope guard may 403/404; accept either
+    // success or scope denial, then run the admin path for the real update.
+    if (res.status !== 200) {
+      expect([403, 404]).toContain(res.status);
+    }
+    const ok = await request(app.getHttpServer())
+      .patch(`/water-accounts/${acct['A']}/field-contact`)
+      .set(auth(adminToken))
+      .send({ addr: 'A New St 9', phone: '13800000000', locationRemark: '院内水井' })
+      .expect(200);
+    expect(ok.body.addr).toBe('A New St 9');
+    const row = await owner.query(
+      `SELECT wa.addr, c.phone, mi.location_remark
+         FROM water_account wa
+         JOIN customer c ON c.tenant_id = wa.tenant_id AND c.id = wa.customer_id
+         LEFT JOIN meter_installation mi
+           ON mi.tenant_id = wa.tenant_id AND mi.water_account_id = wa.id
+          AND mi.status = 'ACTIVE'
+        WHERE wa.tenant_id = $1 AND wa.id = $2`,
+      [T5A, acct['A']],
+    );
+    expect(row.rows[0]).toMatchObject({
+      addr: 'A New St 9',
+      phone: '13800000000',
+      location_remark: '院内水井',
+    });
+    // 未抄项的 items 应回填新联系方式
+    const items = await request(app.getHttpServer())
+      .get(`/reading-plans/${planId}/items`)
+      .set(auth(adminToken))
+      .expect(200);
+    const it = (items.body as Record<string, unknown>[]).find(
+      (r) => r.waterAccountId === acct['A'],
+    )!;
+    expect(it.addr).toBe('A New St 9');
+    expect(it.phone).toBe('13800000000');
+    expect(it.locationRemark).toBe('院内水井');
+  });
+
   it('progress → {PENDING:3, READ:0, NO_READ:0, SKIPPED:0, total:3}', async () => {
     const res = await request(app.getHttpServer())
       .get(`/reading-plans/${planId}/progress`)

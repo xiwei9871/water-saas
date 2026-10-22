@@ -9,6 +9,7 @@ import { RolesController } from './roles.controller.js';
 import { StaffController } from './staff.controller.js';
 import { MyPrefsController } from './my-prefs.controller.js';
 import { TenantParamsController } from './tenant-params.controller.js';
+import { DocRulesController } from './doc-rules.controller.js';
 
 /**
  * JWT_SECRET is mandatory in production (fail-fast at startup). In dev/test
@@ -49,6 +50,7 @@ const jwtSecret = (() => {
     TenantParamsController,
     MyPrefsController,
     DictsController,
+    DocRulesController,
     AuditLogsController,
   ],
   providers: [AuthService],

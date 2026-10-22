@@ -45,10 +45,13 @@ export class InstallService {
 
   async createTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: CreateApplyBody) {
     const applyNo = await this.seq.nextFormatted(tx, ctx.tenantId, 'install_apply', 'BZ', ctx.staffId);
+    // 受理即生成供用水合同号（2.2 要素：合同号在受理环节产生）。
+    const contractNo = await this.seq.nextFormatted(tx, ctx.tenantId, 'install_contract', 'HT', ctx.staffId);
     const app = await tx.installApplication.create({
       data: {
         tenantId: ctx.tenantId,
         applyNo,
+        contractNo,
         applicantName: body.applicantName,
         custType: body.custType ?? 'PERSONAL',
         contactPhone: body.contactPhone,
@@ -80,6 +83,15 @@ export class InstallService {
     id: string,
     to: InstallApplyStatus,
     note?: string,
+    installInitialReading?: number,
+    installInfo?: {
+      meterNo?: string;
+      caliber?: string;
+      completedAt?: Date;
+      feeRequired?: number;
+      feeReceived?: number;
+      feeNote?: string;
+    },
   ) {
     const app = await tx.installApplication.findFirst({
       where: { tenantId: ctx.tenantId, id },
@@ -93,13 +105,40 @@ export class InstallService {
       updatedBy: ctx.staffId,
       ...(to === 'SURVEYED' && note !== undefined ? { surveyNote: note } : {}),
       ...(to === 'INSTALLING' && note !== undefined ? { installNote: note } : {}),
+      ...(to === 'INSTALLING' && installInitialReading !== undefined
+        ? { installInitialReading }
+        : {}),
+      // 2.1 接收完成信息：表号/口径/装表完成日期/工程费随装表流转一并登记。
+      ...(to === 'INSTALLING' && installInfo?.meterNo !== undefined
+        ? { installMeterNo: installInfo.meterNo }
+        : {}),
+      ...(to === 'INSTALLING' && installInfo?.caliber !== undefined
+        ? { installCaliber: installInfo.caliber }
+        : {}),
+      ...(to === 'INSTALLING' && installInfo?.completedAt !== undefined
+        ? { installCompletedAt: installInfo.completedAt }
+        : {}),
+      ...(to === 'INSTALLING' && installInfo?.feeRequired !== undefined
+        ? { feeRequired: installInfo.feeRequired }
+        : {}),
+      ...(to === 'INSTALLING' && installInfo?.feeReceived !== undefined
+        ? { feeReceived: installInfo.feeReceived }
+        : {}),
+      ...(to === 'INSTALLING' && installInfo?.feeNote !== undefined
+        ? { feeNote: installInfo.feeNote }
+        : {}),
       ...(to === 'REJECTED' ? { rejectReason: note ?? '' } : {}),
     };
     const updated = await tx.installApplication.update({ where: { id: app.id }, data: patch });
     if (['REJECTED', 'CANCELLED'].includes(to)) {
       await this.tasks.autoCompleteByBiz(tx, ctx, 'INSTALL_REVIEW', 'INSTALL_APPLICATION', app.id, `申请${to === 'REJECTED' ? '被驳回' : '已取消'}`);
     }
-    return updated;
+    // V7：取消时已收工程费须线下退款——响应带 refundDue 供前端警示。
+    const refundDue =
+      to === 'CANCELLED' && app.feeReceived && Number(app.feeReceived) > 0
+        ? Number(app.feeReceived)
+        : undefined;
+    return { ...updated, refundDue };
   }
 
   /** 归档：INSTALLING 状态下按立户向导建账（同事务），回写户号并办结任务。 */
@@ -133,14 +172,80 @@ export class InstallService {
               addr: app.addr,
             }),
     };
-    const result = await this.accounts.onboardTx(tx, ctx, merged);
+    // 2.2 报装纳入：立户事务写入来源单号（户/新建客户/新建表记 source_apply_no）。
+    const result = await this.accounts.onboardTx(tx, ctx, {
+      ...merged,
+      sourceApplyNo: app.applyNo,
+    });
     const waId = (result as { waterAccount?: { id: string } }).waterAccount?.id;
     if (!waId) throw new BadRequestException({ code: 'ONBOARD_NO_ACCOUNT' });
+    const updated = await this.completeFromOnboardTx(tx, ctx, app, result);
+    return { ...updated, waterAccountId: waId };
+  }
+
+  /**
+   * 归档/向导立户共用的回写：申请单 → COMPLETED + 正向回写
+   * 结算户/表号 + INSTALL_REVIEW 任务自动办结（2.2 正向回写）。
+   */
+  async completeFromOnboardTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    app: { id: string; applyNo: string },
+    result: unknown,
+  ) {
+    const waId = (result as { waterAccount?: { id: string } }).waterAccount?.id;
+    if (!waId) throw new BadRequestException({ code: 'ONBOARD_NO_ACCOUNT' });
+    const settleId = (result as { settleAccount?: { id: string } }).settleAccount?.id ?? null;
+    const settleNo = (result as { settleAccount?: { settleNo?: string } }).settleAccount?.settleNo ?? null;
+    const meterNo = (result as { meter?: { meterNo: string } }).meter?.meterNo ?? null;
     const updated = await tx.installApplication.update({
       where: { id: app.id },
-      data: { status: 'COMPLETED', waterAccountId: waId, updatedBy: ctx.staffId },
+      data: {
+        status: 'COMPLETED',
+        waterAccountId: waId,
+        settleAccountId: settleId,
+        meterNo,
+        updatedBy: ctx.staffId,
+      },
     });
     await this.tasks.autoCompleteByBiz(tx, ctx, 'INSTALL_REVIEW', 'INSTALL_APPLICATION', app.id, '归档完成');
-    return { ...updated, waterAccountId: waId };
+    await this.ensureFeeCollectionTask(tx, ctx, app.id, settleId, settleNo);
+    return updated;
+  }
+
+  /** V7 工程费闭环：应收 &gt; 实收的差额 → 立户时自动生成催缴任务（走收费侧补收）。 */
+  private async ensureFeeCollectionTask(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    appId: string,
+    settleAccountId: string | null,
+    settleNo: string | null,
+  ) {
+    if (!settleAccountId) return;
+    const app = await tx.installApplication.findFirst({
+      where: { tenantId: ctx.tenantId, id: appId },
+      select: { applyNo: true, feeRequired: true, feeReceived: true },
+    });
+    if (!app?.feeRequired) return;
+    const deficit = app.feeRequired.minus(app.feeReceived ?? 0);
+    if (deficit.lte(0)) return;
+    const deficitCent = deficit.mul(100).toFixed(0);
+    await this.tasks.createTask(tx, ctx, {
+      type: 'COLLECTION',
+      title: `工程费补收：${app.applyNo} 差额 ¥${deficit.toFixed(2)}`,
+      bizType: 'settleAccount',
+      bizId: settleAccountId,
+      bizLabel: settleNo,
+      reason: `报装 ${app.applyNo} 工程费应收 ¥${app.feeRequired} 实收 ¥${app.feeReceived ?? 0}，差额随户挂账`,
+      context: {
+        settleNo: settleNo ?? settleAccountId,
+        arrearsCent: deficitCent,
+        overdueDays: 0,
+        feeApplyNo: app.applyNo,
+        feeRequired: app.feeRequired.toString(),
+        feeReceived: app.feeReceived?.toString() ?? '0',
+      },
+      orgUnitId: null,
+    });
   }
 }

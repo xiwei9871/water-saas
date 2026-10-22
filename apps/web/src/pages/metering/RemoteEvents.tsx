@@ -17,8 +17,26 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
+
+/** canonicalPayload 常见字段的中文名（原始报文逐字段业务化展示）。 */
+const REMOTE_PAYLOAD_LABELS: Record<string, string> = {
+  vendorDeviceKey: '厂商设备号',
+  deviceKey: '设备号',
+  meterNo: '表号',
+  businessPeriod: '业务账期',
+  collectedAt: '采集时间',
+  readingValue: '上报读数(m³)',
+  vendorQuality: '厂商质量码',
+  signal: '信号强度',
+  voltage: '电池电压',
+  valveStatus: '阀门状态',
+  eventType: '事件类型',
+  externalEventKey: '外部事件键',
+  uploadTime: '上报时间',
+  sn: '流水号',
+};
 import { api, apiErrorText } from '../../api/client';
 import type {
   RawRemoteEvent,
@@ -114,6 +132,8 @@ export default function RemoteEvents() {
     queueMicrotask(() => void load());
   }, [load]);
 
+  const focusDone = useRef<string | null>(null);
+
   const openDetail = async (id: string) => {
     setDetailLoading(true);
     try {
@@ -125,6 +145,15 @@ export default function RemoteEvents() {
       setDetailLoading(false);
     }
   };
+
+  // 任务直达 ?focusId= → 自动打开该事件详情。
+  useEffect(() => {
+    const focusId = params.get('focusId');
+    if (focusId && focusDone.current !== focusId) {
+      focusDone.current = focusId;
+      void openDetail(focusId);
+    }
+  }, [params]);
 
   const replay = async (id: string) => {
     setReplaying(true);
@@ -384,21 +413,30 @@ export default function RemoteEvents() {
                   label: '技术详情（原始报文）',
                   children: (
                     <>
-                      <div style={{ fontSize: 12, color: '#888', marginBottom: 8 }}>
-                        解析设备：{detail.resolvedRemoteDeviceId ?? '—'} · 解析绑定：
-                        {detail.resolvedBindingId ?? '—'}
-                      </div>
-                      <pre
-                        style={{
-                          fontSize: 12,
-                          maxHeight: 240,
-                          overflow: 'auto',
-                          background: '#f6f6f6',
-                          padding: 8,
-                        }}
-                      >
-                        {JSON.stringify(detail.canonicalPayload, null, 2)}
-                      </pre>
+                      <Descriptions column={1} size="small" bordered>
+                        {detail.canonicalPayload &&
+                          typeof detail.canonicalPayload === 'object' &&
+                          Object.entries(
+                            detail.canonicalPayload as Record<string, unknown>,
+                          ).map(([k, v]) => (
+                            <Descriptions.Item
+                              key={k}
+                              label={REMOTE_PAYLOAD_LABELS[k] ?? k}
+                            >
+                              {v == null || v === ''
+                                ? '—'
+                                : typeof v === 'object'
+                                  ? JSON.stringify(v)
+                                  : String(v)}
+                            </Descriptions.Item>
+                          ))}
+                        <Descriptions.Item label="解析设备">
+                          {detail.resolvedRemoteDeviceId ?? '—'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="解析绑定">
+                          {detail.resolvedBindingId ?? '—'}
+                        </Descriptions.Item>
+                      </Descriptions>
                     </>
                   ),
                 },

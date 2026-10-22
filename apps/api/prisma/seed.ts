@@ -60,6 +60,7 @@ async function seedTenant({ code, name }: TenantSeed) {
     'metering:write',
     'metering:qc',
     'metering:remote:manage',
+    'metering:service',
     'billing:read',
     'billing:write',
     'payment:read',
@@ -82,9 +83,9 @@ async function seedTenant({ code, name }: TenantSeed) {
   }
   // Sensible starter bindings for the seeded roles (admin has '*' implicitly).
   const rolePermBindings: Record<string, string[]> = {
-    reader: ['customer:read', 'metering:read', 'metering:write', 'exception:read'],
+    reader: ['customer:read', 'metering:read', 'metering:write', 'metering:service', 'exception:read'],
     cashier: ['customer:read', 'billing:read', 'payment:read', 'payment:write', 'exception:read'],
-    reviewer: ['metering:qc', 'metering:read', 'billing:read', 'report:read', 'exception:read', 'exception:manage'],
+    reviewer: ['metering:qc', 'metering:read', 'metering:service', 'billing:read', 'report:read', 'exception:read', 'exception:manage'],
   };
   for (const [roleCode, codes] of Object.entries(rolePermBindings)) {
     for (const code of codes) {
@@ -149,6 +150,17 @@ async function seedTenant({ code, name }: TenantSeed) {
     { category: 'ADJUST_TYPE', code: 'RELIEF', name: '政策性减免', seq: 1 },
     { category: 'ADJUST_TYPE', code: 'DISCOUNT', name: '优惠减免', seq: 2 },
     { category: 'ADJUST_TYPE', code: 'CORRECTION', name: '差错调整', seq: 3 },
+    { category: 'SERVICE_TYPE', code: 'PERIODIC_CHECK', name: '周期校验', seq: 10 },
+    { category: 'SERVICE_TYPE', code: 'DISPUTE_CHECK', name: '争议检定', seq: 20 },
+    { category: 'SERVICE_TYPE', code: 'FAULT', name: '水表故障(换表)', seq: 30 },
+    { category: 'SERVICE_TYPE', code: 'SUSPEND', name: '暂停供水(报停)', seq: 40 },
+    { category: 'SERVICE_TYPE', code: 'STOP', name: '停水', seq: 50 },
+    { category: 'SERVICE_TYPE', code: 'RESUME', name: '复水', seq: 60 },
+    { category: 'SERVICE_TYPE', code: 'FLOW_LIMIT', name: '限流', seq: 70 },
+    { category: 'SERVICE_TYPE', code: 'FACILITY_MAINTENANCE', name: '表位设施维护', seq: 80 },
+    { category: 'SERVICE_TYPE', code: 'SITE_RECTIFICATION', name: '表位整改', seq: 90 },
+    { category: 'SERVICE_TYPE', code: 'METER_GROUP_CLEANING', name: '表组清洁', seq: 100 },
+    { category: 'SERVICE_TYPE', code: 'CLOSE', name: '销户(拆表销户)', seq: 110 },
   ];
   for (const d of dicts) {
     await prisma.sysDict.upsert({

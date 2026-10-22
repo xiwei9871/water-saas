@@ -27,7 +27,6 @@ import type {
   PaymentStatus,
   Receipt,
 } from '../../api/types';
-import { TaskContextBanner } from '../../components/TaskContextBanner';
 import { useAuth } from '../../auth/AuthContext';
 import {
   enumLabel,
@@ -44,6 +43,7 @@ import {
   PREPAY_ENTRY_COLORS,
   PREPAY_ENTRY_LABELS,
 } from './common';
+import { useSearchParams } from 'react-router-dom';
 
 
 
@@ -112,6 +112,10 @@ export default function Payments() {
 
   const detailSeq = useRef(0);
 
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
+  const focusDone = useRef<string | null>(null);
+
   const openDetail = async (row: Payment) => {
     const seq = ++detailSeq.current;
     setDetailLoading(true);
@@ -147,6 +151,14 @@ export default function Payments() {
     } finally {
       setActing(null);
       await load(page, pageSize);
+  // 任务直达 ?focusId= → 自动打开该笔收款详情。
+  useEffect(() => {
+    if (focusId && focusDone.current !== focusId) {
+      focusDone.current = focusId;
+      void openDetail({ id: focusId } as Payment);
+    }
+  }, [focusId]);
+
       if (detail?.id === p.id) void openDetail(p);
     }
   };
@@ -288,7 +300,6 @@ export default function Payments() {
 
   return (
     <>
-      <TaskContextBanner />
       <Card
       title="收款记录"
       extra={

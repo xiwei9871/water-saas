@@ -1,4 +1,3 @@
-import { TaskContextBanner } from '../../components/TaskContextBanner';
 import {
   CheckOutlined,
   CloseOutlined,
@@ -8,6 +7,7 @@ import {
   SearchOutlined,
   SettingOutlined,
   UploadOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import {
   Alert,
@@ -31,7 +31,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api, apiErrorText, toApiError } from '../../api/client';
 import type {
@@ -58,6 +58,7 @@ import {
   RESULT_TYPE_COLORS,
   RESULT_TYPE_LABELS,
 } from './common';
+import { useSearchParams } from 'react-router-dom';
 
 type QcAction = 'pass' | 'reject' | 'review';
 
@@ -116,6 +117,9 @@ export default function MeterReadings() {
 
   const [supersedeTarget, setSupersedeTarget] = useState<MeterReading | null>(null);
   const [supersedeIdemKey, setSupersedeIdemKey] = useState('');
+  // 20261021 整改 任务E：抄表员上报疑似违章（→ PENDING_REVIEW，派发稽查任务）。
+  const [violationTarget, setViolationTarget] = useState<MeterReading | null>(null);
+  const [violationForm] = Form.useForm<{ violationType: string; description?: string; photoRefs?: string }>();
   const [saving, setSaving] = useState(false);
   const [supersedeForm] = Form.useForm<SupersedeFormValues>();
 
@@ -166,6 +170,10 @@ export default function MeterReadings() {
     [page, pageSize, rows.length],
   );
 
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
+  const focusDone = useRef<string | null>(null);
+
   const openDetail = async (reading: MeterReading) => {
     setDetailLoading(true);
     setDetail(null);
@@ -178,6 +186,14 @@ export default function MeterReadings() {
       setDetailLoading(false);
     }
   };
+
+  // 任务直达 ?focusId= → 自动打开该条读数详情（层面一定位）。
+  useEffect(() => {
+    if (focusId && focusDone.current !== focusId) {
+      focusDone.current = focusId;
+      void openDetail({ id: focusId } as MeterReading);
+    }
+  }, [focusId]);
 
   const doQc = async (reading: MeterReading, action: QcAction) => {
     setActing(reading.id);
@@ -441,6 +457,19 @@ export default function MeterReadings() {
                 更正
               </Button>
             )}
+            {canWrite && (
+              <Button
+                size="small"
+                danger
+                icon={<WarningOutlined />}
+                onClick={() => {
+                  violationForm.resetFields();
+                  setViolationTarget(record);
+                }}
+              >
+                上报违章
+              </Button>
+            )}
           </Space>
         );
       },
@@ -460,7 +489,6 @@ export default function MeterReadings() {
 
   return (
     <>
-      <TaskContextBanner />
       <Card
       title="抄表记录 / 质检"
       extra={
@@ -617,6 +645,53 @@ export default function MeterReadings() {
         </Form>
       </Modal>
 
+      {/* 上报疑似违章（20261021 任务E：READING 来源，进入待核实） */}
+      <Modal
+        maskClosable={false}
+        open={violationTarget !== null}
+        title="上报疑似违章（转稽查核实）"
+        okText="上报"
+        cancelText="取消"
+        onOk={async () => {
+          const v = await violationForm.validateFields();
+          try {
+            await api.post(`/meter-readings/${violationTarget!.id}/report-violation`, {
+              violationType: v.violationType,
+              description: v.description,
+              photoRefs: String(v.photoRefs ?? '')
+                .split(/[\s,，;；]+/)
+                .filter(Boolean),
+            });
+            message.success('已上报，稽查岗将在待办中核实');
+            setViolationTarget(null);
+          } catch (e) {
+            message.error(apiErrorText(e));
+          }
+        }}
+        onCancel={() => setViolationTarget(null)}
+        destroyOnHidden
+      >
+        <Form form={violationForm} layout="vertical">
+          <Form.Item name="violationType" label="疑似违章类型" rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: 'THEFT', label: '盗窃用水' },
+                { value: 'PRIVATE_CONN', label: '私自接水' },
+                { value: 'TAMPER', label: '破坏表计' },
+                { value: 'SEAL_BROKEN', label: '破坏铅封' },
+                { value: 'CATEGORY_MISUSE', label: '擅自改变用水性质' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="description" label="现场描述">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+          <Form.Item name="photoRefs" label="现场照片引用（空格分隔，可选）">
+            <Input.TextArea rows={2} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
       {/* CSV 批量导入 */}
       <Modal maskClosable={false}
         open={importOpen}
@@ -693,11 +768,6 @@ export default function MeterReadings() {
               { key: 'address', label: '用水地址', children: detail.account?.addr ?? '—' },
               { key: 'meterNo', label: '表号', children: detail.meterNo ?? '—' },
               {
-                key: 'id',
-                label: '记录 ID',
-                children: <span style={{ fontFamily: 'monospace' }}>{detail.id}</span>,
-              },
-              {
                 key: 'result',
                 label: '抄表结果',
                 children: (
@@ -735,12 +805,17 @@ export default function MeterReadings() {
               },
               {
                 key: 'tech',
-                label: '技术标识',
+                label: '技术信息',
                 children: (
-                  <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                    明细 {detail.planItemId ?? '无（计划外录入）'} · 安装{' '}
-                    {detail.installationId} · 表计 {detail.meterId}
-                  </span>
+                  <details>
+                    <summary style={{ cursor: 'pointer', color: '#888' }}>
+                      展开查看（排查用）
+                    </summary>
+                    <span style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                      记录 {detail.id} · 明细 {detail.planItemId ?? '无（计划外录入）'} ·
+                      安装 {detail.installationId} · 表计 {detail.meterId}
+                    </span>
+                  </details>
                 ),
               },
               {

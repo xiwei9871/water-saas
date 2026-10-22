@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuditInterceptor } from './common/audit.interceptor.js';
@@ -21,9 +22,11 @@ import { RemoteModule } from './modules/remote/remote.module.js';
 import { ReportModule } from './modules/report/report.module.js';
 import { ExceptionModule } from './modules/exception/exception.module.js';
 import { TaskModule } from './modules/task/task.module.js';
+import { ServiceOrderModule } from './modules/service-order/service-order.module.js';
 
 @Module({
   imports: [
+    ScheduleModule.forRoot(),
     CommonModule,
     IamModule,
     CustomerModule,
@@ -38,6 +41,7 @@ import { TaskModule } from './modules/task/task.module.js';
     DashboardModule,
     IntegrationModule,
     InstallModule,
+    ServiceOrderModule,
   ],
   controllers: [AppController],
   providers: [

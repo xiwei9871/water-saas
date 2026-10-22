@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",
+    "@paddleocr/paddleocr-js": "^0.4.2",
+    "@techstark/opencv-js": "4.10.0-release.1",
     "@ws/types": "workspace:*",
     "antd": "^5.29.3",
     "axios": "^1.20.0",

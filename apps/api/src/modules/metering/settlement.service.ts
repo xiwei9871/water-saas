@@ -388,7 +388,7 @@ export class SettlementService {
     // Installations contributing to the period: lifetime intersects
     // [start,end) — still ACTIVE, or REMOVED during/after the period (an
     // install removed in a LATER period was active throughout this one).
-    const installations = await tx.meterInstallation.findMany({
+    const allInstallations = await tx.meterInstallation.findMany({
       where: {
         tenantId: ctx.tenantId,
         waterAccountId: body.waterAccountId,
@@ -403,13 +403,40 @@ export class SettlementService {
         initialReading: true,
         finalReading: true,
         status: true,
-        meter: { select: { maxDial: true } },
+        meter: { select: { id: true, maxDial: true, meterRole: true } },
       },
       orderBy: [{ installedAt: 'asc' }, { id: 'asc' }],
     });
-    if (installations.length === 0) {
+    if (allInstallations.length === 0) {
       throw new BadRequestException({
         code: 'NO_INSTALLATION_IN_PERIOD',
+        waterAccountId: body.waterAccountId,
+        period: body.period,
+      });
+    }
+    // 20261021 整改 任务C：总分表/考核表计费排除 —
+    //  CHECK考核表永不计费；billing_mode=MASTER 时分表安装行不计费（挂总表户）；
+    //  billing_mode=SUB 时总表安装行不计费（各分表户自负）。
+    const meterIds = allInstallations.map((i) => i.meterId);
+    const rels = await tx.meterRelation.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        expiredDate: null,
+        OR: [{ masterMeterId: { in: meterIds } }, { subMeterId: { in: meterIds } }],
+      },
+      select: { masterMeterId: true, subMeterId: true, billingMode: true },
+    });
+    const excludedMeterIds = new Set<string>();
+    for (const r of rels) {
+      if (r.billingMode === 'MASTER') excludedMeterIds.add(r.subMeterId);
+      else excludedMeterIds.add(r.masterMeterId);
+    }
+    const installations = allInstallations.filter(
+      (i) => i.meter.meterRole !== 'CHECK' && !excludedMeterIds.has(i.meterId),
+    );
+    if (installations.length === 0) {
+      throw new BadRequestException({
+        code: 'ACCOUNT_BILLING_EXCLUDED',
         waterAccountId: body.waterAccountId,
         period: body.period,
       });
@@ -984,10 +1011,35 @@ export class SettlementService {
     const insts = instIds.length
       ? await tx.meterInstallation.findMany({
           where: { tenantId: ctx.tenantId, id: { in: instIds } },
-          select: { id: true, meter: { select: { meterNo: true } } },
+          select: {
+            id: true,
+            installedAt: true,
+            removedAt: true,
+            meter: { select: { meterNo: true } },
+          },
         })
       : [];
+    const instById = new Map(insts.map((i) => [i.id, i]));
     const meterNoByInst = new Map(insts.map((i) => [i.id, i.meter.meterNo]));
+    // 换表分段角色（20261020 核查 T3）：分量所属安装行在结算期内被拆
+    // → 老表段；期内新装 → 新表段；否则整期段（null 不标）。期界按
+    // period=YYYYMM → [当月1日, 次月1日)。
+    const periodOf = new Map(
+      rows.map((r) => [r.id, (r as { period?: string }).period ?? '']),
+    );
+    const segRole = (installationId: string, period: string): string | null => {
+      const inst = instById.get(installationId);
+      if (!inst || !/^\d{6}$/.test(period)) return null;
+      const y = Number(period.slice(0, 4));
+      const m = Number(period.slice(4, 6));
+      const start = new Date(Date.UTC(y, m - 1, 1));
+      const end = new Date(Date.UTC(y, m, 1));
+      if (inst.removedAt && inst.removedAt >= start && inst.removedAt < end) {
+        return 'OLD_SEGMENT';
+      }
+      if (inst.installedAt >= start && inst.installedAt < end) return 'NEW_SEGMENT';
+      return null;
+    };
     const readingIds = [
       ...new Set(
         components
@@ -1013,6 +1065,7 @@ export class SettlementService {
       (bySettlement.get(settlementId) ?? []).map((c) => ({
         ...c,
         meterNo: meterNoByInst.get(c.installationId) ?? null,
+        segmentRole: segRole(c.installationId, periodOf.get(settlementId) ?? ''),
         sourceReading: (c.sourceReadingId && readingById.get(c.sourceReadingId)) ?? null,
       }));
     const streaks = await this.estimateStreaks(

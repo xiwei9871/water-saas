@@ -266,3 +266,93 @@ a19c2a4 + 352d87f review fixes (scoped org trees/roles PUT guard/logout race/UX)
 - 部署注意: shared/compose.env 的 MIGRATION_DATABASE_URL runtime 指向受限 ws_app(无 public CREATE)——migrate deploy 必须显式传 owner 串(-e MIGRATION_DATABASE_URL=postgres://...); releases 目录按完整 sha 命名; api:3000 无 /v1 前缀, nginx 剥 /api 前缀。
 - 验证基线: API e2e 580+12(ops-report spec), e10 Playwright 41/41, web/api build ✓; 冒烟走 SSH 隧道 127.0.0.1:5185→192.168.3.185:5185(本机不在 pilot LAN)。
 - 公网勘误: water.manqiaotechnology.com→175.152.66.12 是另一套系统(A0xxx 数字错误码, 全路径 401), 与本项目无关; 试点仅内网 http://192.168.3.185:5185。
+
+## 抄表 H5 v2 + 表底 OCR 识别 (2026-10-19, pilot 4710762)
+- H5 v2 (fc224ab/d309d02): 查表顺序模式/重抄(supersede)/漏抄即待抄队列/搜索定位(户号·客户·地址·电话·表号)/拍照压缩上传/离线 localStorage 队列+幂等键/水表信息抽屉(口径·类别·上期止度)+现场联系信息 PATCH /water-accounts/:id/field-contact(白名单3字段,审计)/抄表统计抽屉; 强制拍照: 非户表必拍+非正常查表必拍(前端校验,服务端未硬拒以兼容旧数据)。
+- 表底识别 `POST /meter-readings/recognize` (metering:write, body {image:base64}): **纯传统 CV 不调大模型** — sharp 预处理→强圆判别(≥6 → 指针表)→字轮带检测+列向墨聚类窗口→tesseract.js 数字白名单(SPARSE_TEXT/SINGLE_LINE 双 psm × norm/negate/暗带gamma)→红轮小数边界(放宽 maroon 红+带纵向2.6×扩扫); 指针路径 Hough 圆(750px降采样)+径向暗像素角度采样+左列×1/×10/×100/×1000 组合。返回 {value,confidence,method,details,message} **仅参考不落库**, H5 预填+置信度提示人工核对。METER_OCR=off 关停。
+- tessdata: `apps/api/tessdata/eng.traineddata`(tessdata_fast 4MB) 已提交随源码进镜像, `langPath` 本地+`gzip:false`+`cacheMethod:none` 运行期零网络; TESSDATA_DIR 可覆盖。
+- 三类表实测: 混合字轮"0088+红7"→89(conf42,decimal_wheel_dropped); 暗光混合"00062"→9008(conf0 自动标低); 全指针8盘→300(conf53 POINTER_INFERRED_LAYOUT)。末轮半转/暗光为固有难点, 全部走人工核对兜底。
+- 验证: 单测 9/9 + ocr e2e 5/5 (401/400/403/合成图/乱码兜底), 全套 e2e 587+5, e10 40/41(1 消耗性跳过), 线上三图实测 5-8s/张。
+- 分支 feat/mobile-reading-v2 已推送未合 main (菜单顺序 09fcdd4 + H5v2 + OCR 同分支)。
+
+## 2026-10-19 表底 OCR 重构：PaddleOCR PP-OCRv6（浏览器本地推理）
+- 原因：自研 Tesseract/CV 管线在暗光字轮图上输出 `8`/`908`（真值 00062.825），不可靠。
+- 方案：`@paddleocr/paddleocr-js@0.4.2` + PP-OCRv6 small det/rec ONNX（非大模型）。
+  模型 tar(det-v6.tar/rec-v6.tar)+ort wasm/.mjs 打进 `apps/web/public/`，内网零外网依赖。
+- 解析层 `apps/web/src/utils/meter-ocr.ts`：纯数字框行聚类、逐字条带暖色(mean r-g>0)截断红轮小数、
+  4-6 位长度门（串号 >6 拒绝）、散布小数字框 ≥8 判为指针表返回 null → 回退服务端指针路径。
+- vite.config.ts dev 中间件直发 /ort、/ocr-models（绕过 public 导入限制）。
+- nginx.conf 加 /ort/ 与 /ocr-models/ location：.mjs 发 text/javascript（默认 octet-stream 会被
+  动态 import 拒绝）。deploy/ 资产（Dockerfile/compose/nginx.conf）本次起入库 git。
+- 线上实测三样片（57de6dc）：00062→62(99%)、0088→88(91%)、全指针 null→服务端兜底。
+- e10 移动抄表 spec 过；window.__meterOcr 诊断钩子可 console 直调。
+
+## 2026-10-19 表务工单模块 (pilot e93b42e, 需求文档 T1-T6/T11/T12 批A)
+- 需求 20261019营销系统表务管理与功能补齐整合需求.docx：T7-T9 换表分段结算早已实现
+  （replaceTx 三要素强制+期中途换多段 component+已结算期阻断，settlement e2e 覆盖），
+  本次落地缺口 = 工单模块 + 统计 + 查询。
+- meter_service_order 表 + RLS + 11 类 SERVICE_TYPE 字典 + metering:service 权限
+  （迁移回填全部存量租户；新租户由 seed.ts 覆盖）。AccountEventType 增 METER_CHECK。
+- 流程：申请 → 审批(tenant_param meterService.requireApproval=false 可旁路) →
+  派单(同事务建 Task type=METER_SERVICE, 复用 task_open_dedupe) → 执行 → 归档；
+  REJECTED/CANCELLED 终态；所有迁移 guarded updateMany（并发负者 409）。
+- 执行域联动（同一事务，失败整体回滚）：PERIODIC_CHECK/DISPUTE_CHECK 写
+  AccountEvent(METER_CHECK)；FAULT → replaceTx(oldFinal/newInitial/newMeterId)；
+  SUSPEND/STOP → suspendTx；RESUME → resumeTx；CLOSE → CloseAccountUseCase
+  （欠款/预存校验内置）；execute 对 EXECUTED/ARCHIVED 幂等返回。
+- T11: GET /service-orders/stats（类型×状态分布+avg处置时长+SLA按期率，
+  tenant_param meterService.slaHours 默认72）；指标字典升 2026-10.v3 增 6 项
+  （工单量/按期率/平均时长/驳回率/归档率/换表处置量）。
+- T12: GET /service-orders/meter-lifecycle/:accountId（装/拆/工单/账户事件合并
+  时间线）；GET /service-orders/replace-records（reason=REPLACE/FAULT 新行反配
+  predecessor，输出 old.finalReading/new.initialReading 分段明细）。
+- 前端：抄表管理→表务工单 /metering/service-orders（perms metering:service）—
+  列表+类型/状态/日期筛选+发起 Modal(户搜索+ACTIVE安装行联动)+详情抽屉
+  状态化动作按钮+按类型执行回填表单+生命周期 Timeline+任务中心 ?focusId 直达。
+- 验证：service-order e2e 10/10；全套 597 通过（仅 e10 版本断言升 v3）；web/api 构建过。
+- 部署坑：compose run api 镜像 tag 受 WATER_RELEASE_SHA 影响 — 迁移前必须显式
+  导出目标 SHA，否则旧镜像里没有新迁移目录会显示 "No pending migrations"。
+- 试点冒烟：cd-water/admin 全流程 create→approve→dispatch→execute→archive 201，
+  METER_CHECK 事件落库，stats/lifecycle 正常。冒烟工单已留库（ARCHIVED 状态）。
+- 批B未动：总分表/库房生命周期/违章用水/银行代扣防重 — 下轮排。
+
+## 2026-10-20 核查报告整改 P0 (需求核查 20261020营销系统整合需求全面核查报告.docx)
+- 先分析再改：核查的"换表分段未实现/统计查询均无"为误判 —— 结算引擎早已按
+  installation 分段（settlement.service.ts 注释+双段 e2e），stats/lifecycle/
+  replace-records 端点已存在；真缺口=呈现层+任务驱动+检定周期+业务触发+
+  执行载荷+一级菜单。
+- 一级菜单：表务工单从抄表管理下提出为「表务管理」/service（ToolOutlined），
+  子页：工单管理 /service/orders、处置统计 /service/stats、换表记录
+  /service/replace-records；旧 /metering/service-orders menuHidden 重定向保留。
+- 任务双节点（task.types.ts 增 SVC_APPROVAL/SVC_EXECUTE，bizRoute 指
+  /service/orders?focusId=）：建单建审批任务、审批/驳回自动完结、派单建
+  执行任务、执行/归档/撤销自动完结 —— 全程走 TaskService dedupe+autoCompleteByBiz。
+- 检定周期：meter + check_period_years/last_check_date（迁移
+  20261020000000_check_fields_order_source）；MeterService.createTx 按口径
+  自动带入（≤25mm→6, 25-50→4, >50→2，25 归小口径档）；检定执行回写
+  lastCheckDate + AccountEvent 全字段（机构/日期/结果/误差/证书/下次日期）。
+- 到期扫描：POST /service-orders/scan-check-due（leadDays 默认30，
+  tenant_param meterService.checkLeadDays 可配）—— lastCheckDate+年限到期即
+  自动建 PERIODIC_CHECK(sourceType=AUTO_CHECK)+审批任务；同表有未完结检定
+  工单跳过；无检定属性的表不生成。e2e 覆盖幂等。
+- 业务触发：order + source_type/source_reading_id/org_unit_id（片区锚点取
+  覆盖册 orgUnitId）；READING_REPORT 校验读数归属户并自动带表位/表；
+  建单未传表位时自动挂最新 ACTIVE 安装行；H5 抄表页加「现场异常上报」
+  （损坏→FAULT/污浊→METER_GROUP_CLEANING/积水→FACILITY_MAINTENANCE/
+  表位不当→SITE_RECTIFICATION），复用压缩照片+离线队列（队列加 url 字段
+  支持 /service-orders 端点）。
+- 执行载荷全补齐（service-order.types.ts 分类型 parse*Payload）：检定
+  机构/日期/结果/误差/证书/下次日期；停复水生效日；限流方式/限值/恢复日期；
+  现场类 content+photoRefs；CLOSE 拆除止码+removedAt（缺→400
+  CLOSE_FINAL_READING_REQUIRED）→ removeTx 拆表 + CloseAccountUseCase 同事务；
+  全类型 photoRefs 并入 linkRef 留证。详情接口注入 targetMeter+installation
+  档案供执行屏展示。
+- 分段呈现：attachDetails 给每个 component 打 segmentRole
+  （removedAt∈结算期→OLD_SEGMENT 老表段 / installedAt∈结算期→NEW_SEGMENT
+  新表段），结算页表号列渲染橙/绿 Tag。
+- 验证：service-order e2e 12/12（任务双节点/检定回写/CLOSE拆表销户/
+  到期扫描幂等/来源自动解析）；回归 settlement+task-center+meter-lifecycle+
+  customer 104/104；全套 599（2 个并发 flake 单跑复绿）；web+api 构建过。
+- 迁移部署记录：测试库 _prisma_migrations 只缺新条目 → SQL 直跑 + 手工登记
+  checksum 行；dev 库照旧手工 SQL。试点部署仍需先导出 WATER_RELEASE_SHA 再
+  compose run api prisma migrate deploy。

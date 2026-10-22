@@ -19,6 +19,7 @@ import {
   Space,
   Statistic,
   Table,
+  Tabs,
   Tag,
   Timeline,
   Typography,
@@ -82,6 +83,32 @@ const TARGET_PAGE: Record<string, string> = {
   UNPAID_BILL_OVERDUE: '/billing/bills',
 };
 
+/**
+ * 3.1 可处置权限映射：异常类型 → 处理该异常所需权限。
+ * 默认 Tab 只展示当前账号可处置的异常；「全部异常」Tab 只读可见。
+ */
+const TYPE_PERM: Record<string, string> = {
+  READING_QC_PENDING: 'metering:qc',
+  READING_QC_REVIEW: 'metering:qc',
+  READING_QC_REJECTED: 'metering:qc',
+  ESTIMATE_STREAK: 'metering:qc',
+  PLANNED_NO_READING: 'metering:qc',
+  NO_ACTIVE_METER: 'metering:service',
+  MULTI_ACTIVE_METER: 'metering:service',
+  NO_BOOK: 'metering:write',
+  MULTI_BOOK: 'metering:write',
+  REMOTE_EVENT_UNBOUND: 'metering:remote:manage',
+  REMOTE_EVENT_WAITING_PLAN: 'metering:remote:manage',
+  REMOTE_EVENT_FAILED: 'metering:remote:manage',
+  REMOTE_EVENT_CONFLICT: 'metering:remote:manage',
+  REMOTE_EVENT_KEY_CONFLICT: 'metering:remote:manage',
+  SETTLEMENT_DRIFT: 'billing:write',
+  PLANNED_NO_SETTLEMENT: 'billing:write',
+  SETTLEMENT_UNFINALIZED: 'billing:write',
+  CLOSED_BALANCE_LEFT: 'customer:write',
+  UNPAID_BILL_OVERDUE: 'payment:write',
+};
+
 const SEV_COLORS = { BLOCKING: 'red', WARNING: 'orange', INFO: 'blue' } as const;
 const SEV_LABELS = { BLOCKING: '阻断', WARNING: '警告', INFO: '提示' } as const;
 const STATUS_LABELS: Record<string, string> = {
@@ -138,6 +165,14 @@ export default function Exceptions() {
   const [bookId, setBookId] = useState<string | undefined>();
   const [orgs, setOrgs] = useState<{ id: string; name: string }[]>([]);
   const [books, setBooks] = useState<{ id: string; name: string }[]>([]);
+
+  /** 3.1：我可处置 / 全部异常 双视角。 */
+  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+  const canAct = (t: string) => {
+    const perm = TYPE_PERM[t];
+    return !perm || hasPerm(perm);
+  };
+  const shownItems = scope === 'mine' ? items.filter((i) => canAct(i.type)) : items;
 
   const [detail, setDetail] = useState<ExceptionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -318,11 +353,14 @@ export default function Exceptions() {
           <Button size="small" icon={<EyeOutlined />} onClick={() => void openDetail(r.key)}>
             详情
           </Button>
-          {TARGET_PAGE[r.type] && (
-            <Button size="small" type="link" onClick={() => navigate(TARGET_PAGE[r.type])}>
-              去处理
-            </Button>
-          )}
+          {TARGET_PAGE[r.type] &&
+            (canAct(r.type) ? (
+              <Button size="small" type="link" onClick={() => navigate(TARGET_PAGE[r.type])}>
+                去处理
+              </Button>
+            ) : (
+              <Tag style={{ marginInlineEnd: 0 }}>无处置权限</Tag>
+            ))}
         </Space>
       ),
     },
@@ -432,12 +470,23 @@ export default function Exceptions() {
           </Space>
         }
       >
+        <Tabs
+          activeKey={scope}
+          onChange={(k) => setScope(k as 'mine' | 'all')}
+          items={[
+            {
+              key: 'mine',
+              label: `我可处置（${items.filter((i) => canAct(i.type)).length}）`,
+            },
+            { key: 'all', label: `全部异常（${items.length}）` },
+          ]}
+        />
         <Table<ExceptionItem>
           rowKey="key"
           size="small"
           loading={loading}
           columns={columns}
-          dataSource={items}
+          dataSource={shownItems}
           pagination={{
             current: page,
             pageSize,

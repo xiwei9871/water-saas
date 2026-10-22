@@ -75,6 +75,7 @@ interface MeterFormValues {
   model?: string;
   caliber?: string;
   maxDial?: string;
+  meterRole?: string;
   status?: MeterStatus;
 }
 
@@ -232,6 +233,7 @@ export default function Meters() {
       model: meter.model ?? undefined,
       caliber: meter.caliber ?? undefined,
       maxDial: meter.maxDial ?? undefined,
+      meterRole: meter.meterRole ?? 'NORMAL',
       status: meter.status,
     });
     setMeterModal({ mode: 'edit', meter });
@@ -262,6 +264,7 @@ export default function Meters() {
             model: values.model,
             caliber: values.caliber,
             maxDial: values.maxDial,
+            meterRole: values.meterRole,
             status: values.status,
           }),
         );
@@ -430,6 +433,14 @@ export default function Meters() {
       key: 'maxDial',
       width: 100,
       render: (v: string | null) => v ?? '—',
+    },
+    {
+      title: '角色',
+      dataIndex: 'meterRole',
+      key: 'meterRole',
+      width: 80,
+      render: (v: string | undefined) =>
+        ({ NORMAL: '普通', MASTER: '总表', SUB: '分表', CHECK: '考核表' })[v ?? 'NORMAL'] ?? v,
     },
     {
       title: '状态',
@@ -784,6 +795,19 @@ export default function Meters() {
             rules={[DECIMAL_RULE]}
           >
             <Input placeholder="如 99999" />
+          </Form.Item>
+          <Form.Item
+            name="meterRole"
+            label="表具角色"
+            tooltip="总表/分表由「总分表关系」自动维护；此处仅可标普通表或考核表（监控表，不计费）"
+          >
+            <Select
+              allowClear
+              options={[
+                { value: 'NORMAL', label: '普通表' },
+                { value: 'CHECK', label: '考核表（监控表，不计费）' },
+              ]}
+            />
           </Form.Item>
           {meterModal?.mode === 'edit' && editTransitions.length > 0 && (
             <Form.Item name="status" label="状态">

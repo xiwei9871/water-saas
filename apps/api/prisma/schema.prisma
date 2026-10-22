@@ -66,6 +66,7 @@ enum AccountEventType {
   SUSPEND
   RESUME
   CLOSE
+  METER_CHECK
 }
 
 enum MeterStatus {
@@ -73,6 +74,9 @@ enum MeterStatus {
   INSTALLED
   MAINTENANCE
   RETIRED
+  /** 20261021 任务D：已领用（出库未装）/ 在途（库间调拨）。 */
+  ISSUED
+  IN_TRANSIT
 }
 
 enum InstallationStatus {
@@ -498,6 +502,21 @@ model SysSequence {
   @@map("sys_sequence")
 }
 
+/** 2.4 单据编号规则：租户级前缀覆盖（未配置走代码默认前缀）。 */
+model DocNoRule {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  seqKey    String   @map("seq_key")
+  label     String
+  prefix    String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, seqKey])
+  @@map("doc_no_rule")
+}
+
 model TenantParam {
   tenantId  String   @map("tenant_id") @db.Uuid
   key       String
@@ -528,6 +547,8 @@ model Customer {
   // Stable identity for system-owned customers (e.g. 'MONITORING_INTERNAL').
   // Regular customers keep NULL — Postgres unique treats NULLs as distinct.
   systemKey  String?  @map("system_key")
+  /** 报装纳入：来源报装单号。 */
+  sourceApplyNo String? @map("source_apply_no")
   createdAt  DateTime @default(now()) @map("created_at")
   createdBy  String?  @map("created_by") @db.Uuid
   updatedAt  DateTime @updatedAt @map("updated_at")
@@ -556,6 +577,8 @@ model SettleAccount {
   waterAccounts     WaterAccount[]
   bills             Bill[]
   prepaymentEntries PrepaymentLedgerEntry[]
+  debitAgreements   BankDebitAgreement[]
+  debitItems        BankDebitItem[]
 
   @@unique([tenantId, settleNo])
   @@unique([tenantId, id])
@@ -574,6 +597,8 @@ model WaterAccount {
   billable        Boolean       @default(true)
   openedAt        DateTime?     @map("opened_at") @db.Date
   closedAt        DateTime?     @map("closed_at") @db.Date
+  /** 报装纳入：来源报装单号（营业厅/电话报装→立户的反向关联）。 */
+  sourceApplyNo   String?       @map("source_apply_no")
   createdAt       DateTime      @default(now()) @map("created_at")
   createdBy       String?       @map("created_by") @db.Uuid
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -585,6 +610,8 @@ model WaterAccount {
   bills              Bill[]
   meterInstallations MeterInstallation[]
   householdProfiles  WaterAccountHouseholdProfile[]
+  serviceOrders      MeterServiceOrder[]
+  violations         WaterViolation[]
 
   @@unique([tenantId, accountNo])
   @@unique([tenantId, id])
@@ -628,7 +655,19 @@ model Meter {
   model         String?
   caliber       String?
   maxDial       Decimal?    @map("max_dial") @db.Decimal(18, 4)
+  /** 检定周期年限（20261020 核查 T4）：DN≤25→6 / DN25–50→4 / DN>50→2，
+      入库按口径自动带入、可修正。 */
+  checkPeriodYears Int?     @map("check_period_years")
+  /** 上次检定日期；与 checkPeriodYears 合算出下次检定到期日。 */
+  lastCheckDate   DateTime? @map("last_check_date") @db.Date
+  /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表(监控表)。 */
+  meterRole     String      @default("NORMAL") @map("meter_role")
+  /** 报装纳入：来源报装单号。 */
+  sourceApplyNo String?     @map("source_apply_no")
   parentMeterId String?     @map("parent_meter_id") @db.Uuid
+  /** 20261021 任务D：在库时指向当前库房/货位；领用/安装后清空。 */
+  warehouseId   String?     @map("warehouse_id") @db.Uuid
+  locationId    String?     @map("location_id") @db.Uuid
   status        MeterStatus @default(AVAILABLE)
   createdAt     DateTime    @default(now()) @map("created_at")
   createdBy     String?     @map("created_by") @db.Uuid
@@ -636,11 +675,208 @@ model Meter {
   updatedBy     String?     @map("updated_by") @db.Uuid
 
   installations MeterInstallation[]
+  masterRelations MeterRelation[] @relation("master")
+  subRelations    MeterRelation[] @relation("sub")
+  stockMovements  MeterStockMovement[]
 
   @@unique([tenantId, meterNo])
   @@unique([tenantId, id])
   @@index([tenantId, status])
   @@map("meter")
+}
+
+/** 20261021 任务D：水表库房 — 编号/名称/所属单位。 */
+model MeterWarehouse {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  owner     String?
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  locations MeterWarehouseLocation[]
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@map("meter_warehouse")
+}
+
+/** 任务D：库房货位。 */
+model MeterWarehouseLocation {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  warehouseId String   @map("warehouse_id") @db.Uuid
+  code        String
+  name        String
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  warehouse MeterWarehouse @relation(fields: [tenantId, warehouseId], references: [tenantId, id])
+
+  @@unique([tenantId, warehouseId, code])
+  @@unique([tenantId, id])
+  @@map("meter_warehouse_location")
+}
+
+/** 任务D：出入库流水 — PURCHASE_IN采购/ISSUE_OUT领用/RETURN_IN退库/SCRAP_OUT报废/TRANSFER调拨。 */
+model MeterStockMovement {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  meterId      String   @map("meter_id") @db.Uuid
+  movementType String   @map("movement_type")
+  docNo        String?  @map("doc_no")
+  supplier     String?
+  batchNo      String?  @map("batch_no")
+  warehouseId  String?  @map("warehouse_id") @db.Uuid
+  locationId   String?  @map("location_id") @db.Uuid
+  operatorId   String?  @map("operator_id") @db.Uuid
+  movedAt      DateTime @default(now()) @map("moved_at")
+  remark       String?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  meter Meter @relation(fields: [tenantId, meterId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, meterId, movedAt])
+  @@index([tenantId, docNo])
+  @@map("meter_stock_movement")
+}
+
+/** 20261021 任务F：银行代扣协议 — 每户至多一条 ACTIVE（partial unique）。 */
+model BankDebitAgreement {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  settleAccountId String    @map("settle_account_id") @db.Uuid
+  cardNoMasked    String    @map("card_no_masked")
+  cardLast4       String    @map("card_last4")
+  bankCode        String    @map("bank_code")
+  holderName      String?   @map("holder_name")
+  signDate        DateTime? @map("sign_date") @db.Date
+  status          String    @default("ACTIVE")
+  cancelledAt     DateTime? @map("cancelled_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  createdBy       String?   @map("created_by") @db.Uuid
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  updatedBy       String?   @map("updated_by") @db.Uuid
+
+  settleAccount SettleAccount @relation(fields: [tenantId, settleAccountId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@map("bank_debit_agreement")
+}
+
+/** 任务F：代扣批次（PKMX 扣款明细文件的一批次）。 */
+model BankDebitBatch {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  period      String   @db.Char(6)
+  totalCount  Int      @default(0) @map("total_count")
+  totalAmount BigInt   @default(0) @map("total_amount")
+  status      String   @default("GENERATED")
+  generatedBy String?  @map("generated_by") @db.Uuid
+  executedAt  DateTime? @map("executed_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  createdBy   String?  @map("created_by") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  items BankDebitItem[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, period])
+  @@map("bank_debit_batch")
+}
+
+/** 任务F：扣款明细 — 防御③ partial unique：同户同期至多一条 PENDING / 一条 SUCCESS。 */
+model BankDebitItem {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  batchId         String    @map("batch_id") @db.Uuid
+  settleAccountId String    @map("settle_account_id") @db.Uuid
+  period          String    @db.Char(6)
+  /** 分（bigint 与 bill.total_amount 一致）。 */
+  amount          BigInt
+  status          String    @default("PENDING")
+  bankSerialNo    String?   @map("bank_serial_no")
+  failReason      String?   @map("fail_reason")
+  /** 扣款成功自动销账生成的 payment。 */
+  paymentId       String?   @map("payment_id") @db.Uuid
+  executedAt      DateTime? @map("executed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  batch         BankDebitBatch @relation(fields: [tenantId, batchId], references: [tenantId, id])
+  settleAccount SettleAccount @relation(fields: [tenantId, settleAccountId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, batchId])
+  @@map("bank_debit_item")
+}
+
+/** 20261021 任务E：违章用水 — 稽查登记(INSPECT)/抄表上报(READING→待核实)。 */
+model WaterViolation {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  waterAccountId String    @map("water_account_id") @db.Uuid
+  violationType  String    @map("violation_type")
+  reporterId     String?   @map("reporter_id") @db.Uuid
+  occurredDate   DateTime? @map("occurred_date") @db.Date
+  description    String?
+  photoRefs      Json?     @map("photo_refs") @db.JsonB
+  /** PENDING_REVIEW待核实→PROCESSING处理中→PROCESSED已处理→ARCHIVED已归档；DISMISSED误报。 */
+  status         String    @default("PENDING_REVIEW")
+  sourceType     String    @default("INSPECT") @map("source_type")
+  /** READING 来源时关联 meter_reading.id。 */
+  sourceId       String?   @map("source_id") @db.Uuid
+  penaltyAmount  Decimal?  @map("penalty_amount") @db.Decimal(18, 2)
+  backbillAmount Decimal?  @map("backbill_amount") @db.Decimal(18, 2)
+  processorId    String?   @map("processor_id") @db.Uuid
+  processedAt    DateTime? @map("processed_at")
+  processNote    String?   @map("process_note")
+  /** 归档佐证（现场照片+处罚文书）。 */
+  evidence       Json?     @db.JsonB
+  taskId         String?   @map("task_id") @db.Uuid
+  /** 联动表务工单（停水/拆表处置）。 */
+  serviceOrderId String?   @map("service_order_id") @db.Uuid
+  archivedBy     String?   @map("archived_by") @db.Uuid
+  archivedAt     DateTime? @map("archived_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by") @db.Uuid
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by") @db.Uuid
+
+  waterAccount WaterAccount @relation(fields: [tenantId, waterAccountId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, waterAccountId])
+  @@index([tenantId, status])
+  @@map("water_violation")
+}
+
+/** 20261021 任务C：总分表关系 — 主表挂分表；billing_mode MASTER=按总表计费/SUB=按分表计费。 */
+model MeterRelation {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  masterMeterId String    @map("master_meter_id") @db.Uuid
+  subMeterId    String    @map("sub_meter_id") @db.Uuid
+  billingMode   String    @default("SUB") @map("billing_mode")
+  effectiveDate DateTime  @map("effective_date") @db.Date
+  expiredDate   DateTime? @map("expired_date") @db.Date
+  createdAt     DateTime  @default(now()) @map("created_at")
+  createdBy     String?   @map("created_by") @db.Uuid
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  updatedBy     String?   @map("updated_by") @db.Uuid
+
+  masterMeter Meter @relation("master", fields: [tenantId, masterMeterId], references: [tenantId, id])
+  subMeter    Meter @relation("sub", fields: [tenantId, subMeterId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+  @@index([tenantId, masterMeterId])
+  @@map("meter_relation")
 }
 
 model MeterInstallation {
@@ -1548,6 +1784,9 @@ model Task {
   escalatedAt    DateTime?    @map("escalated_at")
   completedAt    DateTime?    @map("completed_at")
   completedBy    String?      @map("completed_by") @db.Uuid
+  /** 完成标准回填（3.4）：处理结果说明（必填）+ 佐证引用（照片/单据 dataURL 或 ref）。 */
+  resultNote     String?      @map("result_note")
+  resultEvidence Json?        @map("result_evidence") @db.JsonB
   cancelledAt    DateTime?    @map("cancelled_at")
   cancelReason   String?      @map("cancel_reason")
   createdAt      DateTime     @default(now()) @map("created_at")
@@ -1802,6 +2041,23 @@ model InstallApplication {
   orgUnitId      String?            @map("org_unit_id") @db.Uuid
   surveyNote     String?            @map("survey_note")
   installNote    String?            @map("install_note")
+  /** 装表环节记录的表底读数（APPROVED→INSTALLING 流转时录入），
+      归档时与立户「水表起始读数」联动校验：起始>初始说明装表后有水量。 */
+  installInitialReading Decimal?     @map("install_initial_reading") @db.Decimal(18, 4)
+  /** 受理时生成的供用水合同号（HT+流水）。 */
+  contractNo     String?            @map("contract_no")
+  /** 归档后回写：立户产生的结算户/表号（双向关联 2.2）。 */
+  settleAccountId String?           @map("settle_account_id") @db.Uuid
+  meterNo        String?            @map("meter_no")
+  /** 装表环节接收的完成信息（2.1 接收完成信息）。 */
+  installMeterNo String?            @map("install_meter_no")
+  installCaliber String?            @map("install_caliber")
+  installCompletedAt DateTime?      @map("install_completed_at")
+  feeRequired    Decimal?           @map("fee_required") @db.Decimal(18, 2)
+  feeReceived    Decimal?           @map("fee_received") @db.Decimal(18, 2)
+  feeNote        String?            @map("fee_note")
+  /** V6 合同扫描件：dataURL/引用数组（与任务佐证同口径存 JSONB）。 */
+  contractScan   Json?              @map("contract_scan") @db.JsonB
   rejectReason   String?            @map("reject_reason")
   waterAccountId String?            @map("water_account_id") @db.Uuid
   createdAt      DateTime           @default(now()) @map("created_at")
@@ -1813,4 +2069,72 @@ model InstallApplication {
   @@unique([tenantId, id])
   @@index([tenantId, status])
   @@map("install_application")
+}
+
+// ---------------------------------------------------------------------------
+// 表务管理（2026-10-19 需求 T1-T4）：统一处置工单
+// ---------------------------------------------------------------------------
+
+enum ServiceOrderStatus {
+  PENDING_APPROVAL
+  APPROVED
+  DISPATCHED
+  EXECUTED
+  ARCHIVED
+  REJECTED
+  CANCELLED
+}
+
+/**
+ * 表务处置工单：11 类处置（SERVICE_TYPE 字典，sys_dict 可配置）统一工单。
+ * 流程：申请 PENDING_APPROVAL →(tenant_param meterService.requireApproval=false 免审)
+ * APPROVED → 派单 DISPATCHED(自动建 Task) → 执行回填 EXECUTED(域联动同事务) →
+ * 归档 ARCHIVED；驳回 REJECTED / 取消 CANCELLED。payload 为按类型的扩展字段
+ * （限流量/检定结论/换表三要素等），linkRef 记录联动产物（installation/event id）。
+ */
+model MeterServiceOrder {
+  id                  String             @id @default(uuid()) @db.Uuid
+  tenantId            String             @map("tenant_id") @db.Uuid
+  orderNo             String             @map("order_no")
+  waterAccountId      String             @map("water_account_id") @db.Uuid
+  meterInstallationId String?            @map("meter_installation_id") @db.Uuid
+  meterId             String?            @map("meter_id") @db.Uuid
+  serviceType         String             @map("service_type")
+  reason              String?
+  payload             Json?              @db.JsonB
+  /** 来源：MANUAL 人工发起 / READING_REPORT 抄表异常上报 / AUTO_CHECK 到期检定扫描。 */
+  sourceType          String             @default("MANUAL") @map("source_type")
+  /** 抄表上报时关联的 meter_reading.id。 */
+  sourceReadingId     String?            @map("source_reading_id") @db.Uuid
+  /** 片区锚点（责任册所属组织）— 统计按时间×片区用，建单时由覆盖册解析。 */
+  orgUnitId           String?            @map("org_unit_id") @db.Uuid
+  status              ServiceOrderStatus @default(PENDING_APPROVAL)
+  applicantId         String?            @map("applicant_id") @db.Uuid
+  appliedAt           DateTime           @default(now()) @map("applied_at")
+  approverId          String?            @map("approver_id") @db.Uuid
+  approvedAt          DateTime?          @map("approved_at")
+  approvalNote        String?            @map("approval_note")
+  dispatcherId        String?            @map("dispatcher_id") @db.Uuid
+  assigneeId          String?            @map("assignee_id") @db.Uuid
+  dispatchedAt        DateTime?          @map("dispatched_at")
+  taskId              String?            @map("task_id") @db.Uuid
+  executedBy          String?            @map("executed_by") @db.Uuid
+  executedAt          DateTime?          @map("executed_at")
+  resultNote          String?            @map("result_note")
+  linkRef             Json?              @map("link_ref") @db.JsonB
+  archivedBy          String?            @map("archived_by") @db.Uuid
+  archivedAt          DateTime?          @map("archived_at")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  createdBy           String?            @map("created_by") @db.Uuid
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+  updatedBy           String?            @map("updated_by") @db.Uuid
+
+  waterAccount WaterAccount @relation(fields: [tenantId, waterAccountId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, orderNo])
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@index([tenantId, waterAccountId])
+  @@index([tenantId, serviceType, createdAt])
+  @@map("meter_service_order")
 }

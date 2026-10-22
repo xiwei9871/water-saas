@@ -12,6 +12,9 @@ import { SequenceService } from '../../common/sequence.service.js';
 
 export type MeterStatus = 'AVAILABLE' | 'INSTALLED' | 'MAINTENANCE' | 'RETIRED';
 
+/** 20261021 任务C：水表角色 — MASTER/SUB 由 meter_relation 自动维护，建档只能标 NORMAL/CHECK。 */
+const METER_ROLE_SET = new Set(['NORMAL', 'CHECK']);
+
 export const METER_SELECT = {
   id: true,
   tenantId: true,
@@ -22,6 +25,9 @@ export const METER_SELECT = {
   model: true,
   caliber: true,
   maxDial: true,
+  checkPeriodYears: true,
+  lastCheckDate: true,
+  meterRole: true,
   parentMeterId: true,
   status: true,
   createdAt: true,
@@ -53,6 +59,26 @@ export interface MeterBody {
   model?: string;
   caliber?: string;
   maxDial?: Prisma.Decimal;
+  /** 检定周期年限；缺省按口径自动带入（≤25mm→6, ≤50→4, >50→2）。 */
+  checkPeriodYears?: number | null;
+  /** 上次检定日期（YYYY-MM-DD）。 */
+  lastCheckDate?: string | null;
+  /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表（监控表）。 */
+  meterRole?: string;
+}
+
+/**
+ * 检定周期年限（20261020 核查 T4 / CJ/T 检定规程档位）：
+ * 口径 ≤25mm → 6 年；25–50mm → 4 年；>50mm → 2 年。
+ * 25mm 边界归小口径档（当地规程可另定，建档时可人工修正）。
+ */
+export function deriveCheckPeriodYears(caliber?: string | null): number | null {
+  if (!caliber) return null;
+  const m = /(\d+(?:\.\d+)?)/.exec(caliber);
+  if (!m) return null;
+  const mm = Number(m[1]);
+  if (!Number.isFinite(mm) || mm <= 0) return null;
+  return mm <= 25 ? 6 : mm <= 50 ? 4 : 2;
 }
 
 export interface MeterPatchBody extends MeterBody {
@@ -237,6 +263,11 @@ export class MeterService {
           model: body.model,
           caliber: body.caliber,
           maxDial: body.maxDial,
+          checkPeriodYears:
+            body.checkPeriodYears ?? deriveCheckPeriodYears(body.caliber),
+          lastCheckDate: body.lastCheckDate ? new Date(body.lastCheckDate) : null,
+          meterRole:
+            body.meterRole && METER_ROLE_SET.has(body.meterRole) ? body.meterRole : 'NORMAL',
           status: 'AVAILABLE',
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
@@ -257,6 +288,19 @@ export class MeterService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!existing) throw new NotFoundException({ code: 'METER_NOT_FOUND' });
+    // 20261021 任务C：有在挂总分表关系的表不允许改角色（关系失效先）。
+    if (body.meterRole !== undefined && body.meterRole !== existing.meterRole) {
+      const live = await tx.meterRelation.count({
+        where: {
+          tenantId: ctx.tenantId,
+          expiredDate: null,
+          OR: [{ masterMeterId: id }, { subMeterId: id }],
+        },
+      });
+      if (live > 0) {
+        throw new ConflictException({ code: 'METER_IN_RELATION' });
+      }
+    }
     if (body.status !== undefined && body.status !== existing.status) {
       const allowed = PATCH_TRANSITIONS[existing.status as MeterStatus];
       if (!allowed.includes(body.status)) {
@@ -277,6 +321,15 @@ export class MeterService {
         model: body.model,
         caliber: body.caliber,
         maxDial: body.maxDial,
+        ...(body.checkPeriodYears !== undefined
+          ? { checkPeriodYears: body.checkPeriodYears }
+          : {}),
+        ...(body.lastCheckDate !== undefined
+          ? { lastCheckDate: body.lastCheckDate ? new Date(body.lastCheckDate) : null }
+          : {}),
+        ...(body.meterRole !== undefined && METER_ROLE_SET.has(body.meterRole)
+          ? { meterRole: body.meterRole }
+          : {}),
         status: body.status,
         updatedBy: ctx.staffId,
       },

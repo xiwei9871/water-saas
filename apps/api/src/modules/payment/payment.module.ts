@@ -2,6 +2,9 @@ import { Module } from '@nestjs/common';
 import { TaskModule } from '../task/task.module.js';
 import { PrepaymentModule } from '../prepayment/prepayment.module.js';
 import { AccountOutstandingController } from './account-outstanding.controller.js';
+import { BankDebitController } from './bank-debit.controller.js';
+import { BANK_DEBIT_PORT, MockBankDebitAdapter } from './bank-debit.port.js';
+import { BankDebitService } from './bank-debit.service.js';
 import { DayCloseController } from './day-close.controller.js';
 import { DayCloseService } from './day-close.service.js';
 import { NoticeController } from './notice.controller.js';
@@ -45,7 +48,15 @@ import { WriteoffController } from './writeoff.controller.js';
     ReceiptController,
     DayCloseController,
     WriteoffController,
+    BankDebitController,
   ],
-  providers: [PaymentService, DayCloseService, ReconService],
+  providers: [
+    PaymentService,
+    DayCloseService,
+    ReconService,
+    BankDebitService,
+    // 20261021 任务F：银行直连端口 — 真实通道延后，默认 Mock 适配器。
+    { provide: BANK_DEBIT_PORT, useClass: MockBankDebitAdapter },
+  ],
 })
 export class PaymentModule {}

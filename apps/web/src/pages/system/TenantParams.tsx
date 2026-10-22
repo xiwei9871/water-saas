@@ -222,6 +222,7 @@ export default function TenantParams() {
   ];
 
   return (
+    <>
     <Card
       title="租户参数"
       extra={
@@ -306,5 +307,100 @@ export default function TenantParams() {
         </Form>
       </Modal>
     </Card>
+    <DocNoRulesCard />
+    </>
   );
+}
+
+/** 2.4 单据编号规则：租户级前缀配置（取号实时生效，只影响之后的新单号）。 */
+export function DocNoRulesCard() {
+  const { message } = AntdApp.useApp();
+  const { hasPerm } = useAuth();
+  const canWrite = hasPerm('iam:write');
+  const [rules, setRules] = useState<DocRule[]>([]);
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<DocRule[]>('/iam/doc-rules');
+      setRules(res.data);
+    } catch {
+      /* 无 iam:read 时整块隐藏 */
+    }
+  }, []);
+  useEffect(() => {
+    queueMicrotask(() => void load());
+  }, [load]);
+
+  const save = async (seqKey: string, prefix: string) => {
+    setSavingKey(seqKey);
+    try {
+      await api.put(`/iam/doc-rules/${seqKey}`, { prefix });
+      message.success('编号前缀已更新（之后新单生效）');
+      await load();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  if (!rules.length) return null;
+  return (
+    <Card title="单据编号规则" size="small" style={{ marginTop: 16 }}>
+      <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+        各类单据号 = 前缀 + 年月(6位) + 流水(6位)。改前缀只影响之后新开的单据，存量单号不变。
+      </Typography.Paragraph>
+      <Table<DocRule>
+        rowKey="seqKey"
+        size="small"
+        dataSource={rules}
+        pagination={false}
+        columns={[
+          { title: '单据', dataIndex: 'label', width: 160 },
+          {
+            title: '编号键',
+            dataIndex: 'seqKey',
+            width: 180,
+            render: (v: string) => <Typography.Text code>{v}</Typography.Text>,
+          },
+          {
+            title: '前缀',
+            width: 240,
+            render: (_, r) =>
+              canWrite ? (
+                <Input.Search
+                  size="small"
+                  defaultValue={r.prefix}
+                  key={`${r.seqKey}:${r.prefix}`}
+                  maxLength={4}
+                  style={{ width: 200, textTransform: 'uppercase' }}
+                  enterButton={savingKey === r.seqKey ? '…' : '保存'}
+                  loading={savingKey === r.seqKey}
+                  onSearch={(v) => void save(r.seqKey, v)}
+                />
+              ) : (
+                r.prefix
+              ),
+          },
+          {
+            title: '示例',
+            render: (_, r) => (
+              <Typography.Text type="secondary">
+                {r.prefix}202610000001
+              </Typography.Text>
+            ),
+          },
+        ]}
+      />
+    </Card>
+  );
+}
+
+interface DocRule {
+  seqKey: string;
+  label: string;
+  prefix: string;
+  defaultPrefix: string;
+  customized: boolean;
 }

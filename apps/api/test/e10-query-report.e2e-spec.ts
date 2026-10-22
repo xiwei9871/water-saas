@@ -313,7 +313,7 @@ describe('fixtures', () => {
 describe('C1 metric dictionary', () => {
   it('returns versioned definitions covering the required KPI set', async () => {
     const res = (await get('/reports/metric-dictionary')).body;
-    expect(res.version).toBe('2026-10.v2');
+    expect(res.version).toBe('2026-10.v3');
     expect(res.metrics.length).toBeGreaterThanOrEqual(25);
     const codes = new Set(res.metrics.map((m: { code: string }) => m.code));
     for (const c of [
@@ -444,7 +444,7 @@ describe('F1 xlsx export', () => {
 describe('B1–B3 analysis reports', () => {
   it('B1 ops-daily: collected split current/arrears reconciles with seeded payments', async () => {
     const res = (await get('/reports/ops-daily?date=2026-10-06')).body;
-    expect(res.metricVersion).toBe('2026-10.v2');
+    expect(res.metricVersion).toBe('2026-10.v3');
     // 当日两笔 CASH：5000 单分摊 + 3000 跨两单分摊（扇出回归：
     // collected 必须是 8000，而不是 join 展开后的 5000+3000×2=11000）
     expect(res.totals.collected).toBe('8000');

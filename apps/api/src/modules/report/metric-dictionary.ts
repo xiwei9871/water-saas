@@ -22,7 +22,7 @@ export interface MetricDef {
   unavailableReason?: string;
 }
 
-export const METRIC_DICT_VERSION = '2026-10.v2';
+export const METRIC_DICT_VERSION = '2026-10.v3';
 
 export const METRIC_DICT: MetricDef[] = [
   {
@@ -348,6 +348,117 @@ export const METRIC_DICT: MetricDef[] = [
     source: 'prepayment_ledger_entry',
     unit: 'cent',
     direction: 'info',
+    available: true,
+  },
+  // ---- 20261019 表务管理 T11：表务处置统计指标 ----
+  {
+    code: 'SVC_ORDER_COUNT',
+    name: '表务工单量',
+    formula: '期间内 applied_at ∈ 期间的 meter_service_order 笔数（按 service_type 分组）',
+    source: 'meter_service_order',
+    unit: 'count',
+    direction: 'info',
+    available: true,
+  },
+  {
+    code: 'SVC_DONE_ON_TIME_RATE',
+    name: '表务按期完成率',
+    formula: 'applied_at→executed_at ≤ SLA 小时的已执行工单 ÷ 已执行工单（SLA=tenant_param.meterService.slaHours，默认 72h）',
+    source: 'meter_service_order(applied_at, executed_at)；SLA 取 tenant_param',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'SVC_AVG_HANDLE_HOURS',
+    name: '表务平均处置时长',
+    formula: 'avg(executed_at − applied_at) 小时（已执行工单）',
+    source: 'meter_service_order',
+    unit: 'count',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'SVC_REJECT_RATE',
+    name: '表务驳回率',
+    formula: 'status=REJECTED 工单 ÷ 期间内已审结工单（APPROVED+DISPATCHED+EXECUTED+ARCHIVED+REJECTED）',
+    source: 'meter_service_order',
+    unit: 'ratio',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'SVC_ARCHIVE_RATE',
+    name: '表务归档率',
+    formula: 'status=ARCHIVED 工单 ÷ 期间内已执行工单（EXECUTED+ARCHIVED）',
+    source: 'meter_service_order',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'SVC_REPLACE_COUNT',
+    name: '换表处置量',
+    formula: '期间内 executed_at ∈ 期间且 service_type=FAULT 的 meter_service_order 笔数',
+    source: 'meter_service_order(service_type=FAULT)',
+    unit: 'count',
+    direction: 'info',
+    available: true,
+  },
+
+  // ---- 20261021 整改 任务G：文档口径 6 表务指标（处置统计报表输出）----
+  {
+    code: 'METER_REPLACE_RATE',
+    name: '换表率',
+    formula: '本期换表数 ÷ 在装表总数 ×100%（换表数=meter_installation reason∈REPLACE/FAULT/PERIODIC_CHECK 且 installed_at∈期间）',
+    source: 'meter_installation',
+    unit: 'ratio',
+    direction: 'info',
+    available: true,
+  },
+  {
+    code: 'METER_FAULT_REPLACE_RATE',
+    name: '故障换表率',
+    formula: '故障换表数 ÷ 换表总数 ×100%',
+    source: 'meter_installation(reason=FAULT)',
+    unit: 'ratio',
+    direction: 'lower-better',
+    available: true,
+  },
+  {
+    code: 'METER_CHECK_DONE_RATE',
+    name: '周期检定完成率',
+    formula: '期内已执行检定处置表数 ÷ 到期应检表数（nextCheckDate=last_check_date+check_period_years≤期末）×100%',
+    source: 'meter + meter_service_order(PERIODIC_CHECK/DISPUTE_CHECK)',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'METER_CHECK_PASS_RATE',
+    name: '检定合格率',
+    formula: '检定合格表数（checkResult∈PASS/ADJUSTED）÷ 检定表总数 ×100%',
+    source: 'account_event(type=METER_CHECK)',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'METER_RESUME_ONTIME_RATE',
+    name: '复水及时率',
+    formula: '规定时限内（SLA）复水户数 ÷ 应复水户数（RESUME 工单）×100%',
+    source: 'meter_service_order(service_type=RESUME)；SLA=tenant_param.meterService.slaHours',
+    unit: 'ratio',
+    direction: 'higher-better',
+    available: true,
+  },
+  {
+    code: 'SVC_ONTIME_RATE',
+    name: '表务处置及时率',
+    formula: '规定时限内完成处置数 ÷ 处置工单总数 ×100%',
+    source: 'meter_service_order；SLA=tenant_param.meterService.slaHours',
+    unit: 'ratio',
+    direction: 'higher-better',
     available: true,
   },
 ];

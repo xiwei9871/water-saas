@@ -1,26 +1,31 @@
-import { PlusOutlined } from '@ant-design/icons';
+import { CloseOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
 import {
   App as AntdApp,
   Button,
   Card,
+  DatePicker,
   Drawer,
   Descriptions,
   Form,
+  Image,
   Input,
   InputNumber,
   Modal,
   Select,
   Space,
+  Steps,
   Table,
   Tag,
   Typography,
+  Upload,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { CustomerSelect, ReadingBookSelect, MeterSelect } from '../pickers';
 import { fmtDate, USAGE_CATEGORY_OPTIONS } from '../common';
+import { Link, useSearchParams } from 'react-router-dom';
 
 type ApplyStatus = 'SUBMITTED' | 'SURVEYED' | 'APPROVED' | 'INSTALLING' | 'COMPLETED' | 'REJECTED' | 'CANCELLED';
 
@@ -37,6 +42,18 @@ interface Apply {
   status: ApplyStatus;
   surveyNote: string | null;
   installNote: string | null;
+  installInitialReading?: string | null;
+  contractNo?: string | null;
+  settleAccountId?: string | null;
+  settleNo?: string | null;
+  meterNo?: string | null;
+  installMeterNo?: string | null;
+  installCaliber?: string | null;
+  installCompletedAt?: string | null;
+  feeRequired?: string | null;
+  feeReceived?: string | null;
+  feeNote?: string | null;
+  contractScan?: string[] | null;
   rejectReason: string | null;
   waterAccountId: string | null;
   waterAccountNo?: string | null;
@@ -46,6 +63,10 @@ interface Apply {
 const STATUS_LABELS: Record<ApplyStatus, string> = {
   SUBMITTED: '已提交', SURVEYED: '已勘察', APPROVED: '已审批',
   INSTALLING: '装表中', COMPLETED: '已归档', REJECTED: '已驳回', CANCELLED: '已取消',
+};
+const STATUS_STEP: Record<ApplyStatus, number> = {
+  SUBMITTED: 0, SURVEYED: 1, APPROVED: 2, INSTALLING: 3, COMPLETED: 4,
+  REJECTED: 0, CANCELLED: 0,
 };
 const STATUS_COLORS: Record<ApplyStatus, string> = {
   SUBMITTED: 'processing', SURVEYED: 'cyan', APPROVED: 'geekblue',
@@ -78,10 +99,31 @@ export default function InstallApplications() {
   const [detail, setDetail] = useState<Apply | null>(null);
   const [noteFor, setNoteFor] = useState<{ app: Apply; to: ApplyStatus; label: string; noteField?: string } | null>(null);
   const [archiveFor, setArchiveFor] = useState<Apply | null>(null);
+  /** V6 合同扫描件草稿（详情抽屉内编辑，保存才落库）。 */
+  const [scans, setScans] = useState<string[]>([]);
+  const [scanSaving, setScanSaving] = useState(false);
   const [form] = Form.useForm();
   const [noteForm] = Form.useForm();
   const [archForm] = Form.useForm();
   const canWrite = hasPerm('install:write');
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
+  const focusDone = useRef<string | null>(null);
+
+  // 任务直达 ?focusId= → 打开该申请详情抽屉。
+  useEffect(() => {
+    if (focusId && focusDone.current !== focusId) {
+      focusDone.current = focusId;
+      void (async () => {
+        try {
+          const res = await api.get<Apply>(`/install/applications/${focusId}`);
+          setDetail(res.data);
+        } catch {
+          /* 详情拉取失败时停留在列表 */
+        }
+      })();
+    }
+  }, [focusId]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -113,9 +155,29 @@ export default function InstallApplications() {
 
   const transition = async () => {
     const note = noteForm.getFieldValue('note') as string | undefined;
+    const iir = noteForm.getFieldValue('installInitialReading') as number | undefined;
     try {
-      await api.post(`/install/applications/${noteFor!.app.id}/transition`, { to: noteFor!.to, note });
-      message.success(`已流转至「${STATUS_LABELS[noteFor!.to]}」`);
+      const res = await api.post(`/install/applications/${noteFor!.app.id}/transition`, {
+        to: noteFor!.to,
+        note,
+        ...(noteFor!.to === 'INSTALLING'
+          ? {
+              ...(iir !== undefined && iir !== null ? { installInitialReading: iir } : {}),
+              installMeterNo: noteForm.getFieldValue('installMeterNo') || undefined,
+              installCaliber: noteForm.getFieldValue('installCaliber') || undefined,
+              installCompletedAt:
+                (noteForm.getFieldValue('installCompletedAt') as { format?: (f: string) => string } | undefined)?.format?.('YYYY-MM-DD') || undefined,
+              feeRequired: noteForm.getFieldValue('feeRequired') ?? undefined,
+              feeReceived: noteForm.getFieldValue('feeReceived') ?? undefined,
+              feeNote: noteForm.getFieldValue('feeNote') || undefined,
+            }
+          : {}),
+      }).then((r) => r.data as { refundDue?: number });
+      if (res.refundDue) {
+        message.warning(`已取消——该申请已收工程费 ¥${res.refundDue.toFixed(2)}，请线下办理退款并留痕`);
+      } else {
+        message.success(`已流转至「${STATUS_LABELS[noteFor!.to]}」`);
+      }
       setNoteFor(null);
       noteForm.resetFields();
       void load();
@@ -138,7 +200,14 @@ export default function InstallApplications() {
           addr: app.addr,
         },
         meterId: v.meterId || undefined,
-        meter: v.meterId ? undefined : { caliber: app.caliberReq || 'DN15', brand: '报装新表' },
+        meter: v.meterId
+          ? undefined
+          : {
+              // 装表环节登记的表号/口径优先带入（2.1 完成信息复用）。
+              meterNo: app.installMeterNo || undefined,
+              caliber: app.installCaliber || app.caliberReq || 'DN15',
+              brand: '报装新表',
+            },
         installation: {
           initialReading: v.initialReading,
           reason: 'NEW',
@@ -155,19 +224,35 @@ export default function InstallApplications() {
 
   const cols: ColumnsType<Apply> = [
     { title: '申请号', dataIndex: 'applyNo', width: 150 },
+    { title: '合同号', dataIndex: 'contractNo', width: 140, render: (v: string | null) => v ?? '—' },
     { title: '申请人', dataIndex: 'applicantName', width: 120 },
     { title: '联系电话', dataIndex: 'contactPhone', width: 120, render: (v: string | null) => v ?? '—' },
     { title: '用水性质', dataIndex: 'usageCategory', width: 100, render: (v: string) => USAGE_CATEGORY_OPTIONS.find((c) => c.value === v)?.label ?? v },
     { title: '地址', dataIndex: 'addr', ellipsis: true },
     { title: '申请口径', dataIndex: 'caliberReq', width: 90, render: (v: string | null) => v ?? '—' },
     { title: '状态', dataIndex: 'status', width: 90, render: (s: ApplyStatus) => <Tag color={STATUS_COLORS[s]}>{STATUS_LABELS[s]}</Tag> },
+    {
+      title: '已立户',
+      width: 180,
+      render: (_, r) =>
+        r.waterAccountNo ? (
+          <Space size={4} direction="vertical" style={{ lineHeight: 1.2 }}>
+            <Link to={`/customer/water-accounts?accountNo=${encodeURIComponent(r.waterAccountNo)}`}>{r.waterAccountNo}</Link>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {r.settleNo ?? '—'}{r.meterNo ? ` · ${r.meterNo}` : ''}
+            </Typography.Text>
+          </Space>
+        ) : (
+          '—'
+        ),
+    },
     { title: '申请时间', dataIndex: 'createdAt', width: 160, render: (v: string) => fmtDate(v.slice(0, 10)) },
     {
       title: '操作',
       width: 220,
       render: (_, r) => (
         <Space size={4} wrap>
-          <Button size="small" onClick={() => setDetail(r)}>详情</Button>
+          <Button size="small" onClick={() => { setDetail(r); setScans(r.contractScan ?? []); }}>详情</Button>
           {canWrite &&
             (NEXT_ACTIONS[r.status] ?? []).map((a) => (
               <Button key={a.to} size="small" danger={a.to === 'REJECTED' || a.to === 'CANCELLED'} onClick={() => setNoteFor({ app: r, ...a })}>
@@ -241,6 +326,42 @@ export default function InstallApplications() {
         destroyOnHidden
       >
         <Form form={noteForm} layout="vertical">
+          {noteFor?.to === 'INSTALLING' && (
+            <>
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
+                接收装表完成信息——表号/口径/完成日期/工程费随本步登记，归档立户时自动带入。
+              </Typography.Paragraph>
+              <Space wrap>
+                <Form.Item name="installMeterNo" label="安装表号">
+                  <Input style={{ width: 160 }} placeholder="装上的表号" maxLength={40} />
+                </Form.Item>
+                <Form.Item name="installCaliber" label="实际口径">
+                  <Select allowClear style={{ width: 120 }} options={['DN15', 'DN20', 'DN25', 'DN40', 'DN50', 'DN100'].map((v) => ({ value: v, label: v }))} />
+                </Form.Item>
+                <Form.Item name="installCompletedAt" label="装表完成日期">
+                  <DatePicker style={{ width: 150 }} />
+                </Form.Item>
+              </Space>
+              <Form.Item
+                name="installInitialReading"
+                label="装表初始读数（m³）"
+                tooltip="装表完成那一刻的表码。立户时会与「水表起始读数」对比，若起始读数更大将提示核实装表后至立户期间的用水量。"
+              >
+                <InputNumber min={0} precision={2} style={{ width: 200 }} placeholder="如 0" />
+              </Form.Item>
+              <Space wrap>
+                <Form.Item name="feeRequired" label="工程费应收（元）" tooltip="勘察核定应收的工程费；未收齐将在归档后进入应收补收。">
+                  <InputNumber min={0} precision={2} style={{ width: 160 }} />
+                </Form.Item>
+                <Form.Item name="feeReceived" label="工程费实收（元）">
+                  <InputNumber min={0} precision={2} style={{ width: 160 }} />
+                </Form.Item>
+                <Form.Item name="feeNote" label="费用说明">
+                  <Input style={{ width: 200 }} maxLength={100} />
+                </Form.Item>
+              </Space>
+            </>
+          )}
           <Form.Item name="note" label={noteFor?.to === 'REJECTED' ? '驳回原因' : '办理备注'} rules={noteFor?.to === 'REJECTED' ? [{ required: true }] : []}>
             <Input.TextArea rows={3} maxLength={300} />
           </Form.Item>
@@ -268,24 +389,147 @@ export default function InstallApplications() {
           <Form.Item name="meterId" label="选用库存表（可选，不选则新建表号）">
             <MeterSelect status="AVAILABLE" />
           </Form.Item>
-          <Form.Item name="initialReading" label="水表起始读数（m³）" rules={[{ required: true }]}>
+          <Form.Item
+            name="initialReading"
+            label="水表起始读数（m³）"
+            rules={[{ required: true }]}
+            extra="此处填写装表完成后水表的当前读数（表底），即安装完成那一刻的表码，一般不是 0。"
+          >
             <InputNumber min={0} precision={2} style={{ width: 200 }} />
           </Form.Item>
+          {archiveFor?.installInitialReading != null && (
+            <Form.Item noStyle shouldUpdate>
+              {() => {
+                const start = Number(archForm.getFieldValue('initialReading'));
+                const init = Number(archiveFor.installInitialReading);
+                return Number.isFinite(start) && start > init ? (
+                  <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                    起始读数比装表初始读数（{init}）多 {(start - init).toFixed(2)} m³ ——
+                    请核实装表后至立户期间是否存在用水、阀门未关或漏水。
+                  </Typography.Text>
+                ) : null;
+              }}
+            </Form.Item>
+          )}
         </Form>
       </Modal>
 
       <Drawer title={`申请详情 ${detail?.applyNo ?? ''}`} open={!!detail} onClose={() => setDetail(null)} width={520}>
         {detail && (
+          <>
+            <Steps
+              size="small"
+              style={{ marginBottom: 16 }}
+              current={STATUS_STEP[detail.status] ?? 0}
+              status={['REJECTED', 'CANCELLED'].includes(detail.status) ? 'error' : 'process'}
+              items={[
+                { title: '申请', description: '提交报装' },
+                { title: '勘察', description: '现场勘察' },
+                { title: '审批', description: '审核批准' },
+                { title: '装表', description: '安装水表' },
+                { title: '归档', description: '立户归档' },
+              ]}
+            />
+            {['REJECTED', 'CANCELLED'].includes(detail.status) && (
+              <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
+                流程已{detail.status === 'REJECTED' ? '驳回' : '取消'}
+                {detail.rejectReason ? `：${detail.rejectReason}` : ''}
+              </Typography.Text>
+            )}
+          </>
+        )}
+        {detail && (
           <Descriptions column={1} size="small" bordered>
             <Descriptions.Item label="申请人">{detail.applicantName}</Descriptions.Item>
+            <Descriptions.Item label="合同号">{detail.contractNo ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="联系电话">{detail.contactPhone ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="地址">{detail.addr}</Descriptions.Item>
             <Descriptions.Item label="用水性质">{USAGE_CATEGORY_OPTIONS.find((c) => c.value === detail.usageCategory)?.label ?? detail.usageCategory}</Descriptions.Item>
             <Descriptions.Item label="状态"><Tag color={STATUS_COLORS[detail.status]}>{STATUS_LABELS[detail.status]}</Tag></Descriptions.Item>
             {detail.surveyNote && <Descriptions.Item label="勘察备注">{detail.surveyNote}</Descriptions.Item>}
             {detail.installNote && <Descriptions.Item label="装表备注">{detail.installNote}</Descriptions.Item>}
+            {detail.installInitialReading != null && (
+              <Descriptions.Item label="装表初始读数">{detail.installInitialReading} m³</Descriptions.Item>
+            )}
+            {(detail.installMeterNo || detail.installCaliber || detail.installCompletedAt) && (
+              <Descriptions.Item label="装表完成信息">
+                {[
+                  detail.installMeterNo ? `表号 ${detail.installMeterNo}` : null,
+                  detail.installCaliber ? `口径 ${detail.installCaliber}` : null,
+                  detail.installCompletedAt ? `完成 ${String(detail.installCompletedAt).slice(0, 10)}` : null,
+                ].filter(Boolean).join(' · ')}
+              </Descriptions.Item>
+            )}
+            {(detail.feeRequired != null || detail.feeReceived != null) && (
+              <Descriptions.Item label="工程费">
+                应收 {detail.feeRequired ?? '—'} 元 · 实收 {detail.feeReceived ?? '—'} 元
+                {detail.feeNote ? `（${detail.feeNote}）` : ''}
+              </Descriptions.Item>
+            )}
             {detail.rejectReason && <Descriptions.Item label="驳回原因">{detail.rejectReason}</Descriptions.Item>}
-            {detail.waterAccountId && <Descriptions.Item label="已归档户号">{detail.waterAccountNo ?? detail.waterAccountId}</Descriptions.Item>}
+            {detail.waterAccountId && (
+              <Descriptions.Item label="已立户">
+                {[detail.waterAccountNo, detail.settleNo, detail.meterNo].filter(Boolean).join(' · ') ||
+                  detail.waterAccountId}
+              </Descriptions.Item>
+            )}
+            <Descriptions.Item label="合同扫描件">
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <Space wrap>
+                  {scans.map((s, i) => (
+                    <span key={i} style={{ position: 'relative', display: 'inline-block' }}>
+                      <Image src={s} width={88} height={118} style={{ objectFit: 'cover', borderRadius: 4, border: '1px solid #eee' }} />
+                      {canWrite && (
+                        <Button
+                          size="small" type="text" danger icon={<CloseOutlined />}
+                          style={{ position: 'absolute', top: 0, right: 0 }}
+                          onClick={() => setScans((xs) => xs.filter((_, j) => j !== i))}
+                        />
+                      )}
+                    </span>
+                  ))}
+                  {!scans.length && <Typography.Text type="secondary">未上传</Typography.Text>}
+                </Space>
+                {canWrite && (
+                  <Space>
+                    <Upload
+                      accept="image/*"
+                      showUploadList={false}
+                      beforeUpload={(f) => {
+                        if (scans.length >= 3) {
+                          message.warning('最多 3 张');
+                          return false;
+                        }
+                        const rd = new FileReader();
+                        rd.onload = () => setScans((xs) => [...xs, String(rd.result)]);
+                        rd.readAsDataURL(f);
+                        return false;
+                      }}
+                    >
+                      <Button size="small" icon={<UploadOutlined />}>上传扫描件</Button>
+                    </Upload>
+                    <Button
+                      size="small" type="primary" loading={scanSaving}
+                      disabled={JSON.stringify(scans) === JSON.stringify(detail.contractScan ?? [])}
+                      onClick={async () => {
+                        setScanSaving(true);
+                        try {
+                          const res = await api.post<Apply>(`/install/applications/${detail.id}/contract-scan`, { scans });
+                          setDetail((d) => (d ? { ...d, contractScan: res.data.contractScan } : d));
+                          message.success('扫描件已保存');
+                        } catch (err) {
+                          message.error(apiErrorText(err));
+                        } finally {
+                          setScanSaving(false);
+                        }
+                      }}
+                    >
+                      保存
+                    </Button>
+                  </Space>
+                )}
+              </Space>
+            </Descriptions.Item>
             <Descriptions.Item label="备注">{detail.remark ?? '—'}</Descriptions.Item>
           </Descriptions>
         )}

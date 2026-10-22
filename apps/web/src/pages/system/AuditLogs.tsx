@@ -119,14 +119,11 @@ export default function AuditLogs() {
       title: '对象 ID',
       dataIndex: 'entityId',
       key: 'entityId',
-      width: 300,
+      width: 130,
       render: (id: string | null) =>
         id ? (
-          <Typography.Text
-            copyable={{ text: id }}
-            style={{ fontFamily: 'monospace', fontSize: 12 }}
-          >
-            {id}
+          <Typography.Text copyable={{ text: id }} style={{ fontSize: 12, color: '#888' }}>
+            复制 ID
           </Typography.Text>
         ) : (
           '—'

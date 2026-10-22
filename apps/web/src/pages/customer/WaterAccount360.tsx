@@ -344,6 +344,9 @@ export function WaterAccount360({
             <Descriptions.Item label="计费">
               {account?.billable === false ? '不计费' : '计费'}
             </Descriptions.Item>
+            <Descriptions.Item label="来源报装单">
+              {account?.sourceApplyNo ?? '—'}
+            </Descriptions.Item>
             <Descriptions.Item label="在册水表">
               {summary.activeInstallationCount} 块
             </Descriptions.Item>

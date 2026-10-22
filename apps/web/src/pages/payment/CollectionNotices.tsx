@@ -1,11 +1,14 @@
-import { PrinterOutlined } from '@ant-design/icons';
+import { PrinterOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
   App as AntdApp,
   Button,
   Card,
+  Input,
+  InputNumber,
   Modal,
   Space,
   Table,
+  Tabs,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -13,11 +16,25 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent, fmtPeriod } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
+import { useSearchParams } from 'react-router-dom';
 
 interface NoticeBill {
   period: string;
   total: string;
   due: string;
+}
+
+interface ArrearRow {
+  waterAccountId: string;
+  accountNo: string;
+  customerName: string;
+  customerNo: string;
+  phone: string | null;
+  addr: string;
+  amountDue: string;
+  billCount: number;
+  oldestPeriod: string;
+  overdueDays: number;
 }
 
 interface Notice {
@@ -38,11 +55,21 @@ interface Notice {
 /** G4 催缴通知单：欠费户生成/打印/留痕，同时挂催缴任务。 */
 export default function CollectionNotices() {
   const { message } = AntdApp.useApp();
+  const [focusParams] = useSearchParams();
+  const focusId = focusParams.get('focusId');
   const [rows, setRows] = useState<Notice[]>([]);
   const [loading, setLoading] = useState(false);
   const [accountId, setAccountId] = useState<string>();
   const [printing, setPrinting] = useState<Notice | null>(null);
   const printRef = useRef<HTMLDivElement>(null);
+  // 待催缴户清单
+  const [arrears, setArrears] = useState<ArrearRow[]>([]);
+  const [arrearsLoading, setArrearsLoading] = useState(false);
+  const [minAmount, setMinAmount] = useState<number | null>(null);
+  const [minDays, setMinDays] = useState<number | null>(null);
+  const [arrearsQ, setArrearsQ] = useState('');
+  const [selected, setSelected] = useState<string[]>([]);
+  const [batching, setBatching] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -56,6 +83,51 @@ export default function CollectionNotices() {
     }
   }, [message]);
   useEffect(() => void load(), [load]);
+
+  const loadArrears = useCallback(async () => {
+    setArrearsLoading(true);
+    try {
+      const res = await api.get<{ total: number; items: ArrearRow[] }>(
+        '/payments/collection-notices/arrears',
+        {
+          params: {
+            ...(minAmount ? { minAmount } : {}),
+            ...(minDays ? { minOverdueDays: minDays } : {}),
+            ...(arrearsQ.trim() ? { q: arrearsQ.trim() } : {}),
+          },
+        },
+      );
+      setArrears(res.data.items);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setArrearsLoading(false);
+    }
+  }, [arrearsQ, message, minAmount, minDays]);
+  useEffect(() => void loadArrears(), [loadArrears]);
+
+  const batchCreate = async () => {
+    if (!selected.length) {
+      message.warning('请先勾选要催缴的户');
+      return;
+    }
+    setBatching(true);
+    try {
+      const res = await api.post<{ created: number; results: { ok: boolean; error?: string }[] }>(
+        '/payments/collection-notices/batch',
+        { waterAccountIds: selected },
+      );
+      const failed = res.data.results.filter((r) => !r.ok).length;
+      message.success(`已生成 ${res.data.created} 份催缴通知单${failed ? `，${failed} 户失败` : ''}`);
+      setSelected([]);
+      void load();
+      void loadArrears();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setBatching(false);
+    }
+  };
 
   const create = async () => {
     if (!accountId) {
@@ -109,17 +181,116 @@ export default function CollectionNotices() {
     { title: '', render: (_, r) => <Button size="small" icon={<PrinterOutlined />} onClick={() => void print(r)}>打印</Button> },
   ];
 
+  const arrearsCols: ColumnsType<ArrearRow> = [
+    { title: '户号', dataIndex: 'accountNo', width: 130 },
+    { title: '户名', dataIndex: 'customerName', width: 150 },
+    { title: '联系电话', dataIndex: 'phone', width: 130, render: (v) => v ?? '—' },
+    { title: '用水地址', dataIndex: 'addr', ellipsis: true },
+    { title: '欠费金额', dataIndex: 'amountDue', width: 120, render: fmtCent, sorter: (a, b) => Number(BigInt(a.amountDue) - BigInt(b.amountDue)), defaultSortOrder: 'descend' },
+    { title: '欠费笔数', dataIndex: 'billCount', width: 90 },
+    { title: '最早账期', dataIndex: 'oldestPeriod', width: 100, render: fmtPeriod },
+    { title: '最大逾期(天)', dataIndex: 'overdueDays', width: 110, sorter: (a, b) => a.overdueDays - b.overdueDays },
+    {
+      title: '',
+      width: 110,
+      render: (_, r) => (
+        <Button
+          size="small"
+          onClick={async () => {
+            try {
+              await api.post('/payments/collection-notices', { waterAccountId: r.waterAccountId });
+              message.success('已生成催缴通知单并挂催缴任务');
+              void load();
+              void loadArrears();
+            } catch (err) {
+              message.error(apiErrorText(err));
+            }
+          }}
+        >
+          生成通知单
+        </Button>
+      ),
+    },
+  ];
+
   return (
     <Space direction="vertical" style={{ width: '100%' }} size={12}>
-      <Card title="催缴通知单" size="small"
-        extra={
-          <Space>
-            <WaterAccountSearchSelect value={accountId} onChange={setAccountId} placeholder="搜索户号/户名/地址" />
-            <Button type="primary" onClick={() => void create()}>生成通知单</Button>
-          </Space>
-        }
-      >
-        <Table rowKey="id" size="small" columns={cols} dataSource={rows} loading={loading} pagination={false} />
+      <Card size="small" bodyStyle={{ paddingTop: 8 }}>
+        <Tabs
+          defaultActiveKey="arrears"
+          items={[
+            {
+              key: 'arrears',
+              label: '待催缴户清单',
+              children: (
+                <>
+                  <Space style={{ marginBottom: 12 }} wrap>
+                    <InputNumber
+                      placeholder="欠费金额下限(元)"
+                      min={0}
+                      value={minAmount}
+                      onChange={(v) => setMinAmount(v)}
+                      style={{ width: 150 }}
+                    />
+                    <InputNumber
+                      placeholder="逾期天数≥"
+                      min={0}
+                      value={minDays}
+                      onChange={(v) => setMinDays(v)}
+                      style={{ width: 110 }}
+                    />
+                    <Input.Search
+                      placeholder="户号/户名/地址"
+                      allowClear
+                      style={{ width: 220 }}
+                      onSearch={(v) => setArrearsQ(v)}
+                    />
+                    <Button icon={<ReloadOutlined />} onClick={() => void loadArrears()} />
+                    <Button
+                      type="primary"
+                      disabled={!selected.length}
+                      loading={batching}
+                      onClick={() => void batchCreate()}
+                    >
+                      批量生成通知单{selected.length ? `（已选 ${selected.length}）` : ''}
+                    </Button>
+                  </Space>
+                  <Table
+                    rowKey="waterAccountId"
+                    size="small"
+                    columns={arrearsCols}
+                    dataSource={arrears}
+                    loading={arrearsLoading}
+                    rowSelection={{
+                      selectedRowKeys: selected,
+                      onChange: (keys) => setSelected(keys as string[]),
+                    }}
+                    pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 户欠费` }}
+                  />
+                </>
+              ),
+            },
+            {
+              key: 'notices',
+              label: '催缴通知单',
+              children: (
+                <>
+                  <Space style={{ marginBottom: 12 }}>
+                    <WaterAccountSearchSelect
+                      value={accountId}
+                      onChange={setAccountId}
+                      placeholder="搜索户号/户名/地址"
+                    />
+                    <Button type="primary" onClick={() => void create()}>
+                      生成通知单
+                    </Button>
+                  </Space>
+                  <Table rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.id === focusId ? 'ant-table-row-selected' : '')} dataSource={rows} loading={loading} pagination={false} />
+                </>
+              ),
+            },
+          ]}
+        />
       </Card>
       <Modal open={!!printing} onCancel={() => setPrinting(null)} footer={null} title="打印预览" width={640}>
         <div ref={printRef}>

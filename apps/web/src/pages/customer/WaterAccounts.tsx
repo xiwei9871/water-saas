@@ -24,7 +24,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   AccountInstallation,
@@ -153,6 +153,7 @@ export default function WaterAccounts() {
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('customer:write');
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
 
   const [rows, setRows] = useState<WaterAccount[]>([]);
   const [loading, setLoading] = useState(false);
@@ -349,6 +350,30 @@ export default function WaterAccounts() {
       // 弹窗允许多次申报 —— 每次成功后换新幂等键（失败保留原键供重试回放）。
       setIdemKey(newIdemKey());
       await loadHousehold(modal.account.id);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** 转表务工单：报停/销户走审批→执行流程，由表务人员处置。 */
+  const createServiceOrder = async () => {
+    if (modal?.kind !== 'suspend' && modal?.kind !== 'close') return;
+    const serviceType = modal.kind === 'suspend' ? 'SUSPEND' : 'CLOSE';
+    setSaving(true);
+    try {
+      const values = await eventForm.validateFields();
+      await api.post('/service-orders', {
+        waterAccountId: modal.account.id,
+        serviceType,
+        reason: values.remark || `客户管理发起${serviceType === 'SUSPEND' ? '报停' : '销户'}`,
+        payload: {
+          effectiveDate: values.effectiveDate?.format('YYYY-MM-DD'),
+        },
+      });
+      message.success('已生成表务工单，待审批后由表务人员处置');
+      setModal(null);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -1001,6 +1026,47 @@ export default function WaterAccounts() {
         cancelText="取消"
         confirmLoading={saving}
         onOk={() => void submitEvent()}
+        footer={
+          eventKind === 'suspend' || eventKind === 'close'
+            ? [
+                <Button key="cancel" onClick={() => setModal(null)}>
+                  取消
+                </Button>,
+                <Button
+                  key="order"
+                  type="primary"
+                  loading={saving}
+                  disabled={
+                    eventKind === 'close' &&
+                    (closeCheckLoading ||
+                      (closeCheck !== null &&
+                        (Number(closeCheck.totalOutstanding) !== 0 ||
+                          Number(closeCheck.reversedBillCredit) !== 0 ||
+                          Number(closeCheck.prepaymentBalance) !== 0)))
+                  }
+                  onClick={() => void createServiceOrder()}
+                >
+                  生成表务工单（推荐）
+                </Button>,
+                <Button
+                  key="direct"
+                  danger={eventKind === 'close'}
+                  loading={saving}
+                  disabled={
+                    eventKind === 'close' &&
+                    (closeCheckLoading ||
+                      (closeCheck !== null &&
+                        (Number(closeCheck.totalOutstanding) !== 0 ||
+                          Number(closeCheck.reversedBillCredit) !== 0 ||
+                          Number(closeCheck.prepaymentBalance) !== 0)))
+                  }
+                  onClick={() => void submitEvent()}
+                >
+                  {eventKind === 'close' ? '直接销户' : '直接暂停'}
+                </Button>,
+              ]
+            : undefined
+        }
         onCancel={() => setModal(null)}
         destroyOnHidden
       >
@@ -1039,6 +1105,21 @@ export default function WaterAccounts() {
                 style={{ marginBottom: 12 }}
                 message={`预存结余 ${fmtCent(closeCheck.prepaymentBalance)} 待退`}
                 description="请到收费台对该结算户执行「预存退款」，当日退回客户后点击下方「重新检查」再销户。"
+                action={
+                  modal && 'account' in modal ? (
+                    <Button
+                      size="small"
+                      type="primary"
+                      onClick={() =>
+                        navigate(
+                          `/payment/counter?accountId=${modal.account.id}&action=refund`,
+                        )
+                      }
+                    >
+                      前往预存退款
+                    </Button>
+                  ) : undefined
+                }
               />
             )}
             {closeCheck &&

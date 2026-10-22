@@ -925,7 +925,7 @@ export class MeterReadingService {
         readingValue: p.readingValue.toString(),
         prevReadingValue: prev?.toString() ?? null,
         usageQty: usage?.toString() ?? null,
-        avgUsage3: avg3?.toString() ?? null,
+        avgUsage3: avg3 == null ? null : new Prisma.Decimal(avg3).toDecimalPlaces(2).toString(),
       },
       orgUnitId: p.bookOrgUnitId,
     });
