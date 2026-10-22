@@ -169,8 +169,12 @@ export const taskContextText = (type: string, ctx: unknown): string | null => {
     const v = c[k];
     return v == null ? null : fmtCent(String(v));
   };
-  const num = (k: string, unit: string, label: string) =>
-    s(k) == null ? null : `${label} ${s(k)} ${unit}`;
+  const num = (k: string, unit: string, label: string) => {
+    const v = s(k);
+    if (v == null) return null;
+    const n = Number(v);
+    return `${label} ${Number.isFinite(n) ? String(Math.round(n * 100) / 100) : v} ${unit}`;
+  };
   const join = (parts: (string | null | false | undefined)[]) =>
     parts.filter((x): x is string => !!x).join(' · ');
   let text = '';
