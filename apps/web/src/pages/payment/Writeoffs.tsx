@@ -24,6 +24,7 @@ import { BillingAccountSelect, SettleAccountLookupSelect } from '../pickers';
 import {
   FOCUS_ROW_CLASS,
   FocusTaskBar,
+  useFocusList,
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
@@ -63,7 +64,12 @@ export default function Writeoffs() {
   const [form] = Form.useForm();
   const canWrite = hasPerm('payment:write');
   const taskGroup = useTaskGroup<Writeoff>('badDebtWriteoff', rows, (r) => r.id);
-  const shownRows = taskGroup.filtered;
+  const focusList = useFocusList<Writeoff>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+  );
+  const shownRows = focusList.shown;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -205,11 +211,13 @@ export default function Writeoffs() {
       {focusId && (
         <FocusTaskBar
           focusId={focusId}
-          summary={<span>该笔核销记录已在列表中高亮</span>}
+          summary={<span>该笔核销记录已定位</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
           onClose={clearFocus}
         />
       )}
-      {taskGroup.tabs}
+      {!focusList.focusing && taskGroup.tabs}
       {/* U1 任务直达 ?focusId= 行级高亮 + 置顶警示条 */}
       <Table<Writeoff>
         size="small"

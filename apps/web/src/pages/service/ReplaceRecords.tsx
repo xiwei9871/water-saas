@@ -112,7 +112,10 @@ export default function ReplaceRecords() {
           <span style={{ display: 'inline-block', width: 240 }}>
             <WaterAccountSearchSelect
               placeholder="按用水户过滤"
-              onSelect={(a) => setWaterAccountId(a?.id)}
+              onSelect={(a) => {
+                setWaterAccountId(a?.id);
+                setPage(1);
+              }}
             />
           </span>
           <Button icon={<ReloadOutlined />} onClick={() => void load(page)} />

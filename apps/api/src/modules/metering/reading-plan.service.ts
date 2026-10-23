@@ -491,7 +491,7 @@ export class ReadingPlanService {
       select: PLAN_ITEM_SELECT,
       orderBy: { seqNo: 'asc' },
     });
-    // Non-due periods (e.g. an off-cycle catch-up on a BIMONTHLY book) are
+    // Non-due periods (e.g. an off-cycle catch-up on a non-monthly book) are
     // legal operational cases — warn, never block. The backend owns the
     // due math; the UI only surfaces this flag.
     const cadenceWarning = isBookDue(

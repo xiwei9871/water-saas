@@ -22,7 +22,8 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
+import { FocusTaskBar, useFocusList } from '../../components/TaskFocus';
 import { api, apiErrorText } from '../../api/client';
 import type {
   AccountStatus,
@@ -93,6 +94,39 @@ export default function SettleAccounts() {
   const [refundReason, setRefundReason] = useState('');
   const [refundBusy, setRefundBusy] = useState(false);
   const [refundKey, setRefundKey] = useState('');
+
+  // A2 缺失/单户类异常直达：?wa=用水户id → 只显示该户的结算户。
+  const [focusParams, setFocusParams] = useSearchParams();
+  const focusWa = focusParams.get('wa');
+  const [focusSettleId, setFocusSettleId] = useState<string | null>(null);
+  const [focusWaNo, setFocusWaNo] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusWa) {
+      setFocusSettleId(null);
+      setFocusWaNo(null);
+      return;
+    }
+    let live = true;
+    api
+      .get<{ id: string; accountNo: string; settleAccountId: string }>(`/water-accounts/${focusWa}`)
+      .then((r) => {
+        if (!live) return;
+        setFocusSettleId(r.data.settleAccountId);
+        setFocusWaNo(r.data.accountNo);
+      })
+      .catch(() => {
+        if (live) setFocusSettleId(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [focusWa]);
+  const focusList = useFocusList<SettleAccount>(
+    focusSettleId,
+    rows,
+    focusSettleId ? (r) => r.id === focusSettleId : null,
+    { onShowAll: () => setPage(1) },
+  );
 
   const load = useCallback(
     async (p: number, size: number) => {
@@ -367,22 +401,43 @@ export default function SettleAccounts() {
         </Space>
       }
     >
+      {focusWa && (
+        <FocusTaskBar
+          focusId={focusWa}
+          summary={
+            <span>
+              用水户 {focusWaNo ?? '…'} 的结算户已定位（销户余额残留请走行内「预存退款」）
+            </span>
+          }
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onClose={() => {
+            const next = new URLSearchParams(focusParams);
+            next.delete('wa');
+            setFocusParams(next, { replace: true });
+          }}
+        />
+      )}
       <Table<SettleAccount>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          onChange: (p, size) => {
-            setPage(p);
-            setPageSize(size);
-          },
-        }}
+        dataSource={focusList.shown}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                onChange: (p, size) => {
+                  setPage(p);
+                  setPageSize(size);
+                },
+              }
+        }
       />
 
       <Modal maskClosable={false}

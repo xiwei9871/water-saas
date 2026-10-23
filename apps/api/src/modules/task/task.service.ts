@@ -173,7 +173,7 @@ export class TaskService {
         ${candidates.length}, now(), ${ctx.staffId}::uuid, now(), ${ctx.staffId}::uuid
       )
       ON CONFLICT (tenant_id, type, biz_type, biz_id)
-        WHERE status IN ('PENDING', 'CLAIMED')
+        WHERE status IN ('PENDING', 'CLAIMED', 'ASSIGNED')
         DO NOTHING
       RETURNING id`;
     if (inserted.length > 0) {
@@ -191,7 +191,7 @@ export class TaskService {
         type: input.type,
         bizType: input.bizType,
         bizId: input.bizId,
-        status: { in: ['PENDING', 'CLAIMED'] },
+        status: { in: ['PENDING', 'CLAIMED', 'ASSIGNED'] },
       },
       select: { id: true },
     });
@@ -225,7 +225,7 @@ export class TaskService {
     await tx.task.updateMany({
       where: {
         tenantId: ctx.tenantId,
-        status: { in: ['PENDING', 'CLAIMED'] },
+        status: { in: ['PENDING', 'CLAIMED', 'ASSIGNED'] },
         dueAt: { lt: new Date() },
         escalatedAt: null,
       },
@@ -251,9 +251,12 @@ export class TaskService {
           : { OR: [{ orgUnitId: null }, { orgUnitId: { in: ctx.orgScope } }] }),
       },
       { status: 'CLAIMED', assigneeId: ctx.staffId },
+      // A1-6：被指派任务直接进入该责任人待办（等同处理中）。
+      { status: 'ASSIGNED', assigneeId: ctx.staffId },
     ];
     if (p.has('iam:write')) {
-      mine.push({ status: 'PENDING', escalatedAt: { not: null } });
+      // 超期未领 + 超期未办的指派单 → 管理岗待办可见，便于催办/改派。
+      mine.push({ status: { in: ['PENDING', 'ASSIGNED'] }, escalatedAt: { not: null } });
     }
     return { tenantId: ctx.tenantId, OR: mine, ...(type ? { type } : {}) };
   }
@@ -281,7 +284,19 @@ export class TaskService {
         }),
         tx.task.count({ where }),
       ]);
-      return { items: this.decorate(await this.hydrateNames(tx, ctx, items)), total };
+      // A1-5 来源标识：指派给我 / 我领取的 / 待领取（池内未领）。
+      const withSource = (await this.hydrateNames(tx, ctx, items)).map((i) => ({
+        ...i,
+        source:
+          i.status === 'ASSIGNED' && i.assigneeId === ctx.staffId
+            ? ('ASSIGNED_TO_ME' as const)
+            : i.status === 'CLAIMED' && i.assigneeId === ctx.staffId
+              ? ('CLAIMED_BY_ME' as const)
+              : i.status === 'ASSIGNED'
+                ? ('ASSIGNED_OTHER' as const)
+                : ('POOL' as const),
+      }));
+      return { items: this.decorate(withSource), total };
     });
   }
 
@@ -301,26 +316,88 @@ export class TaskService {
     });
   }
 
-  /** 业务页任务分组（U2）：返回该 bizType 下 bizId 两桶——
-      openIds：仍有未完成任务；doneIds：任务全部办结/取消。两桶互斥。
-      虚拟 bizType：readingPlan=抄表计划（经读数回联）、billingRun=开账批次（经账单回联）、
-      settlement=结算水量（任务挂在用水户上，返回的是 waterAccountId）。 */
+  /** 业务页任务分组：返回页面「记录 id」两桶——
+      openIds：该记录下仍有未完成任务；doneIds：该记录下有任务且全部办结/取消。
+      两桶互斥；无任务记录不出现在任一集合（前端归入已完成组）。
+      记录维度解析（A3-4：分组粒度必须与页面行 id 一致）：
+      - reconciliation / settlement：任务挂在用水户上，经 context(waterAccountId,period)
+        回联补差记录（period ∈ (from,to]）/ 结算记录（period 相等）的行 id；
+      - collectionNotice：任务挂在结算户上，经 context.noticeId 回联通知单行 id；
+      - readingPlan / billingRun：经读数/账单回联计划、批次行 id；
+      - 其余 bizType：bizId 即记录 id。 */
   async bizFlags(ctx: TenantCtx, bizType: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      const virtual = bizType === 'readingPlan' || bizType === 'billingRun';
-      const realType = bizType === 'readingPlan' ? 'meterReading' : bizType === 'billingRun' ? 'bill' : bizType;
+      const srcMap: Record<string, string> = {
+        readingPlan: 'meterReading',
+        billingRun: 'bill',
+        reconciliation: 'waterAccount',
+        settlement: 'waterAccount',
+        collectionNotice: 'settleAccount',
+      };
       const rows = await tx.task.findMany({
-        where: { tenantId: ctx.tenantId, bizType: realType },
-        select: { bizId: true, status: true },
+        where: { tenantId: ctx.tenantId, bizType: srcMap[bizType] ?? bizType },
+        select: { bizId: true, status: true, context: true },
       });
-      const open = new Set<string>();
-      const all = new Set<string>();
-      for (const r of rows) {
-        all.add(r.bizId);
-        if (r.status === 'PENDING' || r.status === 'CLAIMED') open.add(r.bizId);
+      const isOpen = (s: string) => s === 'PENDING' || s === 'CLAIMED' || s === 'ASSIGNED';
+      const collect = (keyOf: (r: (typeof rows)[number]) => string | null) => {
+        const open = new Set<string>();
+        const all = new Set<string>();
+        for (const r of rows) {
+          const k = keyOf(r);
+          if (!k) continue;
+          all.add(k);
+          if (isOpen(r.status)) open.add(k);
+        }
+        return { open, all };
+      };
+      const finish = (open: Set<string>, all: Set<string>) => ({
+        openIds: [...all].filter((id) => open.has(id)),
+        doneIds: [...all].filter((id) => !open.has(id)),
+      });
+
+      if (bizType === 'reconciliation' || bizType === 'settlement') {
+        const ctxOf = (r: (typeof rows)[number]) => {
+          const c = (r.context ?? {}) as { waterAccountId?: string; period?: string };
+          const waId = c.waterAccountId ?? r.bizId;
+          return c.period ? { waId, period: c.period } : null;
+        };
+        const pairs = rows.map(ctxOf).filter((p): p is { waId: string; period: string } => !!p);
+        if (!pairs.length) return { openIds: [], doneIds: [] };
+        const waIds = [...new Set(pairs.map((p) => p.waId))];
+        const links =
+          bizType === 'reconciliation'
+            ? await tx.$queryRaw<{ id: string; wa: string; f: string; t: string }[]>`
+                SELECT id::text AS id, water_account_id::text AS wa, from_period AS f, to_period AS t
+                FROM reconciliation
+                WHERE tenant_id = ${ctx.tenantId}::uuid AND water_account_id = ANY(${waIds}::uuid[])`
+            : await tx.$queryRaw<{ id: string; wa: string; f: string; t: string }[]>`
+                SELECT id::text AS id, water_account_id::text AS wa, period AS f, period AS t
+                FROM consumption_settlement
+                WHERE tenant_id = ${ctx.tenantId}::uuid AND water_account_id = ANY(${waIds}::uuid[])`;
+        const open = new Set<string>();
+        const all = new Set<string>();
+        rows.forEach((r) => {
+          const p = ctxOf(r);
+          if (!p) return;
+          for (const l of links) {
+            if (l.wa !== p.waId || !(p.period > l.f && p.period <= l.t)) continue;
+            all.add(l.id);
+            if (isOpen(r.status)) open.add(l.id);
+          }
+        });
+        return finish(open, all);
       }
-      if (virtual && all.size) {
-        // 把实体 bizId 映射为页面行 id：读数→抄表计划 / 账单→开账批次。
+
+      if (bizType === 'collectionNotice') {
+        const { open, all } = collect(
+          (r) => ((r.context ?? {}) as { noticeId?: string }).noticeId ?? null,
+        );
+        return finish(open, all);
+      }
+
+      if (bizType === 'readingPlan' || bizType === 'billingRun') {
+        const { open, all } = collect((r) => r.bizId);
+        if (!all.size) return { openIds: [], doneIds: [] };
         const ids = [...all];
         const links =
           bizType === 'readingPlan'
@@ -341,15 +418,11 @@ export class TaskService {
           allP.add(l.pid);
           if (open.has(l.rid)) openP.add(l.pid);
         }
-        return {
-          openIds: [...openP],
-          doneIds: [...allP].filter((id) => !openP.has(id)),
-        };
+        return finish(openP, allP);
       }
-      return {
-        openIds: [...all].filter((id) => open.has(id)),
-        doneIds: [...all].filter((id) => !open.has(id)),
-      };
+
+      const { open, all } = collect((r) => r.bizId);
+      return finish(open, all);
     });
   }
 
@@ -368,6 +441,40 @@ export class TaskService {
       const typeName = (await this.resolveRule(tx, ctx, row.type)).name;
       const [hydrated] = this.decorate(await this.hydrateNames(tx, ctx, [row]));
       return { ...hydrated, typeName, candidates, canClaim: row.status === 'PENDING' && isCandidate };
+    });
+  }
+
+  /**
+   * A1 指派/改派（iam:write 管理岗）：
+   * - 被指派人必须具备该任务所需权限且数据范围覆盖（候选人规则）；
+   * - 任务立即进入被指派人待办（ASSIGNED），无需其领取；
+   * - 允许对未了结任务改派——改派后原指派人待办移除、操作被拦（TASK_REASSIGNED）；
+   * - 被指派人不得自行退回（无 unassign 出口），无法处理找管理岗改派。
+   */
+  async assign(ctx: TenantCtx, id: string, assigneeId: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const row = await tx.task.findFirst({
+        where: { tenantId: ctx.tenantId, id },
+        select: {
+          id: true, status: true, requiredPerm: true, orgUnitId: true, assigneeId: true,
+        },
+      });
+      if (!row) throw new NotFoundException({ code: 'TASK_NOT_FOUND' });
+      if (row.status === 'DONE' || row.status === 'CANCELLED') {
+        throw new ConflictException({ code: 'TASK_ALREADY_CLOSED', status: row.status });
+      }
+      const candidates = await this.resolveCandidates(tx, ctx, row.requiredPerm, row.orgUnitId);
+      if (!candidates.some((c) => c.id === assigneeId)) {
+        throw new ForbiddenException({
+          code: 'ASSIGNEE_NOT_CANDIDATE',
+          message: '该账号无此任务类型处置权限或不在数据范围内',
+        });
+      }
+      await tx.task.update({
+        where: { id },
+        data: { status: 'ASSIGNED', assigneeId, updatedBy: ctx.staffId },
+      });
+      return tx.task.findUniqueOrThrow({ where: { id }, select: TASK_SELECT });
     });
   }
 
@@ -459,6 +566,15 @@ export class TaskService {
         select: { id: true, status: true, assigneeId: true, context: true, type: true, bizType: true, bizId: true },
       });
       if (!row) throw new NotFoundException({ code: 'TASK_NOT_FOUND' });
+      // A1-7：归属校验最先——被改派/非领取人继续操作须明确告知，
+      // 而不是先撞上一段与己无关的结果/业务校验提示。
+      if ((row.status === 'CLAIMED' || row.status === 'ASSIGNED') && row.assigneeId !== ctx.staffId) {
+        throw new ConflictException(
+          row.status === 'ASSIGNED'
+            ? { code: 'TASK_REASSIGNED', message: '任务已改派' }
+            : { code: 'TASK_NOT_CLAIMED_BY_ME', status: row.status },
+        );
+      }
       const def = TASK_TYPES.find((t) => t.code === row.type);
       const trimmed = note?.trim() ?? '';
       if (!trimmed) {
@@ -477,7 +593,12 @@ export class TaskService {
           ? { ...(row.context as Record<string, unknown>), completionNote: trimmed }
           : { completionNote: trimmed };
       const flipped = await tx.task.updateMany({
-        where: { tenantId: ctx.tenantId, id, status: 'CLAIMED', assigneeId: ctx.staffId },
+        where: {
+          tenantId: ctx.tenantId,
+          id,
+          status: { in: ['CLAIMED', 'ASSIGNED'] },
+          assigneeId: ctx.staffId,
+        },
         data: {
           status: 'DONE',
           completedAt: new Date(),
@@ -489,6 +610,10 @@ export class TaskService {
         },
       });
       if (flipped.count === 0) {
+        // A1-7：任务被改派给别人后，原指派人继续操作须明确告知。
+        if (row.status === 'ASSIGNED' && row.assigneeId !== ctx.staffId) {
+          throw new ConflictException({ code: 'TASK_REASSIGNED', message: '任务已改派' });
+        }
         throw new ConflictException({ code: 'TASK_NOT_CLAIMED_BY_ME', status: row.status });
       }
       return tx.task.findUniqueOrThrow({ where: { id }, select: TASK_SELECT });
@@ -618,7 +743,7 @@ export class TaskService {
     }
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const flipped = await tx.task.updateMany({
-        where: { tenantId: ctx.tenantId, id, status: { in: ['PENDING', 'CLAIMED'] } },
+        where: { tenantId: ctx.tenantId, id, status: { in: ['PENDING', 'CLAIMED', 'ASSIGNED'] } },
         data: {
           status: 'CANCELLED',
           cancelledAt: new Date(),
@@ -651,7 +776,7 @@ export class TaskService {
         type: { in: [...types] },
         bizType,
         ...(bizId ? { bizId } : {}),
-        status: { in: ['PENDING', 'CLAIMED'] },
+        status: { in: ['PENDING', 'CLAIMED', 'ASSIGNED'] },
       },
       select: { id: true, type: true, title: true, bizId: true, bizLabel: true, requiredPerm: true, orgUnitId: true },
     });
@@ -675,7 +800,7 @@ export class TaskService {
         type,
         bizType,
         bizId,
-        status: { in: ['PENDING', 'CLAIMED'] },
+        status: { in: ['PENDING', 'CLAIMED', 'ASSIGNED'] },
       },
       data: {
         status: 'DONE',

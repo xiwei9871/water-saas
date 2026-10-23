@@ -16,7 +16,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent, fmtPeriod } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
-import { FocusTaskBar, FOCUS_ROW_CLASS, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
+import {
+  FocusTaskBar,
+  FOCUS_ROW_CLASS,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 
 interface NoticeBill {
   period: string;
@@ -70,9 +76,15 @@ export default function CollectionNotices() {
   const [arrearsQ, setArrearsQ] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [batching, setBatching] = useState(false);
-  // U2 任务分组：催缴任务挂在结算户上。
-  const taskGroup = useTaskGroup<Notice>('settleAccount', rows, (r) => r.settleAccountId ?? r.id);
-  const shownRows = taskGroup.filtered;
+  // A3 任务三态分组：按通知单 id（后端经 context.noticeId 回联催缴任务）。
+  const taskGroup = useTaskGroup<Notice>('collectionNotice', rows, (r) => r.id);
+  // A2「只显示该条」：?focusId=（=结算户 id）→ 只看该结算户的催缴单。
+  const focusList = useFocusList<Notice>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.settleAccountId === focusId || r.id === focusId : null,
+  );
+  const shownRows = focusList.shown;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -291,11 +303,13 @@ export default function CollectionNotices() {
                   {focusId && (
                     <FocusTaskBar
                       focusId={focusId}
-                      summary={<span>该结算户的催缴单已高亮（若尚无通知单请先生成）</span>}
+                      summary={<span>该结算户的催缴单（若尚无通知单请先生成）</span>}
+                      showAll={focusList.showAll}
+                      onToggleAll={focusList.toggleAll}
                       onClose={clearFocus}
                     />
                   )}
-                  {taskGroup.tabs}
+                  {!focusList.focusing && taskGroup.tabs}
                   <Table rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.settleAccountId === focusId || r.id === focusId ? FOCUS_ROW_CLASS : '')} dataSource={shownRows} loading={loading} pagination={false} />
                 </>
               ),

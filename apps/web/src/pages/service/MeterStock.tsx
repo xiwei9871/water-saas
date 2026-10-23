@@ -18,7 +18,6 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
-import { MeterSelect } from '../pickers';
 
 interface Warehouse {
   id: string;
@@ -154,14 +153,43 @@ export default function MeterStock() {
     }
   };
 
+  // 20261023 D1 分源多选：按流水类型加载候选表（采购入库则录新号）。
+  const [candidates, setCandidates] = useState<
+    { id: string; meterNo: string; status: string; warehouse: { name: string } | null }[]
+  >([]);
+  const loadCandidates = useCallback(
+    async (type?: string) => {
+      if (!type || type === 'PURCHASE_IN') {
+        setCandidates([]);
+        return;
+      }
+      try {
+        const res = await api.get<typeof candidates>('/meter-stock/selectable', {
+          params: { type, take: 200 },
+        });
+        setCandidates(res.data);
+      } catch (e) {
+        message.error(apiErrorText(e));
+      }
+    },
+    [message],
+  );
+  useEffect(() => {
+    if (whModal === 'move') void loadCandidates(mvType);
+  }, [mvType, whModal, loadCandidates]);
+
   const onMove = async () => {
     const v = await mvForm.validateFields();
     try {
       await api.post('/meter-stock/movements', {
         type: v.type,
-        meterIds: v.meterIds,
+        meterIds: v.type === 'PURCHASE_IN' ? undefined : v.meterIds,
+        meterNos: v.type === 'PURCHASE_IN' ? v.meterNos : undefined,
         warehouseId: v.warehouseId,
         locationId: v.locationId,
+        brand: v.brand,
+        model: v.model,
+        caliber: v.caliber,
         docNo: v.docNo,
         supplier: v.supplier,
         batchNo: v.batchNo,
@@ -335,25 +363,64 @@ export default function MeterStock() {
               options={Object.entries(MOVE_LABEL).map(([value, label]) => ({ value, label }))}
             />
           </Form.Item>
-          <Form.Item name="meterIds" label="水表（可多选）" rules={[{ required: true }]}>
-            <Select
-              mode="multiple"
-              optionLabelProp="label"
-              options={[]}
-              placeholder="先搜索表号"
-              notFoundContent="用下方单表搜索逐个添加"
-            />
-          </Form.Item>
-          <Form.Item label="搜索表号添加" extra="下面选中的表进入本次流水">
-            <MeterSelect
-              placeholder="搜索并选择表"
-              onChange={(id) => {
-                if (!id) return;
-                const cur = mvForm.getFieldValue('meterIds') ?? [];
-                if (!cur.includes(id)) mvForm.setFieldValue('meterIds', [...cur, id]);
-              }}
-            />
-          </Form.Item>
+          {mvType === 'PURCHASE_IN' ? (
+            <>
+              <Form.Item
+                name="meterNos"
+                label="新表号（批量录入，回车分隔）"
+                rules={[{ required: true, message: '至少录入一个新表号' }]}
+                extra="表号与全局档案池比对，重号整单拒绝。"
+              >
+                <Select
+                  mode="tags"
+                  open={false}
+                  suffixIcon={null}
+                  placeholder="输入表号后回车，如 YS202610-001"
+                  tokenSeparators={[',', '，', ' ', '\n']}
+                />
+              </Form.Item>
+              <Space.Compact block>
+                <Form.Item name="brand" label="品牌" style={{ flex: 1 }}>
+                  <Input placeholder="同批统一品牌" />
+                </Form.Item>
+                <Form.Item name="model" label="型号" style={{ flex: 1 }}>
+                  <Input />
+                </Form.Item>
+                <Form.Item name="caliber" label="口径" style={{ flex: 1 }}>
+                  <Input placeholder="DN15（自动带检定周期）" />
+                </Form.Item>
+              </Space.Compact>
+            </>
+          ) : (
+            <Form.Item
+              name="meterIds"
+              label={
+                mvType === 'RETURN_IN'
+                  ? '已出库水表（可多选）'
+                  : mvType === 'TRANSFER'
+                    ? '调拨水表（在库，可多选）'
+                    : mvType === 'SCRAP_OUT'
+                      ? '报废水表（未装表，可多选）'
+                      : '在库水表（可多选）'
+              }
+              rules={[{ required: true }]}
+            >
+              <Select
+                mode="multiple"
+                optionLabelProp="label"
+                options={candidates.map((m) => ({
+                  value: m.id,
+                  label: `${m.meterNo}${m.warehouse ? ` · ${m.warehouse.name}` : ''}`,
+                }))}
+                placeholder={
+                  mvType === 'RETURN_IN'
+                    ? '选择已领用/在途的水表'
+                    : '选择在库水表'
+                }
+                notFoundContent="该类型无可选水表"
+              />
+            </Form.Item>
+          )}
           {mvType !== 'ISSUE_OUT' && mvType !== 'SCRAP_OUT' && (
             <>
               <Form.Item name="warehouseId" label="目标库房" rules={[{ required: true }]}>

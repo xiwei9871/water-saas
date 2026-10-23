@@ -46,6 +46,7 @@ import {
 import {
   FOCUS_ROW_CLASS,
   FocusTaskBar,
+  useFocusList,
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
@@ -169,9 +170,16 @@ export default function Payments() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId]);
 
-  // U2 任务分组：任务挂在收款单上。
+  // A3 任务三态分组：任务挂在收款单上。
   const taskGroup = useTaskGroup<Payment>('payment', rows, (r) => r.id);
-  const shownRows = taskGroup.filtered;
+  // A2「只显示该条」。
+  const focusList = useFocusList<Payment>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
+  const shownRows = focusList.shown;
 
   const print = async (receipt: Receipt) => {
     setPrinting(true);
@@ -374,11 +382,13 @@ export default function Payments() {
         <FocusTaskBar
           focusId={focusId}
           summary={<span>该笔收款单已定位（单号 {focusRow?.paymentNo ?? '…'}）</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
           onOpenDetail={() => void openDetail({ id: focusId } as Payment)}
           onClose={clearFocus}
         />
       )}
-      {taskGroup.tabs}
+      {!focusList.focusing && taskGroup.tabs}
       <Table<Payment>
         rowKey="id"
         size="middle"
@@ -386,16 +396,20 @@ export default function Payments() {
         columns={columns}
         dataSource={shownRows}
         rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          onChange: (p, size) => {
-            setPage(p);
-            setPageSize(size);
-          },
-        }}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                onChange: (p, size) => {
+                  setPage(p);
+                  setPageSize(size);
+                },
+              }
+        }
       />
 
       {/* 收款详情抽屉 */}

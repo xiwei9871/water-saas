@@ -693,4 +693,197 @@ describe('U2 业务页任务分组：GET /tasks/biz-flags', () => {
     expect(flags.openIds).not.toContain(bizId);
     expect(flags.doneIds).toContain(bizId);
   });
+
+  it('A3-4：reconciliation 按补差记录 id 聚合（任务挂用水户，经 waId+period 回联）', async () => {
+    // 用水户 + 该户 (from,to] 覆盖 202804 的补差记录 + 同 period 的挂户任务。
+    const a = await estimatedAccount('flg', '202601');
+    const rd1 = await seedReading(a, '202803', 100, 'PASSED');
+    const rd2 = await seedReading(a, '202804', 115, 'PASSED');
+    const wa = a.waterAccount;
+    const recon = await owner.reconciliation.create({
+      data: {
+        tenantId: T,
+        waterAccountId: wa.id,
+        anchorReadingId: rd1.id,
+        actualReadingId: rd2.id,
+        fromPeriod: '202803',
+        toPeriod: '202804',
+        actualTotalUsage: 10,
+        previouslySettledUsage: 5,
+        remainderUsage: 5,
+      },
+    });
+    const mkTask = (status: 'PENDING' | 'DONE') =>
+      owner.task.create({
+        data: {
+          tenantId: T,
+          type: 'SUPPLEMENT',
+          title: 't',
+          bizType: 'waterAccount',
+          bizId: wa.id,
+          reason: 'r',
+          requiredPerm: 'settlement:write',
+          status,
+          priority: 'NORMAL',
+          candidateCount: 1,
+          context: { waterAccountId: wa.id, period: '202804' },
+        },
+      });
+    await mkTask('PENDING');
+    let flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).toContain(recon.id);
+    expect(flags.doneIds).not.toContain(recon.id);
+    await mkTask('DONE'); // 同户同期再补一条已了结任务 —— 仍被 open 压住
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).toContain(recon.id);
+    await owner.task.updateMany({
+      where: { tenantId: T, bizType: 'waterAccount', bizId: wa.id },
+      data: { status: 'DONE' },
+    });
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).not.toContain(recon.id);
+    expect(flags.doneIds).toContain(recon.id);
+    // period 不匹配的任务不连累该记录（202805 不在 (202803,202804]）。
+    await owner.task.create({
+      data: {
+        tenantId: T,
+        type: 'SUPPLEMENT',
+        title: 't',
+        bizType: 'waterAccount',
+        bizId: wa.id,
+        reason: 'r',
+        requiredPerm: 'settlement:write',
+        status: 'PENDING',
+        priority: 'NORMAL',
+        candidateCount: 1,
+        context: { waterAccountId: wa.id, period: '202805' },
+      },
+    });
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).not.toContain(recon.id);
+    expect(flags.doneIds).toContain(recon.id);
+  });
+
+  it('A3-4：collectionNotice 按通知单 id 聚合（context.noticeId）', async () => {
+    const noticeId = randomUUID();
+    await owner.task.create({
+      data: {
+        tenantId: T,
+        type: 'COLLECTION',
+        title: 't',
+        bizType: 'settleAccount',
+        bizId: randomUUID(),
+        reason: 'r',
+        requiredPerm: 'payment:write',
+        status: 'PENDING',
+        priority: 'NORMAL',
+        candidateCount: 1,
+        context: { noticeId },
+      },
+    });
+    const flags = (await get(`/tasks/biz-flags?bizType=collectionNotice`, tokens.qc).expect(200))
+      .body;
+    expect(flags.openIds).toContain(noticeId);
+    expect(flags.doneIds).not.toContain(noticeId);
+  });
+});
+
+describe('A1 任务指派/派送', () => {
+  const mkTask = (perm = 'billing:write') =>
+    owner.task.create({
+      data: {
+        tenantId: T,
+        type: 'COLLECTION',
+        title: `指派测试 ${randomUUID().slice(0, 8)}`,
+        bizType: 'settleAccount',
+        bizId: randomUUID(),
+        reason: 'A1 测试注入',
+        requiredPerm: perm,
+        status: 'PENDING',
+        priority: 'NORMAL',
+        candidateCount: 1,
+      },
+    });
+
+  it('管理岗指派 → ASSIGNED；进指派人待办且带来源标识，旁人不可见', async () => {
+    const t = await mkTask();
+    const res = await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }).expect(201);
+    expect(res.body.status).toBe('ASSIGNED');
+    expect(res.body.assigneeId).toBe(ids.staff_billerA);
+    const todoA = (await get('/tasks?box=todo', tokens.billerA).expect(200)).body.items;
+    const mine = todoA.find((x: { id: string }) => x.id === t.id);
+    expect(mine?.source).toBe('ASSIGNED_TO_ME');
+    // 同权限但非指派人：不再出现在其待办（指定单由指定人处置）。
+    const todoB = (await get('/tasks?box=todo', tokens.billerB).expect(200)).body.items;
+    expect(todoB.map((x: { id: string }) => x.id)).not.toContain(t.id);
+  });
+
+  it('非管理岗指派 → 403；无权候选人 → 403 该账号无此任务类型处置权限', async () => {
+    const t = await mkTask();
+    const byPlain = await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }, tokens.billerA);
+    expect(byPlain.status).toBe(403);
+    expect(JSON.stringify(byPlain.body)).toContain('TASK_ASSIGN_FORBIDDEN');
+    const badTarget = await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_cashier });
+    expect(badTarget.status).toBe(403);
+    expect(JSON.stringify(badTarget.body)).toContain('ASSIGNEE_NOT_CANDIDATE');
+  });
+
+  it('已指派任务旁人不可领取(409)；未指派任务仍可领取', async () => {
+    const t = await mkTask();
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }).expect(201);
+    const steal = await post(`/tasks/${t.id}/claim`, {}, tokens.billerB);
+    expect(steal.status).toBe(409);
+    // 未指派 PENDING 任务：另一候选人正常领取（对照组）。
+    const free = await mkTask();
+    await post(`/tasks/${free.id}/claim`, {}, tokens.billerB).expect(201);
+    const after = await owner.task.findUniqueOrThrow({ where: { id: free.id } });
+    expect(after.status).toBe('CLAIMED');
+    expect(after.assigneeId).toBe(ids.staff_billerB);
+  });
+
+  it('改派：原指派人待办消失、新指派人获得；原指派人完成被拒并提示已改派', async () => {
+    const t = await mkTask('metering:qc');
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_qc }).expect(201);
+    // 管理岗改派给另一候选人（admin 也是候选人）。
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_admin }).expect(201);
+    const todoQc = (await get('/tasks?box=todo', tokens.qc).expect(200)).body.items;
+    expect(todoQc.map((x: { id: string }) => x.id)).not.toContain(t.id);
+    const todoAdmin = (await get('/tasks?box=todo').expect(200)).body.items;
+    expect(todoAdmin.map((x: { id: string }) => x.id)).toContain(t.id);
+    // 原指派人完成 → 409 TASK_REASSIGNED。
+    const stale = await post(`/tasks/${t.id}/complete`, { note: '旧指派人' }, tokens.qc);
+    expect(stale.status).toBe(409);
+    expect(JSON.stringify(stale.body)).toContain('TASK_REASSIGNED');
+  });
+
+  it('被指派人完成自己的指派单（结果+业务校验链路不变）', async () => {
+    const t = await mkTask('metering:qc');
+    await owner.task.update({
+      where: { id: t.id },
+      data: { context: { noticeId: randomUUID() } },
+    });
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_qc }).expect(201);
+    // COLLECTION 完成标准：context 无具体业务锚点时放行；结果必填仍生效。
+    const noNote = await post(`/tasks/${t.id}/complete`, {}, tokens.qc);
+    expect(noNote.status).toBe(400);
+    const done = await post(`/tasks/${t.id}/complete`, { note: '指派单办结' }, tokens.qc);
+    expect(done.status).toBe(201);
+    const after = await owner.task.findUniqueOrThrow({ where: { id: t.id } });
+    expect(after.status).toBe('DONE');
+    expect(after.resultNote).toBe('指派单办结');
+  });
+
+  it('ASSIGNED 占用 open 槽位：同 (type,biz) 不重复建单 + bizFlags 计入 open', async () => {
+    const bizId = randomUUID();
+    const t = await mkTask();
+    await owner.task.update({
+      where: { id: t.id },
+      data: { type: 'COLLECTION', bizId },
+    });
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }).expect(201);
+    // 去重索引含 ASSIGNED：同键直接 INSERT 应冲突被吸收 → 仍只有一条 open。
+    const flags = (await get(`/tasks/biz-flags?bizType=settleAccount`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).toContain(bizId);
+    expect(flags.doneIds).not.toContain(bizId);
+  });
 });

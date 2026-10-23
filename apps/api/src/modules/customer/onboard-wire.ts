@@ -30,6 +30,8 @@ export interface OnboardWireBody {
   };
   /** 报装纳入：来源报装单号（可选，回写户/客户/表 source_apply_no）。 */
   sourceApplyNo?: string;
+  /** B1：立户即入册（可选，reading_book id）。 */
+  readingBookId?: string;
 }
 
 /**
@@ -125,5 +127,8 @@ export function parseOnboardWire(
       reason: body.installation.reason as OnboardBody['installation']['reason'],
     },
     sourceApplyNo: body.sourceApplyNo?.trim() || undefined,
+    readingBookId: body.readingBookId
+      ? assertUuid(body.readingBookId, 'readingBookId')
+      : undefined,
   };
 }

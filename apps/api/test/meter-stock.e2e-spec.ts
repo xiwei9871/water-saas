@@ -222,4 +222,78 @@ describe('任务D 水表库房全生命周期', () => {
     };
     expect(list.total).toBe(2);
   });
+
+  it('D1 出入库分源：采购录新号建档+重号拒绝；selectable 按类型分源', async () => {
+    const wh = await post('/meter-warehouses', {
+      code: `WH2-${RUN}`,
+      name: '二库房',
+    }).expect(201);
+
+    // 1) 采购入库直接录新表号批量建档（含检定周期自动带入）
+    const nos = [`NEW-${RUN}-001`, `NEW-${RUN}-002`];
+    const mv = await post('/meter-stock/movements', {
+      type: 'PURCHASE_IN',
+      meterNos: [...nos, nos[0]], // 批内重复应去重
+      warehouseId: wh.body.id,
+      brand: '宁波',
+      caliber: 'DN15',
+      supplier: 'XX表厂',
+      batchNo: 'D1BATCH',
+    }).expect(201);
+    expect(mv.body.count).toBe(2);
+    const created = (
+      await owner.query(
+        `SELECT meter_no, status::text AS s, check_period_years FROM meter
+         WHERE meter_no = ANY($1) ORDER BY meter_no`,
+        [nos],
+      )
+    ).rows;
+    expect(created).toHaveLength(2);
+    expect(created[0].s).toBe('AVAILABLE');
+    expect(created[0].check_period_years).toBe(6); // DN15 → 6 年
+
+    // 2) 重号整单拒绝（与档案池比对，含已入档表）
+    const dup = await post('/meter-stock/movements', {
+      type: 'PURCHASE_IN',
+      meterNos: [nos[0], `NEW-${RUN}-003`],
+      warehouseId: wh.body.id,
+    });
+    expect(dup.status).toBe(409);
+    expect(dup.body.code).toBe('METER_NO_EXISTS');
+    // 003 未落库（整单拒绝）
+    expect(
+      (
+        await owner.query(`SELECT 1 FROM meter WHERE meter_no = $1`, [
+          `NEW-${RUN}-003`,
+        ])
+      ).rowCount,
+    ).toBe(0);
+
+    // 3) selectable 分源：在库表出现在 ISSUE_OUT 候选，不出现在 RETURN_IN
+    const issueCands = (
+      await get(`/meter-stock/selectable?type=ISSUE_OUT&kw=NEW-${RUN}`)
+    ).body as { meterNo: string; warehouse: { name: string } | null }[];
+    expect(issueCands.map((c) => c.meterNo).sort()).toEqual(nos);
+    const returnCands = (
+      await get(`/meter-stock/selectable?type=RETURN_IN&kw=NEW-${RUN}`)
+    ).body as { meterNo: string }[];
+    expect(returnCands).toHaveLength(0);
+
+    // 4) 领用出库后：该表转入 RETURN_IN 候选、离开 ISSUE_OUT 候选
+    const meterId = (
+      await owner.query(`SELECT id FROM meter WHERE meter_no = $1`, [nos[0]])
+    ).rows[0].id as string;
+    await post('/meter-stock/movements', {
+      type: 'ISSUE_OUT',
+      meterIds: [meterId],
+    }).expect(201);
+    const issueAfter = (
+      await get(`/meter-stock/selectable?type=ISSUE_OUT&kw=NEW-${RUN}`)
+    ).body as { meterNo: string }[];
+    expect(issueAfter.map((c) => c.meterNo)).toEqual([nos[1]]);
+    const returnAfter = (
+      await get(`/meter-stock/selectable?type=RETURN_IN&kw=NEW-${RUN}`)
+    ).body as { meterNo: string }[];
+    expect(returnAfter.map((c) => c.meterNo)).toEqual([nos[0]]);
+  });
 });

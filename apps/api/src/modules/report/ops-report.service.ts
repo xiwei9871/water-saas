@@ -745,7 +745,7 @@ export class OpsReportService {
             AND r.created_at >= ${dayGte} AND r.created_at < ${dayLt}`,
         tx.$queryRaw<{ cnt: number }[]>`
           SELECT count(*)::int AS cnt FROM task t
-          WHERE t.tenant_id = ${ctx.tenantId}::uuid AND t.status IN ('PENDING','CLAIMED')`,
+          WHERE t.tenant_id = ${ctx.tenantId}::uuid AND t.status IN ('PENDING','CLAIMED','ASSIGNED')`,
         tx.$queryRaw<{ cnt: number }[]>`
           SELECT count(*)::int AS cnt FROM meter_reading r
           JOIN meter_installation mi ON mi.tenant_id = r.tenant_id AND mi.id = r.installation_id

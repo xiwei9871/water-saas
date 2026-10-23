@@ -84,6 +84,46 @@ const TARGET_PAGE: Record<string, string> = {
 };
 
 /**
+ * A2 异常直达与任务直达共用同一套聚焦参数（focusId / wa / period）：
+ * - 有可定位记录的类型 → focusId=记录 id（读数/远传事件/账单）；
+ * - 缺失类异常（无表/多表/未入册/多册/估算连期/计划漏抄）→ wa=用水户 id 定位到户；
+ * - 带账期的类型附 period。
+ */
+function targetUrl(f: { type: string; anchorRef: { kind: string; id: string }; waterAccountId: string | null; period: string | null }): string | null {
+  const base = TARGET_PAGE[f.type];
+  if (!base) return null;
+  const q = new URLSearchParams();
+  const readingTypes = ['READING_QC_PENDING', 'READING_QC_REVIEW', 'READING_QC_REJECTED'];
+  const remoteTypes = [
+    'REMOTE_EVENT_UNBOUND',
+    'REMOTE_EVENT_WAITING_PLAN',
+    'REMOTE_EVENT_FAILED',
+    'REMOTE_EVENT_CONFLICT',
+    'REMOTE_EVENT_KEY_CONFLICT',
+  ];
+  if (readingTypes.includes(f.type)) {
+    if (f.anchorRef.id) q.set('focusId', f.anchorRef.id);
+    if (f.waterAccountId) q.set('wa', f.waterAccountId);
+    if (f.period) q.set('period', f.period);
+  } else if (remoteTypes.includes(f.type) || f.type === 'UNPAID_BILL_OVERDUE') {
+    if (f.anchorRef.id) q.set('focusId', f.anchorRef.id);
+    if (f.waterAccountId) q.set('wa', f.waterAccountId);
+  } else if (f.type === 'SETTLEMENT_DRIFT' || f.type === 'PLANNED_NO_SETTLEMENT' || f.type === 'SETTLEMENT_UNFINALIZED') {
+    if (f.waterAccountId) q.set('focusId', f.waterAccountId);
+    if (f.period) q.set('period', f.period);
+  } else {
+    // 缺失类（NO_ACTIVE_METER / MULTI_ACTIVE_METER / NO_BOOK / MULTI_BOOK /
+    // ESTIMATE_STREAK / PLANNED_NO_READING / CLOSED_BALANCE_LEFT）：定位到户。
+    if (f.waterAccountId) q.set('wa', f.waterAccountId);
+    if (f.period && (f.type === 'ESTIMATE_STREAK' || f.type === 'PLANNED_NO_READING')) {
+      q.set('period', f.period);
+    }
+  }
+  const s = q.toString();
+  return s ? `${base}?${s}` : base;
+}
+
+/**
  * 3.1 可处置权限映射：异常类型 → 处理该异常所需权限。
  * 默认 Tab 只展示当前账号可处置的异常；「全部异常」Tab 只读可见。
  */
@@ -301,7 +341,7 @@ export default function Exceptions() {
 
   const drill = () => {
     if (!detail) return;
-    const target = TARGET_PAGE[detail.fact.type];
+    const target = targetUrl(detail.fact);
     if (target) {
       navigate(target);
       return;
@@ -355,7 +395,7 @@ export default function Exceptions() {
           </Button>
           {TARGET_PAGE[r.type] &&
             (canAct(r.type) ? (
-              <Button size="small" type="link" onClick={() => navigate(TARGET_PAGE[r.type])}>
+              <Button size="small" type="link" onClick={() => navigate(targetUrl(r) ?? TARGET_PAGE[r.type])}>
                 去处理
               </Button>
             ) : (

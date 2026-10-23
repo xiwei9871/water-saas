@@ -80,6 +80,18 @@ export class MeterStockController {
     return this.svc.meterTrail(currentTenant(), assertUuid(id, 'id'));
   }
 
+  /** 20261023 D1：GET /meter-stock/selectable?type=&kw= — 按流水类型的候选表。 */
+  @Get('meter-stock/selectable')
+  @Permissions('metering:service')
+  selectable(@Query('type') type?: string, @Query('kw') kw?: string, @Query('take') take?: string) {
+    return this.svc.selectable(
+      currentTenant(),
+      type ?? '',
+      kw?.trim() || undefined,
+      Math.min(Math.max(parseInt(take ?? '50', 10) || 50, 1), 200),
+    );
+  }
+
   /** GET /meter-stock — 在库表清单（?warehouseId=）。 */
   @Get('meter-stock')
   @Permissions('metering:service')

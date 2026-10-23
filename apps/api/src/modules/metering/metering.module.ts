@@ -6,6 +6,8 @@ import { MeterReadingController } from './meter-reading.controller.js';
 import { MeterReadingService } from './meter-reading.service.js';
 import { MeterRelationController } from './meter-relation.controller.js';
 import { MeterRelationService } from './meter-relation.service.js';
+import { DmaController } from './dma.controller.js';
+import { DmaService } from './dma.service.js';
 import { MeterOcrService } from './ocr/meter-ocr.service.js';
 import { ReadingBookController } from './reading-book.controller.js';
 import { ReadingBookService } from './reading-book.service.js';
@@ -35,6 +37,7 @@ import { SettlementService } from './settlement.service.js';
     SettlementController,
     EstimateController,
     MeterRelationController,
+    DmaController,
   ],
   providers: [
     ReadingBookService,
@@ -43,6 +46,7 @@ import { SettlementService } from './settlement.service.js';
     SettlementService,
     MeterOcrService,
     MeterRelationService,
+    DmaService,
   ],
 })
 export class MeteringModule {}

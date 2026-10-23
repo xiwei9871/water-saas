@@ -243,7 +243,7 @@ export class ReadingBookService {
    * Cadence/meterChannel/anchorPeriod wire validation — mirrors the DB
    * CHECKs so bad input is a 422 here, never a 500 from the constraint.
    * For PATCH the caller passes the MERGED cadence/anchor (patch value
-   * falling back to the stored row) so switching MONTHLY→BIMONTHLY
+   * falling back to the stored row) so switching MONTHLY→QUARTERLY
    * without an anchor is refused too.
    */
   private validateCadence(
@@ -264,8 +264,8 @@ export class ReadingBookService {
     ) {
       throw new UnprocessableEntityException({ code: 'INVALID_ANCHOR_PERIOD' });
     }
-    if (cadence === 'BIMONTHLY' && (anchorPeriod ?? null) === null) {
-      throw new UnprocessableEntityException({ code: 'BIMONTHLY_ANCHOR_REQUIRED' });
+    if (cadence === 'QUARTERLY' && (anchorPeriod ?? null) === null) {
+      throw new UnprocessableEntityException({ code: 'QUARTERLY_ANCHOR_REQUIRED' });
     }
   }
 

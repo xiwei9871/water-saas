@@ -14,6 +14,15 @@ type Tx = Prisma.TransactionClient;
 const bad = (code: string, extra?: Record<string, unknown>) =>
   new BadRequestException({ code, ...extra });
 
+/** 检定周期按口径（DN≤25→6年 / 25–50→4 / >50→2，20261020 T4 规则）。 */
+const checkPeriodYearsOf = (caliber: string | null): number | null => {
+  const m = /(\d+(?:\.\d+)?)/.exec(caliber ?? '');
+  if (!m) return null;
+  const dn = Number(m[1]);
+  if (!Number.isFinite(dn)) return null;
+  return dn <= 25 ? 6 : dn <= 50 ? 4 : 2;
+};
+
 export const MOVEMENT_TYPES = [
   'PURCHASE_IN',
   'ISSUE_OUT',
@@ -108,8 +117,12 @@ export class MeterStockService {
     body: {
       type?: unknown;
       meterIds?: unknown;
+      meterNos?: unknown;
       warehouseId?: unknown;
       locationId?: unknown;
+      brand?: unknown;
+      model?: unknown;
+      caliber?: unknown;
       docNo?: unknown;
       supplier?: unknown;
       batchNo?: unknown;
@@ -121,10 +134,6 @@ export class MeterStockService {
     if (!(MOVEMENT_TYPES as readonly string[]).includes(type)) {
       throw bad('MOVEMENT_TYPE_INVALID');
     }
-    const meterIds = Array.isArray(body.meterIds)
-      ? (body.meterIds.filter((x): x is string => typeof x === 'string') as string[])
-      : [];
-    if (meterIds.length === 0) throw bad('MOVEMENT_METERS_REQUIRED');
     const warehouseId = typeof body.warehouseId === 'string' ? body.warehouseId : null;
     const locationId = typeof body.locationId === 'string' ? body.locationId : null;
 
@@ -143,6 +152,27 @@ export class MeterStockService {
         if (!loc) throw bad('LOCATION_NOT_IN_WAREHOUSE');
       }
     }
+
+    // 20261023 D1：采购入库录入新表号批量建档（meterIds 与 meterNos 二选一）。
+    if (type === 'PURCHASE_IN' && Array.isArray(body.meterNos)) {
+      return this.purchaseInTx(tx, ctx, {
+        meterNos: body.meterNos,
+        warehouseId: warehouseId!,
+        locationId,
+        brand: typeof body.brand === 'string' ? body.brand : null,
+        model: typeof body.model === 'string' ? body.model : null,
+        caliber: typeof body.caliber === 'string' ? body.caliber : null,
+        docNo: body.docNo,
+        supplier: body.supplier,
+        batchNo: body.batchNo,
+        remark: body.remark,
+      }, req);
+    }
+
+    const meterIds = Array.isArray(body.meterIds)
+      ? (body.meterIds.filter((x): x is string => typeof x === 'string') as string[])
+      : [];
+    if (meterIds.length === 0) throw bad('MOVEMENT_METERS_REQUIRED');
 
     const meters = await tx.meter.findMany({
       where: { tenantId: ctx.tenantId, id: { in: meterIds } },
@@ -210,6 +240,151 @@ export class MeterStockService {
     }
     req.auditBefore = undefined;
     return { movementIds: results, count: results.length };
+  }
+
+  /**
+   * 20261023 D1 采购入库：批量录入新表号 → 同批建 meter 档案 + 入库流水。
+   * 表号与全局水表档案池比对（含历史/在用/已报废）——重号整单拒绝，
+   * 避免同一表号在档案池出现两条表记录。
+   */
+  private async purchaseInTx(
+    tx: Tx,
+    ctx: TenantCtx,
+    body: {
+      meterNos: unknown[];
+      warehouseId: string;
+      locationId: string | null;
+      brand: string | null;
+      model: string | null;
+      caliber: string | null;
+      docNo?: unknown;
+      supplier?: unknown;
+      batchNo?: unknown;
+      remark?: unknown;
+    },
+    req: Request,
+  ) {
+    const nos = [
+      ...new Set(
+        body.meterNos
+          .map((x) => String(x ?? '').trim())
+          .filter((x) => x.length > 0),
+      ),
+    ];
+    if (nos.length === 0) throw bad('MOVEMENT_METERS_REQUIRED');
+    if (nos.length > 200) throw bad('MOVEMENT_BATCH_TOO_LARGE', { max: 200 });
+    for (const no of nos) {
+      if (no.length > 64 || !/^[A-Za-z0-9_-]+$/.test(no)) {
+        throw bad('METER_NO_INVALID', { meterNo: no });
+      }
+    }
+    const dup = await tx.meter.findFirst({
+      where: { tenantId: ctx.tenantId, meterNo: { in: nos } },
+      select: { meterNo: true },
+    });
+    if (dup) {
+      throw new ConflictException({ code: 'METER_NO_EXISTS', meterNo: dup.meterNo });
+    }
+    const checkYears = checkPeriodYearsOf(body.caliber);
+    const now = new Date();
+    const ids: string[] = [];
+    for (const meterNo of nos) {
+      const meter = await tx.meter.create({
+        data: {
+          tenantId: ctx.tenantId,
+          meterNo,
+          brand: body.brand,
+          model: body.model,
+          caliber: body.caliber,
+          checkPeriodYears: checkYears,
+          status: 'AVAILABLE',
+          warehouseId: body.warehouseId,
+          locationId: body.locationId,
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        },
+      });
+      await tx.meterStockMovement.create({
+        data: {
+          tenantId: ctx.tenantId,
+          meterId: meter.id,
+          movementType: 'PURCHASE_IN',
+          docNo: body.docNo ? String(body.docNo) : null,
+          supplier: body.supplier ? String(body.supplier) : null,
+          batchNo: body.batchNo ? String(body.batchNo) : null,
+          warehouseId: body.warehouseId,
+          locationId: body.locationId,
+          operatorId: ctx.staffId,
+          movedAt: now,
+          remark: body.remark ? String(body.remark) : null,
+        },
+      });
+      ids.push(meter.id);
+    }
+    req.auditBefore = undefined;
+    return { movementIds: ids, meterIds: ids, count: ids.length };
+  }
+
+  /**
+   * 20261023 D1 出入库分源多选：按流水类型返回可选表清单
+   * （出库/调拨=在库；退库=已出库未报废未装表）。
+   */
+  async selectable(ctx: TenantCtx, type: string, kw?: string, take = 50) {
+    const t = String(type ?? '') as MovementType;
+    if (!(MOVEMENT_TYPES as readonly string[]).includes(t)) {
+      throw bad('MOVEMENT_TYPE_INVALID');
+    }
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const statusCond: Prisma.MeterWhereInput =
+        t === 'ISSUE_OUT' || t === 'TRANSFER'
+          ? { status: 'AVAILABLE', warehouseId: { not: null } }
+          : t === 'RETURN_IN'
+            ? { status: { in: ['ISSUED', 'IN_TRANSIT'] } }
+            : t === 'SCRAP_OUT'
+              ? { status: { in: ['AVAILABLE', 'ISSUED', 'IN_TRANSIT'] } }
+              : { id: '__none__' }; // PURCHASE_IN 录入新号，无候选表
+      const rows = await tx.meter.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          ...statusCond,
+          ...(kw ? { meterNo: { contains: kw, mode: 'insensitive' } } : {}),
+        },
+        select: {
+          id: true,
+          meterNo: true,
+          status: true,
+          brand: true,
+          caliber: true,
+          warehouseId: true,
+          locationId: true,
+        },
+        orderBy: { meterNo: 'asc' },
+        take: Math.min(Math.max(take, 1), 200),
+      });
+      const whIds = [...new Set(rows.map((r) => r.warehouseId).filter((x): x is string => !!x))];
+      const loIds = [...new Set(rows.map((r) => r.locationId).filter((x): x is string => !!x))];
+      const [whs, locs] = await Promise.all([
+        whIds.length
+          ? tx.meterWarehouse.findMany({
+              where: { tenantId: ctx.tenantId, id: { in: whIds } },
+              select: { id: true, name: true, code: true },
+            })
+          : Promise.resolve([]),
+        loIds.length
+          ? tx.meterWarehouseLocation.findMany({
+              where: { tenantId: ctx.tenantId, id: { in: loIds } },
+              select: { id: true, name: true, code: true },
+            })
+          : Promise.resolve([]),
+      ]);
+      const wMap = new Map(whs.map((w) => [w.id, w]));
+      const lMap = new Map(locs.map((l) => [l.id, l]));
+      return rows.map((r) => ({
+        ...r,
+        warehouse: r.warehouseId ? (wMap.get(r.warehouseId) ?? null) : null,
+        location: r.locationId ? (lMap.get(r.locationId) ?? null) : null,
+      }));
+    });
   }
 
   /** 表号全生命周期历史：出入库流水 + 装拆履历。 */

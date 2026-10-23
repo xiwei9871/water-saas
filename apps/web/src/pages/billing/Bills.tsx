@@ -34,7 +34,12 @@ import type {
   BillStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
-import { useTaskGroup } from '../../components/TaskFocus';
+import {
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 import { PREPAY_ENTRY_LABELS } from '../payment/common';
 import {
   DECIMAL_RULE,
@@ -94,9 +99,17 @@ export default function Bills() {
   const [status, setStatus] = useState<BillStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  // U2 任务分组：账单任务挂在账单上。
+  // A3 任务三态分组：账单任务挂在账单上。
   const taskGroup = useTaskGroup<Bill>('bill', rows, (r) => r.id);
-  const shownRows = taskGroup.filtered;
+  // A2「只显示该条」：?focusId=账单id（逾期账单异常/任务直达）。
+  const { focusId, clear: clearFocus } = useFocusParams();
+  const focusList = useFocusList<Bill>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
+  const shownRows = focusList.shown;
 
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -515,7 +528,16 @@ export default function Bills() {
         </Space>
       }
     >
-      {taskGroup.tabs}
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该笔账单已定位</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
       <Table<Bill>
         rowKey="id"
         size="middle"
@@ -523,16 +545,20 @@ export default function Bills() {
         columns={columns}
         dataSource={shownRows}
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          onChange: (p, size) => {
-            setPage(p);
-            setPageSize(size);
-          },
-        }}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                onChange: (p, size) => {
+                  setPage(p);
+                  setPageSize(size);
+                },
+              }
+        }
       />
 
       {/* 换票重开 */}

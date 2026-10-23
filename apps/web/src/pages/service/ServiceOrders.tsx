@@ -29,7 +29,13 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FOCUS_ROW_CLASS, FocusTaskBar, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 import { api, apiErrorText } from '../../api/client';
 import {
   enumLabel,
@@ -242,7 +248,13 @@ export default function ServiceOrders() {
 
   // U2 任务分组：工单任务挂在工单上。
   const taskGroup = useTaskGroup<ServiceOrder>('service_order', items, (r) => r.id);
-  const shownItems = taskGroup.filtered;
+  const focusList = useFocusList<ServiceOrder>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
+  const shownItems = focusList.shown;
 
   const doAction = async (
     verb: 'approve' | 'reject' | 'dispatch' | 'cancel' | 'archive',
@@ -436,7 +448,10 @@ export default function ServiceOrders() {
             style={{ width: 160 }}
             options={TYPE_OPTIONS}
             value={serviceType}
-            onChange={(v) => setServiceType(v)}
+            onChange={(v) => {
+              setServiceType(v);
+              setPage(1);
+            }}
           />
           <Select
             allowClear
@@ -444,11 +459,17 @@ export default function ServiceOrders() {
             style={{ width: 120 }}
             options={STATUS_OPTIONS}
             value={status}
-            onChange={(v) => setStatus(v)}
+            onChange={(v) => {
+              setStatus(v);
+              setPage(1);
+            }}
           />
           <DatePicker.RangePicker
             value={range as never}
-            onChange={(v) => setRange(v)}
+            onChange={(v) => {
+              setRange(v);
+              setPage(1);
+            }}
             style={{ width: 240 }}
           />
           <Button icon={<ReloadOutlined />} onClick={() => void load(page)} />
@@ -462,11 +483,13 @@ export default function ServiceOrders() {
         <FocusTaskBar
           focusId={focusId}
           summary={<span>该张工单已定位并打开详情</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
           onOpenDetail={() => void openDetail(focusId)}
           onClose={clearFocus}
         />
       )}
-      {taskGroup.tabs}
+      {!focusList.focusing && taskGroup.tabs}
       <Table<ServiceOrder>
         rowKey="id"
         size="small"
@@ -474,13 +497,17 @@ export default function ServiceOrders() {
         columns={columns}
         dataSource={shownItems}
         rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
-        pagination={{
-          current: page,
-          total,
-          pageSize: 20,
-          onChange: setPage,
-          showTotal: (t) => `共 ${t} 条`,
-        }}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                total,
+                pageSize: 20,
+                onChange: setPage,
+                showTotal: (t) => `共 ${t} 条`,
+              }
+        }
       />
 
       {/* 发起工单 */}

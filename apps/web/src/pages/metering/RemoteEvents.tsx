@@ -19,7 +19,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { FOCUS_ROW_CLASS, FocusTaskBar } from '../../components/TaskFocus';
+import { FOCUS_ROW_CLASS, FocusTaskBar, useFocusList } from '../../components/TaskFocus';
 
 /** canonicalPayload 常见字段的中文名（原始报文逐字段业务化展示）。 */
 const REMOTE_PAYLOAD_LABELS: Record<string, string> = {
@@ -147,8 +147,14 @@ export default function RemoteEvents() {
     }
   };
 
-  // 任务直达 ?focusId= → 置顶警示条 + 行高亮 + 自动打开该事件详情。
+  // 任务/异常直达 ?focusId= → 「只显示该条」+ 自动打开该事件详情。
   const focusId = params.get('focusId');
+  const focusList = useFocusList<RawRemoteEvent>(
+    focusId,
+    rows,
+    focusId ? (r) => r.id === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
   useEffect(() => {
     if (focusId && focusDone.current !== focusId) {
       focusDone.current = focusId;
@@ -284,6 +290,8 @@ export default function RemoteEvents() {
         <FocusTaskBar
           focusId={focusId}
           summary={<span>该远传事件已定位并打开详情</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
           onOpenDetail={() => void openDetail(focusId)}
           onClose={() => {
             const next = new URLSearchParams(params);
@@ -297,18 +305,22 @@ export default function RemoteEvents() {
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={focusList.shown}
         rowClassName={(r: RawRemoteEvent) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
-        pagination={{
-          current: page,
-          pageSize,
-          total: (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-          onChange: (p, s) => {
-            setPage(p);
-            setPageSize(s);
-          },
-          showSizeChanger: true,
-        }}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total: (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
+                onChange: (p, s) => {
+                  setPage(p);
+                  setPageSize(s);
+                },
+                showSizeChanger: true,
+              }
+        }
       />
 
       <Drawer

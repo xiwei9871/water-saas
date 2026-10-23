@@ -263,8 +263,8 @@ export default function Reconciliations() {
     }
   }, [focusId]);
 
-  // U2 任务分组：任务挂在用水户上——该户仍有未完成任务即入「未完成」。
-  const taskGroup = useTaskGroup<Reconciliation>('waterAccount', rows, (r) => r.waterAccountId);
+  // A3 任务三态分组：按补差记录 id（后端经 waterAccountId+period 回联任务）。
+  const taskGroup = useTaskGroup<Reconciliation>('reconciliation', rows, (r) => r.id);
   const shownRows = taskGroup.filtered;
 
   const openDetail = async (row: Reconciliation) => {
@@ -527,7 +527,12 @@ export default function Reconciliations() {
       {focusId && (
         <FocusTaskBar
           focusId={focusId}
-          summary={<span>已按用水户过滤本页补差记录</span>}
+          summary={<span>已按用水户过滤补差记录</span>}
+          showAll={!effectiveAccountId}
+          onToggleAll={(v) => {
+            setWaterAccountId(v ? undefined : focusId);
+            setPage(1);
+          }}
           onClose={() => {
             clearFocus();
             setWaterAccountId(undefined);

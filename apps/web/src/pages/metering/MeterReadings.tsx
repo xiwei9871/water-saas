@@ -61,6 +61,7 @@ import {
 import {
   FOCUS_ROW_CLASS,
   FocusTaskBar,
+  useFocusList,
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
@@ -82,6 +83,7 @@ const QC_ACTION_TEXT: Record<QcAction, { label: string; icon: ReactNode; danger?
 };
 
 interface SupersedeFormValues {
+  mode?: 'CORRECT' | 'ADDITIONAL';
   readingValue: string;
   readDate?: dayjs.Dayjs;
 }
@@ -175,7 +177,7 @@ export default function MeterReadings() {
     [page, pageSize, rows.length],
   );
 
-  const { focusId, clear: clearFocus } = useFocusParams();
+  const { focusId, wa: focusWa, period: focusPeriod, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
   const [focusRecord, setFocusRecord] = useState<MeterReading | null>(null);
 
@@ -213,14 +215,20 @@ export default function MeterReadings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId]);
 
-  // U2 任务分组：默认「未完成」，任务全部办结的记录归入「已完成」。
+  // U2 任务分组：默认「未完成」，任务全部了结或无任务的记录归入「已完成」。
   const taskGroup = useTaskGroup<MeterReading>('meterReading', rows, (r) => r.id);
-  // U1：聚焦记录不在当前页时置顶插入（高亮样式由 rowClassName 给）。
-  const shownRows = useMemo(() => {
-    const base = taskGroup.filtered;
-    if (!focusRecord || base.some((r) => r.id === focusRecord.id)) return base;
-    return [focusRecord, ...base];
-  }, [taskGroup.filtered, focusRecord]);
+  // A2「只显示该条」：聚焦中数据源只含目标记录；「显示全部记录」展开回第 1 页。
+  const focusList = useFocusList<MeterReading>(
+    focusId ?? focusWa,
+    taskGroup.filtered,
+    focusId
+      ? (r) => r.id === focusId
+      : focusWa
+        ? (r) => r.account?.id === focusWa && (!focusPeriod || r.period === focusPeriod)
+        : null,
+    { extraRecord: focusRecord, onShowAll: () => setPage(1) },
+  );
+  const shownRows = focusList.shown;
 
   // 聚焦行进入视口即高亮滚动到位。
   useEffect(() => {
@@ -293,15 +301,32 @@ export default function MeterReadings() {
     if (!supersedeTarget) return;
     setSaving(true);
     try {
-      await api.post(
+      const res = await api.post<{
+        billed?: boolean;
+        supplementTask?: { id: string; deduped: boolean } | null;
+      }>(
         `/meter-readings/${supersedeTarget.id}/supersede`,
         cleanBody({
+          mode: values.mode ?? 'CORRECT',
           readingValue: values.readingValue,
           readDate: values.readDate?.format('YYYY-MM-DD'),
         }),
         { headers: { 'Idempotency-Key': supersedeIdemKey } },
       );
-      message.success('更正读数已生成（原记录保留为历史）');
+      if (res.data.billed) {
+        message.warning(
+          res.data.supplementTask?.deduped
+            ? '该期已开账——读数已独立成行，已有在途补差任务继续跟进'
+            : '该期已开账——读数已独立成行，并生成补差任务走对账/调整',
+          6,
+        );
+      } else {
+        message.success(
+          (values.mode ?? 'CORRECT') === 'ADDITIONAL'
+            ? '追加读数已入链（原记录保留为历史），质检已重置'
+            : '更正读数已生成（原记录保留为历史）',
+        );
+      }
       setSupersedeTarget(null);
       await load(page, pageSize);
     } catch (err) {
@@ -629,9 +654,9 @@ export default function MeterReadings() {
         </Space>
       }
     >
-      {focusId && (
+      {(focusId || focusWa) && (
         <FocusTaskBar
-          focusId={focusId}
+          focusId={focusId ?? focusWa!}
           summary={
             focusRecord ? (
               <span>
@@ -639,15 +664,23 @@ export default function MeterReadings() {
                 {String(focusRecord.readingValue ?? '—')} · 质检{' '}
                 {enumLabel(QC_STATUS_LABELS, focusRecord.qcStatus)}
               </span>
+            ) : focusWa && !focusId ? (
+              <span>
+                该用水户的抄表记录已定位{focusPeriod ? `（账期 ${focusPeriod}）` : ''}
+              </span>
             ) : (
-              <span>记录 {focusId.slice(0, 8)}…</span>
+              <span>记录 {focusId!.slice(0, 8)}…</span>
             )
           }
-          onOpenDetail={() => void openDetail({ id: focusId } as MeterReading)}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onOpenDetail={
+            focusId ? () => void openDetail({ id: focusId } as MeterReading) : undefined
+          }
           onClose={clearFocus}
         />
       )}
-      {taskGroup.tabs}
+      {!focusList.focusing && taskGroup.tabs}
       <Table<MeterReading>
         rowKey="id"
         size="middle"
@@ -656,23 +689,27 @@ export default function MeterReadings() {
         dataSource={shownRows}
         rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         scroll={{ x: 1900, y: 'calc(100vh - 340px)' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          onChange: (p, size) => {
-            setPage(p);
-            setPageSize(size);
-          },
-        }}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                onChange: (p, size) => {
+                  setPage(p);
+                  setPageSize(size);
+                },
+              }
+        }
       />
 
       {/* 更正读数 */}
       <Modal maskClosable={false}
         open={supersedeTarget !== null}
-        title="更正读数（追加新事实行，原记录保留为历史）"
-        okText="更正"
+        title="更正 / 追加读数（追加新事实行，原记录保留为历史）"
+        okText="提交"
         cancelText="取消"
         confirmLoading={saving}
         onOk={() => void submitSupersede()}
@@ -687,10 +724,22 @@ export default function MeterReadings() {
             message={`原读数：${supersedeTarget.readingValue ?? '—'}（${enumLabel(RESULT_TYPE_LABELS, supersedeTarget.resultType)} · ${fmtPeriod(supersedeTarget.period)}）`}
           />
         )}
-        <Form form={supersedeForm} layout="vertical">
+        <Form form={supersedeForm} layout="vertical" initialValues={{ mode: 'CORRECT' }}>
+          <Form.Item
+            name="mode"
+            label="方式"
+            extra="更正：修错值（可小于原值）；追加：本期再抄一次（不得小于上一可信读数）。该期已开账时均转补差任务。"
+          >
+            <Select
+              options={[
+                { value: 'CORRECT', label: '更正错值' },
+                { value: 'ADDITIONAL', label: '追加抄表' },
+              ]}
+            />
+          </Form.Item>
           <Form.Item
             name="readingValue"
-            label="更正后表码读数"
+            label="新表码读数"
             rules={[{ required: true, message: '请输入表码读数' }, DECIMAL_RULE]}
           >
             <Input placeholder="如 123.5" />
@@ -739,10 +788,10 @@ export default function MeterReadings() {
               ]}
             />
           </Form.Item>
-          <Form.Item name="description" label="现场描述">
+          <Form.Item name="description" label="现场描述" rules={[{ required: true, message: '请填写现场描述' }]}>
             <Input.TextArea rows={2} />
           </Form.Item>
-          <Form.Item name="photoRefs" label="现场照片引用（空格分隔，可选）">
+          <Form.Item name="photoRefs" label="现场照片引用（空格分隔）" rules={[{ required: true, message: '疑似违章须附现场照片' }]}>
             <Input.TextArea rows={2} />
           </Form.Item>
         </Form>

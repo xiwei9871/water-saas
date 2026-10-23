@@ -26,7 +26,13 @@ import { useAuth } from '../../auth/AuthContext';
 import { CustomerSelect, ReadingBookSelect, MeterSelect } from '../pickers';
 import { fmtDate, USAGE_CATEGORY_OPTIONS } from '../common';
 import { Link } from 'react-router-dom';
-import { FOCUS_ROW_CLASS, FocusTaskBar, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 
 type ApplyStatus = 'SUBMITTED' | 'SURVEYED' | 'APPROVED' | 'INSTALLING' | 'COMPLETED' | 'REJECTED' | 'CANCELLED';
 
@@ -131,9 +137,15 @@ export default function InstallApplications() {
     })();
   }, [focusId]);
 
-  // U2 任务分组：报装任务挂在申请单上。
+  // A3 任务三态分组：报装任务挂在申请单上。
   const taskGroup = useTaskGroup<Apply>('INSTALL_APPLICATION', rows, (r) => r.id);
-  const shownRows = taskGroup.filtered;
+  const focusList = useFocusList<Apply>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { extraRecord: focusRecord },
+  );
+  const shownRows = focusList.shown;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -222,6 +234,7 @@ export default function InstallApplications() {
           initialReading: v.initialReading,
           reason: 'NEW',
         },
+        readingBookId: v.bookId || undefined,
       });
       message.success('已归档立户');
       setArchiveFor(null);
@@ -308,10 +321,12 @@ export default function InstallApplications() {
               <span>该申请已定位</span>
             )
           }
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
           onClose={clearFocus}
         />
       )}
-      {taskGroup.tabs}
+      {!focusList.focusing && taskGroup.tabs}
       <Table rowKey="id" size="small" columns={cols} dataSource={shownRows} loading={loading} pagination={false} rowClassName={(r: Apply) => (r.id === focusId ? FOCUS_ROW_CLASS : '')} />
 
       <Modal title="新建报装申请" open={createOpen} onOk={() => void create()} onCancel={() => setCreateOpen(false)} destroyOnHidden>

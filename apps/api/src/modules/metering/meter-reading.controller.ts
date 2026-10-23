@@ -400,7 +400,7 @@ export class MeterReadingController {
   @Permissions('metering:write')
   supersede(
     @Param('id') id: string,
-    @Body() body: { readingValue?: unknown; readDate?: unknown },
+    @Body() body: { readingValue?: unknown; readDate?: unknown; mode?: unknown },
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
   ) {
@@ -411,6 +411,7 @@ export class MeterReadingController {
     const parsed: SupersedeBody = {
       readingValue: assertDecimal(body.readingValue, 'readingValue', { min: 0 }),
       readDate: assertOptionalDate(body.readDate, 'readDate'),
+      mode: body.mode === 'ADDITIONAL' ? 'ADDITIONAL' : 'CORRECT',
     };
     const ctx = currentTenant();
     return withOptionalIdem(

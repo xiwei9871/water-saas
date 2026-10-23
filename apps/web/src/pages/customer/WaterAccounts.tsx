@@ -649,6 +649,28 @@ export default function WaterAccounts() {
           : '—',
     },
     {
+      title: '所属抄表册',
+      key: 'readingBooks',
+      width: 160,
+      render: (_: unknown, r: WaterAccount) =>
+        r.readingBooks?.length ? (
+          <>
+            {r.readingBooks.map((b) => (
+              <Tag
+                key={b.id}
+                style={{ cursor: 'pointer', marginBottom: 2 }}
+                onClick={() => navigate('/metering/books')}
+                title={`${b.bookNo} · ${b.name}`}
+              >
+                {b.name}
+              </Tag>
+            ))}
+          </>
+        ) : (
+          '—'
+        ),
+    },
+    {
       title: '用水类别',
       dataIndex: 'usageCategory',
       key: 'usageCategory',

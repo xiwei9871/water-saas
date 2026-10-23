@@ -6,6 +6,7 @@ import {
   ReloadOutlined,
   StopOutlined,
   UserAddOutlined,
+  UserSwitchOutlined,
 } from '@ant-design/icons';
 import {
   App as AntdApp,
@@ -18,6 +19,7 @@ import {
   Form,
   Input,
   Modal,
+  Select,
   Space,
   Table,
   Tabs,
@@ -30,13 +32,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import {
-  TASK_BIZ_ROUTES,
   TASK_PRIORITY_LABELS,
+  TASK_SOURCE_LABELS,
   TASK_STATUS_LABELS,
   TASK_TYPE_LABELS,
   type TaskItem,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import { taskBizUrl } from '../../components/TaskFocus';
 import { enumLabel, fmtTime, taskContextFields, taskContextText } from '../common';
 
 const PRIORITY_COLOR: Record<string, string> = {
@@ -51,10 +54,11 @@ type Box = 'todo' | 'done' | 'alert';
 /** 任务中心（任务书 §1.7）：待办/已办/告警三箱，领取式处理 + bizType 直达。 */
 export default function Tasks() {
   const { message } = AntdApp.useApp();
-  const { hasPerm } = useAuth();
+  const { hasPerm, user } = useAuth();
   const navigate = useNavigate();
   const [box, setBox] = useState<Box>('todo');
   const [typeFilter, setTypeFilter] = useState<string | undefined>(undefined);
+  const [sourceFilter, setSourceFilter] = useState<string | undefined>(undefined);
   const [rows, setRows] = useState<TaskItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -142,6 +146,44 @@ export default function Tasks() {
     }
   };
 
+  // A1 指派/改派：候选人来自任务详情（含权限+数据范围），服务端二次校验。
+  const [assignFor, setAssignFor] = useState<TaskItem | null>(null);
+  const [assigneeId, setAssigneeId] = useState<string>();
+  const [assignees, setAssignees] = useState<{ id: string; name: string }[]>([]);
+  const [assigning, setAssigning] = useState(false);
+  const openAssign = async (t: TaskItem) => {
+    setAssignFor(t);
+    setAssigneeId(undefined);
+    try {
+      const res = await api.get<TaskItem>(`/tasks/${t.id}`);
+      let opts = res.data.candidates ?? [];
+      if (!opts.length) {
+        // 告警任务无候选人时给全量名单，后端仍会校验权限（ASSIGNEE_NOT_CANDIDATE）。
+        const st = await api.get<{ id: string; name: string }[]>('/exceptions/options/assignees');
+        opts = st.data;
+      }
+      setAssignees(opts);
+    } catch (err) {
+      message.error(apiErrorText(err));
+      setAssignees([]);
+    }
+  };
+  const submitAssign = async () => {
+    if (!assignFor || !assigneeId) return;
+    setAssigning(true);
+    try {
+      await api.post(`/tasks/${assignFor.id}/assign`, { assigneeId });
+      message.success('已指派，进入该责任人待办');
+      setAssignFor(null);
+      setDetail(null);
+      void load(box, page, pageSize);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setAssigning(false);
+    }
+  };
+
   const cancel = async (id: string) => {
     try {
       await api.post(`/tasks/${id}/cancel`, { reason: '管理员取消' });
@@ -154,25 +196,12 @@ export default function Tasks() {
   };
 
   const gotoBiz = (t: TaskItem) => {
-    const tpl = TASK_BIZ_ROUTES[t.type];
-    if (!tpl) {
+    const url = taskBizUrl(t);
+    if (!url) {
       message.warning('该任务类型暂无直达页面');
       return;
     }
-    const ctx = (t.context ?? {}) as Record<string, unknown>;
-    const route = tpl.replace(/\{(\w+)\}/g, (_m, k) => {
-      if (k === 'bizId') return t.bizId;
-      if (k === 'taskId') return t.id;
-      const v = ctx[k];
-      return v == null ? '' : String(v);
-    });
-    // U1：携带完整定位参数（户号/账期便于目标页与人工核对）。
-    const extra = new URLSearchParams();
-    const wa = ctx.waterAccountNo ?? ctx.settleNo ?? null;
-    if (wa != null && wa !== '') extra.set('wa', String(wa));
-    if (ctx.period != null && ctx.period !== '') extra.set('period', String(ctx.period));
-    const sep = route.includes('?') ? '&' : '?';
-    navigate(extra.size ? `${route}${sep}${extra.toString()}` : route);
+    navigate(url);
   };
 
   const columns: ColumnsType<TaskItem> = [
@@ -224,15 +253,34 @@ export default function Tasks() {
       width: 100,
       render: (v: TaskItem['status'], r) => (
         <Badge
-          status={v === 'DONE' ? 'success' : v === 'CLAIMED' ? 'processing' : 'default'}
+          status={
+            v === 'DONE'
+              ? 'success'
+              : v === 'CLAIMED' || v === 'ASSIGNED'
+                ? 'processing'
+                : 'default'
+          }
           text={
             <>
               {enumLabel(TASK_STATUS_LABELS, v)}
-              {v === 'CLAIMED' && r.assigneeName ? `（${r.assigneeName}）` : ''}
+              {(v === 'CLAIMED' || v === 'ASSIGNED') && r.assigneeName
+                ? `（${r.assigneeName}）`
+                : ''}
             </>
           }
         />
       ),
+    },
+    {
+      title: '来源',
+      key: 'source',
+      width: 90,
+      render: (_, r) => {
+        const s = r.source ?? 'POOL';
+        const color =
+          s === 'ASSIGNED_TO_ME' ? 'orange' : s === 'CLAIMED_BY_ME' ? 'blue' : 'default';
+        return <Tag color={color}>{enumLabel(TASK_SOURCE_LABELS, s)}</Tag>;
+      },
     },
     {
       title: '操作',
@@ -295,7 +343,10 @@ export default function Tasks() {
         <Button
           size="small"
           type={typeFilter === undefined ? 'primary' : 'default'}
-          onClick={() => setTypeFilter(undefined)}
+          onClick={() => {
+            setTypeFilter(undefined);
+            setPage(1);
+          }}
         >
           全部
         </Button>
@@ -304,17 +355,42 @@ export default function Tasks() {
             key={k}
             size="small"
             type={typeFilter === k ? 'primary' : 'default'}
-            onClick={() => setTypeFilter(k)}
+            onClick={() => {
+              setTypeFilter(k);
+              setPage(1);
+            }}
           >
             {v}
           </Button>
         ))}
       </Space>
+      {box === 'todo' && (
+        <Space style={{ marginBottom: 12 }} wrap>
+          <span>来源：</span>
+          {(
+            [
+              [undefined, '全部'],
+              ['ASSIGNED_TO_ME', '指派给我'],
+              ['CLAIMED_BY_ME', '我领取的'],
+              ['POOL', '待领取'],
+            ] as const
+          ).map(([k, v]) => (
+            <Button
+              key={v}
+              size="small"
+              type={sourceFilter === k ? 'primary' : 'default'}
+              onClick={() => setSourceFilter(k)}
+            >
+              {v}
+            </Button>
+          ))}
+        </Space>
+      )}
       <Table<TaskItem>
         rowKey="id"
         size="small"
         loading={loading}
-        dataSource={rows}
+        dataSource={sourceFilter ? rows.filter((r) => r.source === sourceFilter) : rows}
         columns={columns}
         pagination={{
           current: page,
@@ -413,12 +489,19 @@ export default function Tasks() {
                   领取任务
                 </Button>
               )}
-              {detail.status === 'CLAIMED' && (
+              {(detail.status === 'CLAIMED' ||
+                (detail.status === 'ASSIGNED' && detail.assigneeId === user?.id)) && (
                 <Button type="primary" icon={<CheckOutlined />} onClick={() => openComplete(detail)}>
                   标记完成
                 </Button>
               )}
-              {canAlert && (detail.status === 'PENDING' || detail.status === 'CLAIMED') && (
+              {/* A1：管理岗指派/改派——被指派人不显示领取，也不能退回。 */}
+              {canAlert && detail.status !== 'DONE' && detail.status !== 'CANCELLED' && (
+                <Button icon={<UserSwitchOutlined />} onClick={() => void openAssign(detail)}>
+                  {detail.status === 'ASSIGNED' ? '改派' : '指派'}
+                </Button>
+              )}
+              {canAlert && (detail.status === 'PENDING' || detail.status === 'CLAIMED' || detail.status === 'ASSIGNED') && (
                 <Button danger icon={<StopOutlined />} onClick={() => void cancel(detail.id)}>
                   取消任务
                 </Button>
@@ -482,6 +565,34 @@ export default function Tasks() {
             </div>
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* A1 指派/改派 */}
+      <Modal
+        maskClosable={false}
+        title={assignFor ? `${assignFor.status === 'ASSIGNED' ? '改派' : '指派'}任务：${assignFor.title}` : ''}
+        open={!!assignFor}
+        onOk={() => void submitAssign()}
+        onCancel={() => setAssignFor(null)}
+        confirmLoading={assigning}
+        okText="确认指派"
+        okButtonProps={{ disabled: !assigneeId }}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="指派后任务直接进入该责任人待办，无需其领取；被指派人无处置权限的账号将被服务端拦截。被指派人不能退回，需调整请再次改派。"
+        />
+        <Select
+          style={{ width: '100%' }}
+          placeholder="选择责任人（须具备该任务类型处置权限）"
+          showSearch
+          optionFilterProp="label"
+          value={assigneeId}
+          onChange={setAssigneeId}
+          options={assignees.map((s) => ({ value: s.id, label: s.name }))}
+        />
       </Modal>
     </Card>
   );

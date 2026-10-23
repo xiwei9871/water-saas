@@ -103,6 +103,8 @@ export interface NumberedReadingInput {
 export interface SupersedeBody {
   readingValue: Prisma.Decimal;
   readDate?: Date;
+  /** B3 追加抄表：'ADDITIONAL' 追加读数（不倒走校验）；缺省 'CORRECT' 更正。 */
+  mode?: 'CORRECT' | 'ADDITIONAL';
 }
 
 export type QcAction = 'pass' | 'reject' | 'review';
@@ -680,6 +682,19 @@ export class MeterReadingService {
     if (child) {
       throw new ConflictException({ code: 'ALREADY_SUPERSEDED', by: child.id });
     }
+    const mode = body.mode === 'ADDITIONAL' ? 'ADDITIONAL' : 'CORRECT';
+    // B3 追加读数校验：不得小于上一可信读数（表码不倒走；更正模式不受此限——
+    // 更正的本义就是修错值）。
+    if (
+      mode === 'ADDITIONAL' &&
+      original.readingValue !== null &&
+      body.readingValue.lt(original.readingValue)
+    ) {
+      throw new ConflictException({
+        code: 'ADDITIONAL_BELOW_PREVIOUS',
+        message: `追加读数 ${body.readingValue.toString()} 小于上一可信读数 ${original.readingValue.toString()}，请核实`,
+      });
+    }
 
     req.auditBefore = original;
     const reading = await tx.meterReading.create({
@@ -714,7 +729,63 @@ export class MeterReadingService {
         data: { completedReadingId: reading.id, updatedBy: ctx.staffId },
       });
     }
-    return reading;
+
+    // B3 分流：本期未开账 → 新读数入链即本期最新事实、质检重置（上面已完成）；
+    // 已开账 → 读数独立成行不直接改账，自动建补差任务走对账/调整闭环。
+    const inst = await tx.meterInstallation.findFirst({
+      where: { tenantId: ctx.tenantId, id: original.installationId },
+      select: { waterAccountId: true },
+    });
+    const billed =
+      inst &&
+      (await tx.bill.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: inst.waterAccountId,
+          period: original.period,
+          billKind: 'NORMAL',
+          status: { not: 'REVERSED' },
+        },
+        select: { id: true },
+      }));
+    let supplementTask: { id: string; deduped: boolean } | null = null;
+    if (billed && inst) {
+      const waRows = await tx.$queryRaw<{ account_no: string; org: string | null }[]>`
+        SELECT wa.account_no,
+               (SELECT rb.org_unit_id FROM book_meter bm
+                  JOIN reading_book rb ON rb.id = bm.book_id AND rb.tenant_id = bm.tenant_id
+                 WHERE bm.tenant_id = wa.tenant_id AND bm.water_account_id = wa.id
+                 ORDER BY bm.created_at ASC LIMIT 1) AS org
+        FROM water_account wa
+        WHERE wa.tenant_id = ${ctx.tenantId}::uuid AND wa.id = ${inst.waterAccountId}::uuid`;
+      const wa = waRows[0];
+      const created = await this.tasks.createTask(tx, ctx, {
+        type: 'SUPPLEMENT',
+        title: `补差：户 ${wa?.account_no ?? ''} 的 ${original.period} 期已开账后追读`.trim(),
+        bizType: 'waterAccount',
+        bizId: inst.waterAccountId,
+        bizLabel: wa?.account_no ?? null,
+        reason:
+          mode === 'ADDITIONAL'
+            ? `已开账后追加读数 ${body.readingValue.toString()}（前值 ${original.readingValue?.toString() ?? '—'}），需补差/调整`
+            : `已开账后更正读数 ${body.readingValue.toString()}（前值 ${original.readingValue?.toString() ?? '—'}），需补差/调整`,
+        context: {
+          waterAccountId: inst.waterAccountId,
+          waterAccountNo: wa?.account_no ?? null,
+          period: original.period,
+          readingId: reading.id,
+          priorReadingValue: original.readingValue?.toString() ?? null,
+          // 补差要素：开账依据读数 → 追读实抄，差值即应调整量。
+          estimatedReadingValue: original.readingValue?.toString() ?? '0',
+          actualReadingValue: body.readingValue.toString(),
+          diff: body.readingValue.minus(original.readingValue ?? 0).toString(),
+          postBilled: true,
+        },
+        orgUnitId: wa?.org ?? null,
+      });
+      supplementTask = { id: created.id, deduped: created.deduped };
+    }
+    return { ...reading, billed: !!billed, supplementTask };
   }
 
   // -------------------------------------------------------------------------

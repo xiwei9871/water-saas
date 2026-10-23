@@ -25,6 +25,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   InstallReason,
@@ -48,6 +49,7 @@ import {
   fmtTime,
   newIdemKey,
 } from '../common';
+import { FocusTaskBar } from '../../components/TaskFocus';
 import {
   CustomerSelect,
   InstallationStatusTag,
@@ -139,6 +141,18 @@ export default function Meters() {
   const [instPage, setInstPage] = useState(1);
   const [instPageSize, setInstPageSize] = useState(20);
   const instCardRef = useRef<HTMLDivElement>(null);
+
+  // A2 缺失类异常直达：?wa=用水户id → 装拆记录按户过滤（无表/多表定位到户）。
+  const [focusParams, setFocusParams] = useSearchParams();
+  const focusWa = focusParams.get('wa');
+  const focusWaDone = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusWa || focusWaDone.current === focusWa) return;
+    focusWaDone.current = focusWa;
+    setInstAccountId(focusWa);
+    setInstPage(1);
+    window.setTimeout(() => instCardRef.current?.scrollIntoView({ behavior: 'smooth' }), 300);
+  }, [focusWa]);
 
   const [installOpen, setInstallOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<MeterInstallation | null>(null);
@@ -651,6 +665,19 @@ export default function Meters() {
       </Card>
 
       <div ref={instCardRef} style={{ marginTop: 16 }}>
+        {focusWa && instAccountId === focusWa && (
+          <FocusTaskBar
+            focusId={focusWa}
+            summary={<span>该用水户的装拆记录已定位（无表/多表异常按户排查）</span>}
+            onClose={() => {
+              const next = new URLSearchParams(focusParams);
+              next.delete('wa');
+              setFocusParams(next, { replace: true });
+              setInstAccountId(undefined);
+              setInstPage(1);
+            }}
+          />
+        )}
         <Card
           title="装拆记录"
           extra={

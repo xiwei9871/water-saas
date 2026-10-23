@@ -17,7 +17,13 @@ import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent } from '../common';
-import { FOCUS_ROW_CLASS, FocusTaskBar, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 
 interface ReconBatch {
   id: string;
@@ -102,9 +108,14 @@ export default function Recon() {
 
   const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
-  // U2 任务分组：对账任务挂在批次上。
+  // A3 任务三态分组：对账任务挂在批次上。
   const taskGroup = useTaskGroup<ReconBatch>('RECON_BATCH', batches, (r) => r.id);
-  const shownBatches = taskGroup.filtered;
+  const focusList = useFocusList<ReconBatch>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+  );
+  const shownBatches = focusList.shown;
 
   const openDetail = async (id: string) => {
     try {
@@ -183,11 +194,13 @@ export default function Recon() {
           <FocusTaskBar
             focusId={focusId}
             summary={<span>该对账批次已定位并打开明细</span>}
+            showAll={focusList.showAll}
+            onToggleAll={focusList.toggleAll}
             onOpenDetail={() => void openDetail(focusId)}
             onClose={clearFocus}
           />
         )}
-        {taskGroup.tabs}
+        {!focusList.focusing && taskGroup.tabs}
         <Table rowKey="id" size="small" columns={batchCols} dataSource={shownBatches} loading={loading} pagination={false} rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')} />
       </Card>
       <Drawer title={`对账明细（${detail?.fileName ?? detail?.channel ?? ''}）`} open={!!detail} onClose={() => setDetail(null)} width={820}>

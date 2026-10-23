@@ -143,12 +143,22 @@ const STATUS_TAG: Record<PlanItem['status'], { color: string; text: string }> = 
   SKIPPED: { color: 'default', text: '已跳过' },
 };
 
-/** 现场异常 → 自动建对应表务工单（20261020 核查 T5）。 */
+/** 现场异常 → 自动建对应表务工单（20261020 核查 T5）；"疑是违章"转稽查核实（B2）。 */
 const ANOMALY_TYPES = [
   { value: 'FAULT', label: '水表损坏/停走 → 故障换表工单' },
   { value: 'METER_GROUP_CLEANING', label: '表盘污浊不清 → 表组清洁工单' },
   { value: 'FACILITY_MAINTENANCE', label: '表井积水/设施损坏 → 表位维护工单' },
   { value: 'SITE_RECTIFICATION', label: '表位安装不当 → 表位整改工单' },
+  { value: 'SUSPECTED_VIOLATION', label: '疑是违章用水 → 转稽查核实' },
+];
+
+/** B2 疑似违章子类型：与 sys_dict VIOLATION_TYPE 及 Web 端同一枚举。 */
+const VIOLATION_TYPES = [
+  { value: 'THEFT', label: '盗窃用水' },
+  { value: 'PRIVATE_CONN', label: '私自接水' },
+  { value: 'TAMPER', label: '破坏表计' },
+  { value: 'SEAL_BROKEN', label: '破坏铅封' },
+  { value: 'CATEGORY_MISUSE', label: '擅自改变用水性质' },
 ];
 
 /**
@@ -185,7 +195,8 @@ export default function MobileReading() {
   const [noReadOpen, setNoReadOpen] = useState(false);
   const [noReadForm] = Form.useForm<{ exceptionCode: string; estimateQty?: string; remark?: string }>();
   const [anomalyOpen, setAnomalyOpen] = useState(false);
-  const [anomalyForm] = Form.useForm<{ serviceType: string; desc?: string }>();
+  const [anomalyForm] = Form.useForm<{ serviceType: string; violationType?: string; desc?: string }>();
+  const anomalyType = Form.useWatch('serviceType', anomalyForm);
   const [infoOpen, setInfoOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [reread, setReread] = useState<PlanItem | null>(null);
@@ -449,6 +460,44 @@ export default function MobileReading() {
   const submitAnomaly = async () => {
     if (!current) return;
     const v = await anomalyForm.validateFields();
+    // B2：疑是违章 → 违章核实链路（同 Web 端 report-violation / FIELD 来源，须照片）。
+    if (v.serviceType === 'SUSPECTED_VIOLATION') {
+      if (!photo) {
+        message.warning('疑似违章须附现场照片，请先拍照再上报');
+        return;
+      }
+      const vBody = cleanBody({
+        waterAccountId: current.waterAccountId,
+        violationType: v.violationType,
+        description: v.desc,
+        photoRefs: [photo],
+        sourceType: 'FIELD',
+      });
+      const vPath = current.completedReadingId
+        ? `/meter-readings/${current.completedReadingId}/report-violation`
+        : '/violations';
+      setSubmitting(true);
+      try {
+        if (navigator.onLine === false) throw new Error('OFFLINE');
+        await api.post(vPath, vBody, { headers: { 'Idempotency-Key': newIdemKey() } });
+        message.success('疑似违章已上报，稽查岗将现场核实');
+        setAnomalyOpen(false);
+        anomalyForm.resetFields();
+      } catch (err) {
+        const status = (err as { response?: { status?: number } }).response?.status;
+        if (!status || (err as Error).message === 'OFFLINE') {
+          enqueue(current, vBody, vPath);
+          message.warning('已离线保存上报，联网后随读数一起上传');
+          setAnomalyOpen(false);
+          anomalyForm.resetFields();
+        } else {
+          message.error(apiErrorText(err));
+        }
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
     const label = ANOMALY_TYPES.find((a) => a.value === v.serviceType)?.label ?? '';
     const body = {
       waterAccountId: current.waterAccountId,
@@ -1013,7 +1062,7 @@ export default function MobileReading() {
         title="现场异常上报"
         open={anomalyOpen}
         onOk={submitAnomaly}
-        okText="上报并建工单"
+        okText={anomalyType === 'SUSPECTED_VIOLATION' ? '上报稽查核实' : '上报并建工单'}
         confirmLoading={submitting}
         onCancel={() => setAnomalyOpen(false)}
         destroyOnHidden
@@ -1026,13 +1075,34 @@ export default function MobileReading() {
           >
             <Select size="large" options={ANOMALY_TYPES} />
           </Form.Item>
-          <Form.Item name="desc" label="现场情况说明">
+          {anomalyType === 'SUSPECTED_VIOLATION' && (
+            <Form.Item
+              name="violationType"
+              label="疑似违章类型"
+              rules={[{ required: true, message: '请选择疑似违章类型' }]}
+            >
+              <Select size="large" options={VIOLATION_TYPES} />
+            </Form.Item>
+          )}
+          <Form.Item
+            name="desc"
+            label="现场情况说明"
+            rules={
+              anomalyType === 'SUSPECTED_VIOLATION'
+                ? [{ required: true, message: '疑似违章须填写现场描述' }]
+                : []
+            }
+          >
             <Input.TextArea rows={3} maxLength={200} placeholder="如：表玻璃碎裂、指针停走、表井被水淹没" />
           </Form.Item>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             {photo
-              ? '已拍照片将随工单留证。'
-              : '未拍照——建议先关闭本弹窗拍照后再上报，照片作留证。'}
+              ? anomalyType === 'SUSPECTED_VIOLATION'
+                ? '已拍照片将随上报留证（疑似违章必填）。'
+                : '已拍照片将随工单留证。'
+              : anomalyType === 'SUSPECTED_VIOLATION'
+                ? '疑似违章必须拍照——请关闭本弹窗拍照后再上报。'
+                : '未拍照——建议先关闭本弹窗拍照后再上报，照片作留证。'}
           </Typography.Text>
         </Form>
       </Modal>

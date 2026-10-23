@@ -25,7 +25,9 @@ import {
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { api, apiErrorText } from '../api/client';
+import type { TaskItem } from '../api/types';
 import TrendChart from '../components/TrendChart';
+import { taskBizUrl } from '../components/TaskFocus';
 import { abbrevParts, columnScale, fmtFull, fmtSignedPct } from '../utils/numfmt';
 
 interface OrgRow { id: string; name: string }
@@ -80,6 +82,20 @@ export default function Cockpit() {
   const [loading, setLoading] = useState(false);
   const [orgs, setOrgs] = useState<OrgRow[]>([]);
   const [prefOpen, setPrefOpen] = useState(false);
+
+  // A2-4 首页卡片直达：取当前最前一条待办任务，直达其业务聚焦页；无任务→待办中心。
+  const gotoFirstTask = async () => {
+    try {
+      const res = await api.get<{ items: TaskItem[] }>('/tasks', {
+        params: { box: 'todo', take: 1, skip: 0 },
+      });
+      const t = res.data.items[0];
+      const url = t ? taskBizUrl(t) : null;
+      navigate(url ?? '/tasks');
+    } catch {
+      navigate('/tasks');
+    }
+  };
 
   const [cards, setCards] = useState<string[]>(CARD_DEFS.map((c) => c.key));
   const [trendMetric, setTrendMetric] = useState<string>('revenue');
@@ -264,7 +280,7 @@ export default function Cockpit() {
                     </div>
                     <div>
                       待办任务 <Tag color="orange">{data.alerts.openTasks}</Tag>
-                      <a onClick={() => navigate('/tasks')}>去处理</a>
+                      <a onClick={() => void gotoFirstTask()}>去处理</a>
                     </div>
                     <div>
                       本月异常读数 <Tag color="red">{data.alerts.abnormalReadings}</Tag>
