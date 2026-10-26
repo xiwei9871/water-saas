@@ -63,6 +63,7 @@ export class ReadingPlanController {
     @Query('period') period?: string,
     @Query('status') status?: string,
     @Query('waterAccountId') waterAccountId?: string,
+    @Query('planType') planType?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
@@ -72,12 +73,16 @@ export class ReadingPlanController {
     if (status !== undefined && !PLAN_STATUSES.has(status)) {
       throw new BadRequestException({ code: 'PLAN_STATUS_INVALID' });
     }
+    if (planType !== undefined && !['REGULAR', 'SUPPLEMENT'].includes(planType)) {
+      throw new BadRequestException({ code: 'PLAN_TYPE_INVALID' });
+    }
     return this.svc.list(currentTenant(), {
       ...pageArgs(take, skip),
       bookId,
       period,
       status: status as 'OPEN' | 'IN_PROGRESS' | 'DONE' | 'CLOSED' | undefined,
       waterAccountId,
+      planType,
     });
   }
 
@@ -145,6 +150,46 @@ export class ReadingPlanController {
       ctx,
       { key, method: 'POST', route: req.path, body, responseStatus: 201 },
       (tx) => this.svc.generateTx(tx, ctx, parsed),
+    );
+  }
+
+  /**
+   * POST /reading-plans/supplement — 20261026 追加抄表独立功能：
+   * {waterAccountId, period, planDate?, readerId, remark?} → 单户
+   * SUPPLEMENT 计划 + SUPPLEMENT_READING 任务直接指派给抄表员。
+   * 业务键幂等：同户同期在途追加计划复用；Idempotency-Key 同样支持。
+   */
+  @Post('supplement')
+  @Permissions('metering:write')
+  supplement(
+    @Body()
+    body: {
+      waterAccountId?: string;
+      period?: string;
+      planDate?: unknown;
+      readerId?: string;
+      remark?: string;
+    },
+    @Req() req: Request,
+    @Headers('idempotency-key') key?: string,
+  ) {
+    if (!body?.waterAccountId || !body?.period || !body?.readerId) {
+      throw new BadRequestException({ code: 'SUPPLEMENT_FIELDS_REQUIRED' });
+    }
+    const parsed = {
+      waterAccountId: assertUuid(body.waterAccountId, 'waterAccountId'),
+      period: assertPeriod(body.period),
+      planDate: assertOptionalDate(body.planDate, 'planDate'),
+      readerId: assertUuid(body.readerId, 'readerId'),
+      remark: typeof body.remark === 'string' ? body.remark.slice(0, 500) : undefined,
+    };
+    const ctx = currentTenant();
+    return withOptionalIdem(
+      this.prisma,
+      this.idem,
+      ctx,
+      { key, method: 'POST', route: req.path, body, responseStatus: 201 },
+      (tx) => this.svc.supplementTx(tx, ctx, parsed),
     );
   }
 

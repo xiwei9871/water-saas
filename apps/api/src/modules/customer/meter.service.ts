@@ -12,8 +12,12 @@ import { SequenceService } from '../../common/sequence.service.js';
 
 export type MeterStatus = 'AVAILABLE' | 'INSTALLED' | 'MAINTENANCE' | 'RETIRED';
 
-/** 20261021 任务C：水表角色 — MASTER/SUB 由 meter_relation 自动维护，建档只能标 NORMAL/CHECK。 */
-const METER_ROLE_SET = new Set(['NORMAL', 'CHECK']);
+/**
+ * 表具角色（20261026 DMA-D1 整改）：水表入库均为普通表，「监控表/考核表」
+ * 唯一判定 = 用水户用水类别 MONITORING，不再走 meter_role。
+ * MASTER/SUB 由 meter_relation 自动维护，人工建档/改档仅可标 NORMAL。
+ */
+const METER_ROLE_SET = new Set(['NORMAL']);
 
 export const METER_SELECT = {
   id: true,
@@ -63,7 +67,7 @@ export interface MeterBody {
   checkPeriodYears?: number | null;
   /** 上次检定日期（YYYY-MM-DD）。 */
   lastCheckDate?: string | null;
-  /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表（监控表）。 */
+  /** NORMAL普通/MASTER总表/SUB分表（MASTER/SUB 由总分表关系自动维护）。 */
   meterRole?: string;
 }
 
@@ -96,13 +100,33 @@ export class MeterService {
 
   list(
     ctx: TenantCtx,
-    q: { take: number; skip: number; status?: MeterStatus; q?: string },
+    q: {
+      take: number;
+      skip: number;
+      status?: MeterStatus;
+      q?: string;
+      /**
+       * DMA-D1：按在装用水户的用水类别过滤/反查（如 MONITORING → 监控表
+       * 水表候选）。空值 = 不过滤。
+       */
+      usageCategory?: string;
+    },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const rows = await tx.meter.findMany({
         where: {
           tenantId: ctx.tenantId,
           status: q.status,
+          ...(q.usageCategory
+            ? {
+                installations: {
+                  some: {
+                    status: 'ACTIVE',
+                    waterAccount: { usageCategory: q.usageCategory },
+                  },
+                },
+              }
+            : {}),
           // Device search — registry fields plus the CURRENTLY mounted
           // account (户号) and its customer name, so staff can find "which
           // meter serves household X" without knowing the device number.
@@ -151,7 +175,11 @@ export class MeterService {
             select: {
               meterId: true,
               waterAccount: {
-                select: { accountNo: true, customer: { select: { name: true } } },
+                select: {
+                  accountNo: true,
+                  usageCategory: true,
+                  customer: { select: { name: true } },
+                },
               },
             },
             orderBy: [{ installedAt: 'desc' }, { id: 'desc' }],
@@ -159,13 +187,14 @@ export class MeterService {
         : [];
       const bound = new Map<
         string,
-        { accountNo: string; customerName: string | null }
+        { accountNo: string; customerName: string | null; usageCategory: string }
       >();
       for (const a of actives) {
         if (!bound.has(a.meterId)) {
           bound.set(a.meterId, {
             accountNo: a.waterAccount.accountNo,
             customerName: a.waterAccount.customer?.name ?? null,
+            usageCategory: a.waterAccount.usageCategory,
           });
         }
       }
@@ -173,6 +202,8 @@ export class MeterService {
         ...r,
         currentAccountNo: bound.get(r.id)?.accountNo ?? null,
         currentCustomerName: bound.get(r.id)?.customerName ?? null,
+        // DMA-D1：在装户的用水类别（监控表判定唯一依据）；未在装为 null。
+        usageCategory: bound.get(r.id)?.usageCategory ?? null,
       }));
     });
   }

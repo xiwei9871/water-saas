@@ -100,17 +100,20 @@ const seedReading = async (
     [TA, installationId, meterId, period, `${period.slice(0, 4)}-${period.slice(4)}-15`, value, STAFF_ADMIN],
   );
 
-describe('C1/C2 DMA 管理 + 产销差', () => {
+describe('C1/C2 DMA 管理 + 产销差（20261026 D1-D4：考核表=监控表户）', () => {
   it('分区→考核表→挂接→产销差：Σ考核表−Σ挂接=未计量；除零保护；摘除失效', async () => {
-    // 1. 建考核表（CHECK 角色）+ 挂接用计费表，各立户装表。
+    // 1. 建表（均普通表——D1 后表具角色无 CHECK）+ 各立户装表；
+    //    考核表判定 = 用水户用水类别 MONITORING。
     const chkMeter = (
       await post('/meters', {
         meterNo: `CHK-${RUN}`,
         brand: 'dma',
         caliber: 'DN50',
+        // 兼容旧入参：CHECK 角色已废除，服务端按 NORMAL 落档。
         meterRole: 'CHECK',
       }).expect(201)
-    ).body as { id: string };
+    ).body as { id: string; meterRole: string };
+    expect(chkMeter.meterRole).toBe('NORMAL');
     const usrMeter = (
       await post('/meters', { meterNo: `USR-${RUN}`, brand: 'dma', caliber: 'DN15' }).expect(201)
     ).body as { id: string };
@@ -141,7 +144,7 @@ describe('C1/C2 DMA 管理 + 产销差', () => {
     const chkInstId = chkAcct.installation.id as string;
     const usrInstId = usrAcct.installation.id as string;
 
-    // 2. 建 DMA + 挂考核表（非 CHECK 拒绝）+ 挂接水表。
+    // 2. 建 DMA + 挂考核表（D1：非监控表户的水表拒绝）+ 挂接水表。
     const dma = (
       await post('/dma/zones', {
         code: `DMA-${RUN}`,
@@ -149,13 +152,21 @@ describe('C1/C2 DMA 管理 + 产销差', () => {
         region: '城东片区',
       }).expect(201)
     ).body as { id: string };
-    await post(`/dma/zones/${dma.id}/check-meters`, { meterId: usrMeter.id }).expect(400); // 非 CHECK
-    const chkLink = (
+    await post(`/dma/zones/${dma.id}/check-meters`, {
+      meterIds: [usrMeter.id], // D3 多选入参；该表非监控表 → 400
+    }).expect(400);
+    const chkAdd = (
       await post(`/dma/zones/${dma.id}/check-meters`, {
-        meterId: chkMeter.id,
+        meterIds: [chkMeter.id],
         effectiveFrom: '2026-06-01',
       }).expect(201)
-    ).body as { id: string };
+    ).body as { checkMeterIds: string[]; count: number };
+    expect(chkAdd.count).toBe(1);
+    const chkLink = { id: chkAdd.checkMeterIds[0] };
+    // D1：监控表户的水表不可作为挂接对象。
+    await post(`/dma/check-meters/${chkLink.id}/links`, {
+      meterIds: [chkMeter.id],
+    }).expect(400);
     const link = (
       await post(`/dma/check-meters/${chkLink.id}/links`, {
         meterIds: [usrMeter.id],
@@ -225,6 +236,90 @@ describe('C1/C2 DMA 管理 + 产销差', () => {
     expect(p2row.checkQty).toBe('0.00');
     const p1row = dash3.find((d) => d.period === P)!.rows.find((r) => r.dma.id === dma.id)!;
     expect(p1row.checkQty).toBe('1000.00');
+  });
+
+  it('D3/D4：挂考核表批量多选 + 同表多挂产销差去重', async () => {
+    const P = '202608';
+    // 两只监控表（两只监控户）+ 一只计费表，先入库再立户装表。
+    const m1 = (await post('/meters', { meterNo: `M1-${RUN}`, brand: 'd' }).expect(201)).body as {
+      id: string;
+    };
+    const m2 = (await post('/meters', { meterNo: `M2-${RUN}`, brand: 'd' }).expect(201)).body as {
+      id: string;
+    };
+    const um = (await post('/meters', { meterNo: `UM-${RUN}`, brand: 'd' }).expect(201)).body as {
+      id: string;
+    };
+    const wh = await post('/meter-warehouses', {
+      code: `DWH2-${RUN}`,
+      name: 'DMA库2',
+    }).expect(201);
+    await post('/meter-stock/movements', {
+      type: 'PURCHASE_IN',
+      meterIds: [m1.id, m2.id, um.id],
+      warehouseId: wh.body.id,
+    }).expect(201);
+    const a1 = (
+      await post('/water-accounts/onboard', {
+        account: { usageCategory: 'MONITORING', addr: '入口1' },
+        meterId: m1.id,
+        installation: { initialReading: 0, installedAt: '2026-01-01' },
+      }).expect(201)
+    ).body;
+    const a2 = (
+      await post('/water-accounts/onboard', {
+        account: { usageCategory: 'MONITORING', addr: '入口2' },
+        meterId: m2.id,
+        installation: { initialReading: 0, installedAt: '2026-01-01' },
+      }).expect(201)
+    ).body;
+    const ua = (
+      await post('/water-accounts/onboard', {
+        customer: { name: `U ${RUN}`, custType: 'PERSONAL' },
+        account: { usageCategory: 'RES_METERED', addr: 'u' },
+        meterId: um.id,
+        installation: { initialReading: 0, installedAt: '2026-01-01' },
+      }).expect(201)
+    ).body;
+
+    const dma = (
+      await post('/dma/zones', { code: `DMAD-${RUN}`, name: '去重区' }).expect(201)
+    ).body as { id: string };
+    // D3：一次多选挂两只考核表。
+    const add = (
+      await post(`/dma/zones/${dma.id}/check-meters`, {
+        meterIds: [m1.id, m2.id],
+        effectiveFrom: '2026-06-01',
+      }).expect(201)
+    ).body as { checkMeterIds: string[]; count: number };
+    expect(add.count).toBe(2);
+    // D4：同一结算水表挂到两只考核表下。
+    for (const cmId of add.checkMeterIds) {
+      await post(`/dma/check-meters/${cmId}/links`, {
+        meterIds: [um.id],
+        effectiveFrom: '2026-06-01',
+      }).expect(201);
+    }
+    // 考核表 100+200，挂接表 80 → 挂接侧去重只计一次：未计量 220。
+    await seedReading(a1.installation.id, m1.id, P, 100);
+    await seedReading(a2.installation.id, m2.id, P, 200);
+    await seedReading(ua.installation.id, um.id, P, 80);
+    const dash = (await get(`/dma/dashboard?period=${P}`).expect(200)).body as {
+      rows: {
+        dma: { id: string };
+        checkQty: string;
+        linkedQty: string;
+        unmeasuredQty: string;
+        leakageRate: string | null;
+        linkedMeterCount: number;
+      }[];
+    }[];
+    const row = dash[0].rows.find((r) => r.dma.id === dma.id)!;
+    expect(row.checkQty).toBe('300.00');
+    expect(row.linkedQty).toBe('80.00'); // 去重后不重复扣减
+    expect(row.unmeasuredQty).toBe('220.00');
+    expect(row.linkedMeterCount).toBe(1);
+    expect(row.leakageRate).toBe('73.33');
   });
 
   it('权限边界：dashboard 无 period 或非法期 → 400', async () => {

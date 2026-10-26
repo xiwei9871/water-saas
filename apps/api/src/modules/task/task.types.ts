@@ -45,6 +45,17 @@ export const TASK_TYPES: TaskTypeDef[] = [
     guide: '请到 抄表管理→抄表记录，对户 {waterAccountNo} 账期 {period} 的该条读数提交质检结论（本期 {readingValue}，上期 {prevReadingValue}）。',
   },
   {
+    // 20261026 追加抄表独立功能：计划层主动发起（未抄先派单），
+    // 与「抄表记录→更正→追加」（已抄补读数）并存、本类为主入口。
+    code: 'SUPPLEMENT_READING',
+    name: '追加抄表',
+    fallbackPerm: 'metering:write',
+    bizRoute: '/metering/plans?focusId={bizId}',
+    requiredContext: ['waterAccountNo', 'period', 'planItemId'],
+    guide: '请到 抄表管理→抄表计划，对该追加计划明细现场抄表并回填户 {waterAccountNo} 账期 {period} 的读数（不得小于上一可信读数）。',
+    evidenceRequired: true,
+  },
+  {
     code: 'COLLECTION',
     name: '催缴任务',
     fallbackPerm: 'payment:write',

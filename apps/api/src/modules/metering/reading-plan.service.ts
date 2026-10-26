@@ -15,6 +15,7 @@ import {
 } from '../../common/account-identity.js';
 import { assertAccountScopeTx } from '../../common/account-scope.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
+import { TaskService } from '../task/task.service.js';
 
 export const READING_PLAN_SELECT = {
   id: true,
@@ -24,6 +25,7 @@ export const READING_PLAN_SELECT = {
   planDate: true,
   readerId: true,
   status: true,
+  planType: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ReadingPlanSelect;
@@ -70,7 +72,10 @@ const outOfScope = () => new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
  */
 @Injectable()
 export class ReadingPlanService {
-  constructor(private readonly prisma: TenantPrismaService) {}
+  constructor(
+    private readonly prisma: TenantPrismaService,
+    private readonly tasks: TaskService,
+  ) {}
 
   list(
     ctx: TenantCtx,
@@ -81,6 +86,7 @@ export class ReadingPlanService {
       period?: string;
       status?: PlanStatus;
       waterAccountId?: string;
+      planType?: string;
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
@@ -108,6 +114,7 @@ export class ReadingPlanService {
           bookId: q.bookId ?? (scopedBookIds ? { in: scopedBookIds } : undefined),
           period: q.period,
           status: q.status,
+          planType: q.planType,
           ...(q.waterAccountId
             ? { items: { some: { waterAccountId: q.waterAccountId } } }
             : {}),
@@ -502,6 +509,209 @@ export class ReadingPlanService {
       ? null
       : 'BOOK_NOT_DUE_THIS_PERIOD';
     return { ...plan, items, cadenceWarning };
+  }
+
+  /**
+   * 20261026 追加抄表独立功能：POST /reading-plans/supplement ——
+   * 计划/任务层主动发起（未抄先派单），与读数层「更正→追加」并存。
+   *
+   * 一单事务内：账户范围校验 → 反查所属册（无册→系统册兜底）→
+   * 业务键幂等（同户同期在途 SUPPLEMENT 计划复用）→ 建单户计划
+   * （planType=SUPPLEMENT、1 个 planItem）→ 建 SUPPLEMENT_READING
+   * 任务直接指派给抄表员（ASSIGNED 进其待办，走任务闭环）。
+   */
+  async supplementTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    body: {
+      waterAccountId: string;
+      period: string;
+      planDate?: Date;
+      readerId: string;
+      remark?: string;
+    },
+  ) {
+    if (!body.waterAccountId || !body.period || !body.readerId) {
+      throw new BadRequestException({ code: 'SUPPLEMENT_FIELDS_REQUIRED' });
+    }
+    await assertAccountScopeTx(tx, ctx, body.waterAccountId);
+    const wa = await tx.waterAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: body.waterAccountId },
+      select: { id: true, accountNo: true, status: true },
+    });
+    if (!wa) throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
+    if (wa.status === 'CLOSED') {
+      throw new BadRequestException({ code: 'ACCOUNT_CLOSED' });
+    }
+    // V6：抄表员必填且必须是本租户在职员工（未入册户前端强制手选，
+    // 服务端同检，不靠 UI 把关）。
+    const reader = await tx.staff.findFirst({
+      where: { tenantId: ctx.tenantId, id: body.readerId, status: 'ACTIVE' },
+      select: { id: true, name: true },
+    });
+    if (!reader) throw new BadRequestException({ code: 'READER_NOT_FOUND' });
+
+    const bookId = await this.resolveSupplementBookId(tx, ctx, body.waterAccountId);
+
+    // 业务键幂等：同户同期已有在途追加计划 → 复用（重试/双击不多建）。
+    const existing = await tx.readingPlan.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        planType: 'SUPPLEMENT',
+        period: body.period,
+        status: { not: 'CLOSED' },
+        items: { some: { waterAccountId: body.waterAccountId } },
+      },
+      select: READING_PLAN_SELECT,
+    });
+    if (existing) {
+      const [items, task] = await Promise.all([
+        tx.readingPlanItem.findMany({
+          where: { tenantId: ctx.tenantId, planId: existing.id },
+          select: PLAN_ITEM_SELECT,
+          orderBy: { seqNo: 'asc' },
+        }),
+        tx.task.findFirst({
+          where: {
+            tenantId: ctx.tenantId,
+            type: 'SUPPLEMENT_READING',
+            bizType: 'readingPlan',
+            bizId: existing.id,
+            status: { in: ['PENDING', 'CLAIMED', 'ASSIGNED'] },
+          },
+          select: { id: true },
+        }),
+      ]);
+      return { ...existing, items, taskId: task?.id ?? null, deduped: true };
+    }
+
+    const inst = await tx.meterInstallation.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        waterAccountId: body.waterAccountId,
+        status: 'ACTIVE',
+      },
+      select: { id: true },
+      orderBy: { installedAt: 'desc' },
+    });
+    const plan = await tx.readingPlan.create({
+      data: {
+        tenantId: ctx.tenantId,
+        bookId,
+        period: body.period,
+        planDate: body.planDate ?? new Date(),
+        readerId: body.readerId,
+        status: 'OPEN',
+        planType: 'SUPPLEMENT',
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+      select: READING_PLAN_SELECT,
+    });
+    const item = await tx.readingPlanItem.create({
+      data: {
+        tenantId: ctx.tenantId,
+        planId: plan.id,
+        waterAccountId: body.waterAccountId,
+        seqNo: 1,
+        plannedInstallationId: inst?.id ?? null,
+        status: 'PENDING',
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+      select: PLAN_ITEM_SELECT,
+    });
+    const task = await this.tasks.createTask(tx, ctx, {
+      type: 'SUPPLEMENT_READING',
+      title: `追加抄表：户 ${wa.accountNo} 账期 ${body.period}`,
+      bizType: 'readingPlan',
+      bizId: plan.id,
+      bizLabel: `${wa.accountNo}·${body.period} 追加抄表`,
+      reason: body.remark ? `追加抄表下达：${body.remark}` : '追加抄表下达',
+      context: {
+        waterAccountId: body.waterAccountId,
+        waterAccountNo: wa.accountNo,
+        period: body.period,
+        planId: plan.id,
+        planItemId: item.id,
+        readerName: reader.name,
+        remark: body.remark ?? null,
+      } as Prisma.InputJsonValue,
+      assigneeId: body.readerId,
+    });
+    return { ...plan, items: [item], taskId: task.id, deduped: false };
+  }
+
+  /**
+   * 追加计划的册归属：账户在册 → 挂该册（计划随册组织可见）；未入册 →
+   * 租户级系统册「追加抄表册」（book_no=SYS-SUP，自动建立，锚定下达人
+   * 所在组织，scoped 操作员在自己的子树内可见）。
+   */
+  private async resolveSupplementBookId(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+  ): Promise<string> {
+    const membership = await tx.bookMeter.findFirst({
+      where: { tenantId: ctx.tenantId, waterAccountId },
+      select: { bookId: true },
+    });
+    if (membership) return membership.bookId;
+
+    const sysBookNo = 'SYS-SUP';
+    const found = await tx.readingBook.findFirst({
+      where: { tenantId: ctx.tenantId, bookNo: sysBookNo },
+      select: { id: true },
+    });
+    if (found) return found.id;
+
+    const issuer = await tx.staff.findFirst({
+      where: { tenantId: ctx.tenantId, id: ctx.staffId },
+      select: { orgUnitId: true },
+    });
+    const fallbackOrg = issuer?.orgUnitId
+      ?? ctx.orgScope[0]
+      ?? (
+          await tx.orgUnit.findFirst({
+            where: { tenantId: ctx.tenantId, parentId: null },
+            select: { id: true },
+          })
+        )?.id
+      ?? (
+          await tx.orgUnit.findFirst({
+            where: { tenantId: ctx.tenantId },
+            select: { id: true },
+          })
+        )?.id;
+    if (!fallbackOrg) {
+      throw new BadRequestException({ code: 'ORG_UNIT_MISSING' });
+    }
+    try {
+      const created = await tx.readingBook.create({
+        data: {
+          tenantId: ctx.tenantId,
+          bookNo: sysBookNo,
+          name: '追加抄表册（系统）',
+          orgUnitId: fallbackOrg,
+          cadence: 'MONTHLY',
+          meterChannel: 'MECHANICAL',
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        },
+        select: { id: true },
+      });
+      return created.id;
+    } catch (e) {
+      // 并发首建：唯一键 (tenant_id, book_no) 冲突 → 直接取已建行。
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        const retry = await tx.readingBook.findFirst({
+          where: { tenantId: ctx.tenantId, bookNo: sysBookNo },
+          select: { id: true },
+        });
+        if (retry) return retry.id;
+      }
+      throw e;
+    }
   }
 
   /**

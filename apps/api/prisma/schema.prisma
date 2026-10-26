@@ -987,6 +987,8 @@ model ReadingPlan {
   planDate  DateTime   @map("plan_date") @db.Date
   readerId  String?    @map("reader_id") @db.Uuid
   status    PlanStatus @default(OPEN)
+  /** REGULAR 常规整册计划 / SUPPLEMENT 追加抄表（单户计划）。 */
+  planType  String     @default("REGULAR") @map("plan_type") @db.VarChar(16)
   createdAt DateTime   @default(now()) @map("created_at")
   createdBy String?    @map("created_by") @db.Uuid
   updatedAt DateTime   @updatedAt @map("updated_at")

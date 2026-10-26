@@ -17,9 +17,10 @@ const bad = (code: string, extra?: Record<string, unknown>) =>
 
 /**
  * 20261023 C1/C2：DMA 独立计量分区。
- * 仅做水量监控（产销差分析），不涉水价/水费/计费；考核表 = meter_role CHECK
- * 的监控表，挂接水表为计费侧表计。两侧水量同口径：期内最新有效读数 −
- * 期前最新读数（无前期读数时退到安装初始读数）。
+ * 仅做水量监控（产销差分析），不涉水价/水费/计费；考核表 = 用水户
+ * 用水类别为 MONITORING 的户所挂水表（20261026 D1 整改：不再用
+ * meter_role CHECK 判定），挂接水表为计费侧表计。两侧水量同口径：
+ * 期内最新有效读数 − 期前最新读数（无前期读数时退到安装初始读数）。
  */
 @Injectable()
 export class DmaService {
@@ -194,7 +195,7 @@ export class DmaService {
     tx: Tx,
     ctx: TenantCtx,
     dmaId: string,
-    body: { meterId?: unknown; effectiveFrom?: unknown },
+    body: { meterIds?: unknown; meterId?: unknown; effectiveFrom?: unknown },
     req: Request,
   ) {
     const z = await tx.dmaZone.findFirst({
@@ -205,33 +206,76 @@ export class DmaService {
     if (z.orgUnitId && !orgInScope(ctx, z.orgUnitId)) {
       throw new ConflictException({ code: 'OUT_OF_SCOPE' });
     }
-    const meterId = String(body.meterId ?? '');
-    const meter = await tx.meter.findFirst({
-      where: { tenantId: ctx.tenantId, id: meterId },
-      select: { id: true, meterNo: true, meterRole: true },
+    // D3：一次多选批量挂接；兼容旧单值 meterId 入参。
+    const raw = Array.isArray(body.meterIds)
+      ? body.meterIds
+      : body.meterId !== undefined && body.meterId !== null
+        ? [body.meterId]
+        : [];
+    const meterIds = [...new Set(raw.map((x) => String(x)).filter(Boolean))];
+    if (meterIds.length === 0) throw bad('CHECK_METERS_REQUIRED');
+    const meters = await tx.meter.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: meterIds } },
+      select: { id: true, meterNo: true },
     });
-    if (!meter) throw new NotFoundException({ code: 'METER_NOT_FOUND' });
-    // C1：考核表 = CHECK 角色（监控表），沿用现有表具角色定义。
-    if (meter.meterRole !== 'CHECK') {
-      throw bad('DMA_METER_NOT_CHECK', { meterNo: meter.meterNo });
+    if (meters.length !== meterIds.length) {
+      throw new NotFoundException({ code: 'METER_NOT_FOUND' });
     }
-    const open = await tx.dmaCheckMeter.findFirst({
-      where: { tenantId: ctx.tenantId, dmaId, meterId, effectiveTo: null },
-      select: { id: true },
+    // D1：考核表 = 用水户用水类别 MONITORING 的户所挂水表（经在装
+    // 安装反查），不再看 meter_role。一只表非监控表即整批拒。
+    const cat = await this.usageCategoryByMeter(tx, ctx.tenantId, meterIds);
+    const notMonitoring = meters.find((m) => cat.get(m.id) !== 'MONITORING');
+    if (notMonitoring) {
+      throw bad('DMA_METER_NOT_MONITORING', { meterNo: notMonitoring.meterNo });
+    }
+    const from = body.effectiveFrom ? new Date(String(body.effectiveFrom)) : new Date();
+    const existing = await tx.dmaCheckMeter.findMany({
+      where: { tenantId: ctx.tenantId, dmaId, meterId: { in: meterIds }, effectiveTo: null },
+      select: { meterId: true },
     });
-    if (open) throw new ConflictException({ code: 'DMA_METER_ALREADY_LINKED', meterNo: meter.meterNo });
-    const row = await tx.dmaCheckMeter.create({
-      data: {
-        tenantId: ctx.tenantId,
-        dmaId,
-        meterId,
-        effectiveFrom: body.effectiveFrom ? new Date(String(body.effectiveFrom)) : new Date(),
-        createdBy: ctx.staffId,
-        updatedBy: ctx.staffId,
-      },
-    });
+    const skip = new Set(existing.map((e) => e.meterId));
+    const created: string[] = [];
+    for (const m of meters) {
+      if (skip.has(m.id)) continue;
+      const row = await tx.dmaCheckMeter.create({
+        data: {
+          tenantId: ctx.tenantId,
+          dmaId,
+          meterId: m.id,
+          effectiveFrom: from,
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        },
+      });
+      created.push(row.id);
+    }
     req.auditBefore = undefined;
-    return row;
+    return { checkMeterIds: created, count: created.length, skipped: existing.length };
+  }
+
+  /**
+   * 一组表各自「在装户的用水类别」（最新 ACTIVE 安装优先；未在装 →
+   * undefined）。D1 整改后 DMA 两侧候选判定都走它。
+   */
+  private async usageCategoryByMeter(
+    tx: Tx,
+    tenantId: string,
+    meterIds: string[],
+  ): Promise<Map<string, string>> {
+    if (meterIds.length === 0) return new Map();
+    const insts = await tx.meterInstallation.findMany({
+      where: { tenantId, meterId: { in: meterIds }, status: 'ACTIVE' },
+      select: {
+        meterId: true,
+        waterAccount: { select: { usageCategory: true } },
+      },
+      orderBy: { installedAt: 'desc' },
+    });
+    const cat = new Map<string, string>();
+    for (const i of insts) {
+      if (!cat.has(i.meterId)) cat.set(i.meterId, i.waterAccount.usageCategory);
+    }
+    return cat;
   }
 
   async unlinkCheckMeterTx(tx: Tx, ctx: TenantCtx, checkMeterId: string, req: Request) {
@@ -280,9 +324,13 @@ export class DmaService {
     if (meters.length !== meterIds.length) {
       throw new NotFoundException({ code: 'METER_NOT_FOUND' });
     }
-    // 挂接对象是计费侧表计（普通/总/分表），CHECK 表之间不互挂。
-    const badMeter = meters.find((m) => m.meterRole === 'CHECK');
-    if (badMeter) throw bad('DMA_LINK_CHECK_FORBIDDEN', { meterNo: badMeter.meterNo });
+    // D1：挂接对象是计费侧表计——监控表（在装户用水类别 MONITORING）
+    // 的水表不可作为挂接对象。
+    const cat = await this.usageCategoryByMeter(tx, ctx.tenantId, meterIds);
+    const monitoring = meters.find((m) => cat.get(m.id) === 'MONITORING');
+    if (monitoring) {
+      throw bad('DMA_LINK_MONITORING_FORBIDDEN', { meterNo: monitoring.meterNo });
+    }
     const from = body.effectiveFrom ? new Date(String(body.effectiveFrom)) : new Date();
     const existing = await tx.dmaMeterLink.findMany({
       where: {
@@ -426,9 +474,12 @@ export class DmaService {
           select: { meterId: true },
         })
       : [];
+    // D4：同一只结算水表可挂多只考核表——挂接总水量按 meterId 去重，
+    // 否则该表水量被重复扣减、未计量量被低估甚至为负。
+    const linkedMeterIds = [...new Set(links.map((l) => l.meterId))];
     const [checkMeters, linkedMeters, meters] = await Promise.all([
       this.usageByMeter(tx, ctx.tenantId, checks.map((c) => c.meterId), period),
-      this.usageByMeter(tx, ctx.tenantId, links.map((l) => l.meterId), period),
+      this.usageByMeter(tx, ctx.tenantId, linkedMeterIds, period),
       tx.meter.findMany({
         where: {
           tenantId: ctx.tenantId,

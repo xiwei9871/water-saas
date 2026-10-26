@@ -454,7 +454,7 @@ export default function Meters() {
       key: 'meterRole',
       width: 80,
       render: (v: string | undefined) =>
-        ({ NORMAL: '普通', MASTER: '总表', SUB: '分表', CHECK: '考核表' })[v ?? 'NORMAL'] ?? v,
+        ({ NORMAL: '普通', MASTER: '总表', SUB: '分表' })[v ?? 'NORMAL'] ?? v,
     },
     {
       title: '状态',
@@ -826,14 +826,11 @@ export default function Meters() {
           <Form.Item
             name="meterRole"
             label="表具角色"
-            tooltip="总表/分表由「总分表关系」自动维护；此处仅可标普通表或考核表（监控表，不计费）"
+            tooltip="总表/分表由「总分表关系」自动维护；监控表（考核表）以用水户「用水类别=监控表」立户判定，此处仅可标普通表"
           >
             <Select
               allowClear
-              options={[
-                { value: 'NORMAL', label: '普通表' },
-                { value: 'CHECK', label: '考核表（监控表，不计费）' },
-              ]}
+              options={[{ value: 'NORMAL', label: '普通表' }]}
             />
           </Form.Item>
           {meterModal?.mode === 'edit' && editTransitions.length > 0 && (

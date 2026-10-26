@@ -15,7 +15,8 @@ type Tx = Prisma.TransactionClient;
 const bad = (code: string, extra?: Record<string, unknown>) =>
   new BadRequestException({ code, ...extra });
 
-export const METER_ROLES = ['NORMAL', 'MASTER', 'SUB', 'CHECK'] as const;
+// 20261026 DMA-D1：表具角色废除 CHECK——监控表唯一判定 = 用水户用水类别。
+export const METER_ROLES = ['NORMAL', 'MASTER', 'SUB'] as const;
 export type MeterRole = (typeof METER_ROLES)[number];
 export const BILLING_MODES = ['MASTER', 'SUB'] as const;
 
@@ -93,9 +94,6 @@ export class MeterRelationService {
     const master = meters.find((m) => m.id === masterId);
     const sub = meters.find((m) => m.id === subId);
     if (!master || !sub) throw new NotFoundException({ code: 'METER_NOT_FOUND' });
-    if (master.meterRole === 'CHECK' || sub.meterRole === 'CHECK') {
-      throw bad('CHECK_METER_CANNOT_RELATE');
-    }
     if (sub.meterRole === 'MASTER') throw bad('SUB_IS_MASTER');
     // 分表同一时间只能挂一个总表；同主表下计费模式必须统一。
     const live = await tx.meterRelation.findFirst({

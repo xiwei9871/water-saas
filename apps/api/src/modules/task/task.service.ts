@@ -24,6 +24,8 @@ export interface CreateTaskInput {
   /** 覆盖字典默认 dueDays（小时数不允许负数）。 */
   dueDays?: number;
   priority?: TaskPriority;
+  /** 直接指派（A1）：建单即 ASSIGNED 进该员工待办，跳过领取环节。 */
+  assigneeId?: string;
 }
 
 export interface CreatedTask {
@@ -159,18 +161,20 @@ export class TaskService {
       INSERT INTO task (
         id, tenant_id, type, title, biz_type, biz_id, biz_label, reason,
         context, required_perm, org_unit_id, status, priority, due_at,
-        source_task_id, candidate_count, created_at, created_by,
-        updated_at, updated_by
+        source_task_id, candidate_count, assignee_id,
+        created_at, created_by, updated_at, updated_by
       ) VALUES (
         gen_random_uuid(), ${ctx.tenantId}::uuid, ${input.type}, ${input.title},
         ${input.bizType}, ${input.bizId}::uuid, ${input.bizLabel ?? null},
         ${input.reason},
         ${input.context === undefined ? null : JSON.stringify(input.context)}::jsonb,
         ${rule.perm}, ${input.orgUnitId ?? null}::uuid,
-        'PENDING'::"TaskStatus",
+        ${input.assigneeId ? 'ASSIGNED' : 'PENDING'}::"TaskStatus",
         ${input.priority ?? rule.priority ?? 'NORMAL'}::"TaskPriority",
         ${dueAt}, ${input.sourceTaskId ?? null}::uuid,
-        ${candidates.length}, now(), ${ctx.staffId}::uuid, now(), ${ctx.staffId}::uuid
+        ${candidates.length},
+        ${input.assigneeId ?? null}::uuid,
+        now(), ${ctx.staffId}::uuid, now(), ${ctx.staffId}::uuid
       )
       ON CONFLICT (tenant_id, type, biz_type, biz_id)
         WHERE status IN ('PENDING', 'CLAIMED', 'ASSIGNED')
@@ -665,6 +669,18 @@ export class TaskService {
           }),
         ]);
         if (!recon && !adj) fail('TASK_NOT_DONE', '尚未生成该期补差单');
+        break;
+      }
+      case 'SUPPLEMENT_READING': {
+        // 完成标准（追加抄表方案 V7）：计划明细已回填读数。
+        const c = (row.context ?? {}) as Record<string, unknown>;
+        const item = await tx.readingPlanItem.findFirst({
+          where: { tenantId: ctx.tenantId, id: (c.planItemId as string) ?? '' },
+          select: { status: true, completedReadingId: true },
+        });
+        if (!item || (!item.completedReadingId && item.status !== 'READ')) {
+          fail('TASK_NOT_DONE', '尚未对该追加计划明细回填读数');
+        }
         break;
       }
       case 'COLLECTION': {

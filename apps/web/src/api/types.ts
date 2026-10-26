@@ -325,7 +325,7 @@ export interface Meter {
   caliber: string | null;
   /** Decimal column — serialized as a string on the wire. */
   maxDial: string | null;
-  /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表。 */
+  /** NORMAL普通/MASTER总表/SUB分表（监控表以用水户用水类别判定）。 */
   meterRole?: string;
   parentMeterId: string | null;
   status: MeterStatus;
@@ -450,6 +450,8 @@ export interface ReadingPlan {
   planDate: string;
   readerId: string | null;
   readerName: string | null;
+  /** REGULAR 常规 / SUPPLEMENT 追加抄表（单户计划）。 */
+  planType?: string;
   status: PlanStatus;
   createdAt: string;
   updatedAt: string;
@@ -1523,6 +1525,7 @@ export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
 export const TASK_BIZ_ROUTES: Record<string, string> = {
   SUPPLEMENT: '/settlement/reconciliations?focusId={bizId}&taskId={taskId}',
   METER_REVIEW: '/metering/readings?focusId={bizId}&taskId={taskId}',
+  SUPPLEMENT_READING: '/metering/plans?focusId={bizId}&taskId={taskId}',
   COLLECTION: '/payment/collection-notices?focusId={bizId}&taskId={taskId}',
   REVERSAL_APPROVAL: '/payment/payments?focusId={bizId}&taskId={taskId}',
   WRITEOFF_APPROVAL: '/payment/writeoffs?focusId={bizId}&taskId={taskId}',

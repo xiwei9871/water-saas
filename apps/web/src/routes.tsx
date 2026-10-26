@@ -35,6 +35,7 @@ import MeterStock from './pages/service/MeterStock';
 import Violations from './pages/service/Violations';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
+import SupplementReading from './pages/metering/SupplementReading';
 import RemoteDevices from './pages/metering/RemoteDevices';
 import RemoteEvents from './pages/metering/RemoteEvents';
 import RemoteSources from './pages/metering/RemoteSources';
@@ -209,6 +210,14 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/metering/plans',
         label: '抄表计划',
         element: <ReadingPlans />,
+      },
+      {
+        // 20261026 追加抄表独立功能：计划/任务层主动发起。
+        key: 'metering-supplement',
+        path: '/metering/supplement',
+        label: '追加抄表',
+        perms: ['metering:write'],
+        element: <SupplementReading />,
       },
       {
         key: 'metering-readings',

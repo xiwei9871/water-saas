@@ -71,6 +71,8 @@ interface MeterOption {
   meterNo: string;
   meterRole: string;
   status: string;
+  /** 在装户的用水类别（D1：MONITORING=监控表户）。 */
+  usageCategory: string | null;
   warehouse: { name: string } | null;
 }
 
@@ -159,13 +161,15 @@ export default function Dma() {
     }
   };
 
-  /** 挂考核表：候选 = CHECK 角色表。 */
+  /** 挂考核表：候选 = 用水类别为「监控表」的户所挂水表（D1）。 */
   const openAddCheck = async (z: DmaZone) => {
     setAddCheckFor(z);
     checkForm.resetFields();
     try {
-      const res = await api.get<MeterOption[]>('/meters', { params: { take: 200 } });
-      setCheckOptions(res.data.filter((m) => m.meterRole === 'CHECK'));
+      const res = await api.get<MeterOption[]>('/meters', {
+        params: { take: 200, usageCategory: 'MONITORING' },
+      });
+      setCheckOptions(res.data);
     } catch (e) {
       message.error(apiErrorText(e));
     }
@@ -173,8 +177,13 @@ export default function Dma() {
   const addCheck = async () => {
     const v = await checkForm.validateFields();
     try {
-      await api.post(`/dma/zones/${addCheckFor!.id}/check-meters`, v);
-      message.success('考核表已挂接');
+      const r = await api.post<{ count: number; skipped: number }>(
+        `/dma/zones/${addCheckFor!.id}/check-meters`,
+        { meterIds: v.meterIds },
+      );
+      message.success(
+        `已挂 ${r.data.count} 只考核表${r.data.skipped ? `，${r.data.skipped} 只已挂跳过` : ''}`,
+      );
       setAddCheckFor(null);
       void loadZones();
       if (detail) void openDetail(detail.id);
@@ -183,14 +192,16 @@ export default function Dma() {
     }
   };
 
-  /** 挂接水表：候选 = 非 CHECK 的计费侧表。 */
+  /** 挂接水表：候选 = 计费侧水表（排除监控表户的水表，D1）。 */
   const openLink = async (c: CheckMeterRow) => {
     setLinkFor(c);
     linkForm.resetFields();
     try {
       const res = await api.get<MeterOption[]>('/meters', { params: { take: 200 } });
       const used = new Set(c.linkedMeters.filter((l) => !l.effectiveTo).map((l) => l.meterId));
-      setLinkOptions(res.data.filter((m) => m.meterRole !== 'CHECK' && !used.has(m.id)));
+      setLinkOptions(
+        res.data.filter((m) => m.usageCategory !== 'MONITORING' && !used.has(m.id)),
+      );
     } catch (e) {
       message.error(apiErrorText(e));
     }
@@ -456,18 +467,20 @@ export default function Dma() {
         destroyOnHidden
       >
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          仅可挂「考核表（CHECK）」角色的监控表；考核表只做区域水量计量，不参与计费。
+          候选为「用水类别=监控表」户所挂的水表，可输入表号关键字聚焦、一次多选；
+          考核表只做区域水量计量，不参与计费。
         </Typography.Paragraph>
         <Form form={checkForm} layout="vertical">
-          <Form.Item name="meterId" label="考核表" rules={[{ required: true }]}>
+          <Form.Item name="meterIds" label="考核表（可多选）" rules={[{ required: true }]}>
             <Select
+              mode="multiple"
               showSearch
               optionFilterProp="label"
               options={checkOptions.map((m) => ({
                 value: m.id,
                 label: `${m.meterNo}（${m.status}）`,
               }))}
-              notFoundContent="无 CHECK 角色表——先在表具档案建考核表"
+              notFoundContent="无监控表水表——先立「用水类别=监控表」户并装表"
             />
           </Form.Item>
         </Form>
@@ -482,7 +495,8 @@ export default function Dma() {
         destroyOnHidden
       >
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          挂接对象为计费侧水表（普通/总/分表），同一分表可同时挂接多只考核表。
+          挂接对象为计费侧水表（普通/总/分表；监控表户的表除外），可输入表号
+          关键字聚焦；同一水表可同时挂接多只考核表（产销差按表号去重计量）。
         </Typography.Paragraph>
         <Form form={linkForm} layout="vertical">
           <Form.Item name="meterIds" label="水表（可多选）" rules={[{ required: true }]}>

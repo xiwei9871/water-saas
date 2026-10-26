@@ -94,7 +94,7 @@ export class DmaController {
     return this.svc.zonePeriodDetail(currentTenant(), assertUuid(id, 'id'), period ?? '');
   }
 
-  /** 挂考核表（meterRole=CHECK 校验在 service）。 */
+  /** 挂考核表（D1/D3：meterIds 多选；监控表户反查校验在 service）。 */
   @Post('zones/:id/check-meters')
   @Permissions('metering:service')
   addCheckMeter(

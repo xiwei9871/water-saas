@@ -432,7 +432,7 @@ export class SettlementService {
       else excludedMeterIds.add(r.masterMeterId);
     }
     const installations = allInstallations.filter(
-      (i) => i.meter.meterRole !== 'CHECK' && !excludedMeterIds.has(i.meterId),
+      (i) => !excludedMeterIds.has(i.meterId),
     );
     if (installations.length === 0) {
       throw new BadRequestException({
