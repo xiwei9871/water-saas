@@ -54,6 +54,7 @@ interface PlanRow {
   bookName?: string | null;
   period: string;
   status: 'OPEN' | 'IN_PROGRESS' | 'DONE' | 'CLOSED';
+  planType?: 'REGULAR' | 'SUPPLEMENT';
   readerId?: string | null;
   readerName?: string | null;
 }
@@ -564,7 +565,8 @@ export default function MobileReading() {
     () =>
       plans.map((p) => ({
         value: p.id,
-        label: `${p.bookNo ?? ''} ${p.bookName ?? ''} · ${p.period} · ${p.status === 'OPEN' ? '未开始' : '进行中'}`,
+        // X5：追加计划醒目紫标，与 Web 端一致
+        label: `${p.planType === 'SUPPLEMENT' ? '【追加】' : ''}${p.bookNo ?? ''} ${p.bookName ?? ''} · ${p.period} · ${p.status === 'OPEN' ? '未开始' : '进行中'}`,
       })),
     [plans],
   );
@@ -639,6 +641,16 @@ export default function MobileReading() {
             loading={busy && plans.length === 0}
             showSearch
             optionFilterProp="label"
+            labelRender={(p) => planOptions.find((o) => o.value === p.value)?.label ?? String(p.label ?? '')}
+            optionRender={(opt) => {
+              const p = plans.find((x) => x.id === opt.value);
+              return (
+                <Space size={4}>
+                  {p?.planType === 'SUPPLEMENT' && <Tag color="purple">追加</Tag>}
+                  <span>{opt.label as string}</span>
+                </Space>
+              );
+            }}
           />
           {progress && (
             <div>
@@ -1095,15 +1107,50 @@ export default function MobileReading() {
           >
             <Input.TextArea rows={3} maxLength={200} placeholder="如：表玻璃碎裂、指针停走、表井被水淹没" />
           </Form.Item>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {photo
-              ? anomalyType === 'SUSPECTED_VIOLATION'
-                ? '已拍照片将随上报留证（疑似违章必填）。'
-                : '已拍照片将随工单留证。'
-              : anomalyType === 'SUSPECTED_VIOLATION'
-                ? '疑似违章必须拍照——请关闭本弹窗拍照后再上报。'
-                : '未拍照——建议先关闭本弹窗拍照后再上报，照片作留证。'}
-          </Typography.Text>
+          {/* X3-1：拍照按钮直接在填报页内，拍完即回填预览 */}
+          <Form.Item
+            label={
+              anomalyType === 'SUSPECTED_VIOLATION' ? '现场照片（必填）' : '现场照片（选填）'
+            }
+            required={anomalyType === 'SUSPECTED_VIOLATION'}
+          >
+            <Upload
+              accept="image/*"
+              showUploadList={false}
+              beforeUpload={(file) => {
+                void compressPhoto(file)
+                  .then((dataUrl) => setPhoto(dataUrl))
+                  .catch(() => message.error('照片读取失败'));
+                return false;
+              }}
+            >
+              <Button
+                icon={<CameraOutlined />}
+                danger={anomalyType === 'SUSPECTED_VIOLATION' && !photo}
+                type={photo ? 'primary' : 'default'}
+                ghost={!!photo}
+                block
+              >
+                {photo ? '已拍照（点击重拍）' : '拍照'}
+              </Button>
+            </Upload>
+            {photo && (
+              <img
+                src={photo}
+                alt="现场照片"
+                style={{ width: '100%', borderRadius: 6, maxHeight: 160, objectFit: 'cover', marginTop: 8 }}
+              />
+            )}
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {photo
+                ? anomalyType === 'SUSPECTED_VIOLATION'
+                  ? '照片将随上报留证。'
+                  : '照片将随工单留证。'
+                : anomalyType === 'SUSPECTED_VIOLATION'
+                  ? '疑似违章必须拍照后方能上报。'
+                  : '未拍照也可上报，照片可作留证。'}
+            </Typography.Text>
+          </Form.Item>
         </Form>
       </Modal>
     </div>

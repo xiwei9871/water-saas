@@ -887,3 +887,89 @@ describe('A1 任务指派/派送', () => {
     expect(flags.doneIds).not.toContain(bizId);
   });
 });
+
+describe('1026-v2 X6 — 抄表计划分组口径：全部抄完且无未结任务 → 已完成', () => {
+  const mkPlan = async (
+    suffix: string,
+    a: { waterAccount: { id: string }; installation: { id: string }; meter: { id: string } },
+    opts: { read: boolean },
+  ) => {
+    const book = await owner.readingBook.create({
+      data: { tenantId: T, bookNo: `BKX6${suffix}${RUN}`.slice(0, 38), name: `册${suffix}`, orgUnitId: ORG_A },
+    });
+    const plan = await owner.readingPlan.create({
+      data: { tenantId: T, bookId: book.id, period: '202603', planDate: new Date('2026-03-01'), status: 'OPEN' },
+    });
+    const item = await owner.readingPlanItem.create({
+      data: { tenantId: T, planId: plan.id, waterAccountId: a.waterAccount.id, seqNo: 1 },
+    });
+    let readingId: string | null = null;
+    if (opts.read) {
+      const r = await owner.meterReading.create({
+        data: {
+          tenantId: T,
+          planItemId: item.id,
+          installationId: a.installation.id,
+          meterId: a.meter.id,
+          period: '202603',
+          readDate: new Date('2026-03-05'),
+          resultType: 'ACTUAL',
+          readingValue: 50,
+          qcStatus: 'PASSED',
+          source: 'WEB',
+          operatorId: ids.staff_admin,
+        },
+      });
+      readingId = r.id;
+      await owner.readingPlanItem.update({
+        where: { id: item.id },
+        data: { status: 'READ', completedReadingId: r.id },
+      });
+    }
+    return { plan, item, readingId };
+  };
+
+  it('已抄完无任务→done；CANCELLED 不阻塞→done；未结任务/未抄明细→open', async () => {
+    const a1 = await estimatedAccount('x6a', '202601');
+    const a2 = await estimatedAccount('x6b', '202601');
+    const a3 = await estimatedAccount('x6c', '202601');
+    const a4 = await estimatedAccount('x6d', '202601');
+
+    // p1：全抄完、无任何任务 → done
+    const { plan: p1 } = await mkPlan('1', a1, { read: true });
+    // p2：全抄完 + 读数上挂 CANCELLED 任务 → done（取消不阻塞，X6-2）
+    const { plan: p2, readingId: r2 } = await mkPlan('2', a2, { read: true });
+    await owner.task.create({
+      data: {
+        tenantId: T, type: 'METER_REVIEW', title: 't', bizType: 'meterReading',
+        bizId: r2!, reason: 'r', requiredPerm: 'metering:qc',
+        status: 'CANCELLED', priority: 'NORMAL', candidateCount: 1,
+      },
+    });
+    // p3：全抄完 + 读数上挂 PENDING 收尾任务 → open
+    const { plan: p3, readingId: r3 } = await mkPlan('3', a3, { read: true });
+    await owner.task.create({
+      data: {
+        tenantId: T, type: 'METER_REVIEW', title: 't', bizType: 'meterReading',
+        bizId: r3!, reason: 'r', requiredPerm: 'metering:qc',
+        status: 'PENDING', priority: 'NORMAL', candidateCount: 1,
+      },
+    });
+    // p4：明细未抄、无任务 → open（X6-1 原滞留点）
+    const { plan: p4 } = await mkPlan('4', a4, { read: false });
+
+    const flags = (
+      await get(`/tasks/biz-flags?bizType=readingPlan`, tokens.qc).expect(200)
+    ).body as { openIds: string[]; doneIds: string[]; blockers: Record<string, { unreadItems: number; openTasks: boolean }> };
+
+    expect(flags.doneIds).toContain(p1.id);
+    expect(flags.doneIds).toContain(p2.id);
+    expect(flags.openIds).toContain(p3.id);
+    expect(flags.openIds).toContain(p4.id);
+    // 互斥
+    expect(flags.openIds.filter((x) => flags.doneIds.includes(x))).toHaveLength(0);
+    // blockers 自检：p3 卡在未结任务（unread=0），p4 卡在未抄明细
+    expect(flags.blockers[p3.id]).toMatchObject({ unreadItems: 0, openTasks: true });
+    expect(flags.blockers[p4.id]).toMatchObject({ unreadItems: 1, openTasks: false });
+  });
+});

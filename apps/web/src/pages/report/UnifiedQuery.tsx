@@ -44,6 +44,7 @@ import {
   OrgUnitTreeSelect,
   ReadingBookSelect,
   SettleAccountLookupSelect,
+  useDebounced,
 } from '../pickers';
 
 /**
@@ -114,6 +115,7 @@ function WaterAccountMultiSelect({
     queueMicrotask(() => void fetch(''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const onSearch = useDebounced((kw) => void fetch(kw));
   return (
     <Select
       mode="multiple"
@@ -124,7 +126,7 @@ function WaterAccountMultiSelect({
       options={options}
       value={value}
       onChange={onChange}
-      onSearch={(kw) => void fetch(kw)}
+      onSearch={onSearch}
       style={{ minWidth: 360 }}
       maxTagCount={4}
     />
@@ -316,6 +318,7 @@ function DetailQuery() {
       settleAccountIds: objectKind === 'settle' && v.settleAccountId ? [v.settleAccountId as string] : undefined,
       customerIds: objectKind === 'customer' && v.customerId ? [v.customerId as string] : undefined,
       bookIds: objectKind === 'book' && v.bookId ? [v.bookId as string] : undefined,
+      bookNo: (v.bookNo as string | undefined)?.trim() || undefined,
       orgUnitId: objectKind === 'org' ? (v.orgUnitId as string | undefined) : undefined,
       usageCategories: (v.usageCategories as string[] | undefined)?.length
         ? (v.usageCategories as string[])
@@ -582,6 +585,9 @@ function DetailQuery() {
               maxTagCount={2}
               options={Object.entries(ACCOUNT_STATUS_LABELS).map(([value, label]) => ({ value, label }))}
             />
+          </Form.Item>
+          <Form.Item name="bookNo" label="册号">
+            <Input allowClear style={{ width: 140 }} placeholder="按册号模糊筛选" />
           </Form.Item>
           <Form.Item name="estimated" label="估抄">
             <Select

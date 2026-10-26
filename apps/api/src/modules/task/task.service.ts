@@ -401,10 +401,9 @@ export class TaskService {
 
       if (bizType === 'readingPlan' || bizType === 'billingRun') {
         const { open, all } = collect((r) => r.bizId);
-        if (!all.size) return { openIds: [], doneIds: [] };
         const ids = [...all];
-        const links =
-          bizType === 'readingPlan'
+        const links = ids.length
+          ? bizType === 'readingPlan'
             ? await tx.$queryRaw<{ pid: string; rid: string }[]>`
                 SELECT pi.plan_id AS pid, r.id AS rid
                 FROM meter_reading r
@@ -415,12 +414,48 @@ export class TaskService {
                 SELECT b.billing_run_id AS pid, b.id AS rid
                 FROM bill b
                 WHERE b.tenant_id = ${ctx.tenantId}::uuid AND b.id = ANY(${ids}::uuid[])
-                  AND b.billing_run_id IS NOT NULL`;
+                  AND b.billing_run_id IS NOT NULL`
+          : [];
         const openP = new Set<string>();
         const allP = new Set<string>();
         for (const l of links) {
           allP.add(l.pid);
           if (open.has(l.rid)) openP.add(l.pid);
+        }
+        // X6（20261026-v2）计划完成口径：未完成 = 计划有未抄明细 或 有未结
+        // 收尾任务（PENDING/CLAIMED/ASSIGNED；CANCELLED/DONE 不阻塞）。
+        // 原实现只看任务桶——已全部抄完但从未产生任务的计划会滞留「未完成」，
+        // 有任务但明细未抄完的计划反而落「已完成」。改为按全量计划判定。
+        if (bizType === 'readingPlan') {
+          const items = await tx.$queryRaw<{ pid: string; unread: bigint }[]>`
+            SELECT pi.plan_id AS pid,
+                   count(*) FILTER (
+                     WHERE pi.completed_reading_id IS NULL AND pi.status <> 'READ'
+                   ) AS unread
+            FROM reading_plan_item pi
+            WHERE pi.tenant_id = ${ctx.tenantId}::uuid
+            GROUP BY pi.plan_id`;
+          const open2 = new Set<string>();
+          const all2 = new Set<string>();
+          for (const r of items) {
+            all2.add(r.pid);
+            if (r.unread > 0n || openP.has(r.pid)) open2.add(r.pid);
+          }
+          // 自检辅助：blockers[planId] 给出滞留原因（未抄明细数/未结任务），
+          // 「已抄完仍滞留」可直接定位是哪个环节卡住。
+          const blockers: Record<string, { unreadItems: number; openTasks: boolean }> = {};
+          for (const r of items) {
+            if (!open2.has(r.pid)) continue;
+            blockers[r.pid] = {
+              unreadItems: Number(r.unread),
+              openTasks: openP.has(r.pid),
+            };
+          }
+          return {
+            openIds: [...all2].filter((id) => open2.has(id)),
+            doneIds: [...all2].filter((id) => !open2.has(id)),
+            blockers,
+          };
         }
         return finish(openP, allP);
       }

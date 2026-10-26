@@ -510,6 +510,7 @@ export class BillService {
       sourceId: string;
       billingRunId: string | null;
       tariffPlanId: string | null;
+      period: string;
     },
   >(
     tx: Prisma.TransactionClient,
@@ -624,6 +625,58 @@ export class BillService {
       sourcePeriod = rec?.fromPeriod ?? null;
       sourcePeriodTo = rec?.toPeriod ?? null;
     }
+    // T2-2 阶梯年量核对：当年累计(开账前/含本单) + 年度基数（首档年界值，
+    // 含户籍扩展）。仅阶梯水价账单（有资费版本 + PER_QTY 明细）可核对，
+    // 其余返回 null，前端显示「—」。
+    let ladderInfo: {
+      ytdBeforeQty: string;
+      ytdAfterQty: string;
+      annualBaseQty: string | null;
+    } | null = null;
+    if (bill.tariffPlanId && items.some((i) => i.qty != null)) {
+      const before = await ytdBeforeQty(tx, ctx, bill.waterAccountId, bill.period);
+      const billQty = items
+        .filter((i) => i.itemType === 'NORMAL' && i.qty != null)
+        .reduce((s, i) => s.plus(i.qty!), new Prisma.Decimal(0));
+      // 年度基数 = 首档年界值 + (结算人数 − 基准人数) × 人均扩展量；
+      // 只取 PER_QTY 有界一档（FIXED/PERCENT 项的 tier1 toQty 为 null，不参与）
+      const tier1 = await tx.tariffTier.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          tariffPlanId: bill.tariffPlanId,
+          tierNo: 1,
+          toQty: { not: null },
+        },
+        orderBy: [{ toQty: 'asc' }],
+        select: { toQty: true },
+      });
+      let annualBaseQty: string | null = null;
+      if (tier1?.toQty != null) {
+        let base = tier1.toQty;
+        const plan = await tx.tariffPlan.findFirst({
+          where: { tenantId: ctx.tenantId, id: bill.tariffPlanId },
+          select: { baseHousehold: true, perPersonQty: true },
+        });
+        const settleId =
+          bill.sourceType === 'SETTLEMENT' ? bill.sourceId : null;
+        if (plan?.baseHousehold != null && plan.perPersonQty != null && settleId) {
+          const snap = await tx.consumptionSettlement.findFirst({
+            where: { tenantId: ctx.tenantId, id: settleId },
+            select: { householdSizeSnapshot: true },
+          });
+          if (snap?.householdSizeSnapshot != null) {
+            const extra = Math.max(0, snap.householdSizeSnapshot - plan.baseHousehold);
+            base = base.plus(plan.perPersonQty.times(extra));
+          }
+        }
+        annualBaseQty = base.toString();
+      }
+      ladderInfo = {
+        ytdBeforeQty: before.toString(),
+        ytdAfterQty: before.plus(billQty).toString(),
+        annualBaseQty,
+      };
+    }
     const [identified] = await this.embedIdentity(tx, ctx, [bill]);
     return {
       ...identified,
@@ -633,6 +686,7 @@ export class BillService {
       tariffPlanRef,
       sourcePeriod,
       sourcePeriodTo,
+      ladderInfo,
     };
   }
 

@@ -27,6 +27,7 @@ import {
   Table,
   Tag,
   Tooltip,
+  Typography,
   Upload,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -97,6 +98,26 @@ f47ac10b-58cc-4372-a567-0e02b2c3d480,NO_READ,,LOCKED,2026-10-05`;
  * 抄表记录 / 质检：append-only 采集事实的查询 + QC 质检 + 更正（supersede
  * 追加新事实行）+ CSV 批量导入（all-or-nothing，失败行报告内嵌展示）。
  */
+/** X3：违章照片压缩（最长边 1280，JPEG 0.7）→ dataURL，与 H5 同口径。 */
+const compressPhoto = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale);
+      c.height = Math.round(img.height * scale);
+      c.getContext('2d')?.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(img.src);
+      resolve(c.toDataURL('image/jpeg', 0.7));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(img.src);
+      reject(new Error('照片读取失败'));
+    };
+    img.src = URL.createObjectURL(file);
+  });
+
 export default function MeterReadings() {
   const { message, modal } = AntdApp.useApp();
   const { hasPerm } = useAuth();
@@ -126,7 +147,8 @@ export default function MeterReadings() {
   const [supersedeIdemKey, setSupersedeIdemKey] = useState('');
   // 20261021 整改 任务E：抄表员上报疑似违章（→ PENDING_REVIEW，派发稽查任务）。
   const [violationTarget, setViolationTarget] = useState<MeterReading | null>(null);
-  const [violationForm] = Form.useForm<{ violationType: string; description?: string; photoRefs?: string }>();
+  const [vPhotos, setVPhotos] = useState<string[]>([]);
+  const [violationForm] = Form.useForm<{ violationType: string; description?: string }>();
   const [saving, setSaving] = useState(false);
   const [supersedeForm] = Form.useForm<SupersedeFormValues>();
 
@@ -525,6 +547,7 @@ export default function MeterReadings() {
                 icon={<WarningOutlined />}
                 onClick={() => {
                   violationForm.resetFields();
+                  setVPhotos([]);
                   setViolationTarget(record);
                 }}
               >
@@ -759,21 +782,28 @@ export default function MeterReadings() {
         cancelText="取消"
         onOk={async () => {
           const v = await violationForm.validateFields();
+          // X3-2：照片为上传控件采集，不再手填引用
+          if (vPhotos.length === 0) {
+            message.warning('疑似违章须附现场照片，请拍照或选择图片');
+            return;
+          }
           try {
             await api.post(`/meter-readings/${violationTarget!.id}/report-violation`, {
               violationType: v.violationType,
               description: v.description,
-              photoRefs: String(v.photoRefs ?? '')
-                .split(/[\s,，;；]+/)
-                .filter(Boolean),
+              photoRefs: vPhotos,
             });
             message.success('已上报，稽查岗将在待办中核实');
             setViolationTarget(null);
+            setVPhotos([]);
           } catch (e) {
             message.error(apiErrorText(e));
           }
         }}
-        onCancel={() => setViolationTarget(null)}
+        onCancel={() => {
+          setViolationTarget(null);
+          setVPhotos([]);
+        }}
         destroyOnHidden
       >
         <Form form={violationForm} layout="vertical">
@@ -791,8 +821,45 @@ export default function MeterReadings() {
           <Form.Item name="description" label="现场描述" rules={[{ required: true, message: '请填写现场描述' }]}>
             <Input.TextArea rows={2} />
           </Form.Item>
-          <Form.Item name="photoRefs" label="现场照片引用（空格分隔）" rules={[{ required: true, message: '疑似违章须附现场照片' }]}>
-            <Input.TextArea rows={2} />
+          {/* X3-2：拍照/上传控件替代手填 photo-ref，上传后即时预览 */}
+          <Form.Item label="现场照片（必填）" required>
+            <Upload
+              accept="image/*"
+              showUploadList={false}
+              beforeUpload={(file) => {
+                void compressPhoto(file)
+                  .then((dataUrl) => setVPhotos((p) => [...p, dataUrl]))
+                  .catch(() => message.error('照片读取失败'));
+                return false;
+              }}
+            >
+              <Button icon={<UploadOutlined />}>拍照 / 选择图片</Button>
+            </Upload>
+            <Space wrap style={{ marginTop: 8 }}>
+              {vPhotos.map((p, i) => (
+                <span key={i} style={{ position: 'relative', display: 'inline-block' }}>
+                  <img
+                    src={p}
+                    alt={`现场照片${i + 1}`}
+                    style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6 }}
+                  />
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    style={{ position: 'absolute', top: 0, right: 0 }}
+                    onClick={() => setVPhotos((arr) => arr.filter((_, j) => j !== i))}
+                  >
+                    ×
+                  </Button>
+                </span>
+              ))}
+            </Space>
+            {vPhotos.length === 0 && (
+              <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+                未拍照/上传不得提交。
+              </Typography.Text>
+            )}
           </Form.Item>
         </Form>
       </Modal>

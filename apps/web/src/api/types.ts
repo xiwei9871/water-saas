@@ -852,6 +852,12 @@ export interface BillDetail extends Bill {
   sourcePeriod: string | null;
   /** RECONCILIATION → toPeriod（补差覆盖区间）。 */
   sourcePeriodTo: string | null;
+  /** T2-2 阶梯年量核对：当年累计（开账前/含本单）+ 年度基数；非阶梯账单为 null。 */
+  ladderInfo: {
+    ytdBeforeQty: string;
+    ytdAfterQty: string;
+    annualBaseQty: string | null;
+  } | null;
 }
 
 /* ------------------------------------------------------------------ */

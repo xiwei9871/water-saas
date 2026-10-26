@@ -27,6 +27,8 @@ export interface UnifiedQuery {
   settleAccountIds?: string[];
   customerIds?: string[];
   bookIds?: string[];
+  /** X2-2：按抄表册册号文本筛选（模糊包含，命中该册下用水户）。 */
+  bookNo?: string;
   orgUnitId?: string;
   usageCategories?: string[];
   statuses?: string[];
@@ -161,6 +163,13 @@ export class UnifiedQueryService {
                 SELECT 1 FROM book_meter bm WHERE bm.tenant_id = wa.tenant_id
                   AND bm.water_account_id = wa.id AND bm.book_id = ANY(${q.bookIds}::uuid[]))`
             : Prisma.empty}
+          ${q.bookNo
+            ? Prisma.sql`AND EXISTS (
+                SELECT 1 FROM book_meter bm
+                JOIN reading_book rb ON rb.tenant_id = bm.tenant_id AND rb.id = bm.book_id
+                WHERE bm.tenant_id = wa.tenant_id AND bm.water_account_id = wa.id
+                  AND rb.book_no ILIKE ${'%' + q.bookNo + '%'})`
+            : Prisma.empty}
           ${q.orgUnitId
             ? Prisma.sql`AND EXISTS (
                 SELECT 1 FROM book_meter bm
@@ -200,6 +209,7 @@ export class UnifiedQueryService {
           openedAt: Date | null; closedAt: Date | null; orgName: string | null;
           settleNo: string; settleName: string;
           meterNo: string | null; caliber: string | null;
+          bookNos: string | null;
         }[]
       >`
         SELECT wa.id, wa.account_no AS "accountNo", c.name AS "customerName",
@@ -208,7 +218,8 @@ export class UnifiedQueryService {
                wa.opened_at AS "openedAt", wa.closed_at AS "closedAt",
                ou.name AS "orgName",
                sa.settle_no AS "settleNo", sa.name AS "settleName",
-               m.meter_no AS "meterNo", m.caliber
+               m.meter_no AS "meterNo", m.caliber,
+               bs."bookNos"
         FROM water_account wa
         JOIN customer c ON c.tenant_id = wa.tenant_id AND c.id = wa.customer_id
         JOIN settle_account sa ON sa.tenant_id = wa.tenant_id AND sa.id = wa.settle_account_id
@@ -226,6 +237,12 @@ export class UnifiedQueryService {
           ORDER BY i.installed_at DESC LIMIT 1
         ) mi ON true
         LEFT JOIN meter m ON m.tenant_id = wa.tenant_id AND m.id = mi.meter_id
+        LEFT JOIN LATERAL (
+          SELECT string_agg(rb3.book_no, '、' ORDER BY rb3.book_no) AS "bookNos"
+          FROM book_meter bm3
+          JOIN reading_book rb3 ON rb3.tenant_id = bm3.tenant_id AND rb3.id = bm3.book_id
+          WHERE bm3.tenant_id = wa.tenant_id AND bm3.water_account_id = wa.id
+        ) bs ON true
         ${where}
         ORDER BY wa.account_no
         LIMIT ${take} OFFSET ${skip}`;

@@ -731,6 +731,34 @@ export default function Bills() {
                 />
               );
             })()}
+            {detail.ladderInfo && (
+              <Descriptions
+                bordered
+                size="small"
+                column={3}
+                style={{ marginTop: 12 }}
+                items={[
+                  {
+                    key: 'ytd',
+                    label: '当年累计用水（本单开账前）',
+                    children: `${Number(detail.ladderInfo.ytdBeforeQty)} m³`,
+                  },
+                  {
+                    key: 'ytdA',
+                    label: '当年累计用水（含本单）',
+                    children: `${Number(detail.ladderInfo.ytdAfterQty)} m³`,
+                  },
+                  {
+                    key: 'base',
+                    label: '年度基数（一档上限）',
+                    children:
+                      detail.ladderInfo.annualBaseQty != null
+                        ? `${Number(detail.ladderInfo.annualBaseQty)} m³/年`
+                        : '—',
+                  },
+                ]}
+              />
+            )}
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>账单明细</div>
             <Table<BillItem>
               rowKey="id"

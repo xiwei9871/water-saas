@@ -113,6 +113,8 @@ export class ReadingBookService {
       skip: number;
       name?: string;
       bookNo?: string;
+      /** T1/X2：册号+名称统一模糊查询（远程搜索下拉用）。 */
+      q?: string;
       orgUnitId?: string;
       waterAccountId?: string;
     },
@@ -144,6 +146,14 @@ export class ReadingBookService {
           orgUnitId:
             ctx.scope === 'ALL' ? q.orgUnitId : { in: ctx.orgScope },
           name: q.name ? { contains: q.name } : undefined,
+          ...(q.q
+            ? {
+                OR: [
+                  { bookNo: { contains: q.q } },
+                  { name: { contains: q.q } },
+                ],
+              }
+            : {}),
           ...(memberBookIds ? { id: { in: memberBookIds } } : {}),
         },
         select: READING_BOOK_SELECT,

@@ -109,6 +109,125 @@ export class MeterStockService {
     });
   }
 
+  /** X1-1 编辑库房：名称/所属单位/状态；code 为身份字段不可改。 */
+  async updateWarehouseTx(
+    tx: Tx,
+    ctx: TenantCtx,
+    id: string,
+    body: { name?: unknown; owner?: unknown; status?: unknown },
+  ) {
+    const wh = await tx.meterWarehouse.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+      select: { id: true },
+    });
+    if (!wh) throw new NotFoundException({ code: 'WAREHOUSE_NOT_FOUND' });
+    const data: { name?: string; owner?: string | null; status?: string; updatedBy?: string } =
+      { updatedBy: ctx.staffId };
+    if (body.name !== undefined) {
+      const name = String(body.name ?? '').trim();
+      if (!name) throw bad('WAREHOUSE_FIELDS_REQUIRED');
+      data.name = name;
+    }
+    if (body.owner !== undefined) data.owner = body.owner ? String(body.owner) : null;
+    if (body.status !== undefined) {
+      const s = String(body.status);
+      if (s !== 'ACTIVE' && s !== 'DISABLED') throw bad('WAREHOUSE_STATUS_INVALID');
+      data.status = s;
+    }
+    return tx.meterWarehouse.update({ where: { id }, data });
+  }
+
+  /** X1-1 编辑货位：名称/状态；code 不可改。 */
+  async updateLocationTx(
+    tx: Tx,
+    ctx: TenantCtx,
+    warehouseId: string,
+    locationId: string,
+    body: { name?: unknown; status?: unknown },
+  ) {
+    const loc = await tx.meterWarehouseLocation.findFirst({
+      where: { tenantId: ctx.tenantId, id: locationId, warehouseId },
+      select: { id: true },
+    });
+    if (!loc) throw new NotFoundException({ code: 'LOCATION_NOT_FOUND' });
+    const data: { name?: string; status?: string } = {};
+    if (body.name !== undefined) {
+      const name = String(body.name ?? '').trim();
+      if (!name) throw bad('LOCATION_FIELDS_REQUIRED');
+      data.name = name;
+    }
+    if (body.status !== undefined) {
+      const s = String(body.status);
+      if (s !== 'ACTIVE' && s !== 'DISABLED') throw bad('LOCATION_STATUS_INVALID');
+      data.status = s;
+    }
+    return tx.meterWarehouseLocation.update({ where: { id: locationId }, data });
+  }
+
+  /** X1-2/X1-3 删除库房：有货位/在库表/流水 → 409 拦截，仅空库房可删。 */
+  async deleteWarehouseTx(tx: Tx, ctx: TenantCtx, id: string) {
+    const wh = await tx.meterWarehouse.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+      include: { locations: { select: { id: true } } },
+    });
+    if (!wh) throw new NotFoundException({ code: 'WAREHOUSE_NOT_FOUND' });
+    if (wh.locations.length)
+      throw new ConflictException({
+        code: 'WAREHOUSE_NOT_EMPTY',
+        message: '该库房下尚有货位，请先删除全部货位',
+      });
+    const inStock = await tx.meter.count({
+      where: { tenantId: ctx.tenantId, warehouseId: id },
+    });
+    if (inStock)
+      throw new ConflictException({
+        code: 'WAREHOUSE_NOT_EMPTY',
+        message: '该库房下尚有在库水表，请先清空',
+      });
+    const flows = await tx.meterStockMovement.count({
+      where: { tenantId: ctx.tenantId, warehouseId: id },
+    });
+    if (flows)
+      throw new ConflictException({
+        code: 'WAREHOUSE_NOT_EMPTY',
+        message: '该库房已有出入库流水，不可删除（可改为停用）',
+      });
+    await tx.meterWarehouse.delete({ where: { id } });
+    return { deleted: true };
+  }
+
+  /** X1-2/X1-3 删除货位：有在库表或流水 → 409，空货位可删。 */
+  async deleteLocationTx(
+    tx: Tx,
+    ctx: TenantCtx,
+    warehouseId: string,
+    locationId: string,
+  ) {
+    const loc = await tx.meterWarehouseLocation.findFirst({
+      where: { tenantId: ctx.tenantId, id: locationId, warehouseId },
+      select: { id: true },
+    });
+    if (!loc) throw new NotFoundException({ code: 'LOCATION_NOT_FOUND' });
+    const inStock = await tx.meter.count({
+      where: { tenantId: ctx.tenantId, locationId },
+    });
+    if (inStock)
+      throw new ConflictException({
+        code: 'LOCATION_NOT_EMPTY',
+        message: '该货位下尚有在库水表，请先清空',
+      });
+    const flows = await tx.meterStockMovement.count({
+      where: { tenantId: ctx.tenantId, locationId },
+    });
+    if (flows)
+      throw new ConflictException({
+        code: 'LOCATION_NOT_EMPTY',
+        message: '该货位已有出入库流水，不可删除（可改为停用）',
+      });
+    await tx.meterWarehouseLocation.delete({ where: { id: locationId } });
+    return { deleted: true };
+  }
+
   // ---- 出入库流水 ----
   /** 批量流水：meterIds[] 逐只记一条 movement + 状态/库位联动（同事务）。 */
   async moveTx(
@@ -141,15 +260,17 @@ export class MeterStockService {
       if (!warehouseId) throw bad('MOVEMENT_WAREHOUSE_REQUIRED');
       const wh = await tx.meterWarehouse.findFirst({
         where: { tenantId: ctx.tenantId, id: warehouseId },
-        select: { id: true },
+        select: { id: true, status: true },
       });
       if (!wh) throw new NotFoundException({ code: 'WAREHOUSE_NOT_FOUND' });
+      if (wh.status !== 'ACTIVE') throw bad('WAREHOUSE_DISABLED');
       if (locationId) {
         const loc = await tx.meterWarehouseLocation.findFirst({
           where: { tenantId: ctx.tenantId, id: locationId, warehouseId },
-          select: { id: true },
+          select: { id: true, status: true },
         });
         if (!loc) throw bad('LOCATION_NOT_IN_WAREHOUSE');
+        if (loc.status !== 'ACTIVE') throw bad('LOCATION_DISABLED');
       }
     }
 

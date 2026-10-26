@@ -56,6 +56,7 @@ export class ReadingBookController {
   list(
     @Query('name') name?: string,
     @Query('bookNo') bookNo?: string,
+    @Query('q') q?: string,
     @Query('orgUnitId') orgUnitId?: string,
     @Query('waterAccountId') waterAccountId?: string,
     @Query('take') take?: string,
@@ -67,6 +68,7 @@ export class ReadingBookController {
       ...pageArgs(take, skip),
       name,
       bookNo,
+      q,
       orgUnitId,
       waterAccountId,
     });

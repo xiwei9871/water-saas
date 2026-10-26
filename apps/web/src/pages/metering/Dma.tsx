@@ -21,8 +21,9 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
+import { useDebounced } from '../pickers';
 
 interface DmaZone {
   id: string;
@@ -161,18 +162,30 @@ export default function Dma() {
     }
   };
 
-  /** 挂考核表：候选 = 用水类别为「监控表」的户所挂水表（D1）。 */
+  /** 挂考核表：候选 = 用水类别为「监控表」的户所挂水表（D1）；
+   *  T1 远程搜索——输入表号关键字后端过滤，不一次性全量加载。 */
+  const [checkFetching, setCheckFetching] = useState(false);
+  const fetchCheckOptions = useCallback(
+    async (kw: string) => {
+      setCheckFetching(true);
+      try {
+        const res = await api.get<MeterOption[]>('/meters', {
+          params: { take: 50, usageCategory: 'MONITORING', ...(kw.trim() ? { q: kw.trim() } : {}) },
+        });
+        setCheckOptions(res.data);
+      } catch (e) {
+        message.error(apiErrorText(e));
+      } finally {
+        setCheckFetching(false);
+      }
+    },
+    [message],
+  );
+  const checkSearch = useDebounced((kw) => void fetchCheckOptions(kw));
   const openAddCheck = async (z: DmaZone) => {
     setAddCheckFor(z);
     checkForm.resetFields();
-    try {
-      const res = await api.get<MeterOption[]>('/meters', {
-        params: { take: 200, usageCategory: 'MONITORING' },
-      });
-      setCheckOptions(res.data);
-    } catch (e) {
-      message.error(apiErrorText(e));
-    }
+    void fetchCheckOptions('');
   };
   const addCheck = async () => {
     const v = await checkForm.validateFields();
@@ -192,19 +205,37 @@ export default function Dma() {
     }
   };
 
-  /** 挂接水表：候选 = 计费侧水表（排除监控表户的水表，D1）。 */
+  /** 挂接水表：候选 = 计费侧水表（排除监控表户的水表，D1）；
+   *  T1 远程搜索 + 客户端再滤除已挂接的表。 */
+  const [linkFetching, setLinkFetching] = useState(false);
+  const linkUsedRef = useRef<Set<string>>(new Set());
+  const fetchLinkOptions = useCallback(
+    async (kw: string) => {
+      setLinkFetching(true);
+      try {
+        const res = await api.get<MeterOption[]>('/meters', {
+          params: { take: 50, ...(kw.trim() ? { q: kw.trim() } : {}) },
+        });
+        const used = linkUsedRef.current;
+        setLinkOptions(
+          res.data.filter((m) => m.usageCategory !== 'MONITORING' && !used.has(m.id)),
+        );
+      } catch (e) {
+        message.error(apiErrorText(e));
+      } finally {
+        setLinkFetching(false);
+      }
+    },
+    [message],
+  );
+  const linkSearch = useDebounced((kw) => void fetchLinkOptions(kw));
   const openLink = async (c: CheckMeterRow) => {
     setLinkFor(c);
     linkForm.resetFields();
-    try {
-      const res = await api.get<MeterOption[]>('/meters', { params: { take: 200 } });
-      const used = new Set(c.linkedMeters.filter((l) => !l.effectiveTo).map((l) => l.meterId));
-      setLinkOptions(
-        res.data.filter((m) => m.usageCategory !== 'MONITORING' && !used.has(m.id)),
-      );
-    } catch (e) {
-      message.error(apiErrorText(e));
-    }
+    linkUsedRef.current = new Set(
+      c.linkedMeters.filter((l) => !l.effectiveTo).map((l) => l.meterId),
+    );
+    void fetchLinkOptions('');
   };
   const addLink = async () => {
     const v = await linkForm.validateFields();
@@ -475,7 +506,9 @@ export default function Dma() {
             <Select
               mode="multiple"
               showSearch
-              optionFilterProp="label"
+              filterOption={false}
+              onSearch={checkSearch}
+              loading={checkFetching}
               options={checkOptions.map((m) => ({
                 value: m.id,
                 label: `${m.meterNo}（${m.status}）`,
@@ -503,7 +536,9 @@ export default function Dma() {
             <Select
               mode="multiple"
               showSearch
-              optionFilterProp="label"
+              filterOption={false}
+              onSearch={linkSearch}
+              loading={linkFetching}
               options={linkOptions.map((m) => ({ value: m.id, label: m.meterNo }))}
             />
           </Form.Item>

@@ -422,10 +422,48 @@ export default function RemoteSources() {
           >
             <Input placeholder="vault://nb-cloud/api-key" />
           </Form.Item>
+          {/* X4：中文说明直接展示 + 一键填入示例 + 键名中文注释 */}
           <Form.Item
             name="configText"
-            label="文件列映射（JSON，文件导入需要）"
-            tooltip="deviceKeyColumn / readingColumn / collectedAtColumn 必填；eventIdColumn / qualityColumn / periodColumn 可选"
+            label={
+              <Space>
+                文件列映射（JSON，文件导入需要）
+                <Button
+                  size="small"
+                  type="link"
+                  style={{ padding: 0 }}
+                  onClick={() =>
+                    form.setFieldsValue({
+                      configText: JSON.stringify(
+                        {
+                          deviceKeyColumn: '表号',
+                          readingColumn: '当前读数',
+                          collectedAtColumn: '采集时间',
+                          eventIdColumn: '事件编号',
+                          qualityColumn: '质量码',
+                          periodColumn: '账期',
+                        },
+                        null,
+                        2,
+                      ),
+                    })
+                  }
+                >
+                  填入示例
+                </Button>
+              </Space>
+            }
+            tooltip="仅「文件导入」类型需要；值为文件第一行的列名（表头）"
+            extra={
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                把文件第一行的列名（表头）映射到系统字段。必填三项：
+                deviceKeyColumn＝表号列、readingColumn＝读数列、
+                collectedAtColumn＝采集时间列；可选：
+                eventIdColumn＝事件编号列、qualityColumn＝质量码列、
+                periodColumn＝账期列。如文件表头是「表号、当前读数、采集时间」，
+                点上方「填入示例」后只需把值改成你的实际列名。
+              </Typography.Text>
+            }
           >
             <Input.TextArea rows={7} style={{ fontFamily: 'monospace' }} />
           </Form.Item>

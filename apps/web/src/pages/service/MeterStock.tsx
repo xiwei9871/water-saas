@@ -7,6 +7,7 @@ import {
   Form,
   Input,
   Modal,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -18,13 +19,15 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
+import { useDebounced } from '../pickers';
 
 interface Warehouse {
   id: string;
   code: string;
   name: string;
   owner: string | null;
-  locations: { id: string; code: string; name: string }[];
+  status: string;
+  locations: { id: string; code: string; name: string; status: string }[];
 }
 
 interface Movement {
@@ -153,19 +156,95 @@ export default function MeterStock() {
     }
   };
 
+  // ---- X1 库房/货位 编辑·停用·删除 ----
+  const [editForm] = Form.useForm<{ name: string; owner?: string }>();
+  const [editing, setEditing] = useState<{
+    kind: 'wh' | 'loc';
+    whId?: string;
+    row: { id: string; code: string; name: string };
+  } | null>(null);
+
+  const openEdit = (
+    kind: 'wh' | 'loc',
+    v: { whId?: string; row: { id: string; code: string; name: string } },
+  ) => {
+    setEditing({ kind, whId: v.whId, row: v.row });
+    editForm.setFieldsValue({ name: v.row.name });
+  };
+
+  const saveEdit = async () => {
+    if (!editing) return;
+    const v = await editForm.validateFields();
+    try {
+      const path =
+        editing.kind === 'wh'
+          ? `/meter-warehouses/${editing.row.id}`
+          : `/meter-warehouses/${editing.whId}/locations/${editing.row.id}`;
+      await api.patch(path, editing.kind === 'wh' ? v : { name: v.name });
+      message.success('已保存');
+      setEditing(null);
+      editForm.resetFields();
+      void loadWarehouses();
+    } catch (e) {
+      message.error(apiErrorText(e));
+    }
+  };
+
+  const toggleWh = async (id: string, disable: boolean) => {
+    try {
+      await api.patch(`/meter-warehouses/${id}`, {
+        status: disable ? 'DISABLED' : 'ACTIVE',
+      });
+      message.success(disable ? '库房已停用（不再出现于出入库选项）' : '库房已启用');
+      void loadWarehouses();
+    } catch (e) {
+      message.error(apiErrorText(e));
+    }
+  };
+  const delWh = async (id: string) => {
+    try {
+      await api.delete(`/meter-warehouses/${id}`);
+      message.success('库房已删除');
+      void loadWarehouses();
+    } catch (e) {
+      message.error(apiErrorText(e));
+    }
+  };
+  const toggleLoc = async (whId: string, locId: string, disable: boolean) => {
+    try {
+      await api.patch(`/meter-warehouses/${whId}/locations/${locId}`, {
+        status: disable ? 'DISABLED' : 'ACTIVE',
+      });
+      message.success(disable ? '货位已停用' : '货位已启用');
+      void loadWarehouses();
+    } catch (e) {
+      message.error(apiErrorText(e));
+    }
+  };
+  const delLoc = async (whId: string, locId: string) => {
+    try {
+      await api.delete(`/meter-warehouses/${whId}/locations/${locId}`);
+      message.success('货位已删除');
+      void loadWarehouses();
+    } catch (e) {
+      message.error(apiErrorText(e));
+    }
+  };
+
   // 20261023 D1 分源多选：按流水类型加载候选表（采购入库则录新号）。
   const [candidates, setCandidates] = useState<
     { id: string; meterNo: string; status: string; warehouse: { name: string } | null }[]
   >([]);
   const loadCandidates = useCallback(
-    async (type?: string) => {
+    async (type?: string, kw = '') => {
       if (!type || type === 'PURCHASE_IN') {
         setCandidates([]);
         return;
       }
       try {
+        // T1：kw 远程搜索（后端已支持），不再一次性全量加载
         const res = await api.get<typeof candidates>('/meter-stock/selectable', {
-          params: { type, take: 200 },
+          params: { type, take: 50, ...(kw.trim() ? { kw: kw.trim() } : {}) },
         });
         setCandidates(res.data);
       } catch (e) {
@@ -174,6 +253,7 @@ export default function MeterStock() {
     },
     [message],
   );
+  const candidateSearch = useDebounced((kw) => void loadCandidates(mvType, kw));
   useEffect(() => {
     if (whModal === 'move') void loadCandidates(mvType);
   }, [mvType, whModal, loadCandidates]);
@@ -213,12 +293,18 @@ export default function MeterStock() {
       })),
     [warehouses],
   );
-  const whOptions = warehouses.map((w) => ({ value: w.id, label: `${w.code} ${w.name}` }));
+  // X1：停用库房/货位不再出现在出入库可选项中
+  const whOptions = warehouses
+    .filter((w) => w.status === 'ACTIVE')
+    .map((w) => ({ value: w.id, label: `${w.code} ${w.name}` }));
   const locOptions = (whId?: string) =>
-    warehouses.find((w) => w.id === whId)?.locations.map((l) => ({
-      value: l.id,
-      label: `${l.code} ${l.name}`,
-    })) ?? [];
+    warehouses
+      .find((w) => w.id === whId)
+      ?.locations.filter((l) => l.status === 'ACTIVE')
+      .map((l) => ({
+        value: l.id,
+        label: `${l.code} ${l.name}`,
+      })) ?? [];
 
   const stockCols: ColumnsType<StockRow> = [
     { title: '表号', dataIndex: 'meterNo' },
@@ -303,8 +389,137 @@ export default function MeterStock() {
               />
             ),
           },
+          {
+            key: 'manage',
+            label: '库房货位',
+            children: (
+              <Table<Warehouse>
+                rowKey="id"
+                size="small"
+                pagination={false}
+                expandable={{
+                  expandedRowRender: (w) => (
+                    <Table
+                      rowKey="id"
+                      size="small"
+                      pagination={false}
+                      columns={[
+                        { title: '货位编号', dataIndex: 'code', width: 140 },
+                        { title: '货位名称', dataIndex: 'name' },
+                        {
+                          title: '状态',
+                          dataIndex: 'status',
+                          width: 90,
+                          render: (s: string) =>
+                            s === 'ACTIVE' ? (
+                              <Tag color="green">启用</Tag>
+                            ) : (
+                              <Tag>停用</Tag>
+                            ),
+                        },
+                        {
+                          title: '操作',
+                          key: 'op',
+                          width: 220,
+                          render: (_, l) => (
+                            <Space>
+                              <Button
+                                size="small"
+                                onClick={() => openEdit('loc', { whId: w.id, row: l })}
+                              >
+                                编辑
+                              </Button>
+                              <Button
+                                size="small"
+                                onClick={() =>
+                                  void toggleLoc(w.id, l.id, l.status === 'ACTIVE')
+                                }
+                              >
+                                {l.status === 'ACTIVE' ? '停用' : '启用'}
+                              </Button>
+                              <Popconfirm
+                                title="删除该货位？（有在库表/流水将被拦截）"
+                                onConfirm={() => void delLoc(w.id, l.id)}
+                              >
+                                <Button size="small" danger>
+                                  删除
+                                </Button>
+                              </Popconfirm>
+                            </Space>
+                          ),
+                        },
+                      ]}
+                      dataSource={w.locations}
+                    />
+                  ),
+                }}
+                columns={[
+                  { title: '库房编号', dataIndex: 'code', width: 140 },
+                  { title: '库房名称', dataIndex: 'name' },
+                  { title: '所属单位', dataIndex: 'owner', render: (v) => v ?? '—' },
+                  {
+                    title: '状态',
+                    dataIndex: 'status',
+                    width: 90,
+                    render: (s: string) =>
+                      s === 'ACTIVE' ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>,
+                  },
+                  {
+                    title: '操作',
+                    key: 'op',
+                    width: 240,
+                    render: (_, w) => (
+                      <Space>
+                        <Button size="small" onClick={() => openEdit('wh', { row: w })}>
+                          编辑
+                        </Button>
+                        <Button
+                          size="small"
+                          onClick={() => void toggleWh(w.id, w.status === 'ACTIVE')}
+                        >
+                          {w.status === 'ACTIVE' ? '停用' : '启用'}
+                        </Button>
+                        <Popconfirm
+                          title="删除该库房？（有货位/库存/流水将被拦截）"
+                          onConfirm={() => void delWh(w.id)}
+                        >
+                          <Button size="small" danger>
+                            删除
+                          </Button>
+                        </Popconfirm>
+                      </Space>
+                    ),
+                  },
+                ]}
+                dataSource={warehouses}
+              />
+            ),
+          },
         ]}
       />
+
+      {/* 编辑库房 / 货位（X1） */}
+      <Modal
+        title={editing?.kind === 'wh' ? '编辑库房' : '编辑货位'}
+        open={editing !== null}
+        onOk={() => void saveEdit()}
+        onCancel={() => setEditing(null)}
+        destroyOnHidden
+      >
+        <Form form={editForm} layout="vertical">
+          <Form.Item label="编号（不可改）">
+            <Input value={editing?.row.code} disabled />
+          </Form.Item>
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: '请填名称' }]}>
+            <Input />
+          </Form.Item>
+          {editing?.kind === 'wh' && (
+            <Form.Item name="owner" label="所属单位">
+              <Input />
+            </Form.Item>
+          )}
+        </Form>
+      </Modal>
 
       {/* 建库房 */}
       <Modal
@@ -408,6 +623,9 @@ export default function MeterStock() {
               <Select
                 mode="multiple"
                 optionLabelProp="label"
+                showSearch
+                filterOption={false}
+                onSearch={candidateSearch}
                 options={candidates.map((m) => ({
                   value: m.id,
                   label: `${m.meterNo}${m.warehouse ? ` · ${m.warehouse.name}` : ''}`,
