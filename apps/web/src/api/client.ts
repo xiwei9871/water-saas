@@ -162,6 +162,7 @@ const CODE_LABELS: Record<string, string> = {
   ONBOARD_SETTLE_ACCOUNT_XOR: '结算户需二选一：新建或选择已有',
   ONBOARD_METER_XOR: '水表需二选一：登记新表或选择已有',
   METER_NOT_FOUND: '水表不存在',
+  METER_NO_EXISTS: '表号已存在',
   METER_STATUS_INVALID: '水表状态无效',
   METER_NOT_AVAILABLE: '水表非可用状态，无法安装',
   INVALID_METER_STATUS_TRANSITION: '当前水表状态不允许该操作',
@@ -386,6 +387,10 @@ export const apiErrorText = (err: unknown): string => {
   // 任务书 §1.8 三段式阻断：409 载荷已含任务标题与候选责任人，优先展示
   // 服务端 message，CODE_LABELS 只作缺 message 时的兜底翻译。
   if (e.code === 'SETTLEMENT_BLOCKED_BY_TASK' && e.message) return e.message;
+  if (e.code === 'METER_NO_EXISTS') {
+    const no = (e.body as { meterNo?: unknown } | undefined)?.meterNo;
+    return typeof no === 'string' && no ? `表号已存在：${no}` : '表号已存在';
+  }
   return CODE_LABELS[e.code] ?? e.message ?? e.code;
 };
 
