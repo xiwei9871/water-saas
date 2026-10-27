@@ -281,10 +281,14 @@ export default function Onboard() {
   const submit = async () => {
     let values: WizardValues;
     try {
-      values = await form.validateFields([
+      // validateFields(nameList) 只返回列名字段——step2 的可选项
+      // （acctContractNo/acctHouseholdSize/acctReadingBookId）会被静默丢弃，
+      // 校验后必须用 getFieldsValue(true) 取全量。
+      await form.validateFields([
         'acctUsageCategory',
         ...visibleSteps.flatMap((s) => stepFields(s.content)),
       ]);
+      values = form.getFieldsValue(true) as WizardValues;
     } catch {
       return;
     }
