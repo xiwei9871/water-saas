@@ -243,6 +243,12 @@ export default function Onboard() {
       口径/表号/初始读数→水表步）。 */
   const pickApply = (app: ApplyLite) => {
     setSourceApply(app);
+    // 术语冻结前的旧档枚举 → 受控集映射，避免 422 INVALID_USAGE_CATEGORY
+    const LEGACY_USAGE: Record<string, string> = {
+      RESIDENTIAL: 'RES_METERED',
+      NON_RESIDENTIAL: 'NON_RES',
+      COMMERCIAL: 'NON_RES',
+    };
     form.setFieldsValue({
       custMode: 'new',
       custName: app.applicantName,
@@ -252,7 +258,7 @@ export default function Onboard() {
       custPhone: app.contactPhone ?? undefined,
       custAddr: app.addr,
       acctContractNo: app.contractNo ?? undefined,
-      acctUsageCategory: app.usageCategory,
+      acctUsageCategory: LEGACY_USAGE[app.usageCategory ?? ''] ?? app.usageCategory,
       acctAddr: app.addr,
       meterMode: 'new',
       meterNo: app.installMeterNo ?? undefined,
