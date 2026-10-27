@@ -191,7 +191,7 @@ export default function ReceiptDocs() {
                 <Button type="primary" icon={<PlusOutlined />} onClick={() => setBookModal(true)} style={{ marginBottom: 8 }}>
                   登记号段
                 </Button>
-                <Table rowKey="id" size="small" columns={bookCols} dataSource={books} pagination={false} />
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={bookCols} dataSource={books} pagination={false} />
               </>
             ),
           },
@@ -203,7 +203,7 @@ export default function ReceiptDocs() {
                 <Button type="primary" icon={<PlusOutlined />} onClick={() => setInvoiceModal(true)} style={{ marginBottom: 8 }}>
                   登记发票
                 </Button>
-                <Table rowKey="id" size="small" columns={invCols} dataSource={invoices} pagination={false} />
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={invCols} dataSource={invoices} pagination={false} />
               </>
             ),
           },

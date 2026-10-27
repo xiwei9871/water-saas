@@ -264,7 +264,7 @@ export default function SupplementReading() {
           <Typography.Title level={5} style={{ marginTop: 24 }}>
             近期追加计划
           </Typography.Title>
-          <Table<SupplementResponse>
+          <Table<SupplementResponse> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
             rowKey="id"
             size="small"
             columns={recentCols}

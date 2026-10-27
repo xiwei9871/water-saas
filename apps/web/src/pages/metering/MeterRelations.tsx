@@ -178,7 +178,7 @@ export default function MeterRelations() {
           </Space>
         }
       >
-        <Table<MeterRelation>
+        <Table<MeterRelation> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
           loading={loading}

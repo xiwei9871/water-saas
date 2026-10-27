@@ -553,7 +553,7 @@ export default function Cashier() {
           {items.length === 0 ? (
             <Alert type="success" showIcon message="该户无欠费账单" />
           ) : (
-            <Table<OutstandingItem>
+            <Table<OutstandingItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="billId"
               size="small"
               columns={columns}
@@ -765,7 +765,7 @@ export default function Cashier() {
         onClose={() => setLedgerOpen(false)}
         width={720}
       >
-        <Table<PrepaymentEntry>
+        <Table<PrepaymentEntry> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
           loading={ledgerLoading}

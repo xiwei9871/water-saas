@@ -349,7 +349,7 @@ export default function RemoteSources() {
         </Space>
       }
     >
-      <Table
+      <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}
@@ -534,7 +534,7 @@ export default function RemoteSources() {
               ))}
             </Descriptions>
             {report.invalid.length > 0 && (
-              <Table
+              <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 size="small"
                 style={{ marginTop: 12 }}
                 rowKey="row"

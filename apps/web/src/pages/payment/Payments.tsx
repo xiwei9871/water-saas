@@ -389,7 +389,7 @@ export default function Payments() {
         />
       )}
       {!focusList.focusing && taskGroup.tabs}
-      <Table<Payment>
+      <Table<Payment> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
@@ -489,7 +489,7 @@ export default function Payments() {
               ]}
             />
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>分摊明细</div>
-            <Table<PaymentAlloc>
+            <Table<PaymentAlloc> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={allocColumns}
@@ -502,7 +502,7 @@ export default function Payments() {
                 <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
                   预存流水（本笔资金用途）
                 </div>
-                <Table
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={detail.prepaymentEntries}

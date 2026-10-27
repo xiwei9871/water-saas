@@ -445,7 +445,7 @@ export default function BillingRuns() {
       }
     >
       {taskGroup.tabs}
-      <Table<BillingRun>
+      <Table<BillingRun> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
@@ -588,7 +588,7 @@ export default function BillingRuns() {
             {failures.length > 0 && (
               <>
                 <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>失败明细</div>
-                <Table
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey={(f) => `${f.settlementId}-${f.stage}`}
                   size="small"
                   dataSource={failures}

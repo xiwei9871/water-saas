@@ -312,7 +312,7 @@ export default function Customers() {
         </Space>
       }
     >
-      <Table<Customer>
+      <Table<Customer> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
@@ -432,7 +432,7 @@ export default function Customers() {
                 查看全部
               </Link>
             </Space>
-            <Table<WaterAccountRef>
+            <Table<WaterAccountRef> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={accountColumns}

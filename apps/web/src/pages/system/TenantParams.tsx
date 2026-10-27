@@ -238,7 +238,7 @@ export default function TenantParams() {
         </Space>
       }
     >
-      <Table<TenantParam>
+      <Table<TenantParam> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="key"
         size="middle"
         loading={loading}
@@ -351,7 +351,7 @@ export function DocNoRulesCard() {
       <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
         各类单据号 = 前缀 + 年月(6位) + 流水(6位)。改前缀只影响之后新开的单据，存量单号不变。
       </Typography.Paragraph>
-      <Table<DocRule>
+      <Table<DocRule> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="seqKey"
         size="small"
         dataSource={rules}

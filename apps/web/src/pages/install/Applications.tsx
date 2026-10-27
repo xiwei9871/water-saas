@@ -327,7 +327,7 @@ export default function InstallApplications() {
         />
       )}
       {!focusList.focusing && taskGroup.tabs}
-      <Table rowKey="id" size="small" columns={cols} dataSource={shownRows} loading={loading} pagination={false} rowClassName={(r: Apply) => (r.id === focusId ? FOCUS_ROW_CLASS : '')} />
+      <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={cols} dataSource={shownRows} loading={loading} pagination={false} rowClassName={(r: Apply) => (r.id === focusId ? FOCUS_ROW_CLASS : '')} />
 
       <Modal title="新建报装申请" open={createOpen} onOk={() => void create()} onCancel={() => setCreateOpen(false)} destroyOnHidden>
         <Form form={form} layout="vertical" initialValues={{ custType: 'PERSONAL', usageCategory: 'RES_METERED' }}>

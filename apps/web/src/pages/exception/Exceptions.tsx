@@ -521,7 +521,7 @@ export default function Exceptions() {
             { key: 'all', label: `全部异常（${items.length}）` },
           ]}
         />
-        <Table<ExceptionItem>
+        <Table<ExceptionItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="key"
           size="small"
           loading={loading}

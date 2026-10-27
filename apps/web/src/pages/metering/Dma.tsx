@@ -417,7 +417,7 @@ export default function Dma() {
                     allowClear={false}
                   />
                 </Space>
-                <Table<DashRow>
+                <Table<DashRow> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey={(r) => r.dma.id}
                   size="small"
                   loading={loading}
@@ -428,7 +428,7 @@ export default function Dma() {
                 <Typography.Title level={5} style={{ marginTop: 20 }}>
                   漏损率趋势（近 3 期）
                 </Typography.Title>
-                <Table
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   size="small"
                   columns={trendCols.cols}
                   dataSource={trendCols.rows}
@@ -441,7 +441,7 @@ export default function Dma() {
             key: 'zones',
             label: 'DMA 分区',
             children: (
-              <Table<DmaZone>
+              <Table<DmaZone> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
                 columns={zoneCols}
@@ -657,7 +657,7 @@ export default function Dma() {
               </Col>
             </Row>
             <Typography.Title level={5}>考核表</Typography.Title>
-            <Table
+            <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               size="small"
               rowKey="meterId"
               columns={usageCols('考核表号')}
@@ -667,7 +667,7 @@ export default function Dma() {
             <Typography.Title level={5} style={{ marginTop: 16 }}>
               挂接水表
             </Typography.Title>
-            <Table
+            <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               size="small"
               rowKey="meterId"
               columns={usageCols('水表号')}

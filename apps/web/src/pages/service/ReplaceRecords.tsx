@@ -122,7 +122,7 @@ export default function ReplaceRecords() {
         </Space>
       }
     >
-      <Table<ReplaceRecord>
+      <Table<ReplaceRecord> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="newInstallationId"
         size="small"
         loading={loading}

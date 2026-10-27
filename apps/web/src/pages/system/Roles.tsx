@@ -257,7 +257,7 @@ export default function Roles() {
         </Space>
       }
     >
-      <Table<Role>
+      <Table<Role> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}

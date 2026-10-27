@@ -418,7 +418,7 @@ export default function SettleAccounts() {
           }}
         />
       )}
-      <Table<SettleAccount>
+      <Table<SettleAccount> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
@@ -520,7 +520,7 @@ export default function SettleAccounts() {
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
               结算的用水户
             </div>
-            <Table<WaterAccountRef>
+            <Table<WaterAccountRef> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={accountColumns}
@@ -537,7 +537,7 @@ export default function SettleAccounts() {
                     </span>
                   )}
                 </div>
-                <Table
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="topUpEntryId"
                   size="small"
                   dataSource={prepay.lots}
@@ -566,7 +566,7 @@ export default function SettleAccounts() {
                 <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
                   最近预存流水
                 </div>
-                <Table
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={prepayEntries?.items ?? []}

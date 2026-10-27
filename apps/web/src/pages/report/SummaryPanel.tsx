@@ -153,7 +153,7 @@ export default function SummaryPanel() {
               rowKey={(r) => `${(r as GroupRow).group ?? ''}-${(r as AllRow).year}`}
               columns={(groupBy === 'ALL' ? allCols : groupCols) as never}
               dataSource={data.rows}
-              scroll={{ x: true }}
+              scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
             />
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               口径：售水量/应收/实收为窗口求和；比率按窗口内分子分母重算；

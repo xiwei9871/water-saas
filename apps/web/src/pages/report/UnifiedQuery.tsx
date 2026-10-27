@@ -735,7 +735,7 @@ function DetailQuery() {
           loading={loading}
           dataSource={shownRows}
           columns={columns}
-          scroll={{ x: 'max-content' }}
+          scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           pagination={{
             current: page,
             pageSize,

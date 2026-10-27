@@ -270,7 +270,7 @@ export default function CollectionNotices() {
                       批量生成通知单{selected.length ? `（已选 ${selected.length}）` : ''}
                     </Button>
                   </Space>
-                  <Table
+                  <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                     rowKey="waterAccountId"
                     size="small"
                     columns={arrearsCols}
@@ -310,7 +310,7 @@ export default function CollectionNotices() {
                     />
                   )}
                   {!focusList.focusing && taskGroup.tabs}
-                  <Table rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.settleAccountId === focusId || r.id === focusId ? FOCUS_ROW_CLASS : '')} dataSource={shownRows} loading={loading} pagination={false} />
+                  <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.settleAccountId === focusId || r.id === focusId ? FOCUS_ROW_CLASS : '')} dataSource={shownRows} loading={loading} pagination={false} />
                 </>
               ),
             },
@@ -326,7 +326,7 @@ export default function CollectionNotices() {
               <p>用水户：{printing.waterAccountLabel ?? printing.waterAccountId}</p>
               <p>欠费账期：{fmtPeriod(printing.periodFrom)} 至 {fmtPeriod(printing.periodTo)}，共 {printing.billCount} 笔</p>
               <p>欠费金额：<b>{fmtCent(printing.amountDue)}</b></p>
-              <Table
+              <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="period"
                 size="small"
                 pagination={false}

@@ -154,7 +154,7 @@ export default function AuditLogs() {
         </Space>
       }
     >
-      <Table<AuditLog>
+      <Table<AuditLog> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}

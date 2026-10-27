@@ -564,7 +564,7 @@ export default function ReadingBooks() {
           }}
         />
       )}
-      <Table<ReadingBook>
+      <Table<ReadingBook> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
@@ -741,7 +741,7 @@ export default function ReadingBooks() {
                 </Form.Item>
               </Form>
             )}
-            <Table<BookMember>
+            <Table<BookMember> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="waterAccountId"
               size="small"
               columns={memberColumns}

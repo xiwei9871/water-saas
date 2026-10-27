@@ -370,7 +370,7 @@ export default function RemoteDevices() {
         </Space>
       }
     >
-      <Table
+      <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}
@@ -439,7 +439,7 @@ export default function RemoteDevices() {
               <Descriptions.Item label="型号">{detail.model ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="登记时间">{fmtTime(detail.createdAt)}</Descriptions.Item>
             </Descriptions>
-            <Table
+            <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={bindingCols}

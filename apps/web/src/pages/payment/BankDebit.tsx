@@ -298,14 +298,14 @@ export default function BankDebit() {
             key: 'batches',
             label: '代扣批次',
             children: (
-              <Table<Batch> rowKey="id" size="small" columns={batchCols} dataSource={batches} pagination={false} />
+              <Table<Batch> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={batchCols} dataSource={batches} pagination={false} />
             ),
           },
           {
             key: 'agreements',
             label: '代扣协议',
             children: (
-              <Table<Agreement> rowKey="id" size="small" columns={agCols} dataSource={agreements} pagination={{ pageSize: 20 }} />
+              <Table<Agreement> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={agCols} dataSource={agreements} pagination={{ pageSize: 20 }} />
             ),
           },
         ]}
@@ -353,7 +353,7 @@ export default function BankDebit() {
           </Space>
         }
       >
-        <Table<Item> rowKey="id" size="small" columns={itemCols} dataSource={detail?.items ?? []} pagination={false} />
+        <Table<Item> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={itemCols} dataSource={detail?.items ?? []} pagination={false} />
       </Drawer>
 
       <Modal

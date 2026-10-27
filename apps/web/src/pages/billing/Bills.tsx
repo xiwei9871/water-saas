@@ -760,7 +760,7 @@ export default function Bills() {
               />
             )}
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>账单明细</div>
-            <Table<BillItem>
+            <Table<BillItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={itemColumns}
@@ -770,7 +770,7 @@ export default function Bills() {
             {(detail.allocs?.length ?? 0) > 0 && (
               <>
                 <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>销账分摊</div>
-                <Table<BillAlloc>
+                <Table<BillAlloc> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={detail.allocs}

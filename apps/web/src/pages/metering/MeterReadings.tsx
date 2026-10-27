@@ -907,7 +907,7 @@ export default function MeterReadings() {
             message="导入校验失败 —— 未写入任何记录，请按行修正后重新提交"
             style={{ marginTop: 8 }}
             description={
-              <Table<ImportRowError>
+              <Table<ImportRowError> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="row"
                 size="small"
                 columns={failedColumns}

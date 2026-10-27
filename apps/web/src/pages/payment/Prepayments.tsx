@@ -232,7 +232,7 @@ export default function Prepayments() {
           message="选择客户、用水户号或结算户后可查看预存余额；流水默认展示本租户全部预存记录。"
         />
       )}
-      <Table<PrepaymentEntry>
+      <Table<PrepaymentEntry> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}

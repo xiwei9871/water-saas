@@ -298,7 +298,7 @@ export default function Cockpit() {
                 // N6 整列统一单位：按列最大值选 元/万元/亿元，表头标注。
                 const col = columnScale(ranking.map((r) => r.collected));
                 return (
-                  <Table
+                  <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                     size="small" rowKey="orgUnitId" pagination={false}
                     dataSource={ranking}
                     columns={[

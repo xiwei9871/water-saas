@@ -103,7 +103,7 @@ export default function MetricQuery() {
       </Card>
 
       <Card size="small">
-        <Table<MetricDef>
+        <Table<MetricDef> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           size="small" rowKey="code" loading={loading}
           dataSource={items} pagination={{ pageSize: 20 }}
           columns={[

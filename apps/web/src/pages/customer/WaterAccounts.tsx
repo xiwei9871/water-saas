@@ -1224,7 +1224,7 @@ export default function WaterAccounts() {
             <DatePicker picker="month" allowClear={false} />
           </Form.Item>
         </Form>
-        <Table<HouseholdProfile>
+        <Table<HouseholdProfile> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
           loading={hhLoading}

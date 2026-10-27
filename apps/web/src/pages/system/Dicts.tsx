@@ -194,7 +194,7 @@ export default function Dicts() {
           </Button>
         )}
       </Space>
-      <Table<DictItem>
+      <Table<DictItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         size="small"
         rowKey="id"
         columns={columns}

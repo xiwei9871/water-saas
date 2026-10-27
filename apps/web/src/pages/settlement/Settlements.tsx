@@ -852,7 +852,7 @@ export default function Settlements() {
               ]}
             />
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>结算分量</div>
-            <Table<ConsumptionComponent>
+            <Table<ConsumptionComponent> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={componentColumns}
@@ -1057,7 +1057,7 @@ export default function Settlements() {
                 </>
               )}
             </Space>
-            <Table<SettlementBatchItem>
+            <Table<SettlementBatchItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="waterAccountId"
               size="small"
               columns={batchItemColumns}

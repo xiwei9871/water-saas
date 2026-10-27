@@ -365,7 +365,7 @@ export default function MeterStock() {
                   />
                 </Col>
                 <Col span={18}>
-                  <Table<StockRow>
+                  <Table<StockRow> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                     rowKey="id"
                     size="small"
                     columns={stockCols}
@@ -380,7 +380,7 @@ export default function MeterStock() {
             key: 'movements',
             label: '出入库流水',
             children: (
-              <Table<Movement>
+              <Table<Movement> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
                 columns={mvCols}
@@ -393,13 +393,13 @@ export default function MeterStock() {
             key: 'manage',
             label: '库房货位',
             children: (
-              <Table<Warehouse>
+              <Table<Warehouse> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
                 pagination={false}
                 expandable={{
                   expandedRowRender: (w) => (
-                    <Table
+                    <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                       rowKey="id"
                       size="small"
                       pagination={false}

@@ -300,7 +300,7 @@ export default function RemoteEvents() {
           }}
         />
       )}
-      <Table
+      <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}

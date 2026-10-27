@@ -645,7 +645,7 @@ export default function Meters() {
           </Space>
         }
       >
-        <Table<Meter>
+        <Table<Meter> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="middle"
           loading={loading}
@@ -751,7 +751,7 @@ export default function Meters() {
             </Space>
           }
         >
-          <Table<MeterInstallation>
+          <Table<MeterInstallation> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
             rowKey="id"
             size="middle"
             loading={instLoading}
@@ -1039,7 +1039,7 @@ export default function Meters() {
               title="安装历史"
               style={{ marginTop: 16 }}
             >
-              <Table
+              <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
                 dataSource={detail.installations}

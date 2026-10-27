@@ -201,10 +201,10 @@ export default function Recon() {
           />
         )}
         {!focusList.focusing && taskGroup.tabs}
-        <Table rowKey="id" size="small" columns={batchCols} dataSource={shownBatches} loading={loading} pagination={false} rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')} />
+        <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={batchCols} dataSource={shownBatches} loading={loading} pagination={false} rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')} />
       </Card>
       <Drawer title={`对账明细（${detail?.fileName ?? detail?.channel ?? ''}）`} open={!!detail} onClose={() => setDetail(null)} width={820}>
-        {detail && <Table rowKey="id" size="small" columns={rowCols} dataSource={detail.rows} pagination={false} />}
+        {detail && <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={rowCols} dataSource={detail.rows} pagination={false} />}
       </Drawer>
     </Space>
   );

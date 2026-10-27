@@ -280,7 +280,7 @@ export default function StaffPage() {
         </Space>
       }
     >
-      <Table<Staff>
+      <Table<Staff> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}

@@ -89,7 +89,7 @@ export default function MetricDict() {
         ) : null
       }
     >
-      <Table<MetricDef>
+      <Table<MetricDef> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         size="small"
         rowKey="code"
         columns={columns}

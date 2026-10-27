@@ -219,7 +219,7 @@ export default function Writeoffs() {
       )}
       {!focusList.focusing && taskGroup.tabs}
       {/* U1 任务直达 ?focusId= 行级高亮 + 置顶警示条 */}
-      <Table<Writeoff>
+      <Table<Writeoff> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         size="small"
         rowKey="id"
         rowClassName={(r: Writeoff) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}

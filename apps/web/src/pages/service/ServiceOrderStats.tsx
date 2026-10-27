@@ -146,7 +146,7 @@ export default function ServiceOrderStats() {
           })}
         </Space>
       )}
-      <Table<TypeStat>
+      <Table<TypeStat> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="serviceType"
         size="small"
         loading={loading}

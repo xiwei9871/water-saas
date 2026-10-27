@@ -923,7 +923,7 @@ export default function ReadingPlans() {
                 刷新
               </Button>
             </Space>
-            <Table<ReadingPlanItem>
+            <Table<ReadingPlanItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={itemColumns}
@@ -1036,7 +1036,7 @@ export default function ReadingPlans() {
         onCancel={() => setBatchOpen(false)}
         destroyOnHidden
       >
-        <Table<ReadingPlanItem>
+        <Table<ReadingPlanItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
           dataSource={(detail?.items ?? []).filter((i) => batchRows.has(i.id))}

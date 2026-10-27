@@ -231,7 +231,7 @@ export default function Violations() {
         />
       )}
       {!focusList.focusing && taskGroup.tabs}
-      <Table<Violation>
+      <Table<Violation> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}

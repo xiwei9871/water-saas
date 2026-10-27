@@ -950,7 +950,7 @@ export default function Tariffs() {
               ]}
             />
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>阶梯明细</div>
-            <Table<TariffTier>
+            <Table<TariffTier> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={tierColumns}

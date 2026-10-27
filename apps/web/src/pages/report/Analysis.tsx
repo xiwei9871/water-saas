@@ -160,7 +160,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
         <Stat title="欠费总额(元)">{yuan(t.arrearsTotal)}</Stat>
         <Stat title="在册户数">{qty(t.accountCount)}</Stat>
       </Space>
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '按收款点'}
@@ -173,7 +173,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(data?.byOrg ?? []) as Row[]}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '按渠道'}
@@ -191,7 +191,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(data?.byChannel ?? []) as Row[]}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '按抄表员（当日录入读数质量）'}
@@ -205,7 +205,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(data?.byReader ?? []) as Row[]}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '异常明细 · 大额退费/红冲'}
@@ -225,7 +225,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
         dataSource={(anomalies.bigReversals ?? []) as Row[]}
         locale={{ emptyText: '当日无红冲/退费' }}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '异常明细 · 欠费 TOP10'}
@@ -298,7 +298,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
           </Stat>
         ))}
       </Space>
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '按用水类别'}
@@ -316,7 +316,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(data?.byCategory ?? []) as Row[]}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '按组织片区'}
@@ -329,7 +329,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(data?.byOrg ?? []) as Row[]}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '欠费账龄分段'}
@@ -349,7 +349,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={Object.entries(aging).map(([bucket, amount]) => ({ bucket, amount }))}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '按缴费渠道'}
@@ -367,7 +367,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(data?.byChannel ?? []) as Row[]}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '按抄表员'}
@@ -381,7 +381,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(data?.byReader ?? []) as Row[]}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '欠费清单 TOP50'}
@@ -400,7 +400,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         dataSource={(lists.arrearsList ?? []) as Row[]}
         locale={{ emptyText: '本期无欠费户' }}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '红冲/退费清单'}
@@ -421,7 +421,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         dataSource={(lists.reversalList ?? []) as Row[]}
         locale={{ emptyText: '本期无红冲/退费' }}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '调账明细'}
@@ -442,7 +442,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         dataSource={(lists.adjustList ?? []) as Row[]}
         locale={{ emptyText: '本期无调账' }}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '异常读数清单'}
@@ -483,7 +483,7 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
         <Stat title="净增客户">{qty(t.NET_NEW_ACCOUNTS)}</Stat>
         <Stat title="坏账核销(元)">{yuan(t.BAD_DEBT_WRITEOFF)}</Stat>
       </Space>
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '月度趋势'}
@@ -497,7 +497,7 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
         ]}
         dataSource={(data?.trend ?? []) as Row[]}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '大额欠费户 TOP20'}
@@ -512,7 +512,7 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
         dataSource={(lists.topArrears ?? []) as Row[]}
         locale={{ emptyText: '无欠费户' }}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '坏账核销清单'}
@@ -539,7 +539,7 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
         dataSource={(lists.writeoffs ?? []) as Row[]}
         locale={{ emptyText: '本年无核销记录' }}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '红冲/退费（按渠道）'}
@@ -558,7 +558,7 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
         dataSource={(lists.reversals ?? []) as Row[]}
         locale={{ emptyText: '本年无红冲/退费' }}
       />
-      <Table<Row>
+      <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         style={{ marginTop: 16 }}
         size="small"
         title={() => '销户/流失清单'}

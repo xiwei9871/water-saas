@@ -490,7 +490,7 @@ export default function ServiceOrders() {
         />
       )}
       {!focusList.focusing && taskGroup.tabs}
-      <Table<ServiceOrder>
+      <Table<ServiceOrder> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}

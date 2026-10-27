@@ -313,7 +313,7 @@ export default function DayClose() {
         </Space>
       }
     >
-      <Table<CashierDayClose>
+      <Table<CashierDayClose> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
