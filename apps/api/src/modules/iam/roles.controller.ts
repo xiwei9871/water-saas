@@ -113,19 +113,35 @@ export class RolesController {
   @Permissions('iam:write')
   update(
     @Param('id') id: string,
-    @Body() body: { name?: string; dataScope?: 'ALL' | 'ORG_SUBTREE' | 'SELF' },
+    @Body()
+    body: {
+      name?: string;
+      dataScope?: 'ALL' | 'ORG_SUBTREE' | 'SELF';
+      status?: string;
+    },
     @Req() req: Request,
   ) {
     const ctx = currentTenant();
     assertAdmin(req.user);
     assertUuid(id, 'id');
+    if (body.status !== undefined && !['ACTIVE', 'DISABLED'].includes(body.status)) {
+      throw new BadRequestException({ code: 'ROLE_STATUS_INVALID' });
+    }
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const existing = await tx.role.findFirst({ where: { tenantId: ctx.tenantId, id } });
       if (!existing) throw new NotFoundException({ code: 'ROLE_NOT_FOUND' });
+      if (existing.code === 'admin' && body.status === 'DISABLED') {
+        throw new ForbiddenException({ code: 'ROLE_PROTECTED' });
+      }
       req.auditBefore = existing;
       return tx.role.update({
         where: { id },
-        data: { name: body.name, dataScope: body.dataScope, updatedBy: ctx.staffId },
+        data: {
+          name: body.name,
+          dataScope: body.dataScope,
+          status: body.status,
+          updatedBy: ctx.staffId,
+        },
       });
     });
   }
@@ -156,10 +172,11 @@ export class RolesController {
         throw new ConflictException({ code: 'ROLE_IN_USE', holders });
       }
       req.auditBefore = existing;
-      await tx.rolePermission.deleteMany({
-        where: { tenantId: ctx.tenantId, roleId: id },
+      // Q7：停用代替物理删除——权限绑定与历史记录保留，可经 PATCH 恢复。
+      return tx.role.update({
+        where: { id },
+        data: { status: 'DISABLED', updatedBy: ctx.staffId },
       });
-      return tx.role.delete({ where: { id } });
     });
   }
 

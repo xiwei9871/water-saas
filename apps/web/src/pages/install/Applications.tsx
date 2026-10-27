@@ -4,9 +4,8 @@ import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
-import { CustomerSelect, ReadingBookSelect, MeterSelect } from '../pickers';
 import { fmtDate, USAGE_CATEGORY_OPTIONS } from '../common';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   FOCUS_ROW_CLASS,
   FocusTaskBar,
@@ -93,15 +92,12 @@ export default function InstallApplications() {
   const [createOpen, setCreateOpen] = useState(false);
   const [detail, setDetail] = useState<Apply | null>(null);
   const [noteFor, setNoteFor] = useState<{ app: Apply; to: ApplyStatus; label: string; noteField?: string } | null>(null);
-  const [archiveFor, setArchiveFor] = useState<Apply | null>(null);
   /** V6 合同扫描件草稿（详情抽屉内编辑，保存才落库）。 */
   const [scans, setScans] = useState<string[]>([]);
   const [certPhotos, setCertPhotos] = useState<string[]>([]);
-  const [archMeter, setArchMeter] = useState<import('../../api/types').Meter | null>(null);
   const [scanSaving, setScanSaving] = useState(false);
   const [form] = Form.useForm();
   const [noteForm] = Form.useForm();
-  const [archForm] = Form.useForm();
   const canWrite = hasPerm('install:write');
   const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
@@ -199,42 +195,30 @@ export default function InstallApplications() {
     }
   };
 
-  const archive = async () => {
-    const v = await archForm.validateFields();
-    const app = archiveFor!;
+  const nav = useNavigate();
+  const [contractNoDraft, setContractNoDraft] = useState('');
+  const [contractSaving, setContractSaving] = useState(false);
+  // Q5：装表完成后、归档立户前在详情页录入/修正供用水合同编号。
+  const saveContractNo = async () => {
+    if (!detail) return;
+    setContractSaving(true);
     try {
-      await api.post(`/install/applications/${app.id}/archive`, {
-        customerId: v.customerId || undefined,
-        customer: v.customerId
-          ? undefined
-          : { name: app.applicantName, custType: app.custType, phone: app.contactPhone, addr: app.addr },
-        account: {
-          usageCategory: app.usageCategory,
-          addr: app.addr,
-        },
-        meterId: v.meterId || undefined,
-        meter: v.meterId
-          ? undefined
-          : {
-              // 装表环节登记的表号/口径优先带入（2.1 完成信息复用）。
-              meterNo: app.installMeterNo || undefined,
-              caliber: app.installCaliber || app.caliberReq || 'DN15',
-              brand: '报装新表',
-            },
-        installation: {
-          initialReading: v.initialReading,
-          installedAt: v.installedAt?.format('YYYY-MM-DD'),
-          reason: v.installReason ?? 'NEW',
-        },
-        readingBookId: v.bookId || undefined,
+      const res = await api.patch<Apply>(`/install/applications/${detail.id}/contract`, {
+        contractNo: contractNoDraft.trim() || null,
       });
-      message.success('已归档立户');
-      setArchiveFor(null);
-      archForm.resetFields();
+      setDetail((d) => (d ? { ...d, contractNo: res.data.contractNo } : d));
+      message.success('合同编号已保存');
       void load();
     } catch (err) {
       message.error(apiErrorText(err));
+    } finally {
+      setContractSaving(false);
     }
+  };
+
+  // R1：归档立户 → 跳立户向导（唯一立户入口），来源报装单自动预填并办结。
+  const goOnboard = (app: Apply) => {
+    nav(`/customer/onboard?applyNo=${encodeURIComponent(app.applyNo)}`);
   };
 
   const cols: ColumnsType<Apply> = [
@@ -267,7 +251,7 @@ export default function InstallApplications() {
       width: 220,
       render: (_, r) => (
         <Space size={4} wrap>
-          <Button size="small" onClick={() => { setDetail(r); setScans(r.contractScan ?? []); }}>详情</Button>
+          <Button size="small" onClick={() => { setDetail(r); setScans(r.contractScan ?? []); setContractNoDraft(r.contractNo ?? ''); }}>详情</Button>
           {canWrite &&
             (NEXT_ACTIONS[r.status] ?? []).map((a) => (
               <Button key={a.to} size="small" danger={a.to === 'REJECTED' || a.to === 'CANCELLED'} onClick={() => setNoteFor({ app: r, ...a })}>
@@ -275,7 +259,7 @@ export default function InstallApplications() {
               </Button>
             ))}
           {canWrite && (r.status === 'INSTALLING' || r.status === 'APPROVED') && (
-            <Button size="small" type="primary" onClick={() => setArchiveFor(r)}>归档立户</Button>
+            <Button size="small" type="primary" onClick={() => goOnboard(r)}>归档立户</Button>
           )}
         </Space>
       ),
@@ -452,78 +436,6 @@ export default function InstallApplications() {
         </Form>
       </Modal>
 
-      <Modal
-        title={`归档立户：${archiveFor?.applyNo ?? ''}`}
-        open={!!archiveFor}
-        onOk={() => void archive()}
-        onCancel={() => setArchiveFor(null)}
-        width={560}
-        destroyOnHidden
-      >
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          将按立户向导创建 客户/结算户/用水户/表计安装。可关联既有客户，缺省则按申请信息新建。
-        </Typography.Paragraph>
-        <Form form={archForm} layout="vertical">
-          <Form.Item name="customerId" label="关联既有客户（可选）">
-            <CustomerSelect placeholder="不选则新建客户" />
-          </Form.Item>
-          <Form.Item name="bookId" label="抄表册（可选）">
-            <ReadingBookSelect />
-          </Form.Item>
-          <Form.Item name="meterId" label="选用库存表（可选，不选则新建表号）">
-            <MeterSelect status="AVAILABLE" onSelect={(m) => setArchMeter(m ?? null)} />
-          </Form.Item>
-          {archMeter && (
-            <Descriptions size="small" column={2} bordered style={{ marginBottom: 12 }}>
-              <Descriptions.Item label="品牌">{archMeter.brand ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="口径">{archMeter.caliber ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="出厂编号">{archMeter.serialNo ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="最大读数">{archMeter.maxDial ?? '—'}</Descriptions.Item>
-            </Descriptions>
-          )}
-          <Space>
-            <Form.Item name="installedAt" label="装表日期">
-              <DatePicker style={{ width: 160 }} />
-            </Form.Item>
-            <Form.Item name="installReason" label="安装原因" initialValue="NEW">
-              <Select
-                style={{ width: 180 }}
-                showSearch
-                optionFilterProp="label"
-                options={[
-                  { value: 'NEW', label: '新装' },
-                  { value: 'REPLACE', label: '更换' },
-                  { value: 'FAULT', label: '故障换装' },
-                  { value: 'PERIODIC_CHECK', label: '周期检定换装' },
-                ]}
-              />
-            </Form.Item>
-          </Space>
-          <Form.Item
-            name="initialReading"
-            label="水表起始读数（m³）"
-            rules={[{ required: true }]}
-            extra="此处填写装表完成后水表的当前读数（表底），即安装完成那一刻的表码，一般不是 0。"
-          >
-            <InputNumber min={0} precision={2} style={{ width: 200 }} />
-          </Form.Item>
-          {archiveFor?.installInitialReading != null && (
-            <Form.Item noStyle shouldUpdate>
-              {() => {
-                const start = Number(archForm.getFieldValue('initialReading'));
-                const init = Number(archiveFor.installInitialReading);
-                return Number.isFinite(start) && start > init ? (
-                  <Typography.Text type="warning" style={{ fontSize: 12 }}>
-                    起始读数比装表初始读数（{init}）多 {(start - init).toFixed(2)} m³ ——
-                    请核实装表后至立户期间是否存在用水、阀门未关或漏水。
-                  </Typography.Text>
-                ) : null;
-              }}
-            </Form.Item>
-          )}
-        </Form>
-      </Modal>
-
       <Drawer title={`申请详情 ${detail?.applyNo ?? ''}`} open={!!detail} onClose={() => setDetail(null)} width={520}>
         {detail && (
           <>
@@ -551,7 +463,29 @@ export default function InstallApplications() {
         {detail && (
           <Descriptions column={1} size="small" bordered>
             <Descriptions.Item label="申请人">{detail.applicantName}</Descriptions.Item>
-            <Descriptions.Item label="合同号">{detail.contractNo ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="合同号">
+              {canWrite && ['INSTALLING', 'APPROVED'].includes(detail.status) ? (
+                <Space.Compact style={{ width: '100%' }}>
+                  <Input
+                    size="small"
+                    value={contractNoDraft}
+                    placeholder="供用水合同编号（可手填/自动生成）"
+                    onChange={(e) => setContractNoDraft(e.target.value)}
+                  />
+                  <Button
+                    size="small"
+                    type="primary"
+                    loading={contractSaving}
+                    disabled={contractNoDraft === (detail.contractNo ?? '')}
+                    onClick={() => void saveContractNo()}
+                  >
+                    保存
+                  </Button>
+                </Space.Compact>
+              ) : (
+                detail.contractNo ?? '—'
+              )}
+            </Descriptions.Item>
             <Descriptions.Item label="联系电话">{detail.contactPhone ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="证件">{detail.certType ? (CERT_TYPE_LABELS[detail.certType] ?? detail.certType) : '—'}{detail.certNo ? ` ${detail.certNo}` : ''}</Descriptions.Item>
             {Array.isArray(detail.certPhoto) && detail.certPhoto.length > 0 && (

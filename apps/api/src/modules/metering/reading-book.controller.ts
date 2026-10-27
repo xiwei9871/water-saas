@@ -59,6 +59,8 @@ export class ReadingBookController {
     @Query('q') q?: string,
     @Query('orgUnitId') orgUnitId?: string,
     @Query('waterAccountId') waterAccountId?: string,
+    @Query('cadence') cadence?: string,
+    @Query('status') status?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
@@ -71,6 +73,8 @@ export class ReadingBookController {
       q,
       orgUnitId,
       waterAccountId,
+      cadence,
+      status,
     });
   }
 
@@ -139,6 +143,7 @@ export class ReadingBookController {
       cadence: body.cadence,
       anchorPeriod: body.anchorPeriod,
       meterChannel: body.meterChannel,
+      status: body.status,
     };
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>

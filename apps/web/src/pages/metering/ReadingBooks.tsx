@@ -91,6 +91,8 @@ export default function ReadingBooks() {
   const [bookNoInput, setBookNoInput] = useState('');
   const [bookNo, setBookNo] = useState('');
   const [orgFilter, setOrgFilter] = useState<string | undefined>(undefined);
+  const [cadenceFilter, setCadenceFilter] = useState<string | undefined>(undefined);
+  const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   // A2 缺失类异常直达：?wa=用水户id → 只显示含该户的抄表册。
@@ -115,6 +117,8 @@ export default function ReadingBooks() {
         const res = { data: await fetchAll<ReadingBook>('/reading-books', {            ...(name.trim() ? { name: name.trim() } : {}),
             ...(bookNo.trim() ? { bookNo: bookNo.trim() } : {}),
             ...(orgFilter ? { orgUnitId: orgFilter } : {}),
+            ...(cadenceFilter ? { cadence: cadenceFilter } : {}),
+            ...(statusFilter ? { status: statusFilter } : {}),
             ...(focusWa ? { waterAccountId: focusWa } : {}),
           }) };
         setRows(res.data);
@@ -124,7 +128,7 @@ export default function ReadingBooks() {
         setLoading(false);
       }
     },
-    [bookNo, message, name, orgFilter, focusWa],
+    [bookNo, message, name, orgFilter, cadenceFilter, statusFilter, focusWa],
   );
 
   useEffect(() => {
@@ -222,6 +226,17 @@ export default function ReadingBooks() {
       message.error(apiErrorText(err));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const toggleStatus = async (book: ReadingBook) => {
+    const next = book.status === 'DISABLED' ? 'ACTIVE' : 'DISABLED';
+    try {
+      await api.patch(`/reading-books/${book.id}`, { status: next });
+      message.success(`抄表册 ${book.name} 已${next === 'DISABLED' ? '停用' : '启用'}`);
+      await load();
+    } catch (err) {
+      message.error(apiErrorText(err));
     }
   };
 
@@ -369,6 +384,13 @@ export default function ReadingBooks() {
       ),
     },
     {
+      title: '状态',
+      key: 'status',
+      width: 80,
+      render: (_: unknown, r: ReadingBook) =>
+        r.status === 'DISABLED' ? <Tag>停用</Tag> : <Tag color="green">启用</Tag>,
+    },
+    {
       title: '创建时间',
       dataIndex: 'createdAt',
       key: 'createdAt',
@@ -378,7 +400,7 @@ export default function ReadingBooks() {
     {
       title: '操作',
       key: 'actions',
-      width: 220,
+      width: 280,
       render: (_: unknown, record: ReadingBook) => (
         <Space size={4} wrap>
           <Button
@@ -395,6 +417,14 @@ export default function ReadingBooks() {
               onClick={() => openEdit(record)}
             >
               编辑
+            </Button>
+          )}
+          {canWrite && (
+            <Button
+              size="small"
+              onClick={() => void toggleStatus(record)}
+            >
+              {record.status === 'DISABLED' ? '启用' : '停用'}
             </Button>
           )}
           {canWrite && (
@@ -509,6 +539,37 @@ export default function ReadingBooks() {
               />
             </span>
           )}
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            placeholder="抄表周期"
+            style={{ width: 170 }}
+            value={cadenceFilter}
+            onChange={(v) => {
+              setCadenceFilter(v);
+              setPage(1);
+            }}
+            options={(Object.keys(CADENCE_LABELS) as BookCadence[]).map(
+              (c) => ({ value: c, label: enumLabel(CADENCE_LABELS, c) }),
+            )}
+          />
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            placeholder="状态"
+            style={{ width: 110 }}
+            value={statusFilter}
+            onChange={(v) => {
+              setStatusFilter(v);
+              setPage(1);
+            }}
+            options={[
+              { value: 'ACTIVE', label: '启用' },
+              { value: 'DISABLED', label: '停用' },
+            ]}
+          />
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>

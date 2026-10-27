@@ -148,10 +148,22 @@ export default function Roles() {
     }
   };
 
+  // Q7：DELETE 后端已改为停用（软删除）；停用角色可经 PATCH 恢复启用。
+  const toggleStatus = async (role: Role) => {
+    const next = role.status === 'DISABLED' ? 'ACTIVE' : 'DISABLED';
+    try {
+      await api.patch(`/iam/roles/${role.id}`, { status: next });
+      message.success(next === 'DISABLED' ? '角色已停用' : '角色已启用');
+      await load();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
+
   const remove = async (role: Role) => {
     try {
       await api.delete(`/iam/roles/${role.id}`);
-      message.success('角色已删除');
+      message.success('角色已停用');
       await load();
     } catch (err) {
       // ROLE_IN_USE / ROLE_PROTECTED …
@@ -168,6 +180,13 @@ export default function Roles() {
       key: 'dataScope',
       width: 140,
       render: (s: DataScope) => <Tag>{enumLabel(SCOPE_LABELS, s)}</Tag>,
+    },
+    {
+      title: '状态',
+      key: 'status',
+      width: 80,
+      render: (_: unknown, r: Role) =>
+        r.status === 'DISABLED' ? <Tag>停用</Tag> : <Tag color="green">启用</Tag>,
     },
     {
       title: '权限',
@@ -201,27 +220,34 @@ export default function Roles() {
                 >
                   编辑
                 </Button>
-                <Popconfirm
-                  title="删除该角色？"
-                  okText="删除"
-                  okButtonProps={{ danger: true }}
-                  cancelText="取消"
-                  onConfirm={() => void remove(record)}
-                >
-                  <Button
-                    size="small"
-                    danger
-                    icon={<DeleteOutlined />}
-                    disabled={record.code === 'admin'}
-                    title={
-                      record.code === 'admin'
-                        ? '内置管理员角色不可删除'
-                        : undefined
-                    }
-                  >
-                    删除
+                {record.status === 'DISABLED' ? (
+                  <Button size="small" onClick={() => void toggleStatus(record)}>
+                    启用
                   </Button>
-                </Popconfirm>
+                ) : (
+                  <Popconfirm
+                    title="停用该角色？"
+                    description="停用为软删除：绑定用户立即失去该角色权限，可恢复。仍被用户引用的角色无法停用。"
+                    okText="停用"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                    onConfirm={() => void remove(record)}
+                  >
+                    <Button
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      disabled={record.code === 'admin'}
+                      title={
+                        record.code === 'admin'
+                          ? '内置管理员角色不可停用'
+                          : undefined
+                      }
+                    >
+                      停用
+                    </Button>
+                  </Popconfirm>
+                )}
               </Space>
             ),
           } satisfies ColumnsType<Role>[number],

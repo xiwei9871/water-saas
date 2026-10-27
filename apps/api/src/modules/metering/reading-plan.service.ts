@@ -384,15 +384,19 @@ export class ReadingPlanService {
         reader_id: string | null;
         cadence: string;
         anchor_period: string | null;
+        status: string;
       }[]
     >`
-      SELECT id, org_unit_id, reader_id, cadence, anchor_period FROM reading_book
+      SELECT id, org_unit_id, reader_id, cadence, anchor_period, status FROM reading_book
       WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${body.bookId}::uuid
       FOR UPDATE`;
     if (locked.length === 0) {
       throw new BadRequestException({ code: 'BOOK_NOT_FOUND' });
     }
     const book = locked[0];
+    if (book.status === 'DISABLED') {
+      throw new ConflictException({ code: 'BOOK_DISABLED' });
+    }
     // Same write-path orgInScope guard as the book endpoints — a scoped
     // caller must not mint plans for a book outside their subtree.
     if (!orgInScope(ctx, book.org_unit_id)) throw outOfScope();

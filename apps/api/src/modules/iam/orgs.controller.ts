@@ -115,11 +115,20 @@ export class OrgsController {
   @Permissions('iam:write')
   async update(
     @Param('id') id: string,
-    @Body() body: { name?: string; type?: 'COMPANY' | 'BRANCH' | 'DEPT'; parentId?: string | null },
+    @Body()
+    body: {
+      name?: string;
+      type?: 'COMPANY' | 'BRANCH' | 'DEPT';
+      parentId?: string | null;
+      status?: string;
+    },
     @Req() req: Request,
   ) {
     const ctx = currentTenant();
     assertUuid(id, 'id');
+    if (body.status !== undefined && !['ACTIVE', 'DISABLED'].includes(body.status)) {
+      throw new BadRequestException({ code: 'ORG_STATUS_INVALID' });
+    }
     if (!orgInScope(ctx, id)) throw outOfScope();
     if (body.parentId === id) {
       throw new BadRequestException({ code: 'ORG_CYCLE' });
@@ -163,6 +172,7 @@ export class OrgsController {
           name: body.name,
           type: body.type,
           parentId: body.parentId === undefined ? undefined : body.parentId,
+          status: body.status,
           updatedBy: ctx.staffId,
         },
       });
@@ -191,8 +201,16 @@ export class OrgsController {
       if (staffCount > 0) {
         throw new BadRequestException({ code: 'ORG_HAS_STAFF' });
       }
-      return tx.orgUnit.delete({
+      const bookCount = await tx.readingBook.count({
+        where: { tenantId: ctx.tenantId, orgUnitId: id },
+      });
+      if (bookCount > 0) {
+        throw new BadRequestException({ code: 'ORG_HAS_BOOKS' });
+      }
+      // Q7：停用代替物理删除——历史单据上的组织名仍由留存行解析。
+      return tx.orgUnit.update({
         where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+        data: { status: 'DISABLED', updatedBy: ctx.staffId },
       });
     });
   }

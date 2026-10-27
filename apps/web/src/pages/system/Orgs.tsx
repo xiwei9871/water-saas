@@ -18,6 +18,7 @@ import {
   Row,
   Select,
   Space,
+  Tag,
   Tree,
   TreeSelect,
   Typography,
@@ -173,14 +174,25 @@ export default function Orgs() {
     }
   };
 
+  // Q7：DELETE 后端已改为停用（软删除）；停用行可经 PATCH 恢复启用。
+  const toggleStatus = async (org: OrgUnit) => {
+    const next = org.status === 'DISABLED' ? 'ACTIVE' : 'DISABLED';
+    try {
+      await api.patch(`/iam/orgs/${org.id}`, { status: next });
+      message.success(next === 'DISABLED' ? '组织已停用' : '组织已启用');
+      await load();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
+
   const remove = async (org: OrgUnit) => {
     try {
       await api.delete(`/iam/orgs/${org.id}`);
-      message.success('组织已删除');
-      if (selectedId === org.id) setSelectedId(null);
+      message.success('组织已停用');
       await load();
     } catch (err) {
-      // ORG_HAS_CHILDREN / ORG_HAS_STAFF / ORG_OUT_OF_SCOPE …
+      // ORG_HAS_CHILDREN / ORG_HAS_STAFF / ORG_HAS_BOOKS / ORG_OUT_OF_SCOPE …
       message.error(apiErrorText(err));
     }
   };
@@ -238,6 +250,16 @@ export default function Orgs() {
                     children: parentName(selected.parentId),
                   },
                   {
+                    key: 'status',
+                    label: '状态',
+                    children:
+                      selected.status === 'DISABLED' ? (
+                        <Tag>停用</Tag>
+                      ) : (
+                        <Tag color="green">启用</Tag>
+                      ),
+                  },
+                  {
                     key: 'children',
                     label: '下级数量',
                     children: selectedChildren.length,
@@ -260,27 +282,33 @@ export default function Orgs() {
                   <Button icon={<EditOutlined />} onClick={() => openEdit(selected)}>
                     编辑
                   </Button>
-                  <Popconfirm
-                    title="删除该组织？"
-                    description="删除前需确保无下级组织且无所属用户。"
-                    okText="删除"
-                    okButtonProps={{ danger: true }}
-                    cancelText="取消"
-                    onConfirm={() => void remove(selected)}
-                  >
-                    <Button
-                      danger
-                      icon={<DeleteOutlined />}
-                      disabled={selectedChildren.length > 0}
-                      title={
-                        selectedChildren.length > 0
-                          ? '存在下级组织，无法删除'
-                          : undefined
-                      }
-                    >
-                      删除
+                  {selected.status === 'DISABLED' ? (
+                    <Button onClick={() => void toggleStatus(selected)}>
+                      启用
                     </Button>
-                  </Popconfirm>
+                  ) : (
+                    <Popconfirm
+                      title="停用该组织？"
+                      description="停用为软删除：历史单据仍显示本组织名称。需确保无下级组织、无所属用户、无锚定抄表册。"
+                      okText="停用"
+                      okButtonProps={{ danger: true }}
+                      cancelText="取消"
+                      onConfirm={() => void remove(selected)}
+                    >
+                      <Button
+                        danger
+                        icon={<DeleteOutlined />}
+                        disabled={selectedChildren.length > 0}
+                        title={
+                          selectedChildren.length > 0
+                            ? '存在下级组织，无法停用'
+                            : undefined
+                        }
+                      >
+                        停用
+                      </Button>
+                    </Popconfirm>
+                  )}
                 </Space>
               )}
             </>

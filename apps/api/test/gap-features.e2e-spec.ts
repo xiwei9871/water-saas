@@ -46,6 +46,8 @@ const get = (path: string) =>
   request(app.getHttpServer()).get(path).set('Authorization', `Bearer ${token}`);
 const put = (path: string, body?: unknown) =>
   request(app.getHttpServer()).put(path).set('Authorization', `Bearer ${token}`).send(body ?? {});
+const patch = (path: string, body?: unknown) =>
+  request(app.getHttpServer()).patch(path).set('Authorization', `Bearer ${token}`).send(body ?? {});
 
 beforeAll(async () => {
   await owner.connect();
@@ -305,21 +307,37 @@ describe('S1 报装', () => {
     expect(Number(app2.feeReceived)).toBe(300);
   });
 
-  it('归档 → COMPLETED + 回写户号 + 任务办结', async () => {
-    const res = await post(`/install/applications/${appId}/archive`, {
+  it('归档（立户向导办结）→ COMPLETED + 回写户号 + 任务办结', async () => {
+    // R1/R3：唯一立户入口 = onboard(sourceApplyNo)；archive 端点仅状态确认。
+    const app = (await get(`/install/applications/${appId}`)).body;
+    // 未立户前确认归档 → 409 指引走向导
+    const early = await post(`/install/applications/${appId}/archive`, {});
+    expect(early.status).toBe(409);
+    expect(early.body.code).toBe('APPLY_NOT_ONBOARDED');
+    // Q5：装表完成后可在详情页录合同编号（自动生成的 HT 单号可覆盖）
+    await patch(`/install/applications/${appId}/contract`, { contractNo: 'HT-MANUAL-01' }).expect(200);
+    const res = await post('/water-accounts/onboard', {
+      customer: { name: app.applicantName, custType: 'PERSONAL', phone: app.contactPhone },
       account: { usageCategory: 'RES_METERED', addr: 'TG 新址 9 号' },
       meter: { brand: 'tg-brand', caliber: 'DN15' },
       installation: { initialReading: 0, installedAt: '2026-01-01' },
+      sourceApplyNo: app.applyNo,
     }).expect(201);
-    expect(res.body.status).toBe('COMPLETED');
-    expect(res.body.waterAccountId).toBeTruthy();
+    const done = (await get(`/install/applications/${appId}`)).body;
+    expect(done.status).toBe('COMPLETED');
+    expect(done.waterAccountId).toBeTruthy();
     // 2.2 正向回写：结算户 + 表号落到申请单。
-    expect(res.body.settleAccountId).toBeTruthy();
-    expect(res.body.meterNo).toBeTruthy();
-    const wa = (await get(`/water-accounts/${res.body.waterAccountId}`)).body;
+    expect(done.settleAccountId).toBeTruthy();
+    expect(done.meterNo).toBeTruthy();
+    const wa = (await get(`/water-accounts/${done.waterAccountId}`)).body;
     expect(wa.addr).toBe('TG 新址 9 号');
     // 反向关联：户的 source_apply_no 记来源单号。
     expect(wa.sourceApplyNo).toMatch(/^BZ\d+/);
+    // R6：合同编号落到用水户档案（详情页手填值优先）
+    expect(wa.contractNo).toBe('HT-MANUAL-01');
+    // 已立户后 archive 端点幂等确认归档态
+    const confirm = await post(`/install/applications/${appId}/archive`, {}).expect(201);
+    expect(confirm.body.status).toBe('COMPLETED');
     const tasks = ((await get('/tasks?type=INSTALL_REVIEW&box=done')).body as { items: { type: string; bizId: string; status: string }[] }).items;
     expect(tasks.some((t) => t.bizId === appId && t.status === 'DONE')).toBe(true);
   });
@@ -393,10 +411,12 @@ describe('S1 报装', () => {
     await post(`/install/applications/${appId2}/transition`, {
       to: 'INSTALLING', feeRequired: 300, feeReceived: 100,
     }).expect(201);
-    const arch = await post(`/install/applications/${appId2}/archive`, {
+    const arch = await post('/water-accounts/onboard', {
+      customer: { name: '欠费报装户', custType: 'PERSONAL' },
       account: { usageCategory: 'RES_METERED', addr: 'TG 费控路' },
       meter: { caliber: 'DN15' },
       installation: { initialReading: 0 },
+      sourceApplyNo: res.body.applyNo,
     }).expect(201);
     // V7：差额自动生成 COLLECTION 任务，挂到新结算户
     const colTasks = ((await get('/tasks?type=COLLECTION&box=todo')).body as {
@@ -404,7 +424,7 @@ describe('S1 报装', () => {
     }).items;
     const feeTask = colTasks.find((t) => t.context?.feeApplyNo === res.body.applyNo);
     expect(feeTask).toBeTruthy();
-    expect(feeTask!.bizId).toBe(arch.body.settleAccountId);
+    expect(feeTask!.bizId).toBe(arch.body.settleAccount.id);
     expect(feeTask!.context.arrearsCent).toBe('20000');
   });
 });

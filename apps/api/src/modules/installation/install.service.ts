@@ -150,46 +150,34 @@ export class InstallService {
     return { ...updated, refundDue };
   }
 
-  /** 归档：INSTALLING 状态下按立户向导建账（同事务），回写户号并办结任务。 */
+  /**
+   * 归档确认（R3 合并精简）：不再承载建户逻辑——立户唯一入口是
+   * POST /water-accounts/onboard（带 sourceApplyNo 自动办结本申请）。
+   * 本端点仅在申请已被向导立户回写（waterAccountId 非空）后确认归档态，
+   * 未立户的申请返回 409 指引走立户向导。
+   */
   async archiveTx(
     tx: Prisma.TransactionClient,
     ctx: TenantCtx,
     id: string,
-    onboard: OnboardBody,
   ) {
     const app = await tx.installApplication.findFirst({
       where: { tenantId: ctx.tenantId, id },
     });
     if (!app) throw new NotFoundException({ code: 'APPLY_NOT_FOUND' });
-    if (app.status !== 'INSTALLING' && app.status !== 'APPROVED') {
-      throw new ConflictException({ code: 'APPLY_NOT_READY', status: app.status });
+    if (!app.waterAccountId) {
+      throw new ConflictException({
+        code: 'APPLY_NOT_ONBOARDED',
+        message: '请先经「客户管理 → 立户向导」立户（来源报装单自动办结本申请）',
+      });
     }
-    if (!onboard?.account || !onboard?.installation) {
-      throw new BadRequestException({ code: 'ONBOARD_BODY_INVALID' });
+    if (app.status !== 'COMPLETED') {
+      return tx.installApplication.update({
+        where: { id: app.id },
+        data: { status: 'COMPLETED', updatedBy: ctx.staffId },
+      });
     }
-    // 归档客户缺省时用申请单信息建客——归档即立户不该要求重录申请人资料。
-    const merged: OnboardBody = {
-      ...onboard,
-      customer:
-        onboard.customer ??
-        (onboard.customerId
-          ? undefined
-          : {
-              name: app.applicantName,
-              custType: app.custType as 'PERSONAL' | 'ORG',
-              phone: app.contactPhone ?? undefined,
-              addr: app.addr,
-            }),
-    };
-    // 2.2 报装纳入：立户事务写入来源单号（户/新建客户/新建表记 source_apply_no）。
-    const result = await this.accounts.onboardTx(tx, ctx, {
-      ...merged,
-      sourceApplyNo: app.applyNo,
-    });
-    const waId = (result as { waterAccount?: { id: string } }).waterAccount?.id;
-    if (!waId) throw new BadRequestException({ code: 'ONBOARD_NO_ACCOUNT' });
-    const updated = await this.completeFromOnboardTx(tx, ctx, app, result);
-    return { ...updated, waterAccountId: waId };
+    return app;
   }
 
   /**

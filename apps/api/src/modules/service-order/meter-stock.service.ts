@@ -272,6 +272,13 @@ export class MeterStockService {
         if (!loc) throw bad('LOCATION_NOT_IN_WAREHOUSE');
         if (loc.status !== 'ACTIVE') throw bad('LOCATION_DISABLED');
       }
+      // Q3：目标库房建有货位时，调拨必须指明「调拨至货位」。
+      if (type === 'TRANSFER' && !locationId) {
+        const locCount = await tx.meterWarehouseLocation.count({
+          where: { tenantId: ctx.tenantId, warehouseId, status: 'ACTIVE' },
+        });
+        if (locCount > 0) throw bad('TRANSFER_LOCATION_REQUIRED');
+      }
     }
 
     // 20261023 D1：采购入库录入新表号批量建档（meterIds 与 meterNos 二选一）。
@@ -352,6 +359,9 @@ export class MeterStockService {
           batchNo: body.batchNo ? String(body.batchNo) : null,
           warehouseId: IN_TYPES.has(type) || type === 'TRANSFER' ? warehouseId : m.warehouseId,
           locationId: IN_TYPES.has(type) || type === 'TRANSFER' ? locationId : m.locationId,
+          // Q3：调拨保留源库房/源货位快照，便于追溯。
+          fromWarehouseId: type === 'TRANSFER' ? m.warehouseId : null,
+          fromLocationId: type === 'TRANSFER' ? m.locationId : null,
           operatorId: ctx.staffId,
           movedAt: now,
           remark: body.remark ? String(body.remark) : null,
@@ -605,8 +615,21 @@ export class MeterStockService {
         }),
       ]);
       const meterIds = [...new Set(items.map((i) => i.meterId))];
-      const whIds = [...new Set(items.map((i) => i.warehouseId).filter((x): x is string => !!x))];
-      const [meters, whs] = await Promise.all([
+      const whIds = [
+        ...new Set(
+          items
+            .flatMap((i) => [i.warehouseId, i.fromWarehouseId])
+            .filter((x): x is string => !!x),
+        ),
+      ];
+      const locIds = [
+        ...new Set(
+          items
+            .flatMap((i) => [i.locationId, i.fromLocationId])
+            .filter((x): x is string => !!x),
+        ),
+      ];
+      const [meters, whs, locs] = await Promise.all([
         meterIds.length
           ? tx.meter.findMany({
               where: { tenantId: ctx.tenantId, id: { in: meterIds } },
@@ -619,15 +642,29 @@ export class MeterStockService {
               select: { id: true, code: true, name: true },
             })
           : Promise.resolve([]),
+        locIds.length
+          ? tx.meterWarehouseLocation.findMany({
+              where: { tenantId: ctx.tenantId, id: { in: locIds } },
+              select: { id: true, code: true, name: true },
+            })
+          : Promise.resolve([]),
       ]);
       const mMap = new Map(meters.map((m) => [m.id, m.meterNo]));
       const wMap = new Map(whs.map((w) => [w.id, w]));
+      const lMap = new Map(locs.map((l) => [l.id, l]));
       return {
         total,
         items: items.map((i) => ({
           ...i,
           meterNo: mMap.get(i.meterId) ?? null,
           warehouse: i.warehouseId ? (wMap.get(i.warehouseId) ?? null) : null,
+          location: i.locationId ? (lMap.get(i.locationId) ?? null) : null,
+          fromWarehouse: i.fromWarehouseId
+            ? (wMap.get(i.fromWarehouseId) ?? null)
+            : null,
+          fromLocation: i.fromLocationId
+            ? (lMap.get(i.fromLocationId) ?? null)
+            : null,
         })),
       };
     });

@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import type { InstallApplyStatus } from '@prisma/client';
 import { Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
@@ -6,7 +6,7 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 import { assertUsageCategory } from '../../common/usage-categories.js';
 import { InstallService, type CreateApplyBody } from './install.service.js';
-import { parseOnboardWire, type OnboardWireBody } from '../customer/onboard-wire.js';
+import type { OnboardWireBody } from '../customer/onboard-wire.js';
 
 const STATUSES = new Set(['SUBMITTED', 'SURVEYED', 'APPROVED', 'INSTALLING', 'COMPLETED', 'REJECTED', 'CANCELLED']);
 
@@ -173,15 +173,41 @@ export class InstallController {
     });
   }
 
-  /** 归档：按立户向导体创建 客户/结算户/用水户/表/安装，回写户号。
-   *  客户可省略——缺省时以申请单信息建客。 */
+  /** Q5/R6 合同编号录入：装表完成后（INSTALLING）、归档立户前可编辑。 */
+  @Patch(':id/contract')
+  @Permissions('install:write')
+  contract(@Param('id') id: string, @Body() body: { contractNo?: unknown }) {
+    const contractNo =
+      typeof body?.contractNo === 'string' && body.contractNo.trim()
+        ? body.contractNo.trim().slice(0, 64)
+        : null;
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const app = await tx.installApplication.findFirst({
+        where: { tenantId: ctx.tenantId, id: assertUuid(id, 'id') },
+        select: { id: true, status: true },
+      });
+      if (!app) throw new BadRequestException({ code: 'APPLY_NOT_FOUND' });
+      if (!['INSTALLING', 'APPROVED'].includes(app.status)) {
+        throw new ConflictException({
+          code: 'CONTRACT_STAGE_INVALID',
+          message: '合同编号在装表完成后、归档立户前录入',
+        });
+      }
+      return tx.installApplication.update({
+        where: { id: app.id },
+        data: { contractNo, updatedBy: ctx.staffId },
+      });
+    });
+  }
+
+  /** R3：归档确认 —— 立户唯一入口是 onboard(sourceApplyNo)；本端点只做状态核对。 */
   @Post(':id/archive')
   @Permissions('install:write')
-  archive(@Param('id') id: string, @Body() body: OnboardWireBody) {
-    const parsed = parseOnboardWire(body, { allowNoCustomer: true });
+  archive(@Param('id') id: string) {
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      this.svc.archiveTx(tx, ctx, assertUuid(id, 'id'), parsed),
+      this.svc.archiveTx(tx, ctx, assertUuid(id, 'id')),
     );
   }
 }

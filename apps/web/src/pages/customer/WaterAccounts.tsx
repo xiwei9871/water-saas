@@ -605,6 +605,13 @@ export default function WaterAccounts() {
   const columns: ColumnsType<WaterAccount> = [
     { title: '户号', dataIndex: 'accountNo', key: 'accountNo', width: 150 },
     {
+      title: '合同编号',
+      dataIndex: 'contractNo',
+      key: 'contractNo',
+      width: 150,
+      render: (v: string | null) => v ?? '—',
+    },
+    {
       title: '当前表号',
       dataIndex: 'currentMeterNo',
       key: 'currentMeterNo',

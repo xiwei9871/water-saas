@@ -85,7 +85,7 @@ export class AuthService {
 
     const links = await tx.staffRole.findMany({ where: { tenantId, staffId } });
     const roles = await tx.role.findMany({
-      where: { tenantId, id: { in: links.map((l) => l.roleId) } },
+      where: { tenantId, id: { in: links.map((l) => l.roleId) }, status: 'ACTIVE' },
     });
 
     let perms: string[];

@@ -1,4 +1,4 @@
-import { App as AntdApp, Select, Tag, TreeSelect, Typography } from 'antd';
+import { App as AntdApp, Button, Popover, Select, Space, Tag, TreeSelect, Typography } from 'antd';
 import { CheckOutlined, CopyOutlined } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -78,6 +78,60 @@ const copyableOptionRender = (opt: { label?: unknown; data: Option }) => (
   </div>
 );
 
+/**
+ * Q6：下拉「选中后」复制字段 —— 选中项右侧浮出复制钮，弹层逐字段复制。
+ * 缓存被选 option（远程搜索刷新后原选项可能不在列表中）。
+ */
+const useOptionCache = () => useState(() => new Map<string, Option>())[0];
+
+const selectedOf = (
+  options: Option[],
+  cache: Map<string, Option>,
+  value?: string,
+): Option | undefined =>
+  value ? (cache.get(value) ?? options.find((o) => o.value === value)) : undefined;
+
+const SelectedOptionCopy = ({ option }: { option?: Option }) => {
+  const fields = (option?.fields ?? []).filter((f) => f.text);
+  if (!fields.length) return null;
+  return (
+    <Popover
+      trigger="click"
+      placement="bottomRight"
+      content={
+        <Space direction="vertical" size={4}>
+          {fields.map((f) => (
+            <div key={f.name} style={{ fontSize: 12 }}>
+              <span style={{ color: '#888' }}>{f.name}：</span>
+              <Typography.Text
+                copyable={{
+                  text: f.text,
+                  tooltips: [`复制${f.name}`, '已复制'],
+                  icon: [
+                    <CopyOutlined key="c" />,
+                    <CheckOutlined key="ok" />,
+                  ],
+                }}
+              >
+                {f.text}
+              </Typography.Text>
+            </div>
+          ))}
+        </Space>
+      }
+    >
+      <Button
+        type="text"
+        size="small"
+        icon={<CopyOutlined />}
+        title="复制选中项字段"
+        style={{ position: 'absolute', right: 22, top: 2, zIndex: 2, color: '#999' }}
+        onMouseDown={(e) => e.stopPropagation()}
+      />
+    </Popover>
+  );
+};
+
 /** Debounce a search callback so a request doesn't fire per keystroke. */
 export const useDebounced = (fn: (kw: string) => void, ms = 300) => {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -122,6 +176,7 @@ export function CustomerSelect({ value, onChange, placeholder, disabled }: Picke
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -156,6 +211,7 @@ export function CustomerSelect({ value, onChange, placeholder, disabled }: Picke
   const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -168,14 +224,17 @@ export function CustomerSelect({ value, onChange, placeholder, disabled }: Picke
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
       }}
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配客户'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -190,6 +249,7 @@ export function SettleAccountSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -220,6 +280,7 @@ export function SettleAccountSelect({
   const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -232,14 +293,17 @@ export function SettleAccountSelect({
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
       }}
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配结算户'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -266,6 +330,7 @@ export function MeterSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
   const rowsRef = useRef<Map<string, Meter>>(new Map());
 
   const fetch = useCallback(
@@ -308,6 +373,7 @@ export function MeterSelect({
   const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -320,8 +386,9 @@ export function MeterSelect({
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onSelect?.(v ? rowsRef.current.get(v) : undefined);
         onChange?.(v);
@@ -329,6 +396,8 @@ export function MeterSelect({
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配水表'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -358,6 +427,7 @@ export function WaterAccountSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
   // Refs mirror the controlled value/handler so the fetch callback reads the
   // current selection without re-subscribing the effect on every change.
   const valueRef = useRef(value);
@@ -416,6 +486,7 @@ export function WaterAccountSelect({
   }, [customerId, message, labelCache]);
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -430,13 +501,16 @@ export function WaterAccountSelect({
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
       }}
       notFoundContent={fetching ? '加载中…' : '无可用用水户'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -466,6 +540,7 @@ export function WaterAccountSearchSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
   const rowsRef = useRef<Map<string, WaterAccount>>(new Map());
 
   const fetch = useCallback(
@@ -506,6 +581,7 @@ export function WaterAccountSearchSelect({
   const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -518,8 +594,9 @@ export function WaterAccountSearchSelect({
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
         onSelect?.(v ? rowsRef.current.get(v) : undefined);
@@ -527,6 +604,8 @@ export function WaterAccountSearchSelect({
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配用水户'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -546,6 +625,7 @@ export function BillingAccountSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -580,6 +660,7 @@ export function BillingAccountSelect({
   const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -592,14 +673,17 @@ export function BillingAccountSelect({
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
       }}
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配用水户'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -619,6 +703,7 @@ export function SettleAccountLookupSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -653,6 +738,7 @@ export function SettleAccountLookupSelect({
   const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -665,14 +751,17 @@ export function SettleAccountLookupSelect({
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
       }}
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配结算户'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -690,6 +779,7 @@ export function BillingRunSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
 
   useEffect(() => {
     let cancelled = false;
@@ -722,6 +812,7 @@ export function BillingRunSelect({
   }, [message]);
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -734,13 +825,16 @@ export function BillingRunSelect({
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
       }}
       notFoundContent={fetching ? '加载中…' : '暂无开账批次'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -759,6 +853,7 @@ export function StaffLookupSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -789,6 +884,7 @@ export function StaffLookupSelect({
   const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -800,14 +896,18 @@ export function StaffLookupSelect({
       optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
-        const l = v ? (option as Option | undefined)?.label : undefined;
+        const o = option as Option | undefined;
+        const l = v ? o?.label : undefined;
         if (v && l) labelCache.set(v, l);
+        if (v && o?.fields?.length) optCache.set(v, o);
         onLabelChange?.(l);
         onChange?.(v);
       }}
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配员工'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -821,6 +921,7 @@ export function StaffSelect({ value, onChange, placeholder, disabled }: PickerPr
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
 
   useEffect(() => {
     let cancelled = false;
@@ -847,6 +948,7 @@ export function StaffSelect({ value, onChange, placeholder, disabled }: PickerPr
   }, [message]);
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -859,13 +961,16 @@ export function StaffSelect({ value, onChange, placeholder, disabled }: PickerPr
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
       }}
       notFoundContent={fetching ? '加载中…' : '暂无员工'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 
@@ -937,6 +1042,7 @@ export function ReadingBookSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const optCache = useOptionCache();
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -967,6 +1073,7 @@ export function ReadingBookSelect({
   const onSearch = useDebounced((kw) => void fetch(kw));
 
   return (
+    <div style={{ position: 'relative' }}>
     <Select
       showSearch
       allowClear
@@ -979,14 +1086,17 @@ export function ReadingBookSelect({
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
-          const l = (option as Option | undefined)?.label;
-          if (l) labelCache.set(v, l);
+          const o = option as Option | undefined;
+          if (o?.label) labelCache.set(v, o.label);
+          if (o?.fields?.length) optCache.set(v, o);
         }
         onChange?.(v);
       }}
       onSearch={onSearch}
       notFoundContent={fetching ? '加载中…' : '无匹配抄表册'}
     />
+    <SelectedOptionCopy option={selectedOf(options, optCache, value)} />
+    </div>
   );
 }
 

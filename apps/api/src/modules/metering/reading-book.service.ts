@@ -36,6 +36,7 @@ export const READING_BOOK_SELECT = {
   cadence: true,
   anchorPeriod: true,
   meterChannel: true,
+  status: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ReadingBookSelect;
@@ -68,6 +69,7 @@ export interface ReadingBookPatchBody {
   cadence?: BookCadence;
   anchorPeriod?: string | null;
   meterChannel?: MeterChannel;
+  status?: string;
 }
 
 export interface BookMemberBody {
@@ -117,6 +119,8 @@ export class ReadingBookService {
       q?: string;
       orgUnitId?: string;
       waterAccountId?: string;
+      cadence?: string;
+      status?: string;
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
@@ -145,6 +149,8 @@ export class ReadingBookService {
           bookNo: q.bookNo,
           orgUnitId:
             ctx.scope === 'ALL' ? q.orgUnitId : { in: ctx.orgScope },
+          cadence: q.cadence,
+          status: q.status,
           name: q.name ? { contains: q.name } : undefined,
           ...(q.q
             ? {
@@ -318,6 +324,9 @@ export class ReadingBookService {
     req: Request,
   ) {
     const existing = await this.assertBookInScope(tx, ctx, id);
+    if (body.status !== undefined && !['ACTIVE', 'DISABLED'].includes(body.status)) {
+      throw new BadRequestException({ code: 'BOOK_STATUS_INVALID' });
+    }
     this.validateCadence(
       body.cadence ?? (existing.cadence as BookCadence),
       body.anchorPeriod === undefined ? existing.anchorPeriod : body.anchorPeriod,
@@ -335,6 +344,7 @@ export class ReadingBookService {
         cadence: body.cadence,
         anchorPeriod: body.anchorPeriod === undefined ? undefined : body.anchorPeriod,
         meterChannel: body.meterChannel,
+        status: body.status,
         updatedBy: ctx.staffId,
       },
       select: READING_BOOK_SELECT,

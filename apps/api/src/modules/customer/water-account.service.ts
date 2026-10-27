@@ -44,6 +44,8 @@ export const WATER_ACCOUNT_SELECT = {
   openedAt: true,
   closedAt: true,
   sourceApplyNo: true,
+  contractNo: true,
+  contractScan: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.WaterAccountSelect;
@@ -80,6 +82,9 @@ export interface WaterAccountBody {
   usageCategory?: string;
   addr?: string;
   openedAt?: Date;
+  /** R6：供用水合同编号 + 扫描件（立户写入档案，可检索）。 */
+  contractNo?: string;
+  contractScan?: Prisma.InputJsonValue;
 }
 
 export interface WaterAccountPatchBody {
@@ -116,6 +121,8 @@ export interface OnboardBody {
     openedAt?: Date;
     /** 一户多人口申报 — written as an effective-dated profile row. */
     householdSize?: number;
+    /** R6：供用水合同编号（报装带入或手工立户手填，可选）。 */
+    contractNo?: string;
   };
   meter?: MeterBody;
   meterId?: string;
@@ -494,6 +501,8 @@ export class WaterAccountService {
           addr: body.addr!,
           status: 'NORMAL',
           openedAt: body.openedAt ?? new Date(),
+          contractNo: body.contractNo ?? null,
+          contractScan: body.contractScan ?? Prisma.DbNull,
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
         },
@@ -834,7 +843,14 @@ export class WaterAccountService {
       }
     }
 
-    // 3. water_account
+    // 3. water_account — R6/Q5：合同编号手填优先，报装带入兜底；
+    //    合同扫描件随立户同步进用户档案。
+    const srcApp = body.sourceApplyNo
+      ? await tx.installApplication.findFirst({
+          where: { tenantId: ctx.tenantId, applyNo: body.sourceApplyNo },
+          select: { id: true, contractNo: true, contractScan: true },
+        })
+      : null;
     const waterAccount = await this.createTx(tx, ctx, {
       accountNo: aligned.accountNo ?? body.account.accountNo,
       customerId: customer.id,
@@ -842,6 +858,10 @@ export class WaterAccountService {
       usageCategory: body.account.usageCategory,
       addr: body.account.addr,
       openedAt: body.account.openedAt,
+      contractNo: body.account.contractNo ?? srcApp?.contractNo ?? undefined,
+      contractScan: (srcApp?.contractScan ?? undefined) as
+        | Prisma.InputJsonValue
+        | undefined,
     });
 
     // 3b. 一户多人口申报 — first declaration effective from the open period.
@@ -891,11 +911,7 @@ export class WaterAccountService {
     // 5b. 报装纳入：来源单号反写到本次链路实体——户总是写；
     //     客户/表只在"本事务新建"时写（挂接存量客户/表不污染其来源）。
     if (body.sourceApplyNo) {
-      const src = await tx.installApplication.findFirst({
-        where: { tenantId: ctx.tenantId, applyNo: body.sourceApplyNo },
-        select: { id: true },
-      });
-      if (!src) throw new BadRequestException({ code: 'SOURCE_APPLY_NOT_FOUND' });
+      if (!srcApp) throw new BadRequestException({ code: 'SOURCE_APPLY_NOT_FOUND' });
       await tx.waterAccount.update({
         where: { tenantId_id: { tenantId: ctx.tenantId, id: waterAccount.id } },
         data: { sourceApplyNo: body.sourceApplyNo },

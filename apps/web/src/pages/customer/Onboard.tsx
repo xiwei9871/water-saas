@@ -40,6 +40,8 @@ interface ApplyLite {
   id: string;
   applyNo: string;
   contractNo?: string | null;
+  certType?: string | null;
+  certNo?: string | null;
   applicantName: string;
   custType: string;
   contactPhone: string | null;
@@ -72,6 +74,7 @@ interface WizardValues {
   acctOpenedAt?: dayjs.Dayjs;
   acctHouseholdSize?: number;
   acctReadingBookId?: string;
+  acctContractNo?: string;
   meterMode: MeterMode;
   meterId?: string;
   meterNo?: string;
@@ -114,6 +117,8 @@ export default function Onboard() {
       立户成功同时办结该申请（同事务回写 户号/结算户/表号）。 */
   const [applyOptions, setApplyOptions] = useState<{ value: string; label: string; raw: ApplyLite }[]>([]);
   const [sourceApply, setSourceApply] = useState<ApplyLite | null>(null);
+  /** R2：报装跳转进入时来源单锁定不可清除（sourceApplyNo 必带）。 */
+  const [applyLocked, setApplyLocked] = useState(false);
   const [existingMeter, setExistingMeter] = useState<Meter | null>(null);
   /** B1 立户即入册：可选抄表册列表（无 metering:read 时隐藏选择器）。 */
   const [bookOptions, setBookOptions] = useState<{ value: string; label: string }[]>([]);
@@ -178,14 +183,36 @@ export default function Onboard() {
           raw: x,
         }));
         setApplyOptions(opts);
-        const preset = params.get('applyId');
-        if (preset) {
-          const hit = opts.find((o) => o.value === preset) ?? null;
-          if (hit) pickApply(hit.raw);
-          else {
-            // 列表外（如刚流转）——直接拉详情带入。
-            const d = await api.get<ApplyLite>(`/install/applications/${preset}`);
-            if (alive) pickApply(d.data);
+        const presetId = params.get('applyId');
+        const presetNo = params.get('applyNo');
+        if (presetId || presetNo) {
+          const hit =
+            opts.find((o) =>
+              presetId ? o.value === presetId : o.raw.applyNo === presetNo,
+            ) ?? null;
+          if (hit) {
+            pickApply(hit.raw);
+            setApplyLocked(true);
+          } else {
+            // 列表外（如刚流转/按单号直跳）——applyId 拉详情；applyNo 拉全表按单号匹配。
+            if (presetId) {
+              const d = await api.get<ApplyLite>(`/install/applications/${presetId}`);
+              if (alive && d.data?.id) {
+                pickApply(d.data);
+                setApplyLocked(true);
+              }
+            } else {
+              const d = await api.get<ApplyLite[]>('/install/applications', {
+                params: { take: 200 },
+              });
+              const app = (Array.isArray(d.data) ? d.data : []).find(
+                (x) => x.applyNo === presetNo,
+              );
+              if (alive && app?.id) {
+                pickApply(app);
+                setApplyLocked(true);
+              }
+            }
           }
         }
       } catch {
@@ -220,8 +247,11 @@ export default function Onboard() {
       custMode: 'new',
       custName: app.applicantName,
       custType: (app.custType as 'PERSONAL' | 'ORG') ?? 'PERSONAL',
+      custIdType: app.certType ?? undefined,
+      custIdNo: app.certNo ?? undefined,
       custPhone: app.contactPhone ?? undefined,
       custAddr: app.addr,
+      acctContractNo: app.contractNo ?? undefined,
       acctUsageCategory: app.usageCategory,
       acctAddr: app.addr,
       meterMode: 'new',
@@ -234,6 +264,7 @@ export default function Onboard() {
   };
 
   const clearApply = () => {
+    if (applyLocked) return; // R2：报装带入的来源单不可清除
     setSourceApply(null);
     form.resetFields();
   };
@@ -263,6 +294,7 @@ export default function Onboard() {
         addr: values.acctAddr,
         accountNo: values.acctAccountNo,
         openedAt: values.acctOpenedAt?.format('YYYY-MM-DD'),
+        contractNo: values.acctContractNo,
         householdSize: isMonitoring ? undefined : values.acctHouseholdSize,
       }),
       installation: cleanBody({
@@ -411,9 +443,10 @@ export default function Onboard() {
           style={{ marginBottom: 16 }}
           message={
             <Space wrap>
-              <span>来源报装单（可选）</span>
+              <span>来源报装单{applyLocked ? '（报装带入，不可清除）' : '（可选）'}</span>
               <Select
-                allowClear
+                allowClear={!applyLocked}
+                disabled={applyLocked}
                 showSearch
                 optionFilterProp="label"
                 placeholder="选择待立户的报装申请"
@@ -582,6 +615,13 @@ export default function Onboard() {
           </Form.Item>
           <Form.Item name="acctOpenedAt" label="开户日期">
             <DatePicker style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item
+            name="acctContractNo"
+            label="供用水合同编号"
+            extra="报装带入自动预填；手工立户可手填，留空则不建档"
+          >
+            <Input maxLength={64} />
           </Form.Item>
           {!isMonitoring && usageCategory?.startsWith('RES_') && (
             <Form.Item

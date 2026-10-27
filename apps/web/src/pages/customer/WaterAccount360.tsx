@@ -1,6 +1,6 @@
-import { Alert, App as AntdApp, Button, Descriptions, Drawer, Space, Tabs, Tag } from 'antd';
+import { Alert, App as AntdApp, Button, Descriptions, Drawer, Image, Space, Tabs, Tag } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { api, apiErrorText, fetchAll } from '../../api/client';
 import type {
   AccountEvent,
   AccountOutstanding,
@@ -120,9 +120,7 @@ export function WaterAccount360({
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(
-    async (key: TabKey, id: string, page = 1) => {
-      const skip = (page - 1) * PAGE_SIZE;
-      setPages((s) => ({ ...s, [key]: page }));
+    async (key: TabKey, id: string) => {
       setLoading((s) => ({ ...s, [key]: true }));
       setError(null);
       try {
@@ -142,50 +140,47 @@ export function WaterAccount360({
           case 'readings': {
             const [books, plans, readings] = await Promise.all([
               api.get('/reading-books', { params: { waterAccountId: id } }),
-              api.get('/reading-plans', {
-                params: { waterAccountId: id, take: PAGE_SIZE, skip },
+              fetchAll<PlanWithMyItem>('/reading-plans', {
+                waterAccountId: id,
               }),
-              api.get('/meter-readings', {
-                params: { waterAccountId: id, take: PAGE_SIZE, skip },
+              fetchAll<MeterReading>('/meter-readings', {
+                waterAccountId: id,
               }),
             ]);
             setData((s) => ({
               ...s,
               books: books.data as ReadingBook[],
-              plans: plans.data as PlanWithMyItem[],
-              readings: readings.data as MeterReading[],
+              plans,
+              readings,
             }));
             break;
           }
           case 'settlements': {
-            const rows = (
-              await api.get('/consumption-settlements', {
-                params: { waterAccountId: id, take: PAGE_SIZE, skip },
-              })
-            ).data as ConsumptionSettlement[];
+            const rows = await fetchAll<ConsumptionSettlement>(
+              '/consumption-settlements',
+              { waterAccountId: id },
+            );
             setData((s) => ({ ...s, settlements: rows }));
             break;
           }
           case 'bills': {
-            const rows = (
-              await api.get('/bills', {
-                params: { waterAccountId: id, take: PAGE_SIZE, skip },
-              })
-            ).data as Bill[];
+            const rows = await fetchAll<Bill>('/bills', {
+              waterAccountId: id,
+            });
             setData((s) => ({ ...s, bills: rows }));
             break;
           }
           case 'payments': {
             const [outstanding, activity] = await Promise.all([
               api.get(`/water-accounts/${id}/outstanding`),
-              api.get(`/water-accounts/${id}/payment-activity`, {
-                params: { take: PAGE_SIZE, skip },
-              }),
+              fetchAll<PaymentActivityRow>(
+                `/water-accounts/${id}/payment-activity`,
+              ),
             ]);
             setData((s) => ({
               ...s,
               outstanding: outstanding.data as AccountOutstanding,
-              activity: activity.data as PaymentActivityRow[],
+              activity,
             }));
             break;
           }
@@ -199,23 +194,23 @@ export function WaterAccount360({
               api.get('/prepayments/balance', {
                 params: { settleAccountId: settleId },
               }),
-              api.get('/prepayments/entries', {
-                params: { settleAccountId: settleId, take: PAGE_SIZE, skip },
-              }),
+              fetchAll<PrepaymentEntriesPage['items'][number]>(
+                '/prepayments/entries',
+                { settleAccountId: settleId },
+                'items',
+              ),
             ]);
             setData((s) => ({
               ...s,
               prepayBalance: balance.data as PrepaymentBalance,
-              prepayEntries: (entries.data as PrepaymentEntriesPage).items,
+              prepayEntries: entries,
             }));
             break;
           }
           case 'events': {
-            const rows = (
-              await api.get(`/water-accounts/${id}/events`, {
-                params: { take: PAGE_SIZE, skip },
-              })
-            ).data as AccountEvent[];
+            const rows = await fetchAll<AccountEvent>(
+              `/water-accounts/${id}/events`,
+            );
             setData((s) => ({ ...s, events: rows }));
             break;
           }
@@ -269,18 +264,17 @@ export function WaterAccount360({
   const summary = data.summary;
   const account = summary?.account;
 
-  // No-total lists: enable "next" while the server returns a full page.
+  // All tab rows are fully loaded — paginate locally with the exact total.
+  const pageRows = <T,>(key: TabKey, rows: T[] | undefined): T[] => {
+    const p = pages[key] ?? 1;
+    return (rows ?? []).slice((p - 1) * PAGE_SIZE, p * PAGE_SIZE);
+  };
   const pager = (key: TabKey, rows: unknown[] | undefined) => ({
     current: pages[key] ?? 1,
     pageSize: PAGE_SIZE,
-    total:
-      ((pages[key] ?? 1) - 1) * PAGE_SIZE +
-      (rows?.length ?? 0) +
-      ((rows?.length ?? 0) === PAGE_SIZE ? PAGE_SIZE : 0),
+    total: rows?.length ?? 0,
     showSizeChanger: false,
-    onChange: (p: number) => {
-      if (accountId) void load(key, accountId, p);
-    },
+    onChange: (p: number) => setPages((s) => ({ ...s, [key]: p })),
   });
   const closed = account?.status === 'CLOSED';
 
@@ -339,6 +333,25 @@ export function WaterAccount360({
             <Descriptions.Item label="来源报装单">
               {account?.sourceApplyNo ?? '—'}
             </Descriptions.Item>
+            <Descriptions.Item label="供用水合同编号">
+              {account?.contractNo ?? '—'}
+            </Descriptions.Item>
+            {Array.isArray(account?.contractScan) &&
+              (account?.contractScan?.length ?? 0) > 0 && (
+                <Descriptions.Item label="合同扫描件" span={2}>
+                  <Space wrap>
+                    {(account?.contractScan ?? []).map((p, i) => (
+                      <Image
+                        key={i}
+                        src={p}
+                        width={64}
+                        height={88}
+                        style={{ objectFit: 'cover', borderRadius: 4 }}
+                      />
+                    ))}
+                  </Space>
+                </Descriptions.Item>
+              )}
             <Descriptions.Item label="在册水表">
               {summary.activeInstallationCount} 块
             </Descriptions.Item>
@@ -436,7 +449,7 @@ export function WaterAccount360({
                 <Table<MeterReading> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
-                  dataSource={data.readings ?? []}
+                  dataSource={pageRows('readings', data.readings)}
                   pagination={pager('readings', data.readings)}
                   locale={{ emptyText: '暂无读数' }}
                   columns={[
@@ -478,7 +491,7 @@ export function WaterAccount360({
               <Table<ConsumptionSettlement> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
-                dataSource={data.settlements ?? []}
+                dataSource={pageRows('settlements', data.settlements)}
                 pagination={pager('settlements', data.settlements)}
                 locale={{ emptyText: '暂无结算' }}
                 expandable={{
@@ -544,7 +557,7 @@ export function WaterAccount360({
               <Table<Bill> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
-                dataSource={data.bills ?? []}
+                dataSource={pageRows('bills', data.bills)}
                 pagination={pager('bills', data.bills)}
                 locale={{ emptyText: '暂无账单' }}
                 columns={[
@@ -609,7 +622,7 @@ export function WaterAccount360({
                 <Table<PaymentActivityRow> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
-                  dataSource={data.activity ?? []}
+                  dataSource={pageRows('payments', data.activity)}
                   pagination={pager('payments', data.activity)}
                   locale={{ emptyText: '暂无偿付记录' }}
                   columns={[
@@ -680,7 +693,7 @@ export function WaterAccount360({
                 <Table<PrepaymentEntriesPage['items'][number]> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
-                  dataSource={data.prepayEntries ?? []}
+                  dataSource={pageRows('prepay', data.prepayEntries)}
                   pagination={pager('prepay', data.prepayEntries)}
                   locale={{ emptyText: '暂无预存流水' }}
                   columns={[
@@ -716,7 +729,7 @@ export function WaterAccount360({
         <Table<AccountEvent> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
-          dataSource={data.events ?? []}
+          dataSource={pageRows('events', data.events)}
           pagination={pager('events', data.events)}
           locale={{ emptyText: '暂无生命周期事件' }}
           columns={[

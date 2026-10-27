@@ -20,6 +20,7 @@ export interface OnboardWireBody {
     addr?: string;
     openedAt?: unknown;
     householdSize?: unknown;
+    contractNo?: string;
   };
   meter?: MeterBody & { maxDial?: unknown };
   meterId?: string;
@@ -110,6 +111,7 @@ export function parseOnboardWire(
               return n;
             })()
           : undefined,
+      contractNo: body.account.contractNo?.trim() || undefined,
     },
     meter: body.meter
       ? {

@@ -29,6 +29,8 @@ export interface UnifiedQuery {
   bookIds?: string[];
   /** X2-2：按抄表册册号文本筛选（模糊包含，命中该册下用水户）。 */
   bookNo?: string;
+  /** R6：按供用水合同编号模糊筛选。 */
+  contractNo?: string;
   orgUnitId?: string;
   usageCategories?: string[];
   statuses?: string[];
@@ -177,6 +179,7 @@ export class UnifiedQueryService {
                 WHERE bm.tenant_id = wa.tenant_id AND bm.water_account_id = wa.id
                   AND rb.org_unit_id = ${q.orgUnitId}::uuid)`
             : Prisma.empty}
+          ${q.contractNo ? Prisma.sql`AND wa.contract_no ILIKE ${'%' + q.contractNo + '%'}` : Prisma.empty}
           ${q.usageCategories?.length ? Prisma.sql`AND wa.usage_category = ANY(${q.usageCategories})` : Prisma.empty}
           ${q.statuses?.length ? Prisma.sql`AND wa.status = ANY(${q.statuses}::"AccountStatus"[])` : Prisma.empty}
           ${est === 'ONLY'
@@ -209,7 +212,7 @@ export class UnifiedQueryService {
           openedAt: Date | null; closedAt: Date | null; orgName: string | null;
           settleNo: string; settleName: string;
           meterNo: string | null; caliber: string | null;
-          bookNos: string | null;
+          bookNos: string | null; contractNo: string | null;
         }[]
       >`
         SELECT wa.id, wa.account_no AS "accountNo", c.name AS "customerName",
@@ -219,6 +222,7 @@ export class UnifiedQueryService {
                ou.name AS "orgName",
                sa.settle_no AS "settleNo", sa.name AS "settleName",
                m.meter_no AS "meterNo", m.caliber,
+               wa.contract_no AS "contractNo",
                bs."bookNos"
         FROM water_account wa
         JOIN customer c ON c.tenant_id = wa.tenant_id AND c.id = wa.customer_id

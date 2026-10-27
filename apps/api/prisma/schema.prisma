@@ -373,6 +373,8 @@ model OrgUnit {
   parentId  String?  @map("parent_id") @db.Uuid
   name      String
   type      OrgType
+  // Q7：ACTIVE | DISABLED — 停用代替物理删除，历史单据仍按名称快照显示。
+  status    String   @default("ACTIVE")
   createdAt DateTime @default(now()) @map("created_at")
   createdBy String?  @map("created_by") @db.Uuid
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -413,6 +415,8 @@ model Role {
   code      String
   name      String
   dataScope DataScope @map("data_scope")
+  // Q7：ACTIVE | DISABLED — 停用代替物理删除。
+  status    String    @default("ACTIVE")
   createdAt DateTime  @default(now()) @map("created_at")
   createdBy String?   @map("created_by") @db.Uuid
   updatedAt DateTime  @updatedAt @map("updated_at")
@@ -599,6 +603,9 @@ model WaterAccount {
   closedAt        DateTime?     @map("closed_at") @db.Date
   /** 报装纳入：来源报装单号（营业厅/电话报装→立户的反向关联）。 */
   sourceApplyNo   String?       @map("source_apply_no")
+  /** R6/Q5：供用水合同编号 + 合同扫描件（立户时自报装申请带入/手填）。 */
+  contractNo      String?       @map("contract_no")
+  contractScan    Json?         @map("contract_scan") @db.JsonB
   createdAt       DateTime      @default(now()) @map("created_at")
   createdBy       String?       @map("created_by") @db.Uuid
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -734,6 +741,9 @@ model MeterStockMovement {
   batchNo      String?  @map("batch_no")
   warehouseId  String?  @map("warehouse_id") @db.Uuid
   locationId   String?  @map("location_id") @db.Uuid
+  // Q3：调拨流水保留源库房/源货位快照（warehouseId/locationId 为目标侧）。
+  fromWarehouseId String? @map("from_warehouse_id") @db.Uuid
+  fromLocationId  String? @map("from_location_id") @db.Uuid
   operatorId   String?  @map("operator_id") @db.Uuid
   movedAt      DateTime @default(now()) @map("moved_at")
   remark       String?
@@ -948,7 +958,9 @@ model ReadingBook {
   anchorPeriod String?  @map("anchor_period") @db.Char(6)
   // MECHANICAL | REMOTE_MANUAL | REMOTE_AUTO (REMOTE_AUTO = metadata only).
   meterChannel String   @default("MECHANICAL") @map("meter_channel")
-  createdAt   DateTime @default(now()) @map("created_at")
+  // ACTIVE | DISABLED — 停用的册不再生成抄表计划，历史数据保留。
+  status     String   @default("ACTIVE")
+  createdAt  DateTime @default(now()) @map("created_at")
   createdBy   String?  @map("created_by") @db.Uuid
   updatedAt   DateTime @updatedAt @map("updated_at")
   updatedBy   String?  @map("updated_by") @db.Uuid

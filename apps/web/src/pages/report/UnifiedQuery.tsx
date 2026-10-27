@@ -304,6 +304,7 @@ function DetailQuery() {
       customerIds: objectKind === 'customer' && v.customerId ? [v.customerId as string] : undefined,
       bookIds: objectKind === 'book' && v.bookId ? [v.bookId as string] : undefined,
       bookNo: (v.bookNo as string | undefined)?.trim() || undefined,
+      contractNo: (v.contractNo as string | undefined)?.trim() || undefined,
       orgUnitId: objectKind === 'org' ? (v.orgUnitId as string | undefined) : undefined,
       usageCategories: (v.usageCategories as string[] | undefined)?.length
         ? (v.usageCategories as string[])
@@ -577,6 +578,9 @@ function DetailQuery() {
           </Form.Item>
           <Form.Item name="bookNo" label="册号">
             <Input allowClear style={{ width: 140 }} placeholder="按册号模糊筛选" />
+          </Form.Item>
+          <Form.Item name="contractNo" label="合同编号">
+            <Input allowClear style={{ width: 150 }} placeholder="按合同编号模糊筛选" />
           </Form.Item>
           <Form.Item name="estimated" label="估抄">
             <Select

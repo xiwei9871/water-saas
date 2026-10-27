@@ -114,6 +114,8 @@ export interface OrgUnit {
   parentId: string | null;
   name: string;
   type: OrgType;
+  /** Q7：ACTIVE | DISABLED — 停用代替物理删除。 */
+  status?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -139,6 +141,8 @@ export interface Role {
   code: string;
   name: string;
   dataScope: DataScope;
+  /** Q7：ACTIVE | DISABLED — 停用即不再授予权限，可恢复。 */
+  status?: string;
   perms: string[];
   createdAt: string;
   updatedAt: string;
@@ -239,6 +243,9 @@ export interface WaterAccount {
   closedAt: string | null;
   /** 报装纳入：来源报装单号（营业厅/电话报装→立户的反向关联）。 */
   sourceApplyNo?: string | null;
+  /** R6：供用水合同编号 + 扫描件（立户自报装申请带入/手填）。 */
+  contractNo?: string | null;
+  contractScan?: string[] | null;
   createdAt: string;
   updatedAt: string;
   customer: { id: string; customerNo: string; name: string; custType: CustType };
@@ -412,6 +419,8 @@ export interface ReadingBook {
   /** QUARTERLY 必填首抄月 YYYYMM；其余恒为 null。 */
   anchorPeriod: string | null;
   meterChannel: MeterChannel;
+  /** ACTIVE | DISABLED — 停用的册不再生成抄表计划。 */
+  status?: string;
   createdAt: string;
   updatedAt: string;
 }

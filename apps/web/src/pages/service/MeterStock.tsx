@@ -26,6 +26,10 @@ interface Movement {
   batchNo: string | null;
   warehouseId: string | null;
   warehouse: { code: string; name: string } | null;
+  location: { code: string; name: string } | null;
+  // Q3：调拨源侧快照（warehouseId/locationId 为目标侧）。
+  fromWarehouse: { code: string; name: string } | null;
+  fromLocation: { code: string; name: string } | null;
   movedAt: string;
   remark: string | null;
 }
@@ -310,7 +314,26 @@ export default function MeterStock() {
       width: 110,
       render: (v: string) => <Tag color={MOVE_COLOR[v]}>{MOVE_LABEL[v] ?? v}</Tag>,
     },
-    { title: '库房', render: (_, r) => r.warehouse?.name ?? '—' },
+    {
+      title: '源位置',
+      key: 'from',
+      width: 150,
+      render: (_, r) =>
+        r.movementType === 'TRANSFER'
+          ? r.fromWarehouse
+            ? `${r.fromWarehouse.name}${r.fromLocation ? ` · ${r.fromLocation.name}` : ''}`
+            : '—'
+          : '—',
+    },
+    {
+      title: '目标位置',
+      key: 'to',
+      width: 170,
+      render: (_, r) =>
+        r.warehouse
+          ? `${r.warehouse.name}${r.location ? ` · ${r.location.name}` : ''}`
+          : '—',
+    },
     { title: '单据号', dataIndex: 'docNo', render: (v) => v ?? '—' },
     { title: '供应商', dataIndex: 'supplier', render: (v) => v ?? '—' },
     { title: '批次', dataIndex: 'batchNo', render: (v) => v ?? '—' },
@@ -642,13 +665,36 @@ export default function MeterStock() {
               </Form.Item>
               <Form.Item
                 noStyle
-                shouldUpdate={(a, b) => a.warehouseId !== b.warehouseId}
+                shouldUpdate={(a, b) =>
+                  a.warehouseId !== b.warehouseId || a.type !== b.type
+                }
               >
-                {() => (
-                  <Form.Item name="locationId" label="货位">
-                    <Select allowClear options={locOptions(mvForm.getFieldValue('warehouseId'))} />
-                  </Form.Item>
-                )}
+                {() => {
+                  const opts = locOptions(mvForm.getFieldValue('warehouseId'));
+                  return (
+                    <Form.Item
+                      name="locationId"
+                      label={mvType === 'TRANSFER' ? '调拨至货位' : '货位'}
+                      rules={
+                        mvType === 'TRANSFER' && opts.length > 0
+                          ? [{ required: true, message: '目标库房已建货位，请选择调拨至货位' }]
+                          : []
+                      }
+                    >
+                      <Select
+                        allowClear
+                        showSearch
+                        optionFilterProp="label"
+                        placeholder={
+                          mvType === 'TRANSFER' && opts.length === 0
+                            ? '目标库房暂无货位'
+                            : undefined
+                        }
+                        options={opts}
+                      />
+                    </Form.Item>
+                  );
+                }}
               </Form.Item>
             </>
           )}

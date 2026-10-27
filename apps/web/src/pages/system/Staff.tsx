@@ -344,10 +344,12 @@ export default function StaffPage() {
                 mode="multiple"
                 allowClear
                 placeholder="选择角色（管理员操作）"
-                options={roles.map((r) => ({
-                  value: r.id,
-                  label: `${r.name}（${r.code}）`,
-                }))}
+                options={roles
+                  .filter((r) => r.status !== 'DISABLED')
+                  .map((r) => ({
+                    value: r.id,
+                    label: `${r.name}（${r.code}）`,
+                  }))}
               />
             </Form.Item>
           )}
