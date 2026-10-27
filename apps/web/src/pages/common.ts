@@ -30,6 +30,9 @@ export const USAGE_CATEGORY_LABELS: Record<string, string> = {
   NON_RES: '非居民',
   SPECIAL: '特种',
   MONITORING: '监控表',
+  // 旧档别名：术语冻结前的存量枚举值，渲染时回落到中文而非原码
+  RESIDENTIAL: '居民户表',
+  NON_RESIDENTIAL: '非居民',
 };
 
 export const USAGE_CATEGORY_OPTIONS = Object.entries(USAGE_CATEGORY_LABELS).map(

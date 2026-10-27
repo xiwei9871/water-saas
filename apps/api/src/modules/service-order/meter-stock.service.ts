@@ -242,6 +242,9 @@ export class MeterStockService {
       brand?: unknown;
       model?: unknown;
       caliber?: unknown;
+      serialNo?: unknown;
+      maxDial?: unknown;
+      details?: unknown;
       docNo?: unknown;
       supplier?: unknown;
       batchNo?: unknown;
@@ -290,6 +293,9 @@ export class MeterStockService {
         brand: typeof body.brand === 'string' ? body.brand : null,
         model: typeof body.model === 'string' ? body.model : null,
         caliber: typeof body.caliber === 'string' ? body.caliber : null,
+        serialNo: body.serialNo,
+        maxDial: body.maxDial,
+        details: body.details,
         docNo: body.docNo,
         supplier: body.supplier,
         batchNo: body.batchNo,
