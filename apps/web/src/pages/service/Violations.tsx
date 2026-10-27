@@ -1,18 +1,5 @@
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -25,6 +12,8 @@ import {
 import { api, apiErrorText } from '../../api/client';
 import { enumLabel, newIdemKey } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface Violation {
   id: string;

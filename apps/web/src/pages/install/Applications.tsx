@@ -1,24 +1,5 @@
 import { CloseOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Drawer,
-  Descriptions,
-  Form,
-  Image,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Steps,
-  Table,
-  Tag,
-  Typography,
-  Upload,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Select, Space, Steps, Tag, Typography, Upload } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
@@ -33,6 +14,8 @@ import {
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 type ApplyStatus = 'SUBMITTED' | 'SURVEYED' | 'APPROVED' | 'INSTALLING' | 'COMPLETED' | 'REJECTED' | 'CANCELLED';
 

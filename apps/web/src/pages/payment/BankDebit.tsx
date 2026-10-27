@@ -1,23 +1,12 @@
 import { PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tabs,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, Drawer, Form, Input, Modal, Select, Space, Tabs, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { newIdemKey } from '../common';
 import { SettleAccountSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface Agreement {
   id: string;

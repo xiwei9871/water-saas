@@ -1,19 +1,12 @@
 import { ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Input,
-  Space,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, Input, Space, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { AuditLog, Staff } from '../../api/types';
+import Table from '../../components/PageTable';
+
 
 const fmtTime = (iso: string) => dayjs(iso).format('YYYY-MM-DD HH:mm:ss');
 

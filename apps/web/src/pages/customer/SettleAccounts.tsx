@@ -3,23 +3,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Spin, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -47,6 +31,8 @@ import {
 } from '../common';
 import { PAY_CHANNEL_LABELS, PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from '../payment/common';
 import { AccountStatusTag } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface SettleFormValues {
   settleNo?: string;

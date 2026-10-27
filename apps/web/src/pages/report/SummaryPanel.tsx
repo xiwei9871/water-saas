@@ -1,20 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  InputNumber,
-  Segmented,
-  Space,
-  Spin,
-  Table,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, InputNumber, Segmented, Space, Spin, Typography } from 'antd';
 import { DownloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { api, apiErrorText } from '../../api/client';
 import TrendChart from '../../components/TrendChart';
 import { USAGE_CATEGORY_OPTIONS } from '../common';
 import { columnScale } from '../../utils/numfmt';
+import Table from '../../components/PageTable';
+
 
 type GroupBy = 'ALL' | 'ORG' | 'CATEGORY';
 

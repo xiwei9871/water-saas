@@ -1,21 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Checkbox,
-  Col,
-  Drawer,
-  Row,
-  Segmented,
-  Select,
-  Space,
-  Spin,
-  Statistic,
-  Tooltip,
-  Table,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, Checkbox, Col, Drawer, Row, Segmented, Select, Space, Spin, Statistic, Tooltip, Typography } from 'antd';
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
@@ -28,6 +12,8 @@ import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import TrendChart from '../../components/TrendChart';
 import { abbrevParts } from '../../utils/numfmt';
+import Table from '../../components/PageTable';
+
 
 interface OrgRow { id: string; name: string }
 

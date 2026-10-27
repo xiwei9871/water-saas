@@ -1,29 +1,12 @@
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Col,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Row,
-  Select,
-  Space,
-  Statistic,
-  Table,
-  Tabs,
-  Tag,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, Col, DatePicker, Descriptions, Drawer, Form, Input, Modal, Row, Select, Space, Statistic, Tabs, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useDebounced } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface DmaZone {
   id: string;

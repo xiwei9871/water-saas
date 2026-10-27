@@ -1,16 +1,5 @@
 import { PrinterOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Input,
-  InputNumber,
-  Modal,
-  Space,
-  Table,
-  Tabs,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, Input, InputNumber, Modal, Space, Tabs, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
@@ -23,6 +12,8 @@ import {
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface NoticeBill {
   period: string;

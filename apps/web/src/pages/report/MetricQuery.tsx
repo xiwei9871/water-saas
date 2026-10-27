@@ -1,21 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import {
-  App as AntdApp,
-  Card,
-  Descriptions,
-  Drawer,
-  Input,
-  List,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Card, Descriptions, Drawer, Input, List, Select, Space, Spin, Tag, Typography } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
 import { api, apiErrorText } from '../../api/client';
 import TrendChart from '../../components/TrendChart';
+import Table from '../../components/PageTable';
+
 
 interface MetricDef {
   code: string;

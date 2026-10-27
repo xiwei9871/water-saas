@@ -1,18 +1,4 @@
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Form,
-  Input,
-  Space,
-  Steps,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Form, Input, Space, Steps, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
@@ -25,6 +11,8 @@ import {
 import { USAGE_CATEGORY_LABELS, enumLabel, fmtDate, fmtPeriod, newIdemKey } from '../common';
 import { PLAN_STATUS_COLORS, PLAN_STATUS_LABELS } from './common';
 import { StaffSelect, WaterAccountSearchSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface SupplementResponse extends ReadingPlan {
   taskId: string | null;

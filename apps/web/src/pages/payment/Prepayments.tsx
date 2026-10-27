@@ -1,14 +1,4 @@
-import {
-  Alert,
-  App as AntdApp,
-  Card,
-  Select,
-  Space,
-  Statistic,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { Alert, App as AntdApp, Card, Select, Space, Statistic, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
@@ -29,6 +19,8 @@ import {
   SettleAccountSelect,
   WaterAccountSearchSelect,
 } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 const ENTRY_TYPE_OPTIONS = [
   { value: 'TOP_UP', label: '预存充值' },

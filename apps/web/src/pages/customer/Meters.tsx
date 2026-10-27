@@ -5,23 +5,7 @@ import {
   SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  AutoComplete,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, AutoComplete, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -57,6 +41,8 @@ import {
   MeterStatusTag,
   WaterAccountSelect,
 } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 /**
  * PATCH /meters/:id 允许的状态流转（与服务端一致）：

@@ -1,8 +1,10 @@
-import { App as AntdApp, Card, Table, Tag } from 'antd';
+import { App as AntdApp, Card, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { enumLabel } from '../common';
+import Table from '../../components/PageTable';
+
 
 interface MetricDef {
   code: string;

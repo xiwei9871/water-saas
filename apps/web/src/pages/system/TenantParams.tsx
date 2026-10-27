@@ -1,22 +1,13 @@
 import { EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Alert,
-  Button,
-  Card,
-  Form,
-  Input,
-  Modal,
-  Space,
-  Table,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Alert, Button, Card, Form, Input, Modal, Space, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { TenantParam } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import Table from '../../components/PageTable';
+
 
 interface ParamFormValues {
   key: string;

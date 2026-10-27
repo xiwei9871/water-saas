@@ -3,23 +3,7 @@ import {
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
@@ -45,6 +29,8 @@ import { RESULT_TYPE_LABELS } from '../metering/common';
 import { BillingAccountSelect, CustomerSelect, WaterAccountSelect } from '../pickers';
 import { RECON_STATUS_COLORS, RECON_STATUS_LABELS } from './common';
 import { FocusTaskBar, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface CreateFormValues {
   customerId?: string; // 仅级联过滤

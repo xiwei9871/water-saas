@@ -1,14 +1,4 @@
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Descriptions,
-  Drawer,
-  Space,
-  Table,
-  Tabs,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Descriptions, Drawer, Space, Tabs, Tag } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type {
@@ -49,6 +39,8 @@ import {
 import { COMPONENT_SOURCE_LABELS } from '../settlement/common';
 import { AccountStatusTag } from '../pickers';
 import { MeterSection } from './MeterSection';
+import Table from '../../components/PageTable';
+
 
 /** ReadingPlan row when listed with ?waterAccountId — the account's own
  * plan item is embedded as myItem (see API list semantics). */

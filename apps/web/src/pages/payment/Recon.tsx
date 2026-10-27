@@ -1,18 +1,5 @@
 import { UploadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Drawer,
-  Form,
-  Input,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Typography,
-  Upload,
-} from 'antd';
+import { App as AntdApp, Button, Card, Drawer, Form, Input, Select, Space, Tag, Typography, Upload } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
@@ -24,6 +11,8 @@ import {
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface ReconBatch {
   id: string;

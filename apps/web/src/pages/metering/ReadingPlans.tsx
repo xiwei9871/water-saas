@@ -5,26 +5,7 @@ import {
   StopOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Progress,
-  Radio,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Tooltip,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, Modal, Popconfirm, Progress, Radio, Select, Space, Spin, Tag, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -68,6 +49,8 @@ import {
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface GenerateFormValues {
   bookId: string;

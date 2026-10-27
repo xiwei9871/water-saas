@@ -1,10 +1,12 @@
 import { ReloadOutlined } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, Space, Table, Tag } from 'antd';
+import { App as AntdApp, Button, Card, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtTime } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface ReplaceRecord {
   newInstallationId: string;

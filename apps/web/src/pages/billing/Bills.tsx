@@ -3,25 +3,7 @@ import {
   SearchOutlined,
   SwapOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popconfirm, Select, Space, Spin, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -67,6 +49,8 @@ import {
   RUN_TYPE_LABELS,
   describeBillItem,
 } from './common';
+import Table from '../../components/PageTable';
+
 
 interface ReplaceFormValues {
   usageQty: string;

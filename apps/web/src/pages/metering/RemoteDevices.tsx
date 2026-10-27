@@ -1,20 +1,5 @@
 import { EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popconfirm, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -29,6 +14,8 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { cleanBody, fmtTime, newIdemKey } from '../common';
+import Table from '../../components/PageTable';
+
 
 interface DeviceFormValues {
   vendorDeviceKey: string;

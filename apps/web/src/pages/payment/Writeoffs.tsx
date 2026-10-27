@@ -1,19 +1,5 @@
 import { PlusOutlined, UndoOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
@@ -28,6 +14,8 @@ import {
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface DictItem {
   id: string;

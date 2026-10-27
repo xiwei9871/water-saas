@@ -8,24 +8,7 @@ import {
   UserAddOutlined,
   UserSwitchOutlined,
 } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Alert,
-  Badge,
-  Button,
-  Card,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tabs,
-  Tag,
-  Upload,
-} from 'antd';
+import { App as AntdApp, Alert, Badge, Button, Card, Descriptions, Drawer, Form, Input, Modal, Select, Space, Tabs, Tag, Upload } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
@@ -41,6 +24,8 @@ import {
 import { useAuth } from '../../auth/AuthContext';
 import { taskBizUrl } from '../../components/TaskFocus';
 import { enumLabel, fmtTime, taskContextFields, taskContextText } from '../common';
+import Table from '../../components/PageTable';
+
 
 const PRIORITY_COLOR: Record<string, string> = {
   LOW: 'default',

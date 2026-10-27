@@ -1,21 +1,5 @@
 import { EyeOutlined, RedoOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Alert,
-  Button,
-  Card,
-  Collapse,
-  Descriptions,
-  Drawer,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Timeline,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Alert, Button, Card, Collapse, Descriptions, Drawer, Input, Modal, Select, Space, Tag, Timeline, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -47,6 +31,8 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { enumLabel, fmtTime } from '../common';
+import Table from '../../components/PageTable';
+
 
 const STATUS_LABELS: Record<RemoteEventStatus, string> = {
   RECEIVED: '已接收',

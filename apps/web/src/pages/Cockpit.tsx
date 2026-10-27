@@ -1,22 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Checkbox,
-  Col,
-  Drawer,
-  Progress,
-  Row,
-  Select,
-  Space,
-  Spin,
-  Statistic,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, Checkbox, Col, Drawer, Progress, Row, Select, Space, Spin, Statistic, Tag, Tooltip, Typography } from 'antd';
 import {
   AlertOutlined,
   ArrowDownOutlined,
@@ -29,6 +12,8 @@ import type { TaskItem } from '../api/types';
 import TrendChart from '../components/TrendChart';
 import { taskBizUrl } from '../components/TaskFocus';
 import { abbrevParts, columnScale, fmtFull, fmtSignedPct } from '../utils/numfmt';
+import Table from '../components/PageTable';
+
 
 interface OrgRow { id: string; name: string }
 

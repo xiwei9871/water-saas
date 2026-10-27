@@ -1,22 +1,11 @@
 import { PlusOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Switch,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Switch, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
+import Table from '../../components/PageTable';
+
 
 interface DictCategory {
   code: string;

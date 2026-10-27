@@ -4,27 +4,15 @@ import {
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Checkbox,
-  Divider,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, Checkbox, Divider, Form, Input, Modal, Popconfirm, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { DataScope, Permission, Role } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { enumLabel } from '../common';
+import Table from '../../components/PageTable';
+
 
 const SCOPE_LABELS: Record<DataScope, string> = {
   ALL: '全部数据',

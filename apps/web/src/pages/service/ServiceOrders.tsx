@@ -8,24 +8,7 @@ import {
   StopOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Timeline,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Tag, Timeline } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -52,6 +35,8 @@ import {
   StaffSelect,
   WaterAccountSearchSelect,
 } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface ServiceOrder {
   id: string;

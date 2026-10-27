@@ -1,25 +1,11 @@
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Col,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Row,
-  Select,
-  Space,
-  Table,
-  Tabs,
-  Tag,
-  Tree,
-} from 'antd';
+import { App as AntdApp, Button, Card, Col, Form, Input, Modal, Popconfirm, Row, Select, Space, Tabs, Tag, Tree } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useDebounced } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface Warehouse {
   id: string;

@@ -1,23 +1,12 @@
 import { PlusOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Form,
-  Modal,
-  Radio,
-  Space,
-  Statistic,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Descriptions, Form, Modal, Radio, Space, Statistic, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { MeterSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface MeterRelation {
   id: string;

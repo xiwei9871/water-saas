@@ -1,22 +1,12 @@
 import { SearchOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Alert,
-  Card,
-  DatePicker,
-  Descriptions,
-  Space,
-  Statistic,
-  Table,
-  Tag,
-  Tooltip,
-} from 'antd';
+import { App as AntdApp, Button, Alert, Card, DatePicker, Descriptions, Space, Statistic, Tag, Tooltip } from 'antd';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { enumLabel, fmtCent, fmtDate, fmtPeriod, USAGE_CATEGORY_LABELS } from '../common';
 import { PAY_CHANNEL_LABELS } from '../payment/common';
+import Table from '../../components/PageTable';
+
 
 export type AnalysisKind = 'ops-daily' | 'analysis-monthly' | 'analysis-yearly';
 

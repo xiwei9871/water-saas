@@ -3,21 +3,7 @@ import {
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Modal,
-  Space,
-  Spin,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Modal, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -37,6 +23,8 @@ import {
 } from '../common';
 import { StaffLookupSelect } from '../pickers';
 import { PAY_CHANNEL_COLORS, PAY_CHANNEL_LABELS, PAYMENT_STATUS_COLORS, PAYMENT_STATUS_LABELS } from './common';
+import Table from '../../components/PageTable';
+
 
 interface CloseFormValues {
   closeDate: dayjs.Dayjs;

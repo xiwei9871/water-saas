@@ -4,24 +4,7 @@ import {
   DownloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Tabs,
-  Checkbox,
-  DatePicker,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Radio,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, Tabs, Checkbox, DatePicker, Form, Input, InputNumber, Modal, Radio, Select, Space, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useEffect, useMemo, useState } from 'react';
@@ -46,6 +29,8 @@ import {
   SettleAccountLookupSelect,
   useDebounced,
 } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 /**
  * 统一数据查询（2026-10-15 设计方案）—— 三区域布局：

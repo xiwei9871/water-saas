@@ -5,22 +5,7 @@ import {
   SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -61,6 +46,8 @@ import {
 } from '../pickers';
 import { MeterSection } from './MeterSection';
 import { WaterAccount360 } from './WaterAccount360';
+import Table from '../../components/PageTable';
+
 
 type EventKind = 'suspend' | 'resume' | 'close';
 
