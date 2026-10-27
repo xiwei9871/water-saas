@@ -446,3 +446,31 @@ describe('查询模板（阶段三·个人范围）', () => {
     expect(after.body.some((t: { id: string }) => t.id === tplId)).toBe(false);
   });
 });
+
+describe('1026-v2 X2 — 户维度「抄表册册号」字段 + 册号筛选', () => {
+  it('bookNos 字段展示册号；bookNo 模糊筛出该册下用水户', async () => {
+    const res = await post('/reports/query/unified', {
+      periodFrom: '202701', periodTo: '202703',
+      fields: ['bookNos'],
+    }).expect(201);
+    const a1 = res.body.rows.find(
+      (r: { waterAccountId: string }) => r.waterAccountId === acct['A1'],
+    );
+    const b1 = res.body.rows.find(
+      (r: { waterAccountId: string }) => r.waterAccountId === acct['B1'],
+    );
+    // A1 挂在 BookA（册号 RB-…），B1 在 BookB —— 展示册号非「—」
+    expect(String(a1.fixed.bookNos)).toMatch(/^B\d+/);
+    expect(String(b1.fixed.bookNos)).toMatch(/^B\d+/);
+    expect(a1.fixed.bookNos).not.toBe(b1.fixed.bookNos);
+
+    // 册号模糊筛选：BookA 册号 → 仅 A1
+    const bookNoA = a1.fixed.bookNos as string;
+    const filtered = await post('/reports/query/unified', {
+      periodFrom: '202701', periodTo: '202703',
+      fields: ['bookNos'], bookNo: bookNoA,
+    }).expect(201);
+    expect(filtered.body.rows.map((r: { waterAccountId: string }) => r.waterAccountId))
+      .toEqual([acct['A1']]);
+  });
+});

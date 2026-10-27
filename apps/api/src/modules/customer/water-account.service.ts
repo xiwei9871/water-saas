@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,7 +9,7 @@ import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import { isValidPeriod } from '../../common/reading-cadence.js';
-import type { TenantCtx } from '../../common/tenant-context.js';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import {
   assertAccountScopeTx,
@@ -126,6 +127,9 @@ export interface OnboardBody {
   /** 报装纳入（2.2）：来源报装单号——立户后写入 户/客户/表的
       source_apply_no，申请单反向可查"这户是哪个报装来的"。 */
   sourceApplyNo?: string;
+  /** B1：立户即入册（可选）——自动建 book_meter 成员关系；若该册当前账期
+      已有 OPEN/IN_PROGRESS 计划则同步补入计划项，否则下期自然纳入。 */
+  readingBookId?: string;
 }
 
 /** Stable system-customer key for monitoring accounts (漏损分析计量点). */
@@ -249,9 +253,37 @@ export class WaterAccountService {
           currentMeter.set(a.waterAccountId, a.meter.meterNo);
         }
       }
+      // B1 所属抄表册（一户可挂多册时全部回显，按入册先后排序）。
+      const memberships = rows.length
+        ? await tx.bookMeter.findMany({
+            where: {
+              tenantId: ctx.tenantId,
+              waterAccountId: { in: rows.map((r) => r.id) },
+            },
+            select: { waterAccountId: true, bookId: true, createdAt: true },
+            orderBy: { createdAt: 'asc' },
+          })
+        : [];
+      const bookIds = [...new Set(memberships.map((m) => m.bookId))];
+      const bookRows = bookIds.length
+        ? await tx.readingBook.findMany({
+            where: { tenantId: ctx.tenantId, id: { in: bookIds } },
+            select: { id: true, bookNo: true, name: true },
+          })
+        : [];
+      const bookById = new Map(bookRows.map((b) => [b.id, b]));
+      const booksByAccount = new Map<string, { id: string; bookNo: string; name: string }[]>();
+      for (const m of memberships) {
+        const b = bookById.get(m.bookId);
+        if (!b) continue;
+        const arr = booksByAccount.get(m.waterAccountId) ?? [];
+        arr.push(b);
+        booksByAccount.set(m.waterAccountId, arr);
+      }
       return rows.map((r) => ({
         ...r,
         currentMeterNo: currentMeter.get(r.id) ?? null,
+        readingBooks: booksByAccount.get(r.id) ?? [],
       }));
     });
   }
@@ -287,7 +319,26 @@ export class WaterAccountService {
         orderBy: { effectiveFromPeriod: 'desc' },
         select: { householdSize: true },
       });
-      return { ...account, householdSize: profile?.householdSize ?? null };
+      // B1 所属抄表册回显（与列表同一口径）。
+      const memberships = await tx.bookMeter.findMany({
+        where: { tenantId: ctx.tenantId, waterAccountId: id },
+        select: { bookId: true, createdAt: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      const readingBooks = memberships.length
+        ? await tx.readingBook.findMany({
+            where: { tenantId: ctx.tenantId, id: { in: memberships.map((m) => m.bookId) } },
+            select: { id: true, bookNo: true, name: true },
+          })
+        : [];
+      const bookById = new Map(readingBooks.map((b) => [b.id, b]));
+      return {
+        ...account,
+        householdSize: profile?.householdSize ?? null,
+        readingBooks: memberships
+          .map((m) => bookById.get(m.bookId))
+          .filter((b): b is NonNullable<typeof b> => !!b),
+      };
     });
     if (!row) throw new NotFoundException({ code: 'WATER_ACCOUNT_NOT_FOUND' });
     return row;
@@ -863,12 +914,87 @@ export class WaterAccountService {
       }
     }
 
+    // 6. B1 立户即入册（可选）——建 book_meter；若该册本期已有
+    //    OPEN/IN_PROGRESS 计划则同步补录计划项（返回 planJoined 告知前端），
+    //    否则该户自下一期计划自然纳入。
+    let readingBook: { id: string; bookNo: string; name: string } | null = null;
+    let planJoined: { planId: string; period: string } | null = null;
+    if (body.readingBookId) {
+      const book = await tx.readingBook.findFirst({
+        where: { tenantId: ctx.tenantId, id: body.readingBookId },
+        select: { id: true, bookNo: true, name: true, orgUnitId: true },
+      });
+      if (!book) throw new BadRequestException({ code: 'READING_BOOK_NOT_FOUND' });
+      if (!orgInScope(ctx, book.orgUnitId)) {
+        throw new ForbiddenException({ code: 'OUT_OF_SCOPE' });
+      }
+      // 新户不可能已在其他册——序号为册内 max+1（册行锁防并发重号，与
+      // reading-book.addMemberTx 同一不变式）。
+      await tx.$queryRaw`
+        SELECT id FROM reading_book
+        WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${book.id}::uuid
+        FOR UPDATE`;
+      const seqNo =
+        (await tx.bookMeter
+          .aggregate({
+            where: { tenantId: ctx.tenantId, bookId: book.id },
+            _max: { seqNo: true },
+          })
+          .then((a) => a._max.seqNo ?? 0)) + 1;
+      await tx.bookMeter.create({
+        data: {
+          tenantId: ctx.tenantId,
+          bookId: book.id,
+          waterAccountId: waterAccount.id,
+          seqNo,
+          createdBy: ctx.staffId,
+          updatedBy: ctx.staffId,
+        },
+      });
+      readingBook = { id: book.id, bookNo: book.bookNo, name: book.name };
+      // 本期在途计划 → 补录计划项（在抄表员下一次同步即出现在待抄清单）。
+      const curPeriod = periodOf(new Date());
+      const plan = await tx.readingPlan.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          bookId: book.id,
+          period: curPeriod,
+          status: { in: ['OPEN', 'IN_PROGRESS'] },
+        },
+        select: { id: true, period: true },
+      });
+      if (plan) {
+        const itemSeq =
+          (await tx.readingPlanItem
+            .aggregate({
+              where: { tenantId: ctx.tenantId, planId: plan.id },
+              _max: { seqNo: true },
+            })
+            .then((a) => a._max.seqNo ?? 0)) + 1;
+        await tx.readingPlanItem.create({
+          data: {
+            tenantId: ctx.tenantId,
+            planId: plan.id,
+            waterAccountId: waterAccount.id,
+            seqNo: itemSeq,
+            plannedInstallationId: installation.id,
+            status: 'PENDING',
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+        });
+        planJoined = { planId: plan.id, period: plan.period };
+      }
+    }
+
     return {
       customer,
       settleAccount,
       waterAccount,
       meter: installation.meter,
       installation,
+      readingBook,
+      planJoined,
     };
   }
 

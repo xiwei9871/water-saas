@@ -1,24 +1,9 @@
 import { EyeOutlined, RedoOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Alert,
-  Button,
-  Card,
-  Collapse,
-  Descriptions,
-  Drawer,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Timeline,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Alert, Button, Card, Collapse, Descriptions, Drawer, Input, Modal, Select, Space, Tag, Timeline, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { FOCUS_ROW_CLASS, FocusTaskBar, useFocusList } from '../../components/TaskFocus';
 
 /** canonicalPayload 常见字段的中文名（原始报文逐字段业务化展示）。 */
 const REMOTE_PAYLOAD_LABELS: Record<string, string> = {
@@ -46,6 +31,8 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { enumLabel, fmtTime } from '../common';
+import Table from '../../components/PageTable';
+
 
 const STATUS_LABELS: Record<RemoteEventStatus, string> = {
   RECEIVED: '已接收',
@@ -78,7 +65,7 @@ export default function RemoteEvents() {
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canManage = hasPerm('metering:remote:manage');
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
 
   const [sources, setSources] = useState<RemoteSource[]>([]);
   const [sourceId, setSourceId] = useState<string | undefined>(
@@ -146,14 +133,20 @@ export default function RemoteEvents() {
     }
   };
 
-  // 任务直达 ?focusId= → 自动打开该事件详情。
+  // 任务/异常直达 ?focusId= → 「只显示该条」+ 自动打开该事件详情。
+  const focusId = params.get('focusId');
+  const focusList = useFocusList<RawRemoteEvent>(
+    focusId,
+    rows,
+    focusId ? (r) => r.id === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
   useEffect(() => {
-    const focusId = params.get('focusId');
     if (focusId && focusDone.current !== focusId) {
       focusDone.current = focusId;
       void openDetail(focusId);
     }
-  }, [params]);
+  }, [focusId, params]);
 
   const replay = async (id: string) => {
     setReplaying(true);
@@ -279,22 +272,41 @@ export default function RemoteEvents() {
         </Space>
       }
     >
-      <Table
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该远传事件已定位并打开详情</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onOpenDetail={() => void openDetail(focusId)}
+          onClose={() => {
+            const next = new URLSearchParams(params);
+            next.delete('focusId');
+            setParams(next, { replace: true });
+          }}
+        />
+      )}
+      <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={rows}
-        pagination={{
-          current: page,
-          pageSize,
-          total: (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-          onChange: (p, s) => {
-            setPage(p);
-            setPageSize(s);
-          },
-          showSizeChanger: true,
-        }}
+        dataSource={focusList.shown}
+        rowClassName={(r: RawRemoteEvent) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total: (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
+                onChange: (p, s) => {
+                  setPage(p);
+                  setPageSize(s);
+                },
+                showSizeChanger: true,
+              }
+        }
       />
 
       <Drawer

@@ -1,24 +1,19 @@
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 import { api, apiErrorText } from '../../api/client';
 import { enumLabel, newIdemKey } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface Violation {
   id: string;
@@ -68,7 +63,6 @@ export default function Violations() {
   const [action, setAction] = useState<'create' | 'verify' | 'process' | 'archive' | null>(null);
   const [cur, setCur] = useState<Violation | null>(null);
   const [form] = Form.useForm();
-  const [params] = useSearchParams();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -140,7 +134,15 @@ export default function Violations() {
     }
   };
 
-  const focusId = params.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
+  // A3 任务三态分组：违章处置任务挂在违章单上。
+  const taskGroup = useTaskGroup<Violation>('violation', rows, (r) => r.id);
+  const focusList = useFocusList<Violation>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+  );
+  const shownRows = focusList.shown;
   const columns: ColumnsType<Violation> = [
     {
       title: '用水户',
@@ -208,14 +210,24 @@ export default function Violations() {
         </Space>
       }
     >
-      <Table<Violation>
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该违章单已定位，请核实/处理/归档</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
+      <Table<Violation> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={rows}
-        pagination={{ pageSize: 20 }}
-        rowClassName={(r) => (r.id === focusId ? 'ant-table-row-selected' : '')}
+        dataSource={shownRows}
+        pagination={focusList.focusing ? false : { pageSize: 20 }}
+        rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
       />
 
       <Modal

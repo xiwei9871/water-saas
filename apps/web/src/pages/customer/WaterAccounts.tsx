@@ -5,22 +5,7 @@ import {
   SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -61,6 +46,8 @@ import {
 } from '../pickers';
 import { MeterSection } from './MeterSection';
 import { WaterAccount360 } from './WaterAccount360';
+import Table from '../../components/PageTable';
+
 
 type EventKind = 'suspend' | 'resume' | 'close';
 
@@ -649,6 +636,28 @@ export default function WaterAccounts() {
           : '—',
     },
     {
+      title: '所属抄表册',
+      key: 'readingBooks',
+      width: 160,
+      render: (_: unknown, r: WaterAccount) =>
+        r.readingBooks?.length ? (
+          <>
+            {r.readingBooks.map((b) => (
+              <Tag
+                key={b.id}
+                style={{ cursor: 'pointer', marginBottom: 2 }}
+                onClick={() => navigate('/metering/books')}
+                title={`${b.bookNo} · ${b.name}`}
+              >
+                {b.name}
+              </Tag>
+            ))}
+          </>
+        ) : (
+          '—'
+        ),
+    },
+    {
       title: '用水类别',
       dataIndex: 'usageCategory',
       key: 'usageCategory',
@@ -1202,7 +1211,7 @@ export default function WaterAccounts() {
             <DatePicker picker="month" allowClear={false} />
           </Form.Item>
         </Form>
-        <Table<HouseholdProfile>
+        <Table<HouseholdProfile> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
           loading={hhLoading}

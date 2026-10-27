@@ -5,27 +5,11 @@ import {
   ReloadOutlined,
   TeamOutlined,
 } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Spin, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText, errorCode, toApiError } from '../../api/client';
 import type {
   BookCadence,
@@ -50,6 +34,9 @@ import {
   StaffSelect,
   WaterAccountSelect,
 } from '../pickers';
+import { FocusTaskBar } from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface BookFormValues {
   bookNo?: string;
@@ -64,7 +51,9 @@ interface BookFormValues {
 
 const CADENCE_LABELS: Record<BookCadence, string> = {
   MONTHLY: '每月',
-  BIMONTHLY: '双月（隔月）',
+  ODD_MONTH: '单月（1/3/5/7/9/11月）',
+  EVEN_MONTH: '双月（2/4/6/8/10/12月）',
+  QUARTERLY: '季度（每3个月）',
 };
 const CHANNEL_LABELS: Record<MeterChannel, string> = {
   MECHANICAL: '机械表·人工',
@@ -104,6 +93,9 @@ export default function ReadingBooks() {
   const [orgFilter, setOrgFilter] = useState<string | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // A2 缺失类异常直达：?wa=用水户id → 只显示含该户的抄表册。
+  const [focusParams, setFocusParams] = useSearchParams();
+  const focusWa = focusParams.get('wa');
 
   const [modal, setModal] = useState<ModalState>(null);
   const [idemKey, setIdemKey] = useState('');
@@ -127,6 +119,7 @@ export default function ReadingBooks() {
             ...(name.trim() ? { name: name.trim() } : {}),
             ...(bookNo.trim() ? { bookNo: bookNo.trim() } : {}),
             ...(orgFilter ? { orgUnitId: orgFilter } : {}),
+            ...(focusWa ? { waterAccountId: focusWa } : {}),
           },
         });
         setRows(res.data);
@@ -136,7 +129,7 @@ export default function ReadingBooks() {
         setLoading(false);
       }
     },
-    [bookNo, message, name, orgFilter],
+    [bookNo, message, name, orgFilter, focusWa],
   );
 
   useEffect(() => {
@@ -202,9 +195,9 @@ export default function ReadingBooks() {
             scheduleDay: values.scheduleDay ?? undefined,
             cadence: values.cadence,
             meterChannel: values.meterChannel,
-            // MONTHLY 不带锚点（DB CHECK：仅 BIMONTHLY 必须有锚）。
+            // 仅季度册带首抄月锚点（DB CHECK 同步）。
             anchorPeriod:
-              values.cadence === 'BIMONTHLY'
+              values.cadence === 'QUARTERLY'
                 ? values.anchorMonth?.format('YYYYMM')
                 : undefined,
           }),
@@ -224,7 +217,7 @@ export default function ReadingBooks() {
             cadence: values.cadence,
             meterChannel: values.meterChannel,
             anchorPeriod:
-              values.cadence === 'BIMONTHLY'
+              values.cadence === 'QUARTERLY'
                 ? (values.anchorMonth?.format('YYYYMM') ?? null)
                 : null,
           }),
@@ -375,7 +368,7 @@ export default function ReadingBooks() {
         <Space size={4} wrap>
           <Tag>
             {enumLabel(CADENCE_LABELS, r.cadence ?? 'MONTHLY')}
-            {r.cadence === 'BIMONTHLY' && r.anchorPeriod
+            {r.cadence === 'QUARTERLY' && r.anchorPeriod
               ? ` · 锚 ${r.anchorPeriod.slice(0, 4)}-${r.anchorPeriod.slice(4)}`
               : ''}
           </Tag>
@@ -535,7 +528,28 @@ export default function ReadingBooks() {
         </Space>
       }
     >
-      <Table<ReadingBook>
+      {focusWa && (
+        <FocusTaskBar
+          focusId={focusWa}
+          summary={
+            <span>
+              该用水户的入册情况（未入册异常时此处应为空，请在右侧册中「加入用水户」）
+            </span>
+          }
+          showAll={false}
+          onToggleAll={() => {
+            const next = new URLSearchParams(focusParams);
+            next.delete('wa');
+            setFocusParams(next, { replace: true });
+          }}
+          onClose={() => {
+            const next = new URLSearchParams(focusParams);
+            next.delete('wa');
+            setFocusParams(next, { replace: true });
+          }}
+        />
+      )}
+      <Table<ReadingBook> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
@@ -622,12 +636,12 @@ export default function ReadingBooks() {
           </Form.Item>
           <Form.Item noStyle shouldUpdate={(a, b) => a.cadence !== b.cadence}>
             {({ getFieldValue }) =>
-              getFieldValue('cadence') === 'BIMONTHLY' ? (
+              getFieldValue('cadence') === 'QUARTERLY' ? (
                 <Form.Item
                   name="anchorMonth"
-                  label="锚定账期"
-                  rules={[{ required: true, message: '双月抄表必须选择锚定账期' }]}
-                  extra="用于确定隔月节奏：如 2026-01 表示 1/3/5… 月抄表，2026-02 表示 2/4/6… 月抄表"
+                  label="季度首抄月"
+                  rules={[{ required: true, message: '季度抄表必须选择首抄月' }]}
+                  extra="确定每 3 个月一期的节奏：如 2026-01 表示 1/4/7/10 月抄表，2026-02 表示 2/5/8/11 月抄表"
                 >
                   <DatePicker picker="month" style={{ width: '100%' }} allowClear={false} />
                 </Form.Item>
@@ -712,7 +726,7 @@ export default function ReadingBooks() {
                 </Form.Item>
               </Form>
             )}
-            <Table<BookMember>
+            <Table<BookMember> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="waterAccountId"
               size="small"
               columns={memberColumns}

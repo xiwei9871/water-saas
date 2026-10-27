@@ -236,15 +236,19 @@ describe('任务C 总分表', () => {
     });
     expect(okS.status).toBe(201);
 
-    // CHECK 考核表：永不计费
-    const cA = await onboard('chk');
-    await patch(`/meters/${cA.meter.id}`, { meterRole: 'CHECK' }).expect(200);
+    // 监控表户（20261026 D1 后唯一考核表口径）：billable=false 永不计费
+    const cA = (
+      await post('/water-accounts/onboard', {
+        account: { usageCategory: 'MONITORING', addr: 'x' },
+        meter: { brand: 't', caliber: 'DN15' },
+        installation: { initialReading: 0, installedAt: '2026-01-01' },
+      }).expect(201)
+    ).body as { waterAccount: { id: string } };
     const deniedC = await post('/consumption-settlements', {
       waterAccountId: cA.waterAccount.id,
       period: '202610',
     });
     expect(deniedC.status).toBe(400);
-    expect(deniedC.body.code ?? deniedC.body.message?.code).toBe('ACCOUNT_BILLING_EXCLUDED');
     void rel;
   });
 

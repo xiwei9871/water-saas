@@ -364,6 +364,90 @@ describe('onboard wizard (立户)', () => {
       })
       .expect(400);
   });
+
+  it('B1: onboard with readingBookId → book membership + joins existing OPEN plan for the period', async () => {
+    const book = await request(app.getHttpServer())
+      .post('/reading-books')
+      .set(auth(adminToken))
+      .send({ name: `B1 onboard ${RUN}`, orgUnitId: ORG_A, cadence: 'MONTHLY' })
+      .expect(201);
+    // 空册不能生成计划——先立一个成员户入册。
+    const memberAcct = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `B1 member ${RUN}`, custType: 'PERSONAL' },
+        account: { usageCategory: 'RES_METERED', addr: 'a' },
+        meter: {},
+        installation: { initialReading: 0 },
+      })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/reading-books/${book.body.id}/meters`)
+      .set(auth(adminToken))
+      .send({ waterAccountId: memberAcct.body.waterAccount.id })
+      .expect(201);
+    const period = new Date().toISOString().slice(0, 7).replace('-', '');
+    const plan = await request(app.getHttpServer())
+      .post('/reading-plans/generate')
+      .set(auth(adminToken))
+      .send({ bookId: book.body.id, period })
+      .expect(201);
+    expect(plan.body.status).toBe('OPEN');
+
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `B1 ${RUN}`, custType: 'PERSONAL' },
+        account: { usageCategory: 'RES_METERED', addr: 'a' },
+        meter: {},
+        installation: { initialReading: 0 },
+        readingBookId: book.body.id,
+      })
+      .expect(201);
+    expect(res.body.readingBook).toMatchObject({ id: book.body.id });
+    expect(res.body.planJoined).toMatchObject({ planId: plan.body.id, period });
+
+    // book_meter membership + plan item both landed in the same tx
+    const member = await owner.query(
+      `SELECT 1 FROM book_meter WHERE water_account_id = $1 AND book_id = $2`,
+      [res.body.waterAccount.id, book.body.id],
+    );
+    expect(member.rowCount).toBe(1);
+    const item = await owner.query(
+      `SELECT 1 FROM reading_plan_item WHERE plan_id = $1 AND water_account_id = $2`,
+      [plan.body.id, res.body.waterAccount.id],
+    );
+    expect(item.rowCount).toBe(1);
+
+    // account list surfaces the book
+    const list = await request(app.getHttpServer())
+      .get(`/water-accounts?accountNo=${res.body.waterAccount.accountNo}`)
+      .set(auth(adminToken))
+      .expect(200);
+    const row = (list.body as any[]).find(
+      (r: any) => r.id === res.body.waterAccount.id,
+    );
+    expect(row.readingBooks).toEqual([
+      expect.objectContaining({ id: book.body.id }),
+    ]);
+  });
+
+  it('B1: onboard rejects an unknown readingBookId (400)', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/water-accounts/onboard')
+      .set(auth(adminToken))
+      .send({
+        customer: { name: `B1x ${RUN}`, custType: 'PERSONAL' },
+        account: { usageCategory: 'RES_METERED', addr: 'a' },
+        meter: {},
+        installation: { initialReading: 0 },
+        readingBookId: '00000000-0000-4000-8000-0000000000f1',
+      });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'READING_BOOK_NOT_FOUND' });
+  });
 });
 
 describe('meter installation lifecycle (装表/拆表/换表)', () => {

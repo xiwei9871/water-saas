@@ -1,23 +1,12 @@
 import { PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tabs,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, Drawer, Form, Input, Modal, Select, Space, Tabs, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { newIdemKey } from '../common';
 import { SettleAccountSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface Agreement {
   id: string;
@@ -298,14 +287,14 @@ export default function BankDebit() {
             key: 'batches',
             label: '代扣批次',
             children: (
-              <Table<Batch> rowKey="id" size="small" columns={batchCols} dataSource={batches} pagination={false} />
+              <Table<Batch> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={batchCols} dataSource={batches} pagination={false} />
             ),
           },
           {
             key: 'agreements',
             label: '代扣协议',
             children: (
-              <Table<Agreement> rowKey="id" size="small" columns={agCols} dataSource={agreements} pagination={{ pageSize: 20 }} />
+              <Table<Agreement> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={agCols} dataSource={agreements} pagination={{ pageSize: 20 }} />
             ),
           },
         ]}
@@ -353,7 +342,7 @@ export default function BankDebit() {
           </Space>
         }
       >
-        <Table<Item> rowKey="id" size="small" columns={itemCols} dataSource={detail?.items ?? []} pagination={false} />
+        <Table<Item> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={itemCols} dataSource={detail?.items ?? []} pagination={false} />
       </Drawer>
 
       <Modal

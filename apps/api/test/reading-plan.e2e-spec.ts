@@ -687,23 +687,22 @@ describe('v0.2: book cadence + due-period warning', () => {
       .post('/reading-books')
       .set(auth(adminToken))
       .send({
-        name: `T5 Bi ${RUN}`,
+        name: `T5 Odd ${RUN}`,
         orgUnitId: ORG_A,
-        cadence: 'BIMONTHLY',
-        anchorPeriod: '202601',
+        cadence: 'ODD_MONTH',
         meterChannel: 'REMOTE_MANUAL',
       })
       .expect(201);
-    expect(book.body.cadence).toBe('BIMONTHLY');
-    expect(book.body.anchorPeriod).toBe('202601');
+    expect(book.body.cadence).toBe('ODD_MONTH');
     expect(book.body.meterChannel).toBe('REMOTE_MANUAL');
     bookBiId = book.body.id;
 
     for (const [body, code] of [
       [{ name: 'x', orgUnitId: ORG_A, cadence: 'WEEKLY' }, 'INVALID_CADENCE'],
+      [{ name: 'x', orgUnitId: ORG_A, cadence: 'BIMONTHLY' }, 'INVALID_CADENCE'],
       [{ name: 'x', orgUnitId: ORG_A, meterChannel: 'LORAWAN' }, 'INVALID_METER_CHANNEL'],
-      [{ name: 'x', orgUnitId: ORG_A, cadence: 'BIMONTHLY' }, 'BIMONTHLY_ANCHOR_REQUIRED'],
-      [{ name: 'x', orgUnitId: ORG_A, cadence: 'BIMONTHLY', anchorPeriod: '202613' }, 'INVALID_ANCHOR_PERIOD'],
+      [{ name: 'x', orgUnitId: ORG_A, cadence: 'QUARTERLY' }, 'QUARTERLY_ANCHOR_REQUIRED'],
+      [{ name: 'x', orgUnitId: ORG_A, cadence: 'QUARTERLY', anchorPeriod: '202613' }, 'INVALID_ANCHOR_PERIOD'],
     ] as const) {
       const res = await request(app.getHttpServer())
         .post('/reading-books')
@@ -714,28 +713,28 @@ describe('v0.2: book cadence + due-period warning', () => {
     }
   });
 
-  it('PATCH MONTHLY→BIMONTHLY without anchor → 422; with anchor → 200', async () => {
+  it('PATCH MONTHLY→QUARTERLY without anchor → 422; with anchor → 200', async () => {
     const book = await request(app.getHttpServer())
       .post('/reading-books')
       .set(auth(adminToken))
-      .send({ name: `T5 M2B ${RUN}`, orgUnitId: ORG_A })
+      .send({ name: `T5 M2Q ${RUN}`, orgUnitId: ORG_A })
       .expect(201);
     const bad = await request(app.getHttpServer())
       .patch(`/reading-books/${book.body.id}`)
       .set(auth(adminToken))
-      .send({ cadence: 'BIMONTHLY' });
+      .send({ cadence: 'QUARTERLY' });
     expect(bad.status).toBe(422);
-    expect(bad.body).toMatchObject({ code: 'BIMONTHLY_ANCHOR_REQUIRED' });
+    expect(bad.body).toMatchObject({ code: 'QUARTERLY_ANCHOR_REQUIRED' });
     const ok = await request(app.getHttpServer())
       .patch(`/reading-books/${book.body.id}`)
       .set(auth(adminToken))
-      .send({ cadence: 'BIMONTHLY', anchorPeriod: '202602' })
+      .send({ cadence: 'QUARTERLY', anchorPeriod: '202602' })
       .expect(200);
-    expect(ok.body.cadence).toBe('BIMONTHLY');
+    expect(ok.body.cadence).toBe('QUARTERLY');
     expect(ok.body.anchorPeriod).toBe('202602');
   });
 
-  it('generate on a due bimonthly period → no warning; off-cycle → cadenceWarning, still 201', async () => {
+  it('generate on due/off periods → ODD_MONTH 奇数月到期；跨年边界仍按奇偶判定', async () => {
     const e = await onboard('E2');
     await request(app.getHttpServer())
       .post(`/reading-books/${bookBiId}/meters`)
@@ -743,34 +742,53 @@ describe('v0.2: book cadence + due-period warning', () => {
       .send({ waterAccountId: e.waterAccount.id })
       .expect(201);
 
-    // anchor 202601 → due: 202601, 202603, …, 202701 (odd month-index parity)
-    const due = await request(app.getHttpServer())
-      .post('/reading-plans/generate')
-      .set(auth(adminToken))
-      .send({ bookId: bookBiId, period: '202603' })
-      .expect(201);
-    expect(due.body.cadenceWarning).toBeNull();
+    // ODD_MONTH：奇数月到期。
+    for (const [period, warn] of [
+      ['202603', null],
+      ['202604', 'BOOK_NOT_DUE_THIS_PERIOD'],
+      ['202701', null], // 跨年仍是奇数月
+      ['202612', 'BOOK_NOT_DUE_THIS_PERIOD'],
+    ] as const) {
+      const res = await request(app.getHttpServer())
+        .post('/reading-plans/generate')
+        .set(auth(adminToken))
+        .send({ bookId: bookBiId, period })
+        .expect(201);
+      expect(res.body.cadenceWarning).toBe(warn);
+    }
+  });
 
-    const off = await request(app.getHttpServer())
-      .post('/reading-plans/generate')
+  it('generate → QUARTERLY 按首抄月每 3 个月到期', async () => {
+    const book = await request(app.getHttpServer())
+      .post('/reading-books')
       .set(auth(adminToken))
-      .send({ bookId: bookBiId, period: '202604' })
-      .expect(201); // warn, never block — catch-up reads are legal
-    expect(off.body.cadenceWarning).toBe('BOOK_NOT_DUE_THIS_PERIOD');
-
-    // Year-boundary: 202612→202702 is one bimonthly step.
-    const xYear = await request(app.getHttpServer())
-      .post('/reading-plans/generate')
-      .set(auth(adminToken))
-      .send({ bookId: bookBiId, period: '202701' })
+      .send({
+        name: `T5 Q ${RUN}`,
+        orgUnitId: ORG_A,
+        cadence: 'QUARTERLY',
+        anchorPeriod: '202602',
+      })
       .expect(201);
-    expect(xYear.body.cadenceWarning).toBeNull();
-    const xYearOff = await request(app.getHttpServer())
-      .post('/reading-plans/generate')
+    const e = await onboard('E3');
+    await request(app.getHttpServer())
+      .post(`/reading-books/${book.body.id}/meters`)
       .set(auth(adminToken))
-      .send({ bookId: bookBiId, period: '202612' })
+      .send({ waterAccountId: e.waterAccount.id })
       .expect(201);
-    expect(xYearOff.body.cadenceWarning).toBe('BOOK_NOT_DUE_THIS_PERIOD');
+    // anchor 202602 → due 02/05/08/11；202611 跨年仍到期，202612 不到期。
+    for (const [period, warn] of [
+      ['202605', null],
+      ['202606', 'BOOK_NOT_DUE_THIS_PERIOD'],
+      ['202611', null],
+      ['202612', 'BOOK_NOT_DUE_THIS_PERIOD'],
+    ] as const) {
+      const res = await request(app.getHttpServer())
+        .post('/reading-plans/generate')
+        .set(auth(adminToken))
+        .send({ bookId: book.body.id, period })
+        .expect(201);
+      expect(res.body.cadenceWarning).toBe(warn);
+    }
   });
 
   it('MONTHLY book is due every period — no warning ever', async () => {

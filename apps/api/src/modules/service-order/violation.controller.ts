@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Headers,
   Param,
@@ -12,7 +13,7 @@ import {
 import type { Request } from 'express';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
-import { Permissions } from '../../common/permissions.decorator.js';
+import { AnyPermissions, Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
@@ -47,14 +48,22 @@ export class ViolationController {
     });
   }
 
-  /** 稽查登记（直接进入待处理）。 */
+  /** 稽查登记（INSPECT 直接进入待处理，仅稽查岗）/ 现场上报（FIELD → 待核实，抄表岗可报）。 */
   @Post('violations')
-  @Permissions('metering:service')
+  @AnyPermissions('metering:service', 'metering:write')
   create(
     @Body() body: Record<string, unknown>,
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
   ) {
+    const perms = ((req as Request & { user?: { perms?: string[] } }).user?.perms ?? []) as string[];
+    if (
+      body?.sourceType !== 'FIELD' &&
+      !perms.includes('*') &&
+      !perms.includes('metering:service')
+    ) {
+      throw new ForbiddenException({ code: 'VIOLATION_INSPECT_ONLY', message: '稽查登记仅稽查岗可录' });
+    }
     const ctx = currentTenant();
     return withOptionalIdem(
       this.prisma,
@@ -67,7 +76,7 @@ export class ViolationController {
 
   /** 抄表员上报疑似违章：POST /meter-readings/:id/report-violation */
   @Post('meter-readings/:id/report-violation')
-  @Permissions('metering:write', 'metering:service')
+  @AnyPermissions('metering:write', 'metering:service')
   reportByReading(
     @Param('id') id: string,
     @Body() body: Record<string, unknown>,

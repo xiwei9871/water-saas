@@ -645,6 +645,56 @@ describe('supersede chain', () => {
       .send({ readingValue: 1 })
       .expect(404);
   });
+
+  it('B3 追加抄表：小于上一可信读数 → 409；未开账追加 → 入链且 billed=false', async () => {
+    // corrected=130.25 是当前链尾可信值；追加 100 应被拒。
+    const below = await request(app.getHttpServer())
+      .post(`/meter-readings/${corrected}/supersede`)
+      .set(auth(adminToken))
+      .send({ mode: 'ADDITIONAL', readingValue: 100 });
+    expect(below.status).toBe(409);
+    expect(below.body).toMatchObject({ code: 'ADDITIONAL_BELOW_PREVIOUS' });
+    // 更正模式不受不倒走限制（修错值允许更小）。
+    const corr = await request(app.getHttpServer())
+      .post(`/meter-readings/${corrected}/supersede`)
+      .set(auth(adminToken))
+      .send({ mode: 'CORRECT', readingValue: 100 })
+      .expect(201);
+    expect(corr.body.billed).toBe(false);
+    // 追加 ≥ 前值 → 201，未开账 billed=false。
+    const add = await request(app.getHttpServer())
+      .post(`/meter-readings/${corr.body.id}/supersede`)
+      .set(auth(adminToken))
+      .send({ mode: 'ADDITIONAL', readingValue: 100 })
+      .expect(201);
+    expect(add.body.billed).toBe(false);
+    expect(add.body.supplementTask).toBeNull();
+    corrected = add.body.id; // 链尾推进
+  });
+
+  it('B3 已开账追加 → 读数独立成行 + SUPPLEMENT 补差任务自动派发', async () => {
+    // 直接在 DB 放一张该户该期 POSTED NORMAL 账单，模拟已开账。
+    await owner.query(
+      `INSERT INTO bill (id, tenant_id, settle_account_id, water_account_id, period,
+        bill_kind, source_type, source_id, status, total_amount, created_at, updated_at)
+       SELECT gen_random_uuid(), wa.tenant_id, wa.settle_account_id, wa.id, '202610',
+        'NORMAL', 'MANUAL', gen_random_uuid(), 'POSTED', 6000, now(), now()
+       FROM water_account wa WHERE wa.id = $1`,
+      [acct['A']],
+    );
+    const res = await request(app.getHttpServer())
+      .post(`/meter-readings/${corrected}/supersede`)
+      .set(auth(adminToken))
+      .send({ mode: 'ADDITIONAL', readingValue: 150 })
+      .expect(201);
+    expect(res.body.billed).toBe(true);
+    expect(res.body.supplementTask?.id).toBeTruthy();
+    const t = await owner.query(`SELECT type, status, biz_type FROM task WHERE id = $1`, [
+      res.body.supplementTask.id,
+    ]);
+    expect(t.rows[0]).toMatchObject({ type: 'SUPPLEMENT', status: 'PENDING' });
+    corrected = res.body.id;
+  });
 });
 
 describe('CSV import', () => {

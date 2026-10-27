@@ -8,28 +8,17 @@ import {
   StopOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Timeline,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Tag, Timeline } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 import { api, apiErrorText } from '../../api/client';
 import {
   enumLabel,
@@ -46,6 +35,8 @@ import {
   StaffSelect,
   WaterAccountSearchSelect,
 } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface ServiceOrder {
   id: string;
@@ -152,8 +143,7 @@ const IS_CLOSE = new Set(['CLOSE']);
 
 export default function ServiceOrders() {
   const { message } = AntdApp.useApp();
-  const [searchParams] = useSearchParams();
-  const focusId = searchParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
 
   const [items, setItems] = useState<ServiceOrder[]>([]);
   const [total, setTotal] = useState(0);
@@ -240,6 +230,16 @@ export default function ServiceOrders() {
   useEffect(() => {
     if (focusId) void openDetail(focusId);
   }, [focusId, openDetail]);
+
+  // U2 任务分组：工单任务挂在工单上。
+  const taskGroup = useTaskGroup<ServiceOrder>('service_order', items, (r) => r.id);
+  const focusList = useFocusList<ServiceOrder>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
+  const shownItems = focusList.shown;
 
   const doAction = async (
     verb: 'approve' | 'reject' | 'dispatch' | 'cancel' | 'archive',
@@ -433,7 +433,10 @@ export default function ServiceOrders() {
             style={{ width: 160 }}
             options={TYPE_OPTIONS}
             value={serviceType}
-            onChange={(v) => setServiceType(v)}
+            onChange={(v) => {
+              setServiceType(v);
+              setPage(1);
+            }}
           />
           <Select
             allowClear
@@ -441,11 +444,17 @@ export default function ServiceOrders() {
             style={{ width: 120 }}
             options={STATUS_OPTIONS}
             value={status}
-            onChange={(v) => setStatus(v)}
+            onChange={(v) => {
+              setStatus(v);
+              setPage(1);
+            }}
           />
           <DatePicker.RangePicker
             value={range as never}
-            onChange={(v) => setRange(v)}
+            onChange={(v) => {
+              setRange(v);
+              setPage(1);
+            }}
             style={{ width: 240 }}
           />
           <Button icon={<ReloadOutlined />} onClick={() => void load(page)} />
@@ -455,19 +464,35 @@ export default function ServiceOrders() {
         </Space>
       }
     >
-      <Table<ServiceOrder>
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该张工单已定位并打开详情</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onOpenDetail={() => void openDetail(focusId)}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
+      <Table<ServiceOrder> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={items}
-        pagination={{
-          current: page,
-          total,
-          pageSize: 20,
-          onChange: setPage,
-          showTotal: (t) => `共 ${t} 条`,
-        }}
+        dataSource={shownItems}
+        rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                total,
+                pageSize: 20,
+                onChange: setPage,
+                showTotal: (t) => `共 ${t} 条`,
+              }
+        }
       />
 
       {/* 发起工单 */}

@@ -162,6 +162,7 @@ const CODE_LABELS: Record<string, string> = {
   ONBOARD_SETTLE_ACCOUNT_XOR: '结算户需二选一：新建或选择已有',
   ONBOARD_METER_XOR: '水表需二选一：登记新表或选择已有',
   METER_NOT_FOUND: '水表不存在',
+  METER_NO_EXISTS: '表号已存在',
   METER_STATUS_INVALID: '水表状态无效',
   METER_NOT_AVAILABLE: '水表非可用状态，无法安装',
   INVALID_METER_STATUS_TRANSITION: '当前水表状态不允许该操作',
@@ -216,6 +217,7 @@ const CODE_LABELS: Record<string, string> = {
   READING_SUPERSEDED: '该记录已被更正，请对最新记录进行质检',
   NOT_SUPERSEDABLE: '未抄见记录不能更正读数',
   ALREADY_SUPERSEDED: '该记录已被更正，不能重复更正',
+  ADDITIONAL_BELOW_PREVIOUS: '追加读数不得小于上一可信读数',
   IMPORT_BODY_REQUIRED: '请提供 CSV 内容',
   IMPORT_VALIDATION_FAILED: '导入校验失败，请按行修正后重新提交',
   ROW_MALFORMED: '行格式不正确（应为 4-5 列）',
@@ -332,6 +334,9 @@ const CODE_LABELS: Record<string, string> = {
   VIOLATION_TYPE_INVALID: '违章类型无效（未在字典中启用）',
   VIOLATION_NOT_FOUND: '违章记录不存在',
   VIOLATION_STATE: '违章当前状态不允许该操作',
+  VIOLATION_DESC_REQUIRED: '疑似违章上报须填写现场描述',
+  VIOLATION_PHOTO_REQUIRED: '疑似违章上报须附现场照片',
+  VIOLATION_INSPECT_ONLY: '稽查登记仅稽查岗可录',
   OCCURRED_DATE_INVALID: '发生日期格式不正确',
   EVIDENCE_REQUIRED: '归档佐证不全，请按类型补齐必传佐证',
   SOURCE_READING_REQUIRED: '缺少关联抄表记录',
@@ -382,6 +387,10 @@ export const apiErrorText = (err: unknown): string => {
   // 任务书 §1.8 三段式阻断：409 载荷已含任务标题与候选责任人，优先展示
   // 服务端 message，CODE_LABELS 只作缺 message 时的兜底翻译。
   if (e.code === 'SETTLEMENT_BLOCKED_BY_TASK' && e.message) return e.message;
+  if (e.code === 'METER_NO_EXISTS') {
+    const no = (e.body as { meterNo?: unknown } | undefined)?.meterNo;
+    return typeof no === 'string' && no ? `表号已存在：${no}` : '表号已存在';
+  }
   return CODE_LABELS[e.code] ?? e.message ?? e.code;
 };
 

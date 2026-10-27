@@ -987,6 +987,8 @@ model ReadingPlan {
   planDate  DateTime   @map("plan_date") @db.Date
   readerId  String?    @map("reader_id") @db.Uuid
   status    PlanStatus @default(OPEN)
+  /** REGULAR 常规整册计划 / SUPPLEMENT 追加抄表（单户计划）。 */
+  planType  String     @default("REGULAR") @map("plan_type") @db.VarChar(16)
   createdAt DateTime   @default(now()) @map("created_at")
   createdBy String?    @map("created_by") @db.Uuid
   updatedAt DateTime   @updatedAt @map("updated_at")
@@ -1804,6 +1806,8 @@ model Task {
 enum TaskStatus {
   PENDING
   CLAIMED
+  /** A1：管理岗指派给具体责任人——等同「处理中」，被指派人的待办。 */
+  ASSIGNED
   DONE
   CANCELLED
 }
@@ -2137,4 +2141,75 @@ model MeterServiceOrder {
   @@index([tenantId, waterAccountId])
   @@index([tenantId, serviceType, createdAt])
   @@map("meter_service_order")
+}
+
+/**
+ * 20261023 C1/C2：DMA 独立计量分区（仅水量监控，不含水价/水费）。
+ * 两层关系：dma_zone → dma_check_meter（考核表，meter_role=CHECK）
+ *           → dma_meter_link（挂接水表，计费侧普通/总分表）。
+ * 与 meter_relation（总分表计费树）职责分离：同一分表可同时挂接多只
+ * 考核表；考核表不参与 meter_relation。
+ */
+model DmaZone {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  region    String?
+  orgUnitId String?  @map("org_unit_id") @db.Uuid
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  checkMeters DmaCheckMeter[]
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@index([tenantId, status])
+  @@map("dma_zone")
+}
+
+model DmaCheckMeter {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  dmaId         String    @map("dma_id") @db.Uuid
+  meterId       String    @map("meter_id") @db.Uuid
+  effectiveFrom DateTime  @map("effective_from")
+  effectiveTo   DateTime? @map("effective_to")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  createdBy     String?   @map("created_by") @db.Uuid
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  updatedBy     String?   @map("updated_by") @db.Uuid
+
+  dma   DmaZone        @relation(fields: [tenantId, dmaId], references: [tenantId, id], onDelete: Restrict)
+  links DmaMeterLink[]
+
+  @@unique([tenantId, id])
+  @@unique([dmaId, meterId, effectiveFrom])
+  @@index([tenantId, dmaId])
+  @@index([tenantId, meterId])
+  @@map("dma_check_meter")
+}
+
+model DmaMeterLink {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  checkMeterId  String    @map("check_meter_id") @db.Uuid
+  meterId       String    @map("meter_id") @db.Uuid
+  effectiveFrom DateTime  @map("effective_from")
+  effectiveTo   DateTime? @map("effective_to")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  createdBy     String?   @map("created_by") @db.Uuid
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  updatedBy     String?   @map("updated_by") @db.Uuid
+
+  checkMeter DmaCheckMeter @relation(fields: [tenantId, checkMeterId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([checkMeterId, meterId, effectiveFrom])
+  @@index([tenantId, checkMeterId])
+  @@index([tenantId, meterId])
+  @@map("dma_meter_link")
 }

@@ -5,26 +5,7 @@ import {
   StopOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Progress,
-  Radio,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Tooltip,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, Modal, Popconfirm, Progress, Radio, Select, Space, Spin, Tag, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -61,6 +42,15 @@ import {
   RESULT_TYPE_LABELS,
 } from './common';
 import { ReadingBookSelect, StaffSelect } from '../pickers';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface GenerateFormValues {
   bookId: string;
@@ -111,6 +101,18 @@ export default function ReadingPlans() {
   const [status, setStatus] = useState<PlanStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // U2 任务分组：计划任务经其读数上的任务回联。
+  const taskGroup = useTaskGroup<ReadingPlan>('readingPlan', rows, (r) => r.id);
+  // 任务直达（SUPPLEMENT_READING）：focusId=计划 id → 只显示该计划+自动开抽屉。
+  const { focusId, clear: clearFocus } = useFocusParams();
+  const [focusPlan, setFocusPlan] = useState<ReadingPlan | null>(null);
+  const focusList = useFocusList<ReadingPlan>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { extraRecord: focusPlan, onShowAll: () => setPage(1) },
+  );
+  const shownRows = focusList.shown;
 
   const [progressMap, setProgressMap] = useState<Map<string, ReadingPlanProgress>>(
     new Map(),
@@ -288,26 +290,46 @@ export default function ReadingPlans() {
           if (seq === detailSeq.current) setDetailProgress(null);
         });
       // 册成员 → 户号/地址水合（册可能已删 —— 退化为短 id）。
+      // 追加计划的明细户可能不在册（未入册户挂系统册）——对缺项直查账户补齐。
       api
         .get<ReadingBookDetail>(`/reading-books/${res.data.bookId}`)
-        .then((b) => {
+        .then(async (b) => {
           if (seq !== detailSeq.current) return;
-          setMemberLabels(
-            new Map(
-              b.data.members.map((m: BookMember) => [
-                m.waterAccountId,
-                m.waterAccount
-                  ? [
-                      m.waterAccount.accountNo,
-                      m.waterAccount.customer?.name,
-                      m.waterAccount.addr,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')
-                  : '—',
-              ]),
-            ),
+          const labels = new Map(
+            b.data.members.map((m: BookMember) => [
+              m.waterAccountId,
+              m.waterAccount
+                ? [
+                    m.waterAccount.accountNo,
+                    m.waterAccount.customer?.name,
+                    m.waterAccount.addr,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')
+                : '—',
+            ]),
           );
+          const missing = res.data.items.filter((i) => !labels.has(i.waterAccountId));
+          if (missing.length) {
+            await Promise.all(
+              missing.map((i) =>
+                api
+                  .get<{ accountNo: string; addr?: string; customer?: { name?: string } }>(
+                    `/water-accounts/${i.waterAccountId}`,
+                  )
+                  .then((a) => {
+                    labels.set(
+                      i.waterAccountId,
+                      [a.data.accountNo, a.data.customer?.name, a.data.addr]
+                        .filter(Boolean)
+                        .join(' · '),
+                    );
+                  })
+                  .catch(() => labels.set(i.waterAccountId, '—')),
+              ),
+            );
+          }
+          if (seq === detailSeq.current) setMemberLabels(labels);
         })
         .catch(() => {
           if (seq === detailSeq.current) setMemberLabels(new Map());
@@ -330,6 +352,36 @@ export default function ReadingPlans() {
 
   const accountLabel = (item: ReadingPlanItem) =>
     memberLabels.get(item.waterAccountId) ?? '—';
+
+  // 任务直达：focusId 计划不在当前页时按 id 直取并自动打开明细抽屉；
+  // 在列表里则直接用行数据。
+  useEffect(() => {
+    if (!focusId) {
+      setFocusPlan(null);
+      return;
+    }
+    const inRows = rows.find((r) => r.id === focusId);
+    if (inRows) {
+      setFocusPlan(inRows);
+      openDrawer(inRows);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<ReadingPlan>(`/reading-plans/${focusId}`)
+      .then((res) => {
+        if (cancelled) return;
+        setFocusPlan(res.data);
+        openDrawer(res.data);
+      })
+      .catch((err) => {
+        if (!cancelled) message.error(apiErrorText(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusId]);
 
   const filteredItems = useMemo(
     () => (detail?.items ?? []).filter((i) => !itemStatus || i.status === itemStatus),
@@ -501,8 +553,13 @@ export default function ReadingPlans() {
       title: '账期',
       dataIndex: 'period',
       key: 'period',
-      width: 100,
-      render: fmtPeriod,
+      width: 140,
+      render: (v: string, r: ReadingPlan) => (
+        <Space size={4}>
+          {fmtPeriod(v)}
+          {r.planType === 'SUPPLEMENT' && <Tag color="purple">追加</Tag>}
+        </Space>
+      ),
     },
     {
       title: '抄表册',
@@ -717,12 +774,33 @@ export default function ReadingPlans() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={
+            focusPlan ? (
+              <span>
+                追加抄表计划 · 账期 {focusPlan.period} · 册{' '}
+                {focusPlan.bookName ?? '—'} · 抄表员 {focusPlan.readerName ?? '—'}
+              </span>
+            ) : (
+              <span>计划定位中…</span>
+            )
+          }
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onOpenDetail={() => focusPlan && openDrawer(focusPlan)}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
       <Table<ReadingPlan>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
+        rowClassName={(r) => (focusId && r.id === focusId ? FOCUS_ROW_CLASS : '')}
         scroll={{ x: 1300, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,
@@ -828,7 +906,7 @@ export default function ReadingPlans() {
                 刷新
               </Button>
             </Space>
-            <Table<ReadingPlanItem>
+            <Table<ReadingPlanItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={itemColumns}
@@ -941,7 +1019,7 @@ export default function ReadingPlans() {
         onCancel={() => setBatchOpen(false)}
         destroyOnHidden
       >
-        <Table<ReadingPlanItem>
+        <Table<ReadingPlanItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
           dataSource={(detail?.items ?? []).filter((i) => batchRows.has(i.id))}

@@ -36,10 +36,20 @@ export class NoticeController {
       const waIds = [...new Set(rows.map((r) => r.waterAccountId))];
       const accounts = await tx.waterAccount.findMany({
         where: { tenantId: ctx.tenantId, id: { in: waIds } },
-        select: { id: true, accountNo: true, customer: { select: { name: true } } },
+        select: {
+          id: true,
+          accountNo: true,
+          settleAccountId: true,
+          customer: { select: { name: true } },
+        },
       });
       const nameOf = new Map(accounts.map((a) => [a.id, `${a.accountNo} ${a.customer.name}`]));
-      return rows.map((r) => ({ ...r, waterAccountLabel: nameOf.get(r.waterAccountId) ?? null }));
+      const settleOf = new Map(accounts.map((a) => [a.id, a.settleAccountId]));
+      return rows.map((r) => ({
+        ...r,
+        waterAccountLabel: nameOf.get(r.waterAccountId) ?? null,
+        settleAccountId: settleOf.get(r.waterAccountId) ?? null,
+      }));
     });
   }
 

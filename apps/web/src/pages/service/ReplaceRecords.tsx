@@ -1,10 +1,12 @@
 import { ReloadOutlined } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, Space, Table, Tag } from 'antd';
+import { App as AntdApp, Button, Card, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtTime } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface ReplaceRecord {
   newInstallationId: string;
@@ -112,14 +114,17 @@ export default function ReplaceRecords() {
           <span style={{ display: 'inline-block', width: 240 }}>
             <WaterAccountSearchSelect
               placeholder="按用水户过滤"
-              onSelect={(a) => setWaterAccountId(a?.id)}
+              onSelect={(a) => {
+                setWaterAccountId(a?.id);
+                setPage(1);
+              }}
             />
           </span>
           <Button icon={<ReloadOutlined />} onClick={() => void load(page)} />
         </Space>
       }
     >
-      <Table<ReplaceRecord>
+      <Table<ReplaceRecord> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="newInstallationId"
         size="small"
         loading={loading}

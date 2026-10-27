@@ -1,14 +1,4 @@
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Descriptions,
-  Drawer,
-  Space,
-  Table,
-  Tabs,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Descriptions, Drawer, Space, Tabs, Tag } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type {
@@ -49,6 +39,8 @@ import {
 import { COMPONENT_SOURCE_LABELS } from '../settlement/common';
 import { AccountStatusTag } from '../pickers';
 import { MeterSection } from './MeterSection';
+import Table from '../../components/PageTable';
+
 
 /** ReadingPlan row when listed with ?waterAccountId — the account's own
  * plan item is embedded as myItem (see API list semantics). */
@@ -396,7 +388,7 @@ export function WaterAccount360({
                   title="抄表册 / 计划"
                   style={{ marginBottom: 8 }}
                 />
-                <Table<ReadingBook>
+                <Table<ReadingBook> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={data.books ?? []}
@@ -408,7 +400,7 @@ export function WaterAccount360({
                   ]}
                   style={{ marginBottom: 16 }}
                 />
-                <Table<PlanWithMyItem>
+                <Table<PlanWithMyItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={data.plans ?? []}
@@ -441,7 +433,7 @@ export function WaterAccount360({
                   ]}
                   style={{ marginBottom: 16 }}
                 />
-                <Table<MeterReading>
+                <Table<MeterReading> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={data.readings ?? []}
@@ -483,7 +475,7 @@ export function WaterAccount360({
             key: 'settlements',
             label: '结算',
             children: (
-              <Table<ConsumptionSettlement>
+              <Table<ConsumptionSettlement> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
                 dataSource={data.settlements ?? []}
@@ -492,7 +484,7 @@ export function WaterAccount360({
                 expandable={{
                   rowExpandable: (r) => r.components.length > 0,
                   expandedRowRender: (r) => (
-                    <Table
+                    <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                       rowKey="id"
                       size="small"
                       dataSource={r.components}
@@ -549,7 +541,7 @@ export function WaterAccount360({
             key: 'bills',
             label: '账单',
             children: (
-              <Table<Bill>
+              <Table<Bill> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
                 dataSource={data.bills ?? []}
@@ -614,7 +606,7 @@ export function WaterAccount360({
                     </Descriptions.Item>
                   </Descriptions>
                 )}
-                <Table<PaymentActivityRow>
+                <Table<PaymentActivityRow> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={data.activity ?? []}
@@ -685,7 +677,7 @@ export function WaterAccount360({
                     </Descriptions.Item>
                   </Descriptions>
                 )}
-                <Table<PrepaymentEntriesPage['items'][number]>
+                <Table<PrepaymentEntriesPage['items'][number]> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={data.prepayEntries ?? []}
@@ -721,7 +713,7 @@ export function WaterAccount360({
       key: 'events',
       label: '事件',
       children: (
-        <Table<AccountEvent>
+        <Table<AccountEvent> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
           dataSource={data.events ?? []}

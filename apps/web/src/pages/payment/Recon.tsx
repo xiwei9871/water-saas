@@ -1,23 +1,18 @@
 import { UploadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Drawer,
-  Form,
-  Input,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Typography,
-  Upload,
-} from 'antd';
+import { App as AntdApp, Button, Card, Drawer, Form, Input, Select, Space, Tag, Typography, Upload } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent } from '../common';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface ReconBatch {
   id: string;
@@ -100,9 +95,16 @@ export default function Recon() {
     }
   };
 
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
+  // A3 任务三态分组：对账任务挂在批次上。
+  const taskGroup = useTaskGroup<ReconBatch>('RECON_BATCH', batches, (r) => r.id);
+  const focusList = useFocusList<ReconBatch>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+  );
+  const shownBatches = focusList.shown;
 
   const openDetail = async (id: string) => {
     try {
@@ -177,10 +179,21 @@ export default function Recon() {
         </Form>
       </Card>
       <Card title="对账批次" size="small">
-        <Table rowKey="id" size="small" columns={batchCols} dataSource={batches} loading={loading} pagination={false} />
+        {focusId && (
+          <FocusTaskBar
+            focusId={focusId}
+            summary={<span>该对账批次已定位并打开明细</span>}
+            showAll={focusList.showAll}
+            onToggleAll={focusList.toggleAll}
+            onOpenDetail={() => void openDetail(focusId)}
+            onClose={clearFocus}
+          />
+        )}
+        {!focusList.focusing && taskGroup.tabs}
+        <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={batchCols} dataSource={shownBatches} loading={loading} pagination={false} rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')} />
       </Card>
       <Drawer title={`对账明细（${detail?.fileName ?? detail?.channel ?? ''}）`} open={!!detail} onClose={() => setDetail(null)} width={820}>
-        {detail && <Table rowKey="id" size="small" columns={rowCols} dataSource={detail.rows} pagination={false} />}
+        {detail && <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={rowCols} dataSource={detail.rows} pagination={false} />}
       </Drawer>
     </Space>
   );

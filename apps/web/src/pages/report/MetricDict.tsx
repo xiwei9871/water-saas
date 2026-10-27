@@ -1,8 +1,10 @@
-import { App as AntdApp, Card, Table, Tag } from 'antd';
+import { App as AntdApp, Card, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { enumLabel } from '../common';
+import Table from '../../components/PageTable';
+
 
 interface MetricDef {
   code: string;
@@ -89,7 +91,7 @@ export default function MetricDict() {
         ) : null
       }
     >
-      <Table<MetricDef>
+      <Table<MetricDef> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         size="small"
         rowKey="code"
         columns={columns}

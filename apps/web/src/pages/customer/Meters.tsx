@@ -5,26 +5,11 @@ import {
   SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  AutoComplete,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, AutoComplete, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   InstallReason,
@@ -48,6 +33,7 @@ import {
   fmtTime,
   newIdemKey,
 } from '../common';
+import { FocusTaskBar } from '../../components/TaskFocus';
 import {
   CustomerSelect,
   InstallationStatusTag,
@@ -55,6 +41,8 @@ import {
   MeterStatusTag,
   WaterAccountSelect,
 } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 /**
  * PATCH /meters/:id 允许的状态流转（与服务端一致）：
@@ -139,6 +127,18 @@ export default function Meters() {
   const [instPage, setInstPage] = useState(1);
   const [instPageSize, setInstPageSize] = useState(20);
   const instCardRef = useRef<HTMLDivElement>(null);
+
+  // A2 缺失类异常直达：?wa=用水户id → 装拆记录按户过滤（无表/多表定位到户）。
+  const [focusParams, setFocusParams] = useSearchParams();
+  const focusWa = focusParams.get('wa');
+  const focusWaDone = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusWa || focusWaDone.current === focusWa) return;
+    focusWaDone.current = focusWa;
+    setInstAccountId(focusWa);
+    setInstPage(1);
+    window.setTimeout(() => instCardRef.current?.scrollIntoView({ behavior: 'smooth' }), 300);
+  }, [focusWa]);
 
   const [installOpen, setInstallOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<MeterInstallation | null>(null);
@@ -440,7 +440,7 @@ export default function Meters() {
       key: 'meterRole',
       width: 80,
       render: (v: string | undefined) =>
-        ({ NORMAL: '普通', MASTER: '总表', SUB: '分表', CHECK: '考核表' })[v ?? 'NORMAL'] ?? v,
+        ({ NORMAL: '普通', MASTER: '总表', SUB: '分表' })[v ?? 'NORMAL'] ?? v,
     },
     {
       title: '状态',
@@ -631,7 +631,7 @@ export default function Meters() {
           </Space>
         }
       >
-        <Table<Meter>
+        <Table<Meter> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="middle"
           loading={loading}
@@ -651,6 +651,19 @@ export default function Meters() {
       </Card>
 
       <div ref={instCardRef} style={{ marginTop: 16 }}>
+        {focusWa && instAccountId === focusWa && (
+          <FocusTaskBar
+            focusId={focusWa}
+            summary={<span>该用水户的装拆记录已定位（无表/多表异常按户排查）</span>}
+            onClose={() => {
+              const next = new URLSearchParams(focusParams);
+              next.delete('wa');
+              setFocusParams(next, { replace: true });
+              setInstAccountId(undefined);
+              setInstPage(1);
+            }}
+          />
+        )}
         <Card
           title="装拆记录"
           extra={
@@ -724,7 +737,7 @@ export default function Meters() {
             </Space>
           }
         >
-          <Table<MeterInstallation>
+          <Table<MeterInstallation> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
             rowKey="id"
             size="middle"
             loading={instLoading}
@@ -799,14 +812,11 @@ export default function Meters() {
           <Form.Item
             name="meterRole"
             label="表具角色"
-            tooltip="总表/分表由「总分表关系」自动维护；此处仅可标普通表或考核表（监控表，不计费）"
+            tooltip="总表/分表由「总分表关系」自动维护；监控表（考核表）以用水户「用水类别=监控表」立户判定，此处仅可标普通表"
           >
             <Select
               allowClear
-              options={[
-                { value: 'NORMAL', label: '普通表' },
-                { value: 'CHECK', label: '考核表（监控表，不计费）' },
-              ]}
+              options={[{ value: 'NORMAL', label: '普通表' }]}
             />
           </Form.Item>
           {meterModal?.mode === 'edit' && editTransitions.length > 0 && (
@@ -1015,7 +1025,7 @@ export default function Meters() {
               title="安装历史"
               style={{ marginTop: 16 }}
             >
-              <Table
+              <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="id"
                 size="small"
                 dataSource={detail.installations}

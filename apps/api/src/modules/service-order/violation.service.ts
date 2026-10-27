@@ -91,8 +91,22 @@ export class ViolationService {
     });
     if (!dict) throw bad('VIOLATION_TYPE_INVALID', { violationType: vtype });
 
-    const sourceType = body.sourceType === 'READING' ? 'READING' : 'INSPECT';
+    const sourceType =
+      body.sourceType === 'READING' ? 'READING' : body.sourceType === 'FIELD' ? 'FIELD' : 'INSPECT';
     let sourceId: string | null = null;
+    const photos = Array.isArray(body.photoRefs)
+      ? body.photoRefs.filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+      : undefined;
+    // B2：现场上报（抄表/巡检 APP 来源的"疑是违章"）必须带描述+现场照片，
+    // 稽查岗自登（INSPECT）按登记要件不受此限。
+    if (sourceType !== 'INSPECT') {
+      if (!body.description || String(body.description).trim() === '') {
+        throw bad('VIOLATION_DESC_REQUIRED', { message: '疑似违章上报须填写现场描述' });
+      }
+      if (!photos?.length) {
+        throw bad('VIOLATION_PHOTO_REQUIRED', { message: '疑似违章上报须附现场照片' });
+      }
+    }
     if (sourceType === 'READING') {
       sourceId = typeof body.sourceReadingId === 'string' ? body.sourceReadingId : null;
       if (!sourceId) throw bad('SOURCE_READING_REQUIRED');
@@ -110,10 +124,6 @@ export class ViolationService {
         throw bad('READING_ACCOUNT_MISMATCH');
       }
     }
-    const photos = Array.isArray(body.photoRefs)
-      ? body.photoRefs.filter((x): x is string => typeof x === 'string' && x.trim() !== '')
-      : undefined;
-
     const row = await tx.waterViolation.create({
       data: {
         tenantId: ctx.tenantId,
@@ -126,7 +136,7 @@ export class ViolationService {
             : parseDate(String(body.occurredDate), 'OCCURRED_DATE_INVALID'),
         description: body.description ? String(body.description) : null,
         photoRefs: photos?.length ? (photos as Prisma.InputJsonValue) : Prisma.JsonNull,
-        status: sourceType === 'READING' ? 'PENDING_REVIEW' : 'PROCESSING',
+        status: sourceType === 'INSPECT' ? 'PROCESSING' : 'PENDING_REVIEW',
         sourceType,
         sourceId,
         createdBy: ctx.staffId,

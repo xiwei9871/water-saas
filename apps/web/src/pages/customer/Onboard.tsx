@@ -18,7 +18,7 @@ import dayjs from 'dayjs';
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
-import type { InstallReason, OnboardResult } from '../../api/types';
+import type { InstallReason, OnboardResult, ReadingBook } from '../../api/types';
 import {
   enumLabel,
   CUST_TYPE_LABELS,
@@ -71,6 +71,7 @@ interface WizardValues {
   acctAccountNo?: string;
   acctOpenedAt?: dayjs.Dayjs;
   acctHouseholdSize?: number;
+  acctReadingBookId?: string;
   meterMode: MeterMode;
   meterId?: string;
   meterNo?: string;
@@ -113,6 +114,8 @@ export default function Onboard() {
       立户成功同时办结该申请（同事务回写 户号/结算户/表号）。 */
   const [applyOptions, setApplyOptions] = useState<{ value: string; label: string; raw: ApplyLite }[]>([]);
   const [sourceApply, setSourceApply] = useState<ApplyLite | null>(null);
+  /** B1 立户即入册：可选抄表册列表（无 metering:read 时隐藏选择器）。 */
+  const [bookOptions, setBookOptions] = useState<{ value: string; label: string }[]>([]);
 
   const custMode = Form.useWatch('custMode', form) ?? 'new';
   const settleMode = Form.useWatch('settleMode', form) ?? 'default';
@@ -186,6 +189,20 @@ export default function Onboard() {
         }
       } catch {
         /* 无 install:read 权限时隐藏选择器，向导照常可用 */
+      }
+      try {
+        const books = await api.get<ReadingBook[]>('/reading-books', {
+          params: { take: 200 },
+        });
+        if (!alive) return;
+        setBookOptions(
+          books.data.map((b) => ({
+            value: b.id,
+            label: `${b.bookNo} · ${b.name}${b.orgUnitName ? `（${b.orgUnitName}）` : ''}`,
+          })),
+        );
+      } catch {
+        /* 无 metering:read 权限时隐藏选择器 */
       }
     })();
     return () => {
@@ -295,6 +312,8 @@ export default function Onboard() {
     }
     // 报装纳入：来源单号随向导提交 → 服务端同事务办结该申请。
     if (sourceApply) body.sourceApplyNo = sourceApply.applyNo;
+    // B1 立户即入册（选填）。
+    if (values.acctReadingBookId) body.readingBookId = values.acctReadingBookId;
 
     setSubmitting(true);
     try {
@@ -325,7 +344,15 @@ export default function Onboard() {
         <Result
           status="success"
           title="立户完成"
-          subTitle="客户、结算户、用水户与水表已在同一事务中建好。"
+          subTitle={
+            result.readingBook
+              ? `客户、结算户、用水户与水表已在同一事务中建好；已入册「${result.readingBook.name}」${
+                  result.planJoined
+                    ? `，并已补入本期（${result.planJoined.period}）在途抄表计划`
+                    : '，将自下一期抄表计划开始抄表'
+                }。`
+              : '客户、结算户、用水户与水表已在同一事务中建好。'
+          }
           extra={[
             <Button type="primary" key="again" onClick={resetWizard}>
               继续立户
@@ -562,6 +589,21 @@ export default function Onboard() {
               extra="居民户一户多人口申报；留空则按资费方案的基准人数计费，后续可在用水户管理中补报"
             >
               <InputNumber min={1} max={99} precision={0} style={{ width: '100%' }} />
+            </Form.Item>
+          )}
+          {!isMonitoring && bookOptions.length > 0 && (
+            <Form.Item
+              name="acctReadingBookId"
+              label="所属抄表册（选填）"
+              extra="选定后立即入册；若该册本期已有在途抄表计划，将同步补录到该计划"
+            >
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                options={bookOptions}
+                placeholder="不入册可留空，稍后在抄表册管理中添加"
+              />
             </Form.Item>
           )}
         </div>

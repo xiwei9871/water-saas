@@ -1,23 +1,12 @@
 import { PlusOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Popconfirm,
-  Space,
-  Table,
-  Tabs,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Space, Tabs, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent } from '../common';
 import { StaffSelect, WaterAccountSearchSelect } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 interface ReceiptBook {
   id: string;
@@ -191,7 +180,7 @@ export default function ReceiptDocs() {
                 <Button type="primary" icon={<PlusOutlined />} onClick={() => setBookModal(true)} style={{ marginBottom: 8 }}>
                   登记号段
                 </Button>
-                <Table rowKey="id" size="small" columns={bookCols} dataSource={books} pagination={false} />
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={bookCols} dataSource={books} pagination={false} />
               </>
             ),
           },
@@ -203,7 +192,7 @@ export default function ReceiptDocs() {
                 <Button type="primary" icon={<PlusOutlined />} onClick={() => setInvoiceModal(true)} style={{ marginBottom: 8 }}>
                   登记发票
                 </Button>
-                <Table rowKey="id" size="small" columns={invCols} dataSource={invoices} pagination={false} />
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={invCols} dataSource={invoices} pagination={false} />
               </>
             ),
           },

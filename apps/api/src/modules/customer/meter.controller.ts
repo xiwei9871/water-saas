@@ -40,22 +40,27 @@ export class MeterController {
     private readonly idem: IdempotencyService,
   ) {}
 
-  /** GET /meters — optional ?status= filter. */
+  /** GET /meters — optional ?status= / ?usageCategory=（在装户用水类别）filters. */
   @Get()
   @Permissions('customer:read')
   list(
     @Query('status') status?: string,
     @Query('q') q?: string,
+    @Query('usageCategory') usageCategory?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
   ) {
     if (status !== undefined && !METER_STATUSES.has(status)) {
       throw new BadRequestException({ code: 'METER_STATUS_INVALID' });
     }
+    if (usageCategory !== undefined && !/^[A-Z_]{2,32}$/.test(usageCategory)) {
+      throw new BadRequestException({ code: 'USAGE_CATEGORY_INVALID' });
+    }
     return this.svc.list(currentTenant(), {
       ...pageArgs(take, skip),
       status: status as MeterStatus | undefined,
       q: q?.trim() || undefined,
+      usageCategory: usageCategory || undefined,
     });
   }
 

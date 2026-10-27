@@ -1,20 +1,5 @@
 import { EditOutlined, LinkOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popconfirm, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -29,6 +14,8 @@ import type {
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { cleanBody, fmtTime, newIdemKey } from '../common';
+import Table from '../../components/PageTable';
+
 
 interface DeviceFormValues {
   vendorDeviceKey: string;
@@ -370,7 +357,7 @@ export default function RemoteDevices() {
         </Space>
       }
     >
-      <Table
+      <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="small"
         loading={loading}
@@ -439,7 +426,7 @@ export default function RemoteDevices() {
               <Descriptions.Item label="型号">{detail.model ?? '—'}</Descriptions.Item>
               <Descriptions.Item label="登记时间">{fmtTime(detail.createdAt)}</Descriptions.Item>
             </Descriptions>
-            <Table
+            <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={bindingCols}

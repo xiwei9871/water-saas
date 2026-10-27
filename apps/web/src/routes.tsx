@@ -30,10 +30,12 @@ import WaterAccounts from './pages/customer/WaterAccounts';
 import Exceptions from './pages/exception/Exceptions';
 import MeterReadings from './pages/metering/MeterReadings';
 import MeterRelations from './pages/metering/MeterRelations';
+import Dma from './pages/metering/Dma';
 import MeterStock from './pages/service/MeterStock';
 import Violations from './pages/service/Violations';
 import ReadingBooks from './pages/metering/ReadingBooks';
 import ReadingPlans from './pages/metering/ReadingPlans';
+import SupplementReading from './pages/metering/SupplementReading';
 import RemoteDevices from './pages/metering/RemoteDevices';
 import RemoteEvents from './pages/metering/RemoteEvents';
 import RemoteSources from './pages/metering/RemoteSources';
@@ -210,6 +212,14 @@ export const APP_ROUTES: AppRoute[] = [
         element: <ReadingPlans />,
       },
       {
+        // 20261026 追加抄表独立功能：计划/任务层主动发起。
+        key: 'metering-supplement',
+        path: '/metering/supplement',
+        label: '追加抄表',
+        perms: ['metering:write'],
+        element: <SupplementReading />,
+      },
+      {
         key: 'metering-readings',
         path: '/metering/readings',
         label: '抄表记录',
@@ -221,6 +231,13 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/metering/relations',
         label: '总分表关系',
         element: <MeterRelations />,
+      },
+      {
+        // 20261023 C1/C2：DMA 独立计量分区 + 产销差看板。
+        key: 'metering-dma',
+        path: '/metering/dma',
+        label: 'DMA 产销差',
+        element: <Dma />,
       },
       {
         // 20261020 核查：表务工单提为一级「表务管理」——旧路径保留

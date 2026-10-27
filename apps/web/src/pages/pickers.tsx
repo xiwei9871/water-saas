@@ -45,7 +45,7 @@ interface Option {
 }
 
 /** Debounce a search callback so a request doesn't fire per keystroke. */
-const useDebounced = (fn: (kw: string) => void, ms = 300) => {
+export const useDebounced = (fn: (kw: string) => void, ms = 300) => {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
@@ -875,7 +875,8 @@ export function ReadingBookSelect({
       setFetching(true);
       try {
         const res = await api.get<ReadingBook[]>('/reading-books', {
-          params: { take: 50, ...(kw.trim() ? { name: kw.trim() } : {}) },
+          // T1/X2：册号+名称统一模糊（后端 q 参数）
+          params: { take: 50, ...(kw.trim() ? { q: kw.trim() } : {}) },
         });
         setOptions(
           res.data.map((b) => ({

@@ -6,23 +6,7 @@ import {
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Modal, Popconfirm, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -36,6 +20,7 @@ import type {
   RunStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import { useTaskGroup } from '../../components/TaskFocus';
 import {
   enumLabel,
   fmtCent,
@@ -53,6 +38,8 @@ import {
   RUN_STATUS_LABELS,
   RUN_TYPE_LABELS,
 } from './common';
+import Table from '../../components/PageTable';
+
 
 interface CreateFormValues {
   period: dayjs.Dayjs;
@@ -74,6 +61,9 @@ export default function BillingRuns() {
   const [status, setStatus] = useState<RunStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // U2 任务分组：批次任务经其账单上的任务回联。
+  const taskGroup = useTaskGroup<BillingRun>('billingRun', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
 
   const [detail, setDetail] = useState<BillingRunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -440,12 +430,13 @@ export default function BillingRuns() {
         </Space>
       }
     >
-      <Table<BillingRun>
+      {taskGroup.tabs}
+      <Table<BillingRun> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         pagination={{
           current: page,
           pageSize,
@@ -583,7 +574,7 @@ export default function BillingRuns() {
             {failures.length > 0 && (
               <>
                 <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>失败明细</div>
-                <Table
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey={(f) => `${f.settlementId}-${f.stage}`}
                   size="small"
                   dataSource={failures}

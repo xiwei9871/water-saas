@@ -1,19 +1,5 @@
 import { PlusOutlined, UndoOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
@@ -21,7 +7,15 @@ import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { fmtCent, fmtDate } from '../common';
 import { BillingAccountSelect, SettleAccountLookupSelect } from '../pickers';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface DictItem {
   id: string;
@@ -47,8 +41,7 @@ interface Writeoff {
 /** G2 坏账核销登记（轻量版）：登记 + 原因字典 + 留痕；不做账务冲销，
  *  应收数据原样保留，报表层（年报/欠费清单）标注扣减。 */
 export default function Writeoffs() {
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const { message } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const [rows, setRows] = useState<Writeoff[]>([]);
@@ -58,6 +51,13 @@ export default function Writeoffs() {
   const [modal, setModal] = useState(false);
   const [form] = Form.useForm();
   const canWrite = hasPerm('payment:write');
+  const taskGroup = useTaskGroup<Writeoff>('badDebtWriteoff', rows, (r) => r.id);
+  const focusList = useFocusList<Writeoff>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+  );
+  const shownRows = focusList.shown;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -196,13 +196,23 @@ export default function Writeoffs() {
           </Button>
         )}
       </Space>
-      {/* 任务直达 ?focusId= 行级高亮 */}
-      <Table<Writeoff>
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该笔核销记录已定位</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
+      {/* U1 任务直达 ?focusId= 行级高亮 + 置顶警示条 */}
+      <Table<Writeoff> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         size="small"
         rowKey="id"
-        rowClassName={(r: Writeoff) => (r.id === focusId ? 'ant-table-row-selected' : '')}
+        rowClassName={(r: Writeoff) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         loading={loading}
         pagination={{ pageSize: 50 }}
       />

@@ -222,4 +222,162 @@ describe('任务D 水表库房全生命周期', () => {
     };
     expect(list.total).toBe(2);
   });
+
+  it('D1 出入库分源：采购录新号建档+重号拒绝；selectable 按类型分源', async () => {
+    const wh = await post('/meter-warehouses', {
+      code: `WH2-${RUN}`,
+      name: '二库房',
+    }).expect(201);
+
+    // 1) 采购入库直接录新表号批量建档（含检定周期自动带入）
+    const nos = [`NEW-${RUN}-001`, `NEW-${RUN}-002`];
+    const mv = await post('/meter-stock/movements', {
+      type: 'PURCHASE_IN',
+      meterNos: [...nos, nos[0]], // 批内重复应去重
+      warehouseId: wh.body.id,
+      brand: '宁波',
+      caliber: 'DN15',
+      supplier: 'XX表厂',
+      batchNo: 'D1BATCH',
+    }).expect(201);
+    expect(mv.body.count).toBe(2);
+    const created = (
+      await owner.query(
+        `SELECT meter_no, status::text AS s, check_period_years FROM meter
+         WHERE meter_no = ANY($1) ORDER BY meter_no`,
+        [nos],
+      )
+    ).rows;
+    expect(created).toHaveLength(2);
+    expect(created[0].s).toBe('AVAILABLE');
+    expect(created[0].check_period_years).toBe(6); // DN15 → 6 年
+
+    // 2) 重号整单拒绝（与档案池比对，含已入档表）
+    const dup = await post('/meter-stock/movements', {
+      type: 'PURCHASE_IN',
+      meterNos: [nos[0], `NEW-${RUN}-003`],
+      warehouseId: wh.body.id,
+    });
+    expect(dup.status).toBe(409);
+    expect(dup.body.code).toBe('METER_NO_EXISTS');
+    // 003 未落库（整单拒绝）
+    expect(
+      (
+        await owner.query(`SELECT 1 FROM meter WHERE meter_no = $1`, [
+          `NEW-${RUN}-003`,
+        ])
+      ).rowCount,
+    ).toBe(0);
+
+    // 3) selectable 分源：在库表出现在 ISSUE_OUT 候选，不出现在 RETURN_IN
+    const issueCands = (
+      await get(`/meter-stock/selectable?type=ISSUE_OUT&kw=NEW-${RUN}`)
+    ).body as { meterNo: string; warehouse: { name: string } | null }[];
+    expect(issueCands.map((c) => c.meterNo).sort()).toEqual(nos);
+    const returnCands = (
+      await get(`/meter-stock/selectable?type=RETURN_IN&kw=NEW-${RUN}`)
+    ).body as { meterNo: string }[];
+    expect(returnCands).toHaveLength(0);
+
+    // 4) 领用出库后：该表转入 RETURN_IN 候选、离开 ISSUE_OUT 候选
+    const meterId = (
+      await owner.query(`SELECT id FROM meter WHERE meter_no = $1`, [nos[0]])
+    ).rows[0].id as string;
+    await post('/meter-stock/movements', {
+      type: 'ISSUE_OUT',
+      meterIds: [meterId],
+    }).expect(201);
+    const issueAfter = (
+      await get(`/meter-stock/selectable?type=ISSUE_OUT&kw=NEW-${RUN}`)
+    ).body as { meterNo: string }[];
+    expect(issueAfter.map((c) => c.meterNo)).toEqual([nos[1]]);
+    const returnAfter = (
+      await get(`/meter-stock/selectable?type=RETURN_IN&kw=NEW-${RUN}`)
+    ).body as { meterNo: string }[];
+    expect(returnAfter.map((c) => c.meterNo)).toEqual([nos[0]]);
+  });
+});
+
+describe('1026-v2 X1 — 库房/货位 编辑·停用·删除', () => {
+  it('编辑改名 / 停用后禁出入库 / 非空删除拦截 / 空可删', async () => {
+    const wh = (await post('/meter-warehouses', {
+      code: `X1-${RUN}`, name: '编辑前', owner: '一公司',
+    }).expect(201)).body;
+    const loc = (await post(`/meter-warehouses/${wh.id}/locations`, {
+      code: 'L1', name: '旧货位',
+    }).expect(201)).body;
+
+    // X1-1 编辑库房（改名+owner）与货位（改名）
+    const wh2 = (await request(app.getHttpServer())
+      .patch(`/meter-warehouses/${wh.id}`)
+      .set(auth(adminToken))
+      .send({ name: '编辑后', owner: '二公司' })
+      .expect(200)).body;
+    expect(wh2).toMatchObject({ name: '编辑后', owner: '二公司' });
+    const loc2 = (await request(app.getHttpServer())
+      .patch(`/meter-warehouses/${wh.id}/locations/${loc.id}`)
+      .set(auth(adminToken))
+      .send({ name: '新货位' })
+      .expect(200)).body;
+    expect(loc2.name).toBe('新货位');
+
+    // X1-3 非空拦截：库房有货位 → 删库房 409；货位有在库表 → 删货位 409
+    await request(app.getHttpServer())
+      .delete(`/meter-warehouses/${wh.id}`)
+      .set(auth(adminToken))
+      .expect(409);
+    const m = await mkMeter();
+    await post('/meter-stock/movements', {
+      type: 'PURCHASE_IN', meterIds: [m.id],
+      warehouseId: wh.id, locationId: loc.id,
+    }).expect(201);
+    await request(app.getHttpServer())
+      .delete(`/meter-warehouses/${wh.id}/locations/${loc.id}`)
+      .set(auth(adminToken))
+      .expect(409);
+
+    // 停用库房 → 出入库被拒（RETURN_IN 显式指定停用库房 → 400）
+    await request(app.getHttpServer())
+      .patch(`/meter-warehouses/${wh.id}`)
+      .set(auth(adminToken))
+      .send({ status: 'DISABLED' })
+      .expect(200);
+    await post('/meter-stock/movements', {
+      type: 'RETURN_IN', meterIds: [m.id],
+      warehouseId: wh.id,
+    }).expect(400);
+
+    // 恢复启用；出库后货位空、流水已产生 → 删货位仍被流水拦（409）
+    await request(app.getHttpServer())
+      .patch(`/meter-warehouses/${wh.id}`)
+      .set(auth(adminToken))
+      .send({ status: 'ACTIVE' })
+      .expect(200);
+    await post('/meter-stock/movements', {
+      type: 'ISSUE_OUT', meterIds: [m.id],
+    }).expect(201);
+    await request(app.getHttpServer())
+      .delete(`/meter-warehouses/${wh.id}/locations/${loc.id}`)
+      .set(auth(adminToken))
+      .expect(409);
+
+    // X1-2 空库房可删：新建空库房直接删
+    const empty = (await post('/meter-warehouses', {
+      code: `X1E-${RUN}`, name: '空库房',
+    }).expect(201)).body;
+    await request(app.getHttpServer())
+      .delete(`/meter-warehouses/${empty.id}`)
+      .set(auth(adminToken))
+      .expect(200);
+    const emptyLoc = (await post('/meter-warehouses', {
+      code: `X1L-${RUN}`, name: '空货位库房',
+    }).expect(201)).body;
+    const l2 = (await post(`/meter-warehouses/${emptyLoc.id}/locations`, {
+      code: 'L9', name: '临时',
+    }).expect(201)).body;
+    await request(app.getHttpServer())
+      .delete(`/meter-warehouses/${emptyLoc.id}/locations/${l2.id}`)
+      .set(auth(adminToken))
+      .expect(200);
+  });
 });

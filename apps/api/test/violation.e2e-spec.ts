@@ -204,8 +204,44 @@ describe('任务E 违章用水', () => {
     const v3 = await post(`/meter-readings/${r2}/report-violation`, {
       violationType: 'THEFT',
       description: '读数异常疑似偷水',
+      photoRefs: ['p://theft'],
     }).expect(201);
     const d = await post(`/violations/${v3.body.id}/verify`, { confirm: false, note: '复核系误差' });
     expect(d.body.status).toBe('DISMISSED');
+  });
+
+  it('B2 现场上报：FIELD 来源→PENDING_REVIEW；缺描述/照片 400；稽查登记不受影响', async () => {
+    const acc = await mkAccount('field');
+    // 无读数场景：FIELD 来源直接挂用水户（APP 异常上报走此路）。
+    const v = await post('/violations', {
+      waterAccountId: acc.waterAccount.id,
+      violationType: 'PRIVATE_CONN',
+      description: '表后私接软管',
+      photoRefs: ['p://field1'],
+      sourceType: 'FIELD',
+    }).expect(201);
+    expect(v.body.status).toBe('PENDING_REVIEW');
+    expect(v.body.sourceType).toBe('FIELD');
+    expect(v.body.taskId).toBeTruthy();
+    // 现场类缺描述 → 400
+    const noDesc = await post('/violations', {
+      waterAccountId: acc.waterAccount.id,
+      violationType: 'THEFT',
+      photoRefs: ['p://x'],
+      sourceType: 'FIELD',
+    });
+    expect(noDesc.status).toBe(400);
+    // 现场类缺照片 → 400
+    const noPhoto = await post(`/meter-readings/${await mkReading(acc.installation.id, acc.meter.id)}/report-violation`, {
+      violationType: 'THEFT',
+      description: '有描述无照片',
+    });
+    expect(noPhoto.status).toBe(400);
+    // 稽查登记（INSPECT 缺省）不强制照片。
+    await post('/violations', {
+      waterAccountId: acc.waterAccount.id,
+      violationType: 'TAMPER',
+      description: '稽查现场登记',
+    }).expect(201);
   });
 });

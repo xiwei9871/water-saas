@@ -9,25 +9,7 @@ import {
   SearchOutlined,
   StopOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -50,6 +32,8 @@ import {
   USAGE_CATEGORY_OPTIONS,
 } from '../common';
 import { CALC_TYPE_LABELS, TARIFF_STATUS_COLORS, TARIFF_STATUS_LABELS } from './common';
+import Table from '../../components/PageTable';
+
 
 interface TierRow {
   fromQty?: string;
@@ -950,7 +934,7 @@ export default function Tariffs() {
               ]}
             />
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>阶梯明细</div>
-            <Table<TariffTier>
+            <Table<TariffTier> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={tierColumns}

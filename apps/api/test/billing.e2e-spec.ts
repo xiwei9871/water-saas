@@ -182,6 +182,11 @@ const billDetail = async (id: string) =>
       unitPrice: string | null;
       amount: string;
     }[];
+    ladderInfo?: {
+      ytdBeforeQty: string;
+      ytdAfterQty: string;
+      annualBaseQty: string | null;
+    } | null;
   };
 
 beforeAll(async () => {
@@ -1426,5 +1431,56 @@ describe('Round-2 §9 — 开账前置校验 GET /billing-runs/preflight', () =>
     expect(body.draftSettlement.map((r) => r.waterAccountId)).toEqual([
       acct['P2'],
     ]);
+  });
+});
+
+describe('1026-v2 T2 — 阶梯年量首尾相减：双月户 ≡ 每月户 + 年累计核对字段', () => {
+  it('双月户(6×40m³) 与 每月户(12×20m³) 全年 240m³ → 阶梯水费完全一致；'
+     + '账单返回 ladderInfo 当年累计/年度基数', async () => {
+    await onboard('BM', 'RES_METERED');
+    await onboard('MM', 'RES_METERED');
+    // 2027 全年：BM 仅偶数账期有结算（40m³/期，双月口径），MM 每月 20m³。
+    // 逐账期生成+发布，使 ytd 游标按已发布账单滚动累计。
+    for (let m = 1; m <= 12; m++) {
+      const p = `2027${String(m).padStart(2, '0')}`;
+      await seedSettlement(`MM-${p}`, acct['MM'], p, 20);
+      if (m % 2 === 0) await seedSettlement(`BM-${p}`, acct['BM'], p, 40);
+      const run = (await post('/billing-runs', { period: p }).expect(201)).body;
+      await post(`/billing-runs/${run.id}/post`, {}).expect(201);
+    }
+
+    const waterFeeOf = async (accountId: string) => {
+      const bills = (
+        await get(`/bills?waterAccountId=${accountId}&take=50`)
+      ).body as { id: string; billKind: string; status: string }[];
+      let total = 0;
+      for (const b of bills.filter(
+        (x) => x.billKind === 'NORMAL' && x.status === 'POSTED',
+      )) {
+        const d = await billDetail(b.id);
+        total += d.items
+          .filter((i) => i.feeItemId === waterItem)
+          .reduce((s, i) => s + Number(i.amount), 0);
+      }
+      return total;
+    };
+
+    const bmFee = await waterFeeOf(acct['BM']);
+    const mmFee = await waterFeeOf(acct['MM']);
+    // 一档 180m³@3 + 二档 60m³@4.5 = ¥810 → 81000¢，两户一致（T2-1）。
+    expect(bmFee).toBe(81000);
+    expect(mmFee).toBe(81000);
+
+    // T2-2：账单返回当年累计 + 年度基数。MM 12 月单：开账前 220 + 本单 20 = 240。
+    const mmBills = (
+      await get(`/bills?waterAccountId=${acct['MM']}&take=50`)
+    ).body as { id: string; period: string; billKind: string }[];
+    const dec = mmBills.find((b) => b.period === '202712' && b.billKind === 'NORMAL');
+    const d = await billDetail(dec!.id);
+    expect(d.ladderInfo).toMatchObject({
+      ytdBeforeQty: '220',
+      ytdAfterQty: '240',
+      annualBaseQty: '180',
+    });
   });
 });

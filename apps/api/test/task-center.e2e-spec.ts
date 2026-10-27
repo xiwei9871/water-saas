@@ -664,3 +664,312 @@ describe('T16 出账批次阻断 + T17 超期升级 + T11 无候选告警 + badg
     expect(after.completedBy).not.toBeNull();
   });
 });
+
+describe('U2 业务页任务分组：GET /tasks/biz-flags', () => {
+  it('返回 open/done 两桶且互斥，完成后记录移入 done', async () => {
+    const bizId = randomUUID();
+    const mk = (status: 'PENDING' | 'DONE') =>
+      owner.task.create({
+        data: {
+          tenantId: T,
+          type: 'SVC_EXECUTE',
+          title: 't',
+          bizType: 'service_order',
+          bizId,
+          reason: 'r',
+          requiredPerm: 'service:write',
+          status,
+          priority: 'NORMAL',
+          candidateCount: 1,
+        },
+      });
+    await mk('PENDING');
+    let flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).toContain(bizId);
+    expect(flags.doneIds).not.toContain(bizId);
+    // 全部办结 → 移入 done
+    await owner.task.updateMany({ where: { bizId, tenantId: T }, data: { status: 'DONE' } });
+    flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).not.toContain(bizId);
+    expect(flags.doneIds).toContain(bizId);
+  });
+
+  it('A3-4：reconciliation 按补差记录 id 聚合（任务挂用水户，经 waId+period 回联）', async () => {
+    // 用水户 + 该户 (from,to] 覆盖 202804 的补差记录 + 同 period 的挂户任务。
+    const a = await estimatedAccount('flg', '202601');
+    const rd1 = await seedReading(a, '202803', 100, 'PASSED');
+    const rd2 = await seedReading(a, '202804', 115, 'PASSED');
+    const wa = a.waterAccount;
+    const recon = await owner.reconciliation.create({
+      data: {
+        tenantId: T,
+        waterAccountId: wa.id,
+        anchorReadingId: rd1.id,
+        actualReadingId: rd2.id,
+        fromPeriod: '202803',
+        toPeriod: '202804',
+        actualTotalUsage: 10,
+        previouslySettledUsage: 5,
+        remainderUsage: 5,
+      },
+    });
+    const mkTask = (status: 'PENDING' | 'DONE') =>
+      owner.task.create({
+        data: {
+          tenantId: T,
+          type: 'SUPPLEMENT',
+          title: 't',
+          bizType: 'waterAccount',
+          bizId: wa.id,
+          reason: 'r',
+          requiredPerm: 'settlement:write',
+          status,
+          priority: 'NORMAL',
+          candidateCount: 1,
+          context: { waterAccountId: wa.id, period: '202804' },
+        },
+      });
+    await mkTask('PENDING');
+    let flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).toContain(recon.id);
+    expect(flags.doneIds).not.toContain(recon.id);
+    await mkTask('DONE'); // 同户同期再补一条已了结任务 —— 仍被 open 压住
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).toContain(recon.id);
+    await owner.task.updateMany({
+      where: { tenantId: T, bizType: 'waterAccount', bizId: wa.id },
+      data: { status: 'DONE' },
+    });
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).not.toContain(recon.id);
+    expect(flags.doneIds).toContain(recon.id);
+    // period 不匹配的任务不连累该记录（202805 不在 (202803,202804]）。
+    await owner.task.create({
+      data: {
+        tenantId: T,
+        type: 'SUPPLEMENT',
+        title: 't',
+        bizType: 'waterAccount',
+        bizId: wa.id,
+        reason: 'r',
+        requiredPerm: 'settlement:write',
+        status: 'PENDING',
+        priority: 'NORMAL',
+        candidateCount: 1,
+        context: { waterAccountId: wa.id, period: '202805' },
+      },
+    });
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).not.toContain(recon.id);
+    expect(flags.doneIds).toContain(recon.id);
+  });
+
+  it('A3-4：collectionNotice 按通知单 id 聚合（context.noticeId）', async () => {
+    const noticeId = randomUUID();
+    await owner.task.create({
+      data: {
+        tenantId: T,
+        type: 'COLLECTION',
+        title: 't',
+        bizType: 'settleAccount',
+        bizId: randomUUID(),
+        reason: 'r',
+        requiredPerm: 'payment:write',
+        status: 'PENDING',
+        priority: 'NORMAL',
+        candidateCount: 1,
+        context: { noticeId },
+      },
+    });
+    const flags = (await get(`/tasks/biz-flags?bizType=collectionNotice`, tokens.qc).expect(200))
+      .body;
+    expect(flags.openIds).toContain(noticeId);
+    expect(flags.doneIds).not.toContain(noticeId);
+  });
+});
+
+describe('A1 任务指派/派送', () => {
+  const mkTask = (perm = 'billing:write') =>
+    owner.task.create({
+      data: {
+        tenantId: T,
+        type: 'COLLECTION',
+        title: `指派测试 ${randomUUID().slice(0, 8)}`,
+        bizType: 'settleAccount',
+        bizId: randomUUID(),
+        reason: 'A1 测试注入',
+        requiredPerm: perm,
+        status: 'PENDING',
+        priority: 'NORMAL',
+        candidateCount: 1,
+      },
+    });
+
+  it('管理岗指派 → ASSIGNED；进指派人待办且带来源标识，旁人不可见', async () => {
+    const t = await mkTask();
+    const res = await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }).expect(201);
+    expect(res.body.status).toBe('ASSIGNED');
+    expect(res.body.assigneeId).toBe(ids.staff_billerA);
+    const todoA = (await get('/tasks?box=todo', tokens.billerA).expect(200)).body.items;
+    const mine = todoA.find((x: { id: string }) => x.id === t.id);
+    expect(mine?.source).toBe('ASSIGNED_TO_ME');
+    // 同权限但非指派人：不再出现在其待办（指定单由指定人处置）。
+    const todoB = (await get('/tasks?box=todo', tokens.billerB).expect(200)).body.items;
+    expect(todoB.map((x: { id: string }) => x.id)).not.toContain(t.id);
+  });
+
+  it('非管理岗指派 → 403；无权候选人 → 403 该账号无此任务类型处置权限', async () => {
+    const t = await mkTask();
+    const byPlain = await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }, tokens.billerA);
+    expect(byPlain.status).toBe(403);
+    expect(JSON.stringify(byPlain.body)).toContain('TASK_ASSIGN_FORBIDDEN');
+    const badTarget = await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_cashier });
+    expect(badTarget.status).toBe(403);
+    expect(JSON.stringify(badTarget.body)).toContain('ASSIGNEE_NOT_CANDIDATE');
+  });
+
+  it('已指派任务旁人不可领取(409)；未指派任务仍可领取', async () => {
+    const t = await mkTask();
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }).expect(201);
+    const steal = await post(`/tasks/${t.id}/claim`, {}, tokens.billerB);
+    expect(steal.status).toBe(409);
+    // 未指派 PENDING 任务：另一候选人正常领取（对照组）。
+    const free = await mkTask();
+    await post(`/tasks/${free.id}/claim`, {}, tokens.billerB).expect(201);
+    const after = await owner.task.findUniqueOrThrow({ where: { id: free.id } });
+    expect(after.status).toBe('CLAIMED');
+    expect(after.assigneeId).toBe(ids.staff_billerB);
+  });
+
+  it('改派：原指派人待办消失、新指派人获得；原指派人完成被拒并提示已改派', async () => {
+    const t = await mkTask('metering:qc');
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_qc }).expect(201);
+    // 管理岗改派给另一候选人（admin 也是候选人）。
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_admin }).expect(201);
+    const todoQc = (await get('/tasks?box=todo', tokens.qc).expect(200)).body.items;
+    expect(todoQc.map((x: { id: string }) => x.id)).not.toContain(t.id);
+    const todoAdmin = (await get('/tasks?box=todo').expect(200)).body.items;
+    expect(todoAdmin.map((x: { id: string }) => x.id)).toContain(t.id);
+    // 原指派人完成 → 409 TASK_REASSIGNED。
+    const stale = await post(`/tasks/${t.id}/complete`, { note: '旧指派人' }, tokens.qc);
+    expect(stale.status).toBe(409);
+    expect(JSON.stringify(stale.body)).toContain('TASK_REASSIGNED');
+  });
+
+  it('被指派人完成自己的指派单（结果+业务校验链路不变）', async () => {
+    const t = await mkTask('metering:qc');
+    await owner.task.update({
+      where: { id: t.id },
+      data: { context: { noticeId: randomUUID() } },
+    });
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_qc }).expect(201);
+    // COLLECTION 完成标准：context 无具体业务锚点时放行；结果必填仍生效。
+    const noNote = await post(`/tasks/${t.id}/complete`, {}, tokens.qc);
+    expect(noNote.status).toBe(400);
+    const done = await post(`/tasks/${t.id}/complete`, { note: '指派单办结' }, tokens.qc);
+    expect(done.status).toBe(201);
+    const after = await owner.task.findUniqueOrThrow({ where: { id: t.id } });
+    expect(after.status).toBe('DONE');
+    expect(after.resultNote).toBe('指派单办结');
+  });
+
+  it('ASSIGNED 占用 open 槽位：同 (type,biz) 不重复建单 + bizFlags 计入 open', async () => {
+    const bizId = randomUUID();
+    const t = await mkTask();
+    await owner.task.update({
+      where: { id: t.id },
+      data: { type: 'COLLECTION', bizId },
+    });
+    await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }).expect(201);
+    // 去重索引含 ASSIGNED：同键直接 INSERT 应冲突被吸收 → 仍只有一条 open。
+    const flags = (await get(`/tasks/biz-flags?bizType=settleAccount`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).toContain(bizId);
+    expect(flags.doneIds).not.toContain(bizId);
+  });
+});
+
+describe('1026-v2 X6 — 抄表计划分组口径：全部抄完且无未结任务 → 已完成', () => {
+  const mkPlan = async (
+    suffix: string,
+    a: { waterAccount: { id: string }; installation: { id: string }; meter: { id: string } },
+    opts: { read: boolean },
+  ) => {
+    const book = await owner.readingBook.create({
+      data: { tenantId: T, bookNo: `BKX6${suffix}${RUN}`.slice(0, 38), name: `册${suffix}`, orgUnitId: ORG_A },
+    });
+    const plan = await owner.readingPlan.create({
+      data: { tenantId: T, bookId: book.id, period: '202603', planDate: new Date('2026-03-01'), status: 'OPEN' },
+    });
+    const item = await owner.readingPlanItem.create({
+      data: { tenantId: T, planId: plan.id, waterAccountId: a.waterAccount.id, seqNo: 1 },
+    });
+    let readingId: string | null = null;
+    if (opts.read) {
+      const r = await owner.meterReading.create({
+        data: {
+          tenantId: T,
+          planItemId: item.id,
+          installationId: a.installation.id,
+          meterId: a.meter.id,
+          period: '202603',
+          readDate: new Date('2026-03-05'),
+          resultType: 'ACTUAL',
+          readingValue: 50,
+          qcStatus: 'PASSED',
+          source: 'WEB',
+          operatorId: ids.staff_admin,
+        },
+      });
+      readingId = r.id;
+      await owner.readingPlanItem.update({
+        where: { id: item.id },
+        data: { status: 'READ', completedReadingId: r.id },
+      });
+    }
+    return { plan, item, readingId };
+  };
+
+  it('已抄完无任务→done；CANCELLED 不阻塞→done；未结任务/未抄明细→open', async () => {
+    const a1 = await estimatedAccount('x6a', '202601');
+    const a2 = await estimatedAccount('x6b', '202601');
+    const a3 = await estimatedAccount('x6c', '202601');
+    const a4 = await estimatedAccount('x6d', '202601');
+
+    // p1：全抄完、无任何任务 → done
+    const { plan: p1 } = await mkPlan('1', a1, { read: true });
+    // p2：全抄完 + 读数上挂 CANCELLED 任务 → done（取消不阻塞，X6-2）
+    const { plan: p2, readingId: r2 } = await mkPlan('2', a2, { read: true });
+    await owner.task.create({
+      data: {
+        tenantId: T, type: 'METER_REVIEW', title: 't', bizType: 'meterReading',
+        bizId: r2!, reason: 'r', requiredPerm: 'metering:qc',
+        status: 'CANCELLED', priority: 'NORMAL', candidateCount: 1,
+      },
+    });
+    // p3：全抄完 + 读数上挂 PENDING 收尾任务 → open
+    const { plan: p3, readingId: r3 } = await mkPlan('3', a3, { read: true });
+    await owner.task.create({
+      data: {
+        tenantId: T, type: 'METER_REVIEW', title: 't', bizType: 'meterReading',
+        bizId: r3!, reason: 'r', requiredPerm: 'metering:qc',
+        status: 'PENDING', priority: 'NORMAL', candidateCount: 1,
+      },
+    });
+    // p4：明细未抄、无任务 → open（X6-1 原滞留点）
+    const { plan: p4 } = await mkPlan('4', a4, { read: false });
+
+    const flags = (
+      await get(`/tasks/biz-flags?bizType=readingPlan`, tokens.qc).expect(200)
+    ).body as { openIds: string[]; doneIds: string[]; blockers: Record<string, { unreadItems: number; openTasks: boolean }> };
+
+    expect(flags.doneIds).toContain(p1.id);
+    expect(flags.doneIds).toContain(p2.id);
+    expect(flags.openIds).toContain(p3.id);
+    expect(flags.openIds).toContain(p4.id);
+    // 互斥
+    expect(flags.openIds.filter((x) => flags.doneIds.includes(x))).toHaveLength(0);
+    // blockers 自检：p3 卡在未结任务（unread=0），p4 卡在未抄明细
+    expect(flags.blockers[p3.id]).toMatchObject({ unreadItems: 0, openTasks: true });
+    expect(flags.blockers[p4.id]).toMatchObject({ unreadItems: 1, openTasks: false });
+  });
+});

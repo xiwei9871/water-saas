@@ -9,26 +9,7 @@ import {
   UploadOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popover,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Tooltip,
-  Upload,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popover, Select, Space, Spin, Tag, Tooltip, Typography, Upload } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -58,7 +39,15 @@ import {
   RESULT_TYPE_COLORS,
   RESULT_TYPE_LABELS,
 } from './common';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 type QcAction = 'pass' | 'reject' | 'review';
 
@@ -77,6 +66,7 @@ const QC_ACTION_TEXT: Record<QcAction, { label: string; icon: ReactNode; danger?
 };
 
 interface SupersedeFormValues {
+  mode?: 'CORRECT' | 'ADDITIONAL';
   readingValue: string;
   readDate?: dayjs.Dayjs;
 }
@@ -90,6 +80,26 @@ f47ac10b-58cc-4372-a567-0e02b2c3d480,NO_READ,,LOCKED,2026-10-05`;
  * 抄表记录 / 质检：append-only 采集事实的查询 + QC 质检 + 更正（supersede
  * 追加新事实行）+ CSV 批量导入（all-or-nothing，失败行报告内嵌展示）。
  */
+/** X3：违章照片压缩（最长边 1280，JPEG 0.7）→ dataURL，与 H5 同口径。 */
+const compressPhoto = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale);
+      c.height = Math.round(img.height * scale);
+      c.getContext('2d')?.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(img.src);
+      resolve(c.toDataURL('image/jpeg', 0.7));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(img.src);
+      reject(new Error('照片读取失败'));
+    };
+    img.src = URL.createObjectURL(file);
+  });
+
 export default function MeterReadings() {
   const { message, modal } = AntdApp.useApp();
   const { hasPerm } = useAuth();
@@ -119,7 +129,8 @@ export default function MeterReadings() {
   const [supersedeIdemKey, setSupersedeIdemKey] = useState('');
   // 20261021 整改 任务E：抄表员上报疑似违章（→ PENDING_REVIEW，派发稽查任务）。
   const [violationTarget, setViolationTarget] = useState<MeterReading | null>(null);
-  const [violationForm] = Form.useForm<{ violationType: string; description?: string; photoRefs?: string }>();
+  const [vPhotos, setVPhotos] = useState<string[]>([]);
+  const [violationForm] = Form.useForm<{ violationType: string; description?: string }>();
   const [saving, setSaving] = useState(false);
   const [supersedeForm] = Form.useForm<SupersedeFormValues>();
 
@@ -170,9 +181,9 @@ export default function MeterReadings() {
     [page, pageSize, rows.length],
   );
 
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, wa: focusWa, period: focusPeriod, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
+  const [focusRecord, setFocusRecord] = useState<MeterReading | null>(null);
 
   const openDetail = async (reading: MeterReading) => {
     setDetailLoading(true);
@@ -187,13 +198,50 @@ export default function MeterReadings() {
     }
   };
 
-  // 任务直达 ?focusId= → 自动打开该条读数详情（层面一定位）。
+  // U1 任务直达 ?focusId= → 定位到"该条"记录：置顶警示条 + 行高亮 + 自动开详情。
   useEffect(() => {
-    if (focusId && focusDone.current !== focusId) {
-      focusDone.current = focusId;
-      void openDetail({ id: focusId } as MeterReading);
+    if (!focusId) {
+      setFocusRecord(null);
+      focusDone.current = null;
+      return;
     }
+    if (focusDone.current === focusId) return;
+    focusDone.current = focusId;
+    void (async () => {
+      try {
+        const res = await api.get<MeterReading>(`/meter-readings/${focusId}`);
+        setFocusRecord(res.data);
+      } catch {
+        setFocusRecord(null);
+      }
+      await openDetail({ id: focusId } as MeterReading);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId]);
+
+  // U2 任务分组：默认「未完成」，任务全部了结或无任务的记录归入「已完成」。
+  const taskGroup = useTaskGroup<MeterReading>('meterReading', rows, (r) => r.id);
+  // A2「只显示该条」：聚焦中数据源只含目标记录；「显示全部记录」展开回第 1 页。
+  const focusList = useFocusList<MeterReading>(
+    focusId ?? focusWa,
+    taskGroup.filtered,
+    focusId
+      ? (r) => r.id === focusId
+      : focusWa
+        ? (r) => r.account?.id === focusWa && (!focusPeriod || r.period === focusPeriod)
+        : null,
+    { extraRecord: focusRecord, onShowAll: () => setPage(1) },
+  );
+  const shownRows = focusList.shown;
+
+  // 聚焦行进入视口即高亮滚动到位。
+  useEffect(() => {
+    if (!focusId) return;
+    const t = window.setTimeout(() => {
+      document.querySelector(`.${FOCUS_ROW_CLASS}`)?.scrollIntoView({ block: 'center' });
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [focusId, shownRows.length]);
 
   const doQc = async (reading: MeterReading, action: QcAction) => {
     setActing(reading.id);
@@ -257,15 +305,32 @@ export default function MeterReadings() {
     if (!supersedeTarget) return;
     setSaving(true);
     try {
-      await api.post(
+      const res = await api.post<{
+        billed?: boolean;
+        supplementTask?: { id: string; deduped: boolean } | null;
+      }>(
         `/meter-readings/${supersedeTarget.id}/supersede`,
         cleanBody({
+          mode: values.mode ?? 'CORRECT',
           readingValue: values.readingValue,
           readDate: values.readDate?.format('YYYY-MM-DD'),
         }),
         { headers: { 'Idempotency-Key': supersedeIdemKey } },
       );
-      message.success('更正读数已生成（原记录保留为历史）');
+      if (res.data.billed) {
+        message.warning(
+          res.data.supplementTask?.deduped
+            ? '该期已开账——读数已独立成行，已有在途补差任务继续跟进'
+            : '该期已开账——读数已独立成行，并生成补差任务走对账/调整',
+          6,
+        );
+      } else {
+        message.success(
+          (values.mode ?? 'CORRECT') === 'ADDITIONAL'
+            ? '追加读数已入链（原记录保留为历史），质检已重置'
+            : '更正读数已生成（原记录保留为历史）',
+        );
+      }
       setSupersedeTarget(null);
       await load(page, pageSize);
     } catch (err) {
@@ -464,6 +529,7 @@ export default function MeterReadings() {
                 icon={<WarningOutlined />}
                 onClick={() => {
                   violationForm.resetFields();
+                  setVPhotos([]);
                   setViolationTarget(record);
                 }}
               >
@@ -593,30 +659,62 @@ export default function MeterReadings() {
         </Space>
       }
     >
+      {(focusId || focusWa) && (
+        <FocusTaskBar
+          focusId={focusId ?? focusWa!}
+          summary={
+            focusRecord ? (
+              <span>
+                户号 {focusRecord.account?.accountNo ?? '—'} · 账期 {focusRecord.period} · 读数{' '}
+                {String(focusRecord.readingValue ?? '—')} · 质检{' '}
+                {enumLabel(QC_STATUS_LABELS, focusRecord.qcStatus)}
+              </span>
+            ) : focusWa && !focusId ? (
+              <span>
+                该用水户的抄表记录已定位{focusPeriod ? `（账期 ${focusPeriod}）` : ''}
+              </span>
+            ) : (
+              <span>记录 {focusId!.slice(0, 8)}…</span>
+            )
+          }
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onOpenDetail={
+            focusId ? () => void openDetail({ id: focusId } as MeterReading) : undefined
+          }
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
       <Table<MeterReading>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
+        rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         scroll={{ x: 1900, y: 'calc(100vh - 340px)' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          onChange: (p, size) => {
-            setPage(p);
-            setPageSize(size);
-          },
-        }}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                onChange: (p, size) => {
+                  setPage(p);
+                  setPageSize(size);
+                },
+              }
+        }
       />
 
       {/* 更正读数 */}
       <Modal maskClosable={false}
         open={supersedeTarget !== null}
-        title="更正读数（追加新事实行，原记录保留为历史）"
-        okText="更正"
+        title="更正 / 追加读数（追加新事实行，原记录保留为历史）"
+        okText="提交"
         cancelText="取消"
         confirmLoading={saving}
         onOk={() => void submitSupersede()}
@@ -631,10 +729,22 @@ export default function MeterReadings() {
             message={`原读数：${supersedeTarget.readingValue ?? '—'}（${enumLabel(RESULT_TYPE_LABELS, supersedeTarget.resultType)} · ${fmtPeriod(supersedeTarget.period)}）`}
           />
         )}
-        <Form form={supersedeForm} layout="vertical">
+        <Form form={supersedeForm} layout="vertical" initialValues={{ mode: 'CORRECT' }}>
+          <Form.Item
+            name="mode"
+            label="方式"
+            extra="更正：修错值（可小于原值）；追加：本期再抄一次（不得小于上一可信读数）。该期已开账时均转补差任务。"
+          >
+            <Select
+              options={[
+                { value: 'CORRECT', label: '更正错值' },
+                { value: 'ADDITIONAL', label: '追加抄表' },
+              ]}
+            />
+          </Form.Item>
           <Form.Item
             name="readingValue"
-            label="更正后表码读数"
+            label="新表码读数"
             rules={[{ required: true, message: '请输入表码读数' }, DECIMAL_RULE]}
           >
             <Input placeholder="如 123.5" />
@@ -654,21 +764,28 @@ export default function MeterReadings() {
         cancelText="取消"
         onOk={async () => {
           const v = await violationForm.validateFields();
+          // X3-2：照片为上传控件采集，不再手填引用
+          if (vPhotos.length === 0) {
+            message.warning('疑似违章须附现场照片，请拍照或选择图片');
+            return;
+          }
           try {
             await api.post(`/meter-readings/${violationTarget!.id}/report-violation`, {
               violationType: v.violationType,
               description: v.description,
-              photoRefs: String(v.photoRefs ?? '')
-                .split(/[\s,，;；]+/)
-                .filter(Boolean),
+              photoRefs: vPhotos,
             });
             message.success('已上报，稽查岗将在待办中核实');
             setViolationTarget(null);
+            setVPhotos([]);
           } catch (e) {
             message.error(apiErrorText(e));
           }
         }}
-        onCancel={() => setViolationTarget(null)}
+        onCancel={() => {
+          setViolationTarget(null);
+          setVPhotos([]);
+        }}
         destroyOnHidden
       >
         <Form form={violationForm} layout="vertical">
@@ -683,11 +800,48 @@ export default function MeterReadings() {
               ]}
             />
           </Form.Item>
-          <Form.Item name="description" label="现场描述">
+          <Form.Item name="description" label="现场描述" rules={[{ required: true, message: '请填写现场描述' }]}>
             <Input.TextArea rows={2} />
           </Form.Item>
-          <Form.Item name="photoRefs" label="现场照片引用（空格分隔，可选）">
-            <Input.TextArea rows={2} />
+          {/* X3-2：拍照/上传控件替代手填 photo-ref，上传后即时预览 */}
+          <Form.Item label="现场照片（必填）" required>
+            <Upload
+              accept="image/*"
+              showUploadList={false}
+              beforeUpload={(file) => {
+                void compressPhoto(file)
+                  .then((dataUrl) => setVPhotos((p) => [...p, dataUrl]))
+                  .catch(() => message.error('照片读取失败'));
+                return false;
+              }}
+            >
+              <Button icon={<UploadOutlined />}>拍照 / 选择图片</Button>
+            </Upload>
+            <Space wrap style={{ marginTop: 8 }}>
+              {vPhotos.map((p, i) => (
+                <span key={i} style={{ position: 'relative', display: 'inline-block' }}>
+                  <img
+                    src={p}
+                    alt={`现场照片${i + 1}`}
+                    style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6 }}
+                  />
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    style={{ position: 'absolute', top: 0, right: 0 }}
+                    onClick={() => setVPhotos((arr) => arr.filter((_, j) => j !== i))}
+                  >
+                    ×
+                  </Button>
+                </span>
+              ))}
+            </Space>
+            {vPhotos.length === 0 && (
+              <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12 }}>
+                未拍照/上传不得提交。
+              </Typography.Text>
+            )}
           </Form.Item>
         </Form>
       </Modal>
@@ -735,7 +889,7 @@ export default function MeterReadings() {
             message="导入校验失败 —— 未写入任何记录，请按行修正后重新提交"
             style={{ marginTop: 8 }}
             description={
-              <Table<ImportRowError>
+              <Table<ImportRowError> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="row"
                 size="small"
                 columns={failedColumns}

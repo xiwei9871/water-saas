@@ -3,23 +3,7 @@ import {
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
@@ -44,7 +28,9 @@ import {
 import { RESULT_TYPE_LABELS } from '../metering/common';
 import { BillingAccountSelect, CustomerSelect, WaterAccountSelect } from '../pickers';
 import { RECON_STATUS_COLORS, RECON_STATUS_LABELS } from './common';
-import { useSearchParams } from 'react-router-dom';
+import { FocusTaskBar, useFocusParams, useTaskGroup } from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface CreateFormValues {
   customerId?: string; // 仅级联过滤
@@ -252,17 +238,20 @@ export default function Reconciliations() {
     [page, pageSize, rows.length],
   );
 
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
 
-  // 任务直达 ?focusId=（bizId=用水户）→ 按户过滤补差列表。
+  // 任务直达 ?focusId=（bizId=用水户）→ 按户过滤补差列表 + 置顶警示条。
   useEffect(() => {
     if (focusId && focusDone.current !== focusId) {
       focusDone.current = focusId;
       setWaterAccountId(focusId);
     }
   }, [focusId]);
+
+  // A3 任务三态分组：按补差记录 id（后端经 waterAccountId+period 回联任务）。
+  const taskGroup = useTaskGroup<Reconciliation>('reconciliation', rows, (r) => r.id);
+  const shownRows = taskGroup.filtered;
 
   const openDetail = async (row: Reconciliation) => {
     setDetailLoading(true);
@@ -521,12 +510,28 @@ export default function Reconciliations() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>已按用水户过滤补差记录</span>}
+          showAll={!effectiveAccountId}
+          onToggleAll={(v) => {
+            setWaterAccountId(v ? undefined : focusId);
+            setPage(1);
+          }}
+          onClose={() => {
+            clearFocus();
+            setWaterAccountId(undefined);
+          }}
+        />
+      )}
+      {taskGroup.tabs}
       <Table<Reconciliation>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         // 列宽总和超过视口 —— scroll.x 让溢出发生在表格内而不是整页。
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{

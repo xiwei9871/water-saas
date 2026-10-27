@@ -4,24 +4,7 @@ import {
   PrinterOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Statistic,
-  Table,
-  Tag,
-  Tooltip,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Statistic, Tag, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -53,6 +36,8 @@ import {
 } from '../pickers';
 import { BILL_KIND_COLORS, BILL_KIND_LABELS } from '../billing/common';
 import { PAY_CHANNEL_LABELS, PREPAY_ENTRY_COLORS, PREPAY_ENTRY_LABELS } from './common';
+import Table from '../../components/PageTable';
+
 
 /** 元（最多 2 位小数）→ 整数分；非法输入返回 null。 */
 const yuanToCent = (v: number | null | undefined): number | null =>
@@ -553,7 +538,7 @@ export default function Cashier() {
           {items.length === 0 ? (
             <Alert type="success" showIcon message="该户无欠费账单" />
           ) : (
-            <Table<OutstandingItem>
+            <Table<OutstandingItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="billId"
               size="small"
               columns={columns}
@@ -765,7 +750,7 @@ export default function Cashier() {
         onClose={() => setLedgerOpen(false)}
         width={720}
       >
-        <Table<PrepaymentEntry>
+        <Table<PrepaymentEntry> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowKey="id"
           size="small"
           loading={ledgerLoading}

@@ -89,3 +89,24 @@ body {
     justify-content: flex-start;
   }
 }
+
+/* U1 任务聚焦行高亮 */
+.task-focus-row > td {
+  background: #fff7e6 !important;
+  border-top: 2px solid #faad14 !important;
+  border-bottom: 2px solid #faad14 !important;
+}
+
+/* 原则四兜底：表头固定 + 横向滚动条常驻。
+   页面清单表统一 scroll={{x,y}}（antd 原生固定表头+表体限高），
+   此处为漏网表格（无 scroll.y 的 .ant-table-content 结构）的兜底：
+   表头相对页面滚动 sticky，且内容区限高使横向滚动条常驻视口。 */
+.ant-table .ant-table-content {
+  max-height: calc(100vh - 300px);
+  overflow: auto;
+}
+.ant-table .ant-table-content .ant-table-thead > tr > th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}

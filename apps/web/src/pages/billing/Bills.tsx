@@ -3,25 +3,7 @@ import {
   SearchOutlined,
   SwapOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Typography,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popconfirm, Select, Space, Spin, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -34,6 +16,12 @@ import type {
   BillStatus,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import {
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
 import { PREPAY_ENTRY_LABELS } from '../payment/common';
 import {
   DECIMAL_RULE,
@@ -61,6 +49,8 @@ import {
   RUN_TYPE_LABELS,
   describeBillItem,
 } from './common';
+import Table from '../../components/PageTable';
+
 
 interface ReplaceFormValues {
   usageQty: string;
@@ -93,6 +83,17 @@ export default function Bills() {
   const [status, setStatus] = useState<BillStatus | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // A3 任务三态分组：账单任务挂在账单上。
+  const taskGroup = useTaskGroup<Bill>('bill', rows, (r) => r.id);
+  // A2「只显示该条」：?focusId=账单id（逾期账单异常/任务直达）。
+  const { focusId, clear: clearFocus } = useFocusParams();
+  const focusList = useFocusList<Bill>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
+  const shownRows = focusList.shown;
 
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -511,23 +512,37 @@ export default function Bills() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该笔账单已定位</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
       <Table<Bill>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          onChange: (p, size) => {
-            setPage(p);
-            setPageSize(size);
-          },
-        }}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                onChange: (p, size) => {
+                  setPage(p);
+                  setPageSize(size);
+                },
+              }
+        }
       />
 
       {/* 换票重开 */}
@@ -700,8 +715,36 @@ export default function Bills() {
                 />
               );
             })()}
+            {detail.ladderInfo && (
+              <Descriptions
+                bordered
+                size="small"
+                column={3}
+                style={{ marginTop: 12 }}
+                items={[
+                  {
+                    key: 'ytd',
+                    label: '当年累计用水（本单开账前）',
+                    children: `${Number(detail.ladderInfo.ytdBeforeQty)} m³`,
+                  },
+                  {
+                    key: 'ytdA',
+                    label: '当年累计用水（含本单）',
+                    children: `${Number(detail.ladderInfo.ytdAfterQty)} m³`,
+                  },
+                  {
+                    key: 'base',
+                    label: '年度基数（一档上限）',
+                    children:
+                      detail.ladderInfo.annualBaseQty != null
+                        ? `${Number(detail.ladderInfo.annualBaseQty)} m³/年`
+                        : '—',
+                  },
+                ]}
+              />
+            )}
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>账单明细</div>
-            <Table<BillItem>
+            <Table<BillItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={itemColumns}
@@ -711,7 +754,7 @@ export default function Bills() {
             {(detail.allocs?.length ?? 0) > 0 && (
               <>
                 <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>销账分摊</div>
-                <Table<BillAlloc>
+                <Table<BillAlloc> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={detail.allocs}

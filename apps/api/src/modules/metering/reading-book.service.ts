@@ -113,6 +113,8 @@ export class ReadingBookService {
       skip: number;
       name?: string;
       bookNo?: string;
+      /** T1/X2：册号+名称统一模糊查询（远程搜索下拉用）。 */
+      q?: string;
       orgUnitId?: string;
       waterAccountId?: string;
     },
@@ -144,6 +146,14 @@ export class ReadingBookService {
           orgUnitId:
             ctx.scope === 'ALL' ? q.orgUnitId : { in: ctx.orgScope },
           name: q.name ? { contains: q.name } : undefined,
+          ...(q.q
+            ? {
+                OR: [
+                  { bookNo: { contains: q.q } },
+                  { name: { contains: q.q } },
+                ],
+              }
+            : {}),
           ...(memberBookIds ? { id: { in: memberBookIds } } : {}),
         },
         select: READING_BOOK_SELECT,
@@ -243,7 +253,7 @@ export class ReadingBookService {
    * Cadence/meterChannel/anchorPeriod wire validation — mirrors the DB
    * CHECKs so bad input is a 422 here, never a 500 from the constraint.
    * For PATCH the caller passes the MERGED cadence/anchor (patch value
-   * falling back to the stored row) so switching MONTHLY→BIMONTHLY
+   * falling back to the stored row) so switching MONTHLY→QUARTERLY
    * without an anchor is refused too.
    */
   private validateCadence(
@@ -264,8 +274,8 @@ export class ReadingBookService {
     ) {
       throw new UnprocessableEntityException({ code: 'INVALID_ANCHOR_PERIOD' });
     }
-    if (cadence === 'BIMONTHLY' && (anchorPeriod ?? null) === null) {
-      throw new UnprocessableEntityException({ code: 'BIMONTHLY_ANCHOR_REQUIRED' });
+    if (cadence === 'QUARTERLY' && (anchorPeriod ?? null) === null) {
+      throw new UnprocessableEntityException({ code: 'QUARTERLY_ANCHOR_REQUIRED' });
     }
   }
 

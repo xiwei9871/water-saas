@@ -250,6 +250,8 @@ export interface WaterAccount {
   };
   /** RC1-4: ACTIVE installation's meter_no (installedAt desc, id desc). */
   currentMeterNo?: string | null;
+  /** B1 所属抄表册（可多个，按入册先后）。 */
+  readingBooks?: { id: string; bookNo: string; name: string }[];
 }
 
 /** GET /water-accounts/:id — 在列表行基础上附带当前（展示用）人数。
@@ -323,7 +325,7 @@ export interface Meter {
   caliber: string | null;
   /** Decimal column — serialized as a string on the wire. */
   maxDial: string | null;
-  /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表。 */
+  /** NORMAL普通/MASTER总表/SUB分表（监控表以用水户用水类别判定）。 */
   meterRole?: string;
   parentMeterId: string | null;
   status: MeterStatus;
@@ -379,6 +381,10 @@ export interface OnboardResult {
     model: string | null;
   };
   installation: MeterInstallation;
+  /** B1 立户即入册：选择了抄表册时返回该册；为 null 表示未入册。 */
+  readingBook: { id: string; bookNo: string; name: string } | null;
+  /** B1 本期在途计划已补录该项时为 {planId, period}；否则 null（下期自然纳入）。 */
+  planJoined: { planId: string; period: string } | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -386,8 +392,8 @@ export interface OnboardResult {
 /* ------------------------------------------------------------------ */
 
 /** GET /reading-books */
-/** 抄表册节奏：MONTHLY 每月 / BIMONTHLY 双月（anchorPeriod 定奇偶）。 */
-export type BookCadence = 'MONTHLY' | 'BIMONTHLY';
+/** 抄表册节奏：MONTHLY 每月 / ODD_MONTH 单月 / EVEN_MONTH 双月 / QUARTERLY 季度（anchorPeriod 定首抄月）。 */
+export type BookCadence = 'MONTHLY' | 'ODD_MONTH' | 'EVEN_MONTH' | 'QUARTERLY';
 /** 表计通道：REMOTE_AUTO 仅登记元数据（本期无远传集成）。 */
 export type MeterChannel = 'MECHANICAL' | 'REMOTE_MANUAL' | 'REMOTE_AUTO';
 
@@ -403,7 +409,7 @@ export interface ReadingBook {
   readerName: string | null;
   scheduleDay: number | null;
   cadence: BookCadence;
-  /** BIMONTHLY 必填，YYYYMM；MONTHLY 恒为 null。 */
+  /** QUARTERLY 必填首抄月 YYYYMM；其余恒为 null。 */
   anchorPeriod: string | null;
   meterChannel: MeterChannel;
   createdAt: string;
@@ -444,6 +450,8 @@ export interface ReadingPlan {
   planDate: string;
   readerId: string | null;
   readerName: string | null;
+  /** REGULAR 常规 / SUPPLEMENT 追加抄表（单户计划）。 */
+  planType?: string;
   status: PlanStatus;
   createdAt: string;
   updatedAt: string;
@@ -844,6 +852,12 @@ export interface BillDetail extends Bill {
   sourcePeriod: string | null;
   /** RECONCILIATION → toPeriod（补差覆盖区间）。 */
   sourcePeriodTo: string | null;
+  /** T2-2 阶梯年量核对：当年累计（开账前/含本单）+ 年度基数；非阶梯账单为 null。 */
+  ladderInfo: {
+    ytdBeforeQty: string;
+    ytdAfterQty: string;
+    annualBaseQty: string | null;
+  } | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1430,7 +1444,9 @@ export type ExceptionSummary = {
 // 任务中心（任务驱动机制 V1.0）
 // ---------------------------------------------------------------------------
 
-export type TaskStatus = 'PENDING' | 'CLAIMED' | 'DONE' | 'CANCELLED';
+export type TaskStatus = 'PENDING' | 'CLAIMED' | 'ASSIGNED' | 'DONE' | 'CANCELLED';
+/** A1-5 任务来源标识（待办列表行）。 */
+export type TaskSource = 'ASSIGNED_TO_ME' | 'CLAIMED_BY_ME' | 'ASSIGNED_OTHER' | 'POOL';
 export type TaskPriority = 'LOW' | 'NORMAL' | 'HIGH' | 'URGENT';
 
 export type TaskItem = {
@@ -1449,6 +1465,8 @@ export type TaskItem = {
   assigneeName?: string | null;
   completedByName?: string | null;
   status: TaskStatus;
+  /** A1-5：指派给我 / 我领取的 / 指派他人 / 待领取（池）。 */
+  source?: TaskSource;
   priority: TaskPriority;
   dueAt: string | null;
   sourceTaskId: string | null;
@@ -1486,8 +1504,16 @@ export const TASK_TYPE_LABELS: Record<string, string> = {
 export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   PENDING: '待处理',
   CLAIMED: '处理中',
+  ASSIGNED: '已指派',
   DONE: '已完成',
   CANCELLED: '已取消',
+};
+
+export const TASK_SOURCE_LABELS: Record<TaskSource, string> = {
+  ASSIGNED_TO_ME: '指派给我',
+  CLAIMED_BY_ME: '我领取的',
+  ASSIGNED_OTHER: '指派他人',
+  POOL: '待领取',
 };
 
 export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
@@ -1505,6 +1531,7 @@ export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
 export const TASK_BIZ_ROUTES: Record<string, string> = {
   SUPPLEMENT: '/settlement/reconciliations?focusId={bizId}&taskId={taskId}',
   METER_REVIEW: '/metering/readings?focusId={bizId}&taskId={taskId}',
+  SUPPLEMENT_READING: '/metering/plans?focusId={bizId}&taskId={taskId}',
   COLLECTION: '/payment/collection-notices?focusId={bizId}&taskId={taskId}',
   REVERSAL_APPROVAL: '/payment/payments?focusId={bizId}&taskId={taskId}',
   WRITEOFF_APPROVAL: '/payment/writeoffs?focusId={bizId}&taskId={taskId}',

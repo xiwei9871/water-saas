@@ -48,6 +48,8 @@ export const UNIFIED_FIELDS: UnifiedFieldDef[] = [
   { key: 'settleName', label: '结算户名', theme: 'basic', grain: 'account', perm: 'customer:read' },
   { key: 'meterNo', label: '表号', theme: 'basic', grain: 'account', perm: 'metering:read' },
   { key: 'caliber', label: '表口径', theme: 'basic', grain: 'account', perm: 'metering:read' },
+  // X2：户所属抄表册册号（一户多册并列展示，顿号分隔；未入册 → null → 「—」）
+  { key: 'bookNos', label: '抄表册册号', theme: 'basic', grain: 'account', perm: 'metering:read' },
   // ---------- 水量（账期级） ----------
   { key: 'usageQty', label: '本期水量', theme: 'usage', grain: 'period', perm: 'metering:read' },
   { key: 'isEstimated', label: '是否估抄', theme: 'usage', grain: 'period', perm: 'metering:read' },

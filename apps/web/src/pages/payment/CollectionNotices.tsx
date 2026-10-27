@@ -1,22 +1,19 @@
 import { PrinterOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Input,
-  InputNumber,
-  Modal,
-  Space,
-  Table,
-  Tabs,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Button, Card, Input, InputNumber, Modal, Space, Tabs, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { fmtCent, fmtPeriod } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FocusTaskBar,
+  FOCUS_ROW_CLASS,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface NoticeBill {
   period: string;
@@ -42,6 +39,7 @@ interface Notice {
   noticeNo: string;
   waterAccountId: string;
   waterAccountLabel: string | null;
+  settleAccountId: string | null;
   periodFrom: string;
   periodTo: string;
   amountDue: string;
@@ -55,8 +53,7 @@ interface Notice {
 /** G4 催缴通知单：欠费户生成/打印/留痕，同时挂催缴任务。 */
 export default function CollectionNotices() {
   const { message } = AntdApp.useApp();
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const [rows, setRows] = useState<Notice[]>([]);
   const [loading, setLoading] = useState(false);
   const [accountId, setAccountId] = useState<string>();
@@ -70,6 +67,15 @@ export default function CollectionNotices() {
   const [arrearsQ, setArrearsQ] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [batching, setBatching] = useState(false);
+  // A3 任务三态分组：按通知单 id（后端经 context.noticeId 回联催缴任务）。
+  const taskGroup = useTaskGroup<Notice>('collectionNotice', rows, (r) => r.id);
+  // A2「只显示该条」：?focusId=（=结算户 id）→ 只看该结算户的催缴单。
+  const focusList = useFocusList<Notice>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.settleAccountId === focusId || r.id === focusId : null,
+  );
+  const shownRows = focusList.shown;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -255,7 +261,7 @@ export default function CollectionNotices() {
                       批量生成通知单{selected.length ? `（已选 ${selected.length}）` : ''}
                     </Button>
                   </Space>
-                  <Table
+                  <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                     rowKey="waterAccountId"
                     size="small"
                     columns={arrearsCols}
@@ -285,7 +291,17 @@ export default function CollectionNotices() {
                       生成通知单
                     </Button>
                   </Space>
-                  <Table rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.id === focusId ? 'ant-table-row-selected' : '')} dataSource={rows} loading={loading} pagination={false} />
+                  {focusId && (
+                    <FocusTaskBar
+                      focusId={focusId}
+                      summary={<span>该结算户的催缴单（若尚无通知单请先生成）</span>}
+                      showAll={focusList.showAll}
+                      onToggleAll={focusList.toggleAll}
+                      onClose={clearFocus}
+                    />
+                  )}
+                  {!focusList.focusing && taskGroup.tabs}
+                  <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={cols} rowClassName={(r) => (r.settleAccountId === focusId || r.id === focusId ? FOCUS_ROW_CLASS : '')} dataSource={shownRows} loading={loading} pagination={false} />
                 </>
               ),
             },
@@ -301,7 +317,7 @@ export default function CollectionNotices() {
               <p>用水户：{printing.waterAccountLabel ?? printing.waterAccountId}</p>
               <p>欠费账期：{fmtPeriod(printing.periodFrom)} 至 {fmtPeriod(printing.periodTo)}，共 {printing.billCount} 笔</p>
               <p>欠费金额：<b>{fmtCent(printing.amountDue)}</b></p>
-              <Table
+              <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                 rowKey="period"
                 size="small"
                 pagination={false}

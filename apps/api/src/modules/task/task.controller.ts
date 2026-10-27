@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   DefaultValuePipe,
+  ForbiddenException,
   Get,
   Param,
   ParseIntPipe,
@@ -59,6 +60,16 @@ export class TaskController {
     return this.svc.badge(currentTenant(), TaskController.perms(req));
   }
 
+  /** GET /tasks/biz-flags?bizType= — 业务页任务分组：该 bizType 下
+      有未完成任务(open)与任务全部办结(done)的 bizId 集合，两者互斥。 */
+  @Get('biz-flags')
+  bizFlags(@Query('bizType') bizType?: string) {
+    if (!bizType) {
+      throw new BadRequestException({ code: 'BIZ_TYPE_REQUIRED' });
+    }
+    return this.svc.bizFlags(currentTenant(), bizType);
+  }
+
   /** GET /tasks/:id — 详情 + 候选人 + canClaim。 */
   @Get(':id')
   detail(@Req() req: Request, @Param('id') id: string) {
@@ -71,6 +82,20 @@ export class TaskController {
   claim(@Req() req: Request, @Param('id') id: string) {
     assertUuid(id, 'id');
     return this.svc.claim(currentTenant(), TaskController.perms(req), id);
+  }
+
+  /** POST /tasks/:id/assign — {assigneeId}：A1 管理岗（iam:write）指派/改派。
+      被指派人必须是该任务候选人（权限+数据范围），否则 403。 */
+  @Post(':id/assign')
+  assign(@Req() req: Request, @Param('id') id: string, @Body() body: { assigneeId?: string }) {
+    assertUuid(id, 'id');
+    const perms = TaskController.perms(req);
+    if (!perms.includes('*') && !perms.includes('iam:write')) {
+      throw new ForbiddenException({ code: 'TASK_ASSIGN_FORBIDDEN', message: '仅管理岗可指派任务' });
+    }
+    const assigneeId = typeof body?.assigneeId === 'string' ? body.assigneeId : '';
+    assertUuid(assigneeId, 'assigneeId');
+    return this.svc.assign(currentTenant(), id, assigneeId);
   }
 
   /** POST /tasks/:id/complete — {note, evidenceRefs[]}：认领人完成 → 解锁后续流程。

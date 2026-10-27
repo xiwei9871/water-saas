@@ -1,9 +1,11 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -55,6 +57,61 @@ export class MeterStockController {
     );
   }
 
+  /** X1-1 编辑库房（名称/所属单位/状态；code 不可改）。 */
+  @Patch('meter-warehouses/:id')
+  @Permissions('metering:service')
+  updateWarehouse(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.updateWarehouseTx(tx, ctx, assertUuid(id, 'id'), body),
+    );
+  }
+
+  /** X1-2/X1-3 删除库房（仅空库房；有货位/库存/流水 → 409）。 */
+  @Delete('meter-warehouses/:id')
+  @Permissions('metering:service')
+  deleteWarehouse(@Param('id') id: string) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.deleteWarehouseTx(tx, ctx, assertUuid(id, 'id')),
+    );
+  }
+
+  /** X1-1 编辑货位（名称/状态；code 不可改）。 */
+  @Patch('meter-warehouses/:id/locations/:locId')
+  @Permissions('metering:service')
+  updateLocation(
+    @Param('id') id: string,
+    @Param('locId') locId: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.updateLocationTx(
+        tx,
+        ctx,
+        assertUuid(id, 'id'),
+        assertUuid(locId, 'locId'),
+        body,
+      ),
+    );
+  }
+
+  /** X1-2/X1-3 删除货位（有空货位才可删；有在库表/流水 → 409）。 */
+  @Delete('meter-warehouses/:id/locations/:locId')
+  @Permissions('metering:service')
+  deleteLocation(@Param('id') id: string, @Param('locId') locId: string) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.deleteLocationTx(
+        tx,
+        ctx,
+        assertUuid(id, 'id'),
+        assertUuid(locId, 'locId'),
+      ),
+    );
+  }
+
   /** 出入库流水列表（?meterId= / ?docNo= / ?warehouseId= 过滤 + 分页）。 */
   @Get('meter-stock/movements')
   @Permissions('metering:service')
@@ -78,6 +135,18 @@ export class MeterStockController {
   @Permissions('metering:service')
   trail(@Param('id') id: string) {
     return this.svc.meterTrail(currentTenant(), assertUuid(id, 'id'));
+  }
+
+  /** 20261023 D1：GET /meter-stock/selectable?type=&kw= — 按流水类型的候选表。 */
+  @Get('meter-stock/selectable')
+  @Permissions('metering:service')
+  selectable(@Query('type') type?: string, @Query('kw') kw?: string, @Query('take') take?: string) {
+    return this.svc.selectable(
+      currentTenant(),
+      type ?? '',
+      kw?.trim() || undefined,
+      Math.min(Math.max(parseInt(take ?? '50', 10) || 50, 1), 200),
+    );
   }
 
   /** GET /meter-stock — 在库表清单（?warehouseId=）。 */

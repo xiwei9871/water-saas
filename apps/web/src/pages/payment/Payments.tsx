@@ -3,19 +3,7 @@ import {
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Descriptions,
-  Drawer,
-  Popconfirm,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-} from 'antd';
+import { App as AntdApp, Button, Card, Descriptions, Drawer, Popconfirm, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
@@ -43,7 +31,15 @@ import {
   PREPAY_ENTRY_COLORS,
   PREPAY_ENTRY_LABELS,
 } from './common';
-import { useSearchParams } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 
 
@@ -112,9 +108,9 @@ export default function Payments() {
 
   const detailSeq = useRef(0);
 
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
+  const focusRow = rows.find((r) => r.id === focusId);
 
   const openDetail = async (row: Payment) => {
     const seq = ++detailSeq.current;
@@ -151,17 +147,29 @@ export default function Payments() {
     } finally {
       setActing(null);
       await load(page, pageSize);
-  // 任务直达 ?focusId= → 自动打开该笔收款详情。
+      if (detail?.id === p.id) void openDetail(p);
+    }
+  };
+
+  // U1 任务直达 ?focusId= → 置顶警示条 + 行高亮 + 自动打开该笔收款详情。
   useEffect(() => {
     if (focusId && focusDone.current !== focusId) {
       focusDone.current = focusId;
       void openDetail({ id: focusId } as Payment);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusId]);
 
-      if (detail?.id === p.id) void openDetail(p);
-    }
-  };
+  // A3 任务三态分组：任务挂在收款单上。
+  const taskGroup = useTaskGroup<Payment>('payment', rows, (r) => r.id);
+  // A2「只显示该条」。
+  const focusList = useFocusList<Payment>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
+  const shownRows = focusList.shown;
 
   const print = async (receipt: Receipt) => {
     setPrinting(true);
@@ -360,22 +368,38 @@ export default function Payments() {
         </Space>
       }
     >
-      <Table<Payment>
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该笔收款单已定位（单号 {focusRow?.paymentNo ?? '…'}）</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onOpenDetail={() => void openDetail({ id: focusId } as Payment)}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
+      <Table<Payment> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          onChange: (p, size) => {
-            setPage(p);
-            setPageSize(size);
-          },
-        }}
+        dataSource={shownRows}
+        rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                onChange: (p, size) => {
+                  setPage(p);
+                  setPageSize(size);
+                },
+              }
+        }
       />
 
       {/* 收款详情抽屉 */}
@@ -455,7 +479,7 @@ export default function Payments() {
               ]}
             />
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>分摊明细</div>
-            <Table<PaymentAlloc>
+            <Table<PaymentAlloc> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={allocColumns}
@@ -468,7 +492,7 @@ export default function Payments() {
                 <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>
                   预存流水（本笔资金用途）
                 </div>
-                <Table
+                <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey="id"
                   size="small"
                   dataSource={detail.prepaymentEntries}

@@ -1,5 +1,5 @@
 import { SwapOutlined } from '@ant-design/icons';
-import { Alert, Button, Descriptions, Space, Table } from 'antd';
+import { Alert, Button, Descriptions, Space } from 'antd';
 import type { AccountInstallation, InstallReason, WaterAccountDetail } from '../../api/types';
 import {
   enumLabel,
@@ -7,6 +7,8 @@ import {
   INSTALL_REASON_LABELS,
 } from '../common';
 import { InstallationStatusTag } from '../pickers';
+import Table from '../../components/PageTable';
+
 
 export function MeterSection({
   detail,

@@ -4,19 +4,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Form,
-  Input,
-  Modal,
-  Select,
-  Space,
-  Table,
-  Tag,
-  TreeSelect,
-} from 'antd';
+import { App as AntdApp, Button, Card, Form, Input, Modal, Select, Space, Tag, TreeSelect } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type { DataNode } from 'antd/es/tree';
 import dayjs from 'dayjs';
@@ -24,6 +12,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { OrgUnit, Role, Staff } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import Table from '../../components/PageTable';
+
 
 interface StaffFormValues {
   login: string;
@@ -280,7 +270,7 @@ export default function StaffPage() {
         </Space>
       }
     >
-      <Table<Staff>
+      <Table<Staff> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="id"
         size="middle"
         loading={loading}

@@ -1,10 +1,12 @@
 import { ReloadOutlined } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, DatePicker, Space, Statistic, Table } from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Space, Statistic } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { enumLabel, SERVICE_TYPE_LABELS } from '../common';
+import Table from '../../components/PageTable';
+
 
 interface TypeStat {
   serviceType: string;
@@ -146,7 +148,7 @@ export default function ServiceOrderStats() {
           })}
         </Space>
       )}
-      <Table<TypeStat>
+      <Table<TypeStat> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="serviceType"
         size="small"
         loading={loading}

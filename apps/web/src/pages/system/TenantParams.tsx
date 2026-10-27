@@ -1,22 +1,13 @@
 import { EditOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Alert,
-  Button,
-  Card,
-  Form,
-  Input,
-  Modal,
-  Space,
-  Table,
-  Typography,
-} from 'antd';
+import { App as AntdApp, Alert, Button, Card, Form, Input, Modal, Space, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import type { TenantParam } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
+import Table from '../../components/PageTable';
+
 
 interface ParamFormValues {
   key: string;
@@ -238,7 +229,7 @@ export default function TenantParams() {
         </Space>
       }
     >
-      <Table<TenantParam>
+      <Table<TenantParam> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="key"
         size="middle"
         loading={loading}
@@ -351,7 +342,7 @@ export function DocNoRulesCard() {
       <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
         各类单据号 = 前缀 + 年月(6位) + 流水(6位)。改前缀只影响之后新开的单据，存量单号不变。
       </Typography.Paragraph>
-      <Table<DocRule>
+      <Table<DocRule> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
         rowKey="seqKey"
         size="small"
         dataSource={rules}

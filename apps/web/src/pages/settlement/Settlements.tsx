@@ -5,25 +5,7 @@ import {
   SearchOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Select,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Tooltip,
-} from 'antd';
+import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popconfirm, Select, Space, Spin, Tag, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -64,6 +46,15 @@ import {
   SETTLEMENT_STATUS_LABELS,
 } from './common';
 import { EXCEPTION_CODE_LABELS } from '../metering/common';
+import { useSearchParams } from 'react-router-dom';
+import {
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 interface GenerateFormValues {
   customerId?: string; // 仅级联过滤
@@ -117,6 +108,22 @@ export default function Settlements() {
   const [isEstimated, setIsEstimated] = useState<boolean | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // A3 任务三态分组：按结算记录 id（后端经 waterAccountId+period 回联任务）。
+  const taskGroup = useTaskGroup<ConsumptionSettlement>('settlement', rows, (r) => r.id);
+  // A2「只显示该条」：?focusId=（=用水户 id）+?period= 定位该户该期结算记录。
+  const { focusId, clear: clearFocus } = useFocusParams();
+  const [focusPeriod] = useSearchParams();
+  const focusList = useFocusList<ConsumptionSettlement>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.waterAccountId === focusId : null,
+    { onShowAll: () => setPage(1) },
+  );
+  const shownRows = useMemo(() => {
+    const p = focusPeriod.get('period');
+    if (!focusId || focusList.showAll || !p) return focusList.shown;
+    return focusList.shown.filter((r) => r.period === p);
+  }, [focusList.shown, focusList.showAll, focusId, focusPeriod]);
 
   const [detail, setDetail] = useState<ConsumptionSettlement | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -702,23 +709,37 @@ export default function Settlements() {
         </Space>
       }
     >
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={<span>该户结算记录已定位</span>}
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
       <Table<ConsumptionSettlement>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         scroll={{ x: 1100, y: 'calc(100vh - 340px)' }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          onChange: (p, size) => {
-            setPage(p);
-            setPageSize(size);
-          },
-        }}
+        pagination={
+          focusList.focusing
+            ? false
+            : {
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                onChange: (p, size) => {
+                  setPage(p);
+                  setPageSize(size);
+                },
+              }
+        }
       />
 
       {/* 详情抽屉 */}
@@ -815,7 +836,7 @@ export default function Settlements() {
               ]}
             />
             <div style={{ margin: '16px 0 8px', fontWeight: 600 }}>结算分量</div>
-            <Table<ConsumptionComponent>
+            <Table<ConsumptionComponent> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="id"
               size="small"
               columns={componentColumns}
@@ -1020,7 +1041,7 @@ export default function Settlements() {
                 </>
               )}
             </Space>
-            <Table<SettlementBatchItem>
+            <Table<SettlementBatchItem> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
               rowKey="waterAccountId"
               size="small"
               columns={batchItemColumns}

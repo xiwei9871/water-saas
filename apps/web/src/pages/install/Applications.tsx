@@ -1,31 +1,21 @@
 import { CloseOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Drawer,
-  Descriptions,
-  Form,
-  Image,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Steps,
-  Table,
-  Tag,
-  Typography,
-  Upload,
-} from 'antd';
+import { App as AntdApp, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Select, Space, Steps, Tag, Typography, Upload } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { CustomerSelect, ReadingBookSelect, MeterSelect } from '../pickers';
 import { fmtDate, USAGE_CATEGORY_OPTIONS } from '../common';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link } from 'react-router-dom';
+import {
+  FOCUS_ROW_CLASS,
+  FocusTaskBar,
+  useFocusList,
+  useFocusParams,
+  useTaskGroup,
+} from '../../components/TaskFocus';
+import Table from '../../components/PageTable';
+
 
 type ApplyStatus = 'SUBMITTED' | 'SURVEYED' | 'APPROVED' | 'INSTALLING' | 'COMPLETED' | 'REJECTED' | 'CANCELLED';
 
@@ -106,24 +96,39 @@ export default function InstallApplications() {
   const [noteForm] = Form.useForm();
   const [archForm] = Form.useForm();
   const canWrite = hasPerm('install:write');
-  const [focusParams] = useSearchParams();
-  const focusId = focusParams.get('focusId');
+  const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
+  const [focusRecord, setFocusRecord] = useState<Apply | null>(null);
 
-  // 任务直达 ?focusId= → 打开该申请详情抽屉。
+  // U1 任务直达 ?focusId= → 置顶警示条 + 行高亮 + 打开该申请详情抽屉。
   useEffect(() => {
-    if (focusId && focusDone.current !== focusId) {
-      focusDone.current = focusId;
-      void (async () => {
-        try {
-          const res = await api.get<Apply>(`/install/applications/${focusId}`);
-          setDetail(res.data);
-        } catch {
-          /* 详情拉取失败时停留在列表 */
-        }
-      })();
+    if (!focusId) {
+      setFocusRecord(null);
+      focusDone.current = null;
+      return;
     }
+    if (focusDone.current === focusId) return;
+    focusDone.current = focusId;
+    void (async () => {
+      try {
+        const res = await api.get<Apply>(`/install/applications/${focusId}`);
+        setFocusRecord(res.data);
+        setDetail(res.data);
+      } catch {
+        /* 详情拉取失败时停留在列表 */
+      }
+    })();
   }, [focusId]);
+
+  // A3 任务三态分组：报装任务挂在申请单上。
+  const taskGroup = useTaskGroup<Apply>('INSTALL_APPLICATION', rows, (r) => r.id);
+  const focusList = useFocusList<Apply>(
+    focusId,
+    taskGroup.filtered,
+    focusId ? (r) => r.id === focusId : null,
+    { extraRecord: focusRecord },
+  );
+  const shownRows = focusList.shown;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -212,6 +217,7 @@ export default function InstallApplications() {
           initialReading: v.initialReading,
           reason: 'NEW',
         },
+        readingBookId: v.bookId || undefined,
       });
       message.success('已归档立户');
       setArchiveFor(null);
@@ -286,7 +292,25 @@ export default function InstallApplications() {
         </Space>
       }
     >
-      <Table rowKey="id" size="small" columns={cols} dataSource={rows} loading={loading} pagination={false} />
+      {focusId && (
+        <FocusTaskBar
+          focusId={focusId}
+          summary={
+            focusRecord ? (
+              <span>
+                申请 {focusRecord.applyNo} · {focusRecord.applicantName} · {focusRecord.addr}
+              </span>
+            ) : (
+              <span>该申请已定位</span>
+            )
+          }
+          showAll={focusList.showAll}
+          onToggleAll={focusList.toggleAll}
+          onClose={clearFocus}
+        />
+      )}
+      {!focusList.focusing && taskGroup.tabs}
+      <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }} rowKey="id" size="small" columns={cols} dataSource={shownRows} loading={loading} pagination={false} rowClassName={(r: Apply) => (r.id === focusId ? FOCUS_ROW_CLASS : '')} />
 
       <Modal title="新建报装申请" open={createOpen} onOk={() => void create()} onCancel={() => setCreateOpen(false)} destroyOnHidden>
         <Form form={form} layout="vertical" initialValues={{ custType: 'PERSONAL', usageCategory: 'RES_METERED' }}>
