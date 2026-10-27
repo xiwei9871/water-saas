@@ -8,9 +8,9 @@ import {
 import { Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   AccountInstallation,
   AccountOutstanding,
@@ -221,18 +221,13 @@ export default function WaterAccounts() {
   }, [searchParams]);
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<WaterAccount[]>('/water-accounts', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(q.trim() ? { q: q.trim() } : {}),
+        const res = { data: await fetchAll<WaterAccount>('/water-accounts', {            ...(q.trim() ? { q: q.trim() } : {}),
             ...(status ? { status } : {}),
             ...(customerId ? { customerId } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -244,15 +239,12 @@ export default function WaterAccounts() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   // The endpoint returns a page, not a total — allow "next page" exactly
   // when the current page came back full.
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
 
   const openModal = (m: NonNullable<ModalState>) => {
     setIdemKey(newIdemKey()); // 每次打开表单生成一次幂等键
@@ -395,7 +387,7 @@ export default function WaterAccounts() {
       // there and highlight it so the operator sees it immediately.
       setHighlightId(created.data.id);
       setPage(1);
-      await load(1, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -419,7 +411,7 @@ export default function WaterAccounts() {
       );
       message.success('用水户已更新');
       setModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -453,7 +445,7 @@ export default function WaterAccounts() {
       );
       message.success('已过户');
       setModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -489,7 +481,7 @@ export default function WaterAccounts() {
   const afterMeterMutation = async () => {
     setMeterModal(null);
     if (meterDrawerId) await loadMeterDetail(meterDrawerId);
-    await load(page, pageSize);
+    await load();
   };
 
   const submitMeterInstall = async () => {
@@ -601,7 +593,7 @@ export default function WaterAccounts() {
       );
       message.success(`${modal.account.accountNo} ${EVENT_TEXT[modal.kind].success}`);
       setModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       // 销户被拒（如 ACCOUNT_OUTSTANDING_BALANCE）时直接透出服务端 code 文案。
       message.error(apiErrorText(err));
@@ -812,6 +804,8 @@ export default function WaterAccounts() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="按状态筛选"
             style={{ width: 120 }}
@@ -837,7 +831,7 @@ export default function WaterAccounts() {
           </span>
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => void load(page, pageSize)}
+            onClick={() => void load()}
           >
             刷新
           </Button>
@@ -876,7 +870,7 @@ export default function WaterAccounts() {
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         rowClassName={(r) =>
           r.id === highlightId ? 'ws-row-highlight' : ''
         }

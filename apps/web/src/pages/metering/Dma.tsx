@@ -1,4 +1,4 @@
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { DownloadOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { App as AntdApp, Button, Card, Col, DatePicker, Descriptions, Drawer, Form, Input, Modal, Row, Select, Space, Statistic, Tabs, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -79,6 +79,7 @@ export default function Dma() {
 
   // 看板
   const [period, setPeriod] = useState<Dayjs>(dayjs().subtract(1, 'month'));
+  const [zoneFilter, setZoneFilter] = useState<string | undefined>(undefined);
   const [dashRows, setDashRows] = useState<DashRow[]>([]);
   const [trend, setTrend] = useState<{ period: string; rows: DashRow[] }[]>([]);
   const [drill, setDrill] = useState<{ dmaName: string; period: string; data: UsageDetail } | null>(null);
@@ -99,7 +100,7 @@ export default function Dma() {
       const prev = period.clone().subtract(1, 'month').format('YYYYMM');
       const prev2 = period.clone().subtract(2, 'month').format('YYYYMM');
       const res = await api.get<{ period: string; rows: DashRow[] }[]>('/dma/dashboard', {
-        params: { periods: `${prev2},${prev},${p}` },
+        params: { periods: `${prev2},${prev},${p}`, ...(zoneFilter ? { zoneId: zoneFilter } : {}) },
       });
       setTrend(res.data);
       setDashRows(res.data.find((d) => d.period === p)?.rows ?? []);
@@ -108,7 +109,28 @@ export default function Dma() {
     } finally {
       setLoading(false);
     }
-  }, [message, period]);
+  }, [message, period, zoneFilter]);
+
+  // 问题2（1027 整合）：导出当前筛选口径的产销差 xlsx。
+  const exportDash = async () => {
+    try {
+      const p = period.format('YYYYMM');
+      const prev = period.clone().subtract(1, 'month').format('YYYYMM');
+      const prev2 = period.clone().subtract(2, 'month').format('YYYYMM');
+      const res = await api.get('/dma/dashboard/export', {
+        params: { periods: `${prev2},${prev},${p}`, ...(zoneFilter ? { zoneId: zoneFilter } : {}) },
+        responseType: 'blob',
+      });
+      const url = URL.createObjectURL(res.data as Blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `产销差看板-${p}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      message.error(apiErrorText(e));
+    }
+  };
 
   useEffect(() => {
     void loadZones();
@@ -391,7 +413,7 @@ export default function Dma() {
             label: '产销差看板',
             children: (
               <>
-                <Space style={{ marginBottom: 12 }}>
+                <Space style={{ marginBottom: 12 }} wrap>
                   <Typography.Text>账期：</Typography.Text>
                   <DatePicker
                     picker="month"
@@ -399,6 +421,20 @@ export default function Dma() {
                     onChange={(d) => d && setPeriod(d)}
                     allowClear={false}
                   />
+                  <Typography.Text>分区：</Typography.Text>
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="全部分区"
+                    style={{ width: 200 }}
+                    value={zoneFilter}
+                    onChange={setZoneFilter}
+                    options={zones.map((z) => ({ value: z.id, label: `${z.code} ${z.name}` }))}
+                  />
+                  <Button icon={<DownloadOutlined />} onClick={() => void exportDash()}>
+                    导出 Excel
+                  </Button>
                 </Space>
                 <Table<DashRow> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   rowKey={(r) => r.dma.id}

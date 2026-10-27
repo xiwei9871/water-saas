@@ -63,11 +63,11 @@ export class TaskController {
   /** GET /tasks/biz-flags?bizType= — 业务页任务分组：该 bizType 下
       有未完成任务(open)与任务全部办结(done)的 bizId 集合，两者互斥。 */
   @Get('biz-flags')
-  bizFlags(@Query('bizType') bizType?: string) {
+  bizFlags(@Req() req: Request, @Query('bizType') bizType?: string) {
     if (!bizType) {
       throw new BadRequestException({ code: 'BIZ_TYPE_REQUIRED' });
     }
-    return this.svc.bizFlags(currentTenant(), bizType);
+    return this.svc.bizFlags(currentTenant(), TaskController.perms(req), bizType);
   }
 
   /** GET /tasks/:id — 详情 + 候选人 + canClaim。 */

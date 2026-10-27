@@ -8,9 +8,9 @@ import {
 import { App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Spin, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, apiErrorText, errorCode, toApiError } from '../../api/client';
+import { api, fetchAll, apiErrorText, errorCode, toApiError } from '../../api/client';
 import type {
   BookCadence,
   BookMember,
@@ -109,19 +109,14 @@ export default function ReadingBooks() {
   const [memberForm] = Form.useForm<MemberFormValues>();
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<ReadingBook[]>('/reading-books', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(name.trim() ? { name: name.trim() } : {}),
+        const res = { data: await fetchAll<ReadingBook>('/reading-books', {            ...(name.trim() ? { name: name.trim() } : {}),
             ...(bookNo.trim() ? { bookNo: bookNo.trim() } : {}),
             ...(orgFilter ? { orgUnitId: orgFilter } : {}),
             ...(focusWa ? { waterAccountId: focusWa } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -133,17 +128,14 @@ export default function ReadingBooks() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   // 组织/抄表员名称已由 API 内嵌（orgUnitName/readerName）；取不到按规范显 '—'。
   const orgName = useCallback((_id: string) => '—', []);
   const staffName = useCallback((_id: string | null) => '—', []);
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
 
   const openModal = (m: NonNullable<ModalState>) => {
     setIdemKey(newIdemKey());
@@ -225,7 +217,7 @@ export default function ReadingBooks() {
         message.success('抄表册已更新');
       }
       setModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -237,7 +229,7 @@ export default function ReadingBooks() {
     try {
       await api.delete(`/reading-books/${book.id}`);
       message.success(`抄表册 ${book.name} 已删除`);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       // BOOK_HAS_PLANS 等冲突文案直接透出。
       message.error(apiErrorText(err));
@@ -517,7 +509,7 @@ export default function ReadingBooks() {
               />
             </span>
           )}
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -554,7 +546,7 @@ export default function ReadingBooks() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         pagination={{
           current: page,
           pageSize,

@@ -12,8 +12,8 @@ import {
 import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   FeeItem,
   TariffPlan,
@@ -107,17 +107,12 @@ export default function Tariffs() {
   const [activeForm] = Form.useForm<ActiveFormValues>();
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<TariffPlan[]>('/tariff-plans', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(usageCategory.trim() ? { usageCategory: usageCategory.trim() } : {}),
+        const res = { data: await fetchAll<TariffPlan>('/tariff-plans', {            ...(usageCategory.trim() ? { usageCategory: usageCategory.trim() } : {}),
             ...(status ? { status } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -129,8 +124,8 @@ export default function Tariffs() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   // 费用项一次拉全（租户级配置，量级小）——阶梯选择器与详情名称共用。
   useEffect(() => {
@@ -148,10 +143,7 @@ export default function Tariffs() {
     [feeItems],
   );
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
 
   const detailSeq = useRef(0);
 
@@ -377,7 +369,7 @@ export default function Tariffs() {
         message.success('已生成新版本（草稿），激活后生效');
       }
       setModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -412,7 +404,7 @@ export default function Tariffs() {
       await api.patch(`/tariff-plans/${plan.id}`, { effectiveTo: to });
       message.success('生效区间已提前结束');
       setModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -438,7 +430,7 @@ export default function Tariffs() {
       message.error(apiErrorText(err));
     } finally {
       setActing(null);
-      await load(page, pageSize); // 失败也刷新 —— 状态可能已变
+      await load(); // 失败也刷新 —— 状态可能已变
     }
   };
 
@@ -716,6 +708,8 @@ export default function Tariffs() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 130 }}
@@ -729,7 +723,7 @@ export default function Tariffs() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -745,7 +739,7 @@ export default function Tariffs() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{
           current: page,

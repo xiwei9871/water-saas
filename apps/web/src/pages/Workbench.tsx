@@ -63,6 +63,7 @@ export default function Workbench() {
           { key: 'install', label: '报装管理', path: '/install', subs: '报装申请 · 勘察 · 审批 · 装表 · 归档' },
           { key: 'customer', label: '客户管理', path: '/customer', subs: '立户向导 · 客户列表 · 用水户 · 结算户 · 水表' },
           { key: 'metering', label: '抄表管理', path: '/metering', subs: '抄表册 · 抄表计划 · 抄表记录 · 远传' },
+          { key: 'service', label: '表务管理', path: '/service', subs: '水表档案 · 出入库 · 表务工单 · 换表记录 · 违章' },
           { key: 'settlement', label: '结算管理', path: '/settlement', subs: '结算水量 · 补差管理' },
           { key: 'billing', label: '计费管理', path: '/billing', subs: '资费计划 · 费用项 · 开账批次 · 账单' },
           { key: 'payment', label: '收费管理', path: '/payment', subs: '收费台 · 收款记录 · 预存 · 日结 · 核销 · 对账 · 票据' },

@@ -9,7 +9,7 @@ import {
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
-import { api, apiErrorText } from '../../api/client';
+import { api, apiErrorText, fetchAll } from '../../api/client';
 import { enumLabel, newIdemKey } from '../common';
 import { WaterAccountSearchSelect } from '../pickers';
 import Table from '../../components/PageTable';
@@ -67,10 +67,8 @@ export default function Violations() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get<{ items: Violation[] }>('/violations', {
-        params: { take: 200 },
-      });
-      setRows(res.data.items);
+      const items = await fetchAll<Violation>('/violations', {}, 'items');
+      setRows(items);
     } catch (e) {
       message.error(apiErrorText(e));
     } finally {

@@ -2062,6 +2062,10 @@ model InstallApplication {
   feeNote        String?            @map("fee_note")
   /** V6 合同扫描件：dataURL/引用数组（与任务佐证同口径存 JSONB）。 */
   contractScan   Json?              @map("contract_scan") @db.JsonB
+  /** 问题6（1027 整合）：申请人证件类型/号码 + 证件照片扫描件。 */
+  certType       String?            @map("cert_type")
+  certNo         String?            @map("cert_no")
+  certPhoto      Json?              @map("cert_photo") @db.JsonB
   rejectReason   String?            @map("reject_reason")
   waterAccountId String?            @map("water_account_id") @db.Uuid
   createdAt      DateTime           @default(now()) @map("created_at")

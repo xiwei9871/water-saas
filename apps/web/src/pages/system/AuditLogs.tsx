@@ -2,8 +2,8 @@ import { ReloadOutlined } from '@ant-design/icons';
 import { App as AntdApp, Button, Card, Input, Space, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { useCallback, useEffect, useState } from 'react';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type { AuditLog, Staff } from '../../api/types';
 import Table from '../../components/PageTable';
 
@@ -32,16 +32,11 @@ export default function AuditLogs() {
   const [pageSize, setPageSize] = useState(20);
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<AuditLog[]>('/iam/audit-logs', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(entity.trim() ? { entity: entity.trim() } : {}),
-          },
-        });
+        const res = { data: await fetchAll<AuditLog>('/iam/audit-logs', {            ...(entity.trim() ? { entity: entity.trim() } : {}),
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -54,8 +49,8 @@ export default function AuditLogs() {
 
   useEffect(() => {
     // Defer to a microtask — setState must not run synchronously in effects.
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   // staffId → 姓名（越出 orgScope 的员工只显示短 id）。
   useEffect(() => {
@@ -73,10 +68,7 @@ export default function AuditLogs() {
 
   // The endpoint returns a page, not a total — allow "next page" exactly
   // when the current page came back full.
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
 
   const columns: ColumnsType<AuditLog> = [
     {
@@ -141,7 +133,7 @@ export default function AuditLogs() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
         </Space>
@@ -152,7 +144,7 @@ export default function AuditLogs() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         pagination={{
           current: page,
           pageSize,

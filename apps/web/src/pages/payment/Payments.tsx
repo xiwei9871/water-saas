@@ -5,8 +5,8 @@ import {
 } from '@ant-design/icons';
 import { App as AntdApp, Button, Card, Descriptions, Drawer, Popconfirm, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   PayChannel,
   Payment,
@@ -71,19 +71,14 @@ export default function Payments() {
   const effectiveCashierId = cashierId;
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<Payment[]>('/payments', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(effectiveSettleId ? { settleAccountId: effectiveSettleId } : {}),
+        const res = { data: await fetchAll<Payment>('/payments', {            ...(effectiveSettleId ? { settleAccountId: effectiveSettleId } : {}),
             ...(effectiveCashierId ? { cashierId: effectiveCashierId } : {}),
             ...(status ? { status } : {}),
             ...(channel ? { channel } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -95,16 +90,13 @@ export default function Payments() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   // 10/8 报告 §2：结算户/收费员姓名由 API 内嵌返回（settleNo/settleName/
   // cashierName），不再依赖 customer:read / iam:read 做前端水合。
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  
 
   const detailSeq = useRef(0);
 
@@ -146,7 +138,7 @@ export default function Payments() {
       message.error(apiErrorText(err));
     } finally {
       setActing(null);
-      await load(page, pageSize);
+      await load();
       if (detail?.id === p.id) void openDetail(p);
     }
   };
@@ -170,6 +162,7 @@ export default function Payments() {
     { onShowAll: () => setPage(1) },
   );
   const shownRows = focusList.shown;
+  const total = shownRows.length;
 
   const print = async (receipt: Receipt) => {
     setPrinting(true);
@@ -348,6 +341,8 @@ export default function Payments() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 110 }}
@@ -362,7 +357,7 @@ export default function Payments() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
         </Space>
@@ -384,7 +379,7 @@ export default function Payments() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={shownRows}
+        dataSource={shownRows.slice((page - 1) * pageSize, page * pageSize)}
         rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         pagination={
           focusList.focusing

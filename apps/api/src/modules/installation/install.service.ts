@@ -33,6 +33,10 @@ export interface CreateApplyBody {
   caliberReq?: string;
   remark?: string;
   orgUnitId?: string;
+  /** 问题6（1027）：申请人证件。 */
+  certType?: string;
+  certNo?: string;
+  certPhoto?: unknown;
 }
 
 @Injectable()
@@ -59,6 +63,11 @@ export class InstallService {
         usageCategory: body.usageCategory,
         caliberReq: body.caliberReq,
         remark: body.remark,
+        certType: body.certType ?? null,
+        certNo: body.certNo ?? null,
+        certPhoto: Array.isArray(body.certPhoto)
+          ? body.certPhoto.slice(0, 3).map((x) => String(x).slice(0, 800_000))
+          : undefined,
         orgUnitId: body.orgUnitId ?? null,
         createdBy: ctx.staffId,
         updatedBy: ctx.staffId,

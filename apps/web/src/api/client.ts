@@ -396,6 +396,32 @@ export const apiErrorText = (err: unknown): string => {
 
 export const api = axios.create({ baseURL: '/api', timeout: 15000 });
 
+/**
+ * Y4（10/27 整合修订）：清单页「全量加载 + 本地分组/分页」——
+ * 分批 take=200 循环拉取直至取完，返回完整数组。
+ * 与后端估算 total 划清界限：分组（未完成/已完成）天然覆盖全量数据。
+ */
+export const fetchAll = async <T>(
+  url: string,
+  params?: Record<string, unknown>,
+  itemsKey?: string,
+): Promise<T[]> => {
+  const BATCH = 200;
+  const out: T[] = [];
+  for (let i = 0; i < 50; i++) {
+    const res = await api.get<T[] | Record<string, T[]>>(url, {
+      params: { ...params, take: BATCH, skip: i * BATCH },
+      timeout: 60000,
+    });
+    const batch = itemsKey
+      ? ((res.data as Record<string, T[]>)[itemsKey] ?? [])
+      : (res.data as T[]);
+    out.push(...batch);
+    if (batch.length < BATCH) return out;
+  }
+  return out;
+};
+
 api.interceptors.request.use((config) => {
   const token = session.accessToken;
   if (token) {

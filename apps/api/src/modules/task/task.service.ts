@@ -281,7 +281,8 @@ export class TaskService {
       const [items, total] = await Promise.all([
         tx.task.findMany({
           where,
-          orderBy: [{ priority: 'desc' }, { dueAt: 'asc' }, { createdAt: 'desc' }],
+          // Y3（1027 整合）：任务列表按创建时间倒序，最新任务在前。
+          orderBy: [{ createdAt: 'desc' }, { priority: 'desc' }, { dueAt: 'asc' }],
           take: q.take,
           skip: q.skip,
           select: TASK_SELECT,
@@ -329,7 +330,7 @@ export class TaskService {
       - collectionNotice：任务挂在结算户上，经 context.noticeId 回联通知单行 id；
       - readingPlan / billingRun：经读数/账单回联计划、批次行 id；
       - 其余 bizType：bizId 即记录 id。 */
-  async bizFlags(ctx: TenantCtx, bizType: string) {
+  async bizFlags(ctx: TenantCtx, perms: string[] | undefined, bizType: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const srcMap: Record<string, string> = {
         readingPlan: 'meterReading',
@@ -340,9 +341,23 @@ export class TaskService {
       };
       const rows = await tx.task.findMany({
         where: { tenantId: ctx.tenantId, bizType: srcMap[bizType] ?? bizType },
-        select: { bizId: true, status: true, context: true },
+        select: { bizId: true, status: true, context: true, requiredPerm: true, orgUnitId: true, assigneeId: true, escalatedAt: true },
       });
       const isOpen = (s: string) => s === 'PENDING' || s === 'CLAIMED' || s === 'ASSIGNED';
+      // 问题4（1027 整合）：完成与否按「当前账号」口径——只有与我相关的
+      // 未结任务才算未完成：我是认领/指派人，或我是该任务候选人
+      // （requiredPerm 命中 + orgUnitId 落在我数据范围内；iam:write 上级
+      // 对超期任务也视为相关）。别人的未结环节不影响我视角的「已完成」。
+      const p = this.permSet(perms);
+      const canSeeEscalated = p.has('iam:write');
+      const mine = (r: (typeof rows)[number]) =>
+        r.assigneeId
+          ? // 已认领/指派：只算指派人头上（超期时对 iam:write 上级仍相关）。
+            r.assigneeId === ctx.staffId || (canSeeEscalated && !!r.escalatedAt)
+          : // 待领池：候选人（权限+数据范围）均视为未完成。
+            (p.isAdmin || (perms ?? []).includes(r.requiredPerm)) &&
+              (ctx.scope === 'ALL' || !r.orgUnitId || ctx.orgScope.includes(r.orgUnitId));
+      const openForMe = (r: (typeof rows)[number]) => isOpen(r.status) && mine(r);
       const collect = (keyOf: (r: (typeof rows)[number]) => string | null) => {
         const open = new Set<string>();
         const all = new Set<string>();
@@ -350,7 +365,7 @@ export class TaskService {
           const k = keyOf(r);
           if (!k) continue;
           all.add(k);
-          if (isOpen(r.status)) open.add(k);
+          if (openForMe(r)) open.add(k);
         }
         return { open, all };
       };
@@ -386,7 +401,7 @@ export class TaskService {
           for (const l of links) {
             if (l.wa !== p.waId || !(p.period > l.f && p.period <= l.t)) continue;
             all.add(l.id);
-            if (isOpen(r.status)) open.add(l.id);
+            if (openForMe(r)) open.add(l.id);
           }
         });
         return finish(open, all);

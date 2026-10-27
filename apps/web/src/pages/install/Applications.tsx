@@ -44,6 +44,9 @@ interface Apply {
   feeReceived?: string | null;
   feeNote?: string | null;
   contractScan?: string[] | null;
+  certType?: string | null;
+  certNo?: string | null;
+  certPhoto?: string[] | null;
   rejectReason: string | null;
   waterAccountId: string | null;
   waterAccountNo?: string | null;
@@ -58,6 +61,8 @@ const STATUS_STEP: Record<ApplyStatus, number> = {
   SUBMITTED: 0, SURVEYED: 1, APPROVED: 2, INSTALLING: 3, COMPLETED: 4,
   REJECTED: 0, CANCELLED: 0,
 };
+const CERT_TYPE_LABELS: Record<string, string> = { ID_CARD: '居民身份证', BUSINESS_LICENSE: '营业执照', PASSPORT: '护照', OTHER: '其他证件' };
+
 const STATUS_COLORS: Record<ApplyStatus, string> = {
   SUBMITTED: 'processing', SURVEYED: 'cyan', APPROVED: 'geekblue',
   INSTALLING: 'gold', COMPLETED: 'green', REJECTED: 'red', CANCELLED: 'default',
@@ -91,6 +96,8 @@ export default function InstallApplications() {
   const [archiveFor, setArchiveFor] = useState<Apply | null>(null);
   /** V6 合同扫描件草稿（详情抽屉内编辑，保存才落库）。 */
   const [scans, setScans] = useState<string[]>([]);
+  const [certPhotos, setCertPhotos] = useState<string[]>([]);
+  const [archMeter, setArchMeter] = useState<import('../../api/types').Meter | null>(null);
   const [scanSaving, setScanSaving] = useState(false);
   const [form] = Form.useForm();
   const [noteForm] = Form.useForm();
@@ -148,9 +155,10 @@ export default function InstallApplications() {
   const create = async () => {
     const v = await form.validateFields();
     try {
-      await api.post('/install/applications', v);
+      await api.post('/install/applications', { ...v, certPhoto: certPhotos });
       message.success('申请已提交，审批任务已生成');
       setCreateOpen(false);
+      setCertPhotos([]);
       form.resetFields();
       void load();
     } catch (err) {
@@ -215,7 +223,8 @@ export default function InstallApplications() {
             },
         installation: {
           initialReading: v.initialReading,
-          reason: 'NEW',
+          installedAt: v.installedAt?.format('YYYY-MM-DD'),
+          reason: v.installReason ?? 'NEW',
         },
         readingBookId: v.bookId || undefined,
       });
@@ -280,6 +289,8 @@ export default function InstallApplications() {
       extra={
         <Space>
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 130 }}
@@ -325,6 +336,55 @@ export default function InstallApplications() {
               <Input maxLength={30} style={{ width: 180 }} />
             </Form.Item>
           </Space>
+          <Space>
+            <Form.Item name="certType" label="证件类型">
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                style={{ width: 160 }}
+                options={[
+                  { value: 'ID_CARD', label: '居民身份证' },
+                  { value: 'BUSINESS_LICENSE', label: '营业执照' },
+                  { value: 'PASSPORT', label: '护照' },
+                  { value: 'OTHER', label: '其他证件' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item name="certNo" label="证件号码">
+              <Input maxLength={40} style={{ width: 220 }} />
+            </Form.Item>
+          </Space>
+          <Form.Item label="证件照片/扫描件">
+            <Space wrap>
+              {certPhotos.map((p, i) => (
+                <span key={i} style={{ position: 'relative', display: 'inline-block' }}>
+                  <Image src={p} width={56} height={56} style={{ objectFit: 'cover' }} />
+                  <Button
+                    size="small" type="text" danger icon={<CloseOutlined />}
+                    style={{ position: 'absolute', top: 0, right: 0 }}
+                    onClick={() => setCertPhotos((xs) => xs.filter((_, j) => j !== i))}
+                  />
+                </span>
+              ))}
+              <Upload
+                accept="image/*"
+                showUploadList={false}
+                beforeUpload={(f) => {
+                  if (certPhotos.length >= 3) {
+                    message.warning('最多 3 张');
+                    return false;
+                  }
+                  const rd = new FileReader();
+                  rd.onload = () => setCertPhotos((xs) => [...xs, String(rd.result)]);
+                  rd.readAsDataURL(f);
+                  return false;
+                }}
+              >
+                <Button size="small" icon={<UploadOutlined />}>上传/拍照</Button>
+              </Upload>
+            </Space>
+          </Form.Item>
           <Form.Item name="addr" label="安装地址" rules={[{ required: true }]}>
             <Input maxLength={200} />
           </Form.Item>
@@ -411,8 +471,34 @@ export default function InstallApplications() {
             <ReadingBookSelect />
           </Form.Item>
           <Form.Item name="meterId" label="选用库存表（可选，不选则新建表号）">
-            <MeterSelect status="AVAILABLE" />
+            <MeterSelect status="AVAILABLE" onSelect={(m) => setArchMeter(m ?? null)} />
           </Form.Item>
+          {archMeter && (
+            <Descriptions size="small" column={2} bordered style={{ marginBottom: 12 }}>
+              <Descriptions.Item label="品牌">{archMeter.brand ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="口径">{archMeter.caliber ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="出厂编号">{archMeter.serialNo ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="最大读数">{archMeter.maxDial ?? '—'}</Descriptions.Item>
+            </Descriptions>
+          )}
+          <Space>
+            <Form.Item name="installedAt" label="装表日期">
+              <DatePicker style={{ width: 160 }} />
+            </Form.Item>
+            <Form.Item name="installReason" label="安装原因" initialValue="NEW">
+              <Select
+                style={{ width: 180 }}
+                showSearch
+                optionFilterProp="label"
+                options={[
+                  { value: 'NEW', label: '新装' },
+                  { value: 'REPLACE', label: '更换' },
+                  { value: 'FAULT', label: '故障换装' },
+                  { value: 'PERIODIC_CHECK', label: '周期检定换装' },
+                ]}
+              />
+            </Form.Item>
+          </Space>
           <Form.Item
             name="initialReading"
             label="水表起始读数（m³）"
@@ -467,6 +553,12 @@ export default function InstallApplications() {
             <Descriptions.Item label="申请人">{detail.applicantName}</Descriptions.Item>
             <Descriptions.Item label="合同号">{detail.contractNo ?? '—'}</Descriptions.Item>
             <Descriptions.Item label="联系电话">{detail.contactPhone ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="证件">{detail.certType ? (CERT_TYPE_LABELS[detail.certType] ?? detail.certType) : '—'}{detail.certNo ? ` ${detail.certNo}` : ''}</Descriptions.Item>
+            {Array.isArray(detail.certPhoto) && detail.certPhoto.length > 0 && (
+              <Descriptions.Item label="证件照片">
+                <Space>{(detail.certPhoto as string[]).map((p, i) => <Image key={i} src={p} width={48} height={48} style={{ objectFit: 'cover' }} />)}</Space>
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="地址">{detail.addr}</Descriptions.Item>
             <Descriptions.Item label="用水性质">{USAGE_CATEGORY_OPTIONS.find((c) => c.value === detail.usageCategory)?.label ?? detail.usageCategory}</Descriptions.Item>
             <Descriptions.Item label="状态"><Tag color={STATUS_COLORS[detail.status]}>{STATUS_LABELS[detail.status]}</Tag></Descriptions.Item>

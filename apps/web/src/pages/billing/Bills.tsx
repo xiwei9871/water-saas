@@ -6,8 +6,8 @@ import {
 import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popconfirm, Select, Space, Spin, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   Bill,
   BillAlloc,
@@ -94,6 +94,7 @@ export default function Bills() {
     { onShowAll: () => setPage(1) },
   );
   const shownRows = focusList.shown;
+  const total = shownRows.length;
 
   const [detail, setDetail] = useState<BillDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -124,7 +125,7 @@ export default function Bills() {
       setPenaltyResult(
         `扫描 ${res.data.scanned} 笔在收账单，计提 ${res.data.accrued} 笔，违约金合计 ${fmtCent(res.data.totalPenalty)}`,
       );
-      void load(page, pageSize);
+      void load();
     } catch (err) {
       message.error(apiErrorText(err));
     }
@@ -145,20 +146,15 @@ export default function Bills() {
   const effectiveRunId = billingRunId;
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<Bill[]>('/bills', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(period ? { period: period.format('YYYYMM') } : {}),
+        const res = { data: await fetchAll<Bill>('/bills', {            ...(period ? { period: period.format('YYYYMM') } : {}),
             ...(status ? { status } : {}),
             ...(effectiveAccountId ? { waterAccountId: effectiveAccountId } : {}),
             ...(effectiveSettleId ? { settleAccountId: effectiveSettleId } : {}),
             ...(effectiveRunId ? { billingRunId: effectiveRunId } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -170,8 +166,8 @@ export default function Bills() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   const { accountLabel, accountInfo } = useWaterAccountLabels(
     rows.map((r) => r.waterAccountId),
@@ -181,10 +177,7 @@ export default function Bills() {
     rows.map((r) => r.settleAccountId),
   );
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  
 
   const detailSeq = useRef(0);
 
@@ -240,7 +233,7 @@ export default function Bills() {
       message.error(apiErrorText(err));
     } finally {
       setActing(null);
-      await load(page, pageSize);
+      await load();
       if (detail?.id === bill.id) void openDetail(bill);
     }
   };
@@ -270,7 +263,7 @@ export default function Bills() {
         `已换票重开：原单红冲，新单金额 ${fmtCent(res.data.totalAmount)}（沿用原资费版本计价）`,
       );
       setReplaceFor(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -458,6 +451,8 @@ export default function Bills() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 110 }}
@@ -503,7 +498,7 @@ export default function Bills() {
               }}
             />
           </span>
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {hasPerm('billing:write') && (
@@ -527,7 +522,7 @@ export default function Bills() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={shownRows}
+        dataSource={shownRows.slice((page - 1) * pageSize, page * pageSize)}
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={
           focusList.focusing

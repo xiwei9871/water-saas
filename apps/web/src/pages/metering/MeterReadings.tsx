@@ -12,9 +12,9 @@ import {
 import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popover, Select, Space, Spin, Tag, Tooltip, Typography, Upload } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { api, apiErrorText, toApiError } from '../../api/client';
+import { api, fetchAll, apiErrorText, toApiError } from '../../api/client';
 import type {
   ImportRowError,
   MeterReading,
@@ -144,14 +144,10 @@ export default function MeterReadings() {
   const [detailLoading, setDetailLoading] = useState(false);
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<MeterReading[]>('/meter-readings', {
-          params: {
-            take: size,
-            ...(query ? { q: query } : {}),
-            skip: (p - 1) * size,
+        const res = { data: await fetchAll<MeterReading>('/meter-readings', {            ...(query ? { q: query } : {}),
             ...(planItemId.trim() ? { planItemId: planItemId.trim() } : {}),
             ...(installationId.trim()
               ? { installationId: installationId.trim() }
@@ -159,8 +155,7 @@ export default function MeterReadings() {
             ...(period ? { period: period.format('YYYYMM') } : {}),
             ...(resultType ? { resultType } : {}),
             ...(qcStatus ? { qcStatus } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -172,14 +167,11 @@ export default function MeterReadings() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  
 
   const { focusId, wa: focusWa, period: focusPeriod, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
@@ -233,6 +225,7 @@ export default function MeterReadings() {
     { extraRecord: focusRecord, onShowAll: () => setPage(1) },
   );
   const shownRows = focusList.shown;
+  const total = shownRows.length;
 
   // 聚焦行进入视口即高亮滚动到位。
   useEffect(() => {
@@ -267,10 +260,10 @@ export default function MeterReadings() {
             : `已${st.deduped ? '沿用既有任务并' : ''}通知具备权限的账号：${names}。您无需操作。`,
         });
       }
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
-      await load(page, pageSize);
+      await load();
     } finally {
       setActing(null);
     }
@@ -332,11 +325,11 @@ export default function MeterReadings() {
         );
       }
       setSupersedeTarget(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       // ALREADY_SUPERSEDED / NOT_SUPERSEDABLE 等直接透出。
       message.error(apiErrorText(err));
-      await load(page, pageSize);
+      await load();
     } finally {
       setSaving(false);
     }
@@ -359,7 +352,7 @@ export default function MeterReadings() {
       );
       message.success(`已导入 ${res.data.created} 条抄表记录`);
       setImportOpen(false);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       const e = toApiError(err);
       if (e.code === 'IMPORT_VALIDATION_FAILED') {
@@ -613,6 +606,8 @@ export default function MeterReadings() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="结果类型"
             style={{ width: 110 }}
@@ -627,6 +622,8 @@ export default function MeterReadings() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="质检状态"
             style={{ width: 120 }}
@@ -639,7 +636,7 @@ export default function MeterReadings() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -691,7 +688,7 @@ export default function MeterReadings() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={shownRows}
+        dataSource={shownRows.slice((page - 1) * pageSize, page * pageSize)}
         rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         scroll={{ x: 1900, y: 'calc(100vh - 340px)' }}
         pagination={

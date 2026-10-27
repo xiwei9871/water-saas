@@ -195,6 +195,8 @@ export default function Prepayments() {
             />
           )}
           <Select
+                    showSearch
+                    optionFilterProp="label"
             style={{ width: 140 }}
             placeholder="流水类型"
             allowClear

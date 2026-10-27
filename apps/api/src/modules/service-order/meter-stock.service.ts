@@ -378,6 +378,10 @@ export class MeterStockService {
       brand: string | null;
       model: string | null;
       caliber: string | null;
+      /** 问题7（1027）：出厂编号 / 最大读数（同批共用；details 可按表号逐只覆盖）。 */
+      serialNo?: unknown;
+      maxDial?: unknown;
+      details?: unknown;
       docNo?: unknown;
       supplier?: unknown;
       batchNo?: unknown;
@@ -407,9 +411,27 @@ export class MeterStockService {
       throw new ConflictException({ code: 'METER_NO_EXISTS', meterNo: dup.meterNo });
     }
     const checkYears = checkPeriodYearsOf(body.caliber);
+    // 逐只覆盖：details 为 [{meterNo, serialNo, maxDial}] 时优先于批次字段。
+    const detailByNo = new Map<string, { serialNo?: string; maxDial?: number }>();
+    if (Array.isArray(body.details)) {
+      for (const d of body.details as Record<string, unknown>[]) {
+        const no = String(d?.meterNo ?? '').trim();
+        if (!no) continue;
+        detailByNo.set(no, {
+          serialNo: d.serialNo != null ? String(d.serialNo).slice(0, 64) : undefined,
+          maxDial: d.maxDial != null && Number.isFinite(Number(d.maxDial)) ? Number(d.maxDial) : undefined,
+        });
+      }
+    }
+    const batchSerial = body.serialNo != null ? String(body.serialNo).slice(0, 64) : null;
+    const batchDial =
+      body.maxDial != null && Number.isFinite(Number(body.maxDial))
+        ? Number(body.maxDial)
+        : null;
     const now = new Date();
     const ids: string[] = [];
     for (const meterNo of nos) {
+      const d = detailByNo.get(meterNo);
       const meter = await tx.meter.create({
         data: {
           tenantId: ctx.tenantId,
@@ -417,6 +439,8 @@ export class MeterStockService {
           brand: body.brand,
           model: body.model,
           caliber: body.caliber,
+          serialNo: d?.serialNo ?? batchSerial,
+          maxDial: d?.maxDial ?? batchDial,
           checkPeriodYears: checkYears,
           status: 'AVAILABLE',
           warehouseId: body.warehouseId,

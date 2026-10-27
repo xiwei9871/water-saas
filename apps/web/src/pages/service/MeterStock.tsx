@@ -256,6 +256,8 @@ export default function MeterStock() {
         brand: v.brand,
         model: v.model,
         caliber: v.caliber,
+        serialNo: v.serialNo,
+        maxDial: v.maxDial,
         docNo: v.docNo,
         supplier: v.supplier,
         batchNo: v.batchNo,
@@ -589,6 +591,14 @@ export default function MeterStock() {
                 </Form.Item>
                 <Form.Item name="caliber" label="口径" style={{ flex: 1 }}>
                   <Input placeholder="DN15（自动带检定周期）" />
+                </Form.Item>
+              </Space.Compact>
+              <Space.Compact block>
+                <Form.Item name="serialNo" label="出厂编号" style={{ flex: 1 }}>
+                  <Input placeholder="同批共用；逐只不同请用登记水表逐只录" maxLength={64} />
+                </Form.Item>
+                <Form.Item name="maxDial" label="最大读数（字轮上限）" style={{ flex: 1 }}>
+                  <Input type="number" min={0} placeholder="如 99999" />
                 </Form.Item>
               </Space.Compact>
             </>

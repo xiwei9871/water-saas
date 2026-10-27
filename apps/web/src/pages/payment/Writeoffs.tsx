@@ -168,6 +168,8 @@ export default function Writeoffs() {
       <Card title="坏账核销">
       <Space style={{ marginBottom: 16 }} wrap>
         <Select
+                    showSearch
+                    optionFilterProp="label"
           allowClear
           value={status}
           onChange={setStatus}

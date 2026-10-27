@@ -9,7 +9,7 @@ import { Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, M
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   BookMember,
   PlanItemStatus,
@@ -113,6 +113,7 @@ export default function ReadingPlans() {
     { extraRecord: focusPlan, onShowAll: () => setPage(1) },
   );
   const shownRows = focusList.shown;
+  const total = shownRows.length;
 
   const [progressMap, setProgressMap] = useState<Map<string, ReadingPlanProgress>>(
     new Map(),
@@ -150,18 +151,13 @@ export default function ReadingPlans() {
   const [batchSaving, setBatchSaving] = useState(false);
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<ReadingPlan[]>('/reading-plans', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(bookId ? { bookId } : {}),
+        const res = { data: await fetchAll<ReadingPlan>('/reading-plans', {            ...(bookId ? { bookId } : {}),
             ...(period ? { period: period.format('YYYYMM') } : {}),
             ...(status ? { status } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -173,8 +169,8 @@ export default function ReadingPlans() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   // 册名/抄表员已由 API 内嵌（bookName/readerName）；本地仅加载各计划进度。
   useEffect(() => {
@@ -206,10 +202,7 @@ export default function ReadingPlans() {
   const bookLabel = useCallback((_id: string) => '—', []);
   const staffName = useCallback((_id: string | null) => '—', []);
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  
 
   // ---- 计划动作 ----
 
@@ -227,7 +220,7 @@ export default function ReadingPlans() {
     } finally {
       setActing(null);
       // Resync even on failure so a stale status button doesn't linger.
-      await load(page, pageSize);
+      await load();
       if (drawerPlanId === plan.id) await loadDetail(plan.id);
     }
   };
@@ -261,7 +254,7 @@ export default function ReadingPlans() {
         message.success('抄表计划已生成');
       }
       setGenOpen(false);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       // PLAN_ALREADY_EXISTS / EMPTY_BOOK 等直接透出。
       message.error(apiErrorText(err));
@@ -447,7 +440,7 @@ export default function ReadingPlans() {
       );
       setEntryItem(null);
       await loadDetail(drawerPlanId);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
       // 明细可能已被他人完成 —— 刷新抽屉保持一致。
@@ -536,7 +529,7 @@ export default function ReadingPlans() {
       showReviewTaskNotice(res.data.reviewTasks);
       setBatchOpen(false);
       await loadDetail(drawerPlanId);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       // 批量为单事务 —— 任一行失败整批回滚，文案直接透出。
       message.error(apiErrorText(err));
@@ -742,6 +735,8 @@ export default function ReadingPlans() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 110 }}
@@ -755,7 +750,7 @@ export default function ReadingPlans() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -799,7 +794,7 @@ export default function ReadingPlans() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={shownRows}
+        dataSource={shownRows.slice((page - 1) * pageSize, page * pageSize)}
         rowClassName={(r) => (focusId && r.id === focusId ? FOCUS_ROW_CLASS : '')}
         scroll={{ x: 1300, y: 'calc(100vh - 340px)' }}
         pagination={{
@@ -885,6 +880,8 @@ export default function ReadingPlans() {
             </Space>
             <Space wrap style={{ marginBottom: 12 }}>
               <Select
+                    showSearch
+                    optionFilterProp="label"
                 allowClear
                 placeholder="按明细状态过滤"
                 style={{ width: 160 }}

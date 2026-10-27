@@ -419,6 +419,8 @@ export default function Exceptions() {
         extra={
           <Space wrap>
             <Select
+                    showSearch
+                    optionFilterProp="label"
               allowClear
               placeholder="类型"
               style={{ width: 150 }}
@@ -441,6 +443,8 @@ export default function Exceptions() {
               options={Object.entries(SEV_LABELS).map(([v, l]) => ({ value: v, label: l }))}
             />
             <Select
+                    showSearch
+                    optionFilterProp="label"
               allowClear
               placeholder="状态"
               style={{ width: 100 }}

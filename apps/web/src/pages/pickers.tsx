@@ -1,4 +1,5 @@
-import { App as AntdApp, Select, Tag, TreeSelect } from 'antd';
+import { App as AntdApp, Select, Tag, TreeSelect, Typography } from 'antd';
+import { CheckOutlined, CopyOutlined } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, apiErrorText } from '../api/client';
@@ -39,10 +40,43 @@ interface PickerProps {
   disabled?: boolean;
 }
 
+interface OptionField {
+  /** 字段中文名（复制提示用）。 */
+  name: string;
+  /** 复制内容 = 真实字段值。 */
+  text: string;
+}
+
 interface Option {
   value: string;
   label: string;
+  /** Y2（1027 整合）：选项附带可复制字段。 */
+  fields?: OptionField[];
 }
+
+/**
+ * Y2：下拉选项行内可复制字段 —— 每个字段显示「字段名 值」，尾部复制按钮
+ * 仅复制该字段值；点击复制不触发选中（stopPropagation）。
+ */
+const copyableOptionRender = (opt: { label?: unknown; data: Option }) => (
+  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+    <span>{opt.data.label}</span>
+    {(opt.data.fields ?? []).map((f) => (
+      <span
+        key={f.name}
+        style={{ fontSize: 12, color: '#888' }}
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {f.name}:{f.text}
+        <Typography.Text
+          copyable={{ text: f.text, tooltips: [`复制${f.name}`, '已复制'], icon: [<CopyOutlined key="c" />, <CheckOutlined key="ok" />] }}
+          style={{ marginLeft: 2 }}
+        />
+      </span>
+    ))}
+  </div>
+);
 
 /** Debounce a search callback so a request doesn't fire per keystroke. */
 export const useDebounced = (fn: (kw: string) => void, ms = 300) => {
@@ -100,6 +134,10 @@ export function CustomerSelect({ value, onChange, placeholder, disabled }: Picke
           res.data.map((c) => ({
             value: c.id,
             label: `${c.name}（${c.customerNo}）`,
+            fields: [
+              { name: '编号', text: c.customerNo },
+              ...(c.idNo ? [{ name: '证件号', text: c.idNo }] : []),
+            ],
           })),
         );
       } catch (err) {
@@ -126,6 +164,7 @@ export function CustomerSelect({ value, onChange, placeholder, disabled }: Picke
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
@@ -163,6 +202,7 @@ export function SettleAccountSelect({
           res.data.map((s) => ({
             value: s.id,
             label: `${s.name}（${s.settleNo}）`,
+            fields: [{ name: '结算号', text: s.settleNo }],
           })),
         );
       } catch (err) {
@@ -188,6 +228,7 @@ export function SettleAccountSelect({
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
@@ -205,6 +246,8 @@ export function SettleAccountSelect({
 interface MeterSelectProps extends PickerProps {
   /** Limit the fetched page to one status (e.g. AVAILABLE for install). */
   status?: MeterStatus;
+  /** 问题7：选中时回传完整表行（主数据带出）。 */
+  onSelect?: (meter: Meter | undefined) => void;
 }
 
 /**
@@ -214,6 +257,7 @@ interface MeterSelectProps extends PickerProps {
 export function MeterSelect({
   value,
   onChange,
+  onSelect,
   placeholder,
   disabled,
   status,
@@ -222,6 +266,7 @@ export function MeterSelect({
   const [options, setOptions] = useState<Option[]>([]);
   const [fetching, setFetching] = useState(false);
   const labelCache = useLabelCache();
+  const rowsRef = useRef<Map<string, Meter>>(new Map());
 
   const fetch = useCallback(
     async (kw: string) => {
@@ -234,12 +279,18 @@ export function MeterSelect({
             ...(status ? { status } : {}),
           },
         });
+        rowsRef.current = new Map(res.data.map((m) => [m.id, m]));
         setOptions(
           res.data.map((m) => ({
             value: m.id,
             label: [m.meterNo, m.brand, m.model, m.caliber]
               .filter(Boolean)
               .join(' · '),
+            fields: [
+              { name: '表号', text: m.meterNo },
+              ...(m.brand ? [{ name: '品牌', text: m.brand }] : []),
+              ...(m.caliber ? [{ name: '口径', text: m.caliber }] : []),
+            ],
           })),
         );
       } catch (err) {
@@ -265,12 +316,14 @@ export function MeterSelect({
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
           const l = (option as Option | undefined)?.label;
           if (l) labelCache.set(v, l);
         }
+        onSelect?.(v ? rowsRef.current.get(v) : undefined);
         onChange?.(v);
       }}
       onSearch={onSearch}
@@ -335,6 +388,10 @@ export function WaterAccountSelect({
             a.currentMeterNo ? `表 ${a.currentMeterNo}` : '无在装表',
             enumLabel(USAGE_CATEGORY_LABELS, a.usageCategory),
           ].join(' · '),
+          fields: [
+            { name: '户号', text: a.accountNo },
+            ...(a.addr ? [{ name: '地址', text: a.addr }] : []),
+          ],
         }));
         setOptions(opts);
         // Stale selection from a previous customer → clear it; exactly one
@@ -369,6 +426,7 @@ export function WaterAccountSelect({
       disabled={disabled || !customerId}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
@@ -427,6 +485,10 @@ export function WaterAccountSearchSelect({
               a.addr,
               a.currentMeterNo ? `表 ${a.currentMeterNo}` : '无在装表',
             ].join(' · '),
+            fields: [
+              { name: '户号', text: a.accountNo },
+              ...(a.addr ? [{ name: '地址', text: a.addr }] : []),
+            ],
           })),
         );
       } catch (err) {
@@ -452,6 +514,7 @@ export function WaterAccountSearchSelect({
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
@@ -525,6 +588,7 @@ export function BillingAccountSelect({
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
@@ -597,6 +661,7 @@ export function SettleAccountLookupSelect({
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
@@ -665,6 +730,7 @@ export function BillingRunSelect({
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
@@ -731,6 +797,7 @@ export function StaffLookupSelect({
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         const l = v ? (option as Option | undefined)?.label : undefined;
@@ -788,6 +855,7 @@ export function StaffSelect({ value, onChange, placeholder, disabled }: PickerPr
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {
@@ -907,6 +975,7 @@ export function ReadingBookSelect({
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
+      optionRender={copyableOptionRender}
       value={value}
       onChange={(v: string | undefined, option) => {
         if (v) {

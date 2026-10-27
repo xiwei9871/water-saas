@@ -6,8 +6,8 @@ import {
 import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Modal, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   CashierDayClose,
   CashierDayCloseDetail,
@@ -60,17 +60,12 @@ export default function DayClose() {
   const [closeForm] = Form.useForm<CloseFormValues>();
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<CashierDayClose[]>('/cashier-day-close', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(closeDate ? { closeDate: closeDate.format('YYYY-MM-DD') } : {}),
+        const res = { data: await fetchAll<CashierDayClose>('/cashier-day-close', {            ...(closeDate ? { closeDate: closeDate.format('YYYY-MM-DD') } : {}),
             ...(cashierId ? { cashierId } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -82,8 +77,8 @@ export default function DayClose() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   const staffName = useCallback(
     (r: { cashierId: string; cashierName?: string | null }) =>
@@ -91,10 +86,7 @@ export default function DayClose() {
     [],
   );
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
 
   const detailSeq = useRef(0);
 
@@ -130,7 +122,7 @@ export default function DayClose() {
         `日结完成：${res.data.cashierName ?? '当前用户'} ${fmtDate(res.data.closeDate)} 共 ${res.data.totalCount} 笔、${fmtCent(res.data.totalAmount)}`,
       );
       setCloseOpen(false);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       // DAY_CLOSE_EXISTS / DAY_CLOSE_EMPTY 直接透出。
       message.error(apiErrorText(err));
@@ -281,7 +273,7 @@ export default function DayClose() {
               placeholder="按收费员过滤"
             />
           </span>
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -306,7 +298,7 @@ export default function DayClose() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         pagination={{
           current: page,
           pageSize,

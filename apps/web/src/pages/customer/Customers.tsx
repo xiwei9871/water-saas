@@ -5,9 +5,9 @@ import {
 } from '@ant-design/icons';
 import { App as AntdApp, Button, Card, Descriptions, Drawer, Form, Input, Modal, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type { Customer, CustomerDetail, WaterAccountRef } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -63,17 +63,12 @@ export default function Customers() {
   const [highlightId, setHighlightId] = useState<string | null>(null);
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<Customer[]>('/customers', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(name.trim() ? { name: name.trim() } : {}),
+        const res = { data: await fetchAll<Customer>('/customers', {            ...(name.trim() ? { name: name.trim() } : {}),
             ...(customerNo.trim() ? { customerNo: customerNo.trim() } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -86,15 +81,12 @@ export default function Customers() {
 
   useEffect(() => {
     // Defer to a microtask — setState must not run synchronously in effects.
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   // The endpoint returns a page, not a total — allow "next page" exactly
   // when the current page came back full.
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
 
   const openCreate = () => {
     form.resetFields();
@@ -151,9 +143,9 @@ export default function Customers() {
         // RC1-5: 列表默认 createdAt desc —— 新记录必在第一页并高亮。
         setHighlightId(newId);
         setPage(1);
-        await load(1, pageSize);
+        await load();
       } else {
-        await load(page, pageSize);
+        await load();
       }
     } catch (err) {
       message.error(apiErrorText(err));
@@ -288,7 +280,7 @@ export default function Customers() {
           />
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => void load(page, pageSize)}
+            onClick={() => void load()}
           >
             刷新
           </Button>
@@ -305,7 +297,7 @@ export default function Customers() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         rowClassName={(r) => (r.id === highlightId ? 'ws-row-highlight' : '')}
         pagination={{
           current: page,

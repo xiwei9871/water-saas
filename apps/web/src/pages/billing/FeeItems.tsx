@@ -5,8 +5,8 @@ import {
 } from '@ant-design/icons';
 import { App as AntdApp, Button, Card, Form, Input, Modal, Select, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { useCallback, useEffect, useState } from 'react';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type { CalcType, FeeItem, FeeItemKind } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -60,17 +60,12 @@ export default function FeeItems() {
   const [form] = Form.useForm<CreateFormValues>();
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<FeeItem[]>('/fee-items', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(code.trim() ? { code: code.trim() } : {}),
+        const res = { data: await fetchAll<FeeItem>('/fee-items', {            ...(code.trim() ? { code: code.trim() } : {}),
             ...(calcType ? { calcType } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -82,13 +77,10 @@ export default function FeeItems() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
 
   const openCreate = () => {
     form.resetFields();
@@ -131,7 +123,7 @@ export default function FeeItems() {
         message.success('费用项已更新');
       }
       setModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -210,7 +202,7 @@ export default function FeeItems() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -226,7 +218,7 @@ export default function FeeItems() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         pagination={{
           current: page,
           pageSize,

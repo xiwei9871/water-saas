@@ -5,10 +5,10 @@ import {
 } from '@ant-design/icons';
 import { App as AntdApp, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Spin, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { FocusTaskBar, useFocusList } from '../../components/TaskFocus';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   AccountStatus,
   PayChannel,
@@ -115,17 +115,12 @@ export default function SettleAccounts() {
   );
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<SettleAccount[]>('/settle-accounts', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(name.trim() ? { name: name.trim() } : {}),
+        const res = { data: await fetchAll<SettleAccount>('/settle-accounts', {            ...(name.trim() ? { name: name.trim() } : {}),
             ...(status ? { status } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -137,15 +132,12 @@ export default function SettleAccounts() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   // The endpoint returns a page, not a total — allow "next page" exactly
   // when the current page came back full.
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
 
   const openCreate = () => {
     form.resetFields();
@@ -187,7 +179,7 @@ export default function SettleAccounts() {
         message.success('结算户已更新');
       }
       setModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -363,6 +355,8 @@ export default function SettleAccounts() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="按状态筛选"
             style={{ width: 140 }}
@@ -375,7 +369,7 @@ export default function SettleAccounts() {
           />
           <Button
             icon={<ReloadOutlined />}
-            onClick={() => void load(page, pageSize)}
+            onClick={() => void load()}
           >
             刷新
           </Button>

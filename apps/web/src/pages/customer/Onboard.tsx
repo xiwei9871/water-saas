@@ -18,7 +18,7 @@ import dayjs from 'dayjs';
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
-import type { InstallReason, OnboardResult, ReadingBook } from '../../api/types';
+import type { InstallReason, Meter, OnboardResult, ReadingBook } from '../../api/types';
 import {
   enumLabel,
   CUST_TYPE_LABELS,
@@ -114,6 +114,7 @@ export default function Onboard() {
       立户成功同时办结该申请（同事务回写 户号/结算户/表号）。 */
   const [applyOptions, setApplyOptions] = useState<{ value: string; label: string; raw: ApplyLite }[]>([]);
   const [sourceApply, setSourceApply] = useState<ApplyLite | null>(null);
+  const [existingMeter, setExistingMeter] = useState<Meter | null>(null);
   /** B1 立户即入册：可选抄表册列表（无 metering:read 时隐藏选择器）。 */
   const [bookOptions, setBookOptions] = useState<{ value: string; label: string }[]>([]);
 
@@ -619,13 +620,28 @@ export default function Onboard() {
             />
           </Form.Item>
           {meterMode === 'existing' ? (
-            <Form.Item
-              name="meterId"
-              label="库存水表"
-              rules={[{ required: true, message: '请选择水表' }]}
-            >
-              <MeterSelect status="AVAILABLE" placeholder="仅列出可用水表" />
-            </Form.Item>
+            <>
+              <Form.Item
+                name="meterId"
+                label="库存水表"
+                rules={[{ required: true, message: '请选择水表' }]}
+              >
+                <MeterSelect
+                  status="AVAILABLE"
+                  placeholder="仅列出可用水表"
+                  onSelect={(m) => setExistingMeter(m ?? null)}
+                />
+              </Form.Item>
+              {existingMeter && (
+                <Descriptions size="small" column={2} bordered style={{ marginBottom: 12 }}>
+                  <Descriptions.Item label="品牌">{existingMeter.brand ?? '—'}</Descriptions.Item>
+                  <Descriptions.Item label="型号">{existingMeter.model ?? '—'}</Descriptions.Item>
+                  <Descriptions.Item label="口径">{existingMeter.caliber ?? '—'}</Descriptions.Item>
+                  <Descriptions.Item label="出厂编号">{existingMeter.serialNo ?? '—'}</Descriptions.Item>
+                  <Descriptions.Item label="最大读数">{existingMeter.maxDial ?? '—'}</Descriptions.Item>
+                </Descriptions>
+              )}
+            </>
           ) : (
             <>
               <Form.Item name="meterNo" label="表号" extra="留空则由系统自动生成">

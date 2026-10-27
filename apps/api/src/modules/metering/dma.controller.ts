@@ -10,8 +10,10 @@ import {
   Post,
   Query,
   Req,
+  Res,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
+import * as XLSX from 'xlsx';
 import { IdempotencyService } from '../../common/idempotency.service.js';
 import { withOptionalIdem } from '../../common/idempotent.js';
 import { Permissions } from '../../common/permissions.decorator.js';
@@ -69,7 +71,11 @@ export class DmaController {
    */
   @Get('dashboard')
   @Permissions('metering:read')
-  dashboard(@Query('period') period?: string, @Query('periods') periods?: string) {
+  dashboard(
+    @Query('period') period?: string,
+    @Query('periods') periods?: string,
+    @Query('zoneId') zoneId?: string,
+  ) {
     const list = (periods ?? period ?? '')
       .split(',')
       .map((p) => p.trim())
@@ -78,7 +84,54 @@ export class DmaController {
     if (list.length === 0 || list.some((p) => !isValidPeriod(p))) {
       throw new BadRequestException({ code: 'INVALID_PERIOD' });
     }
-    return this.svc.dashboard(currentTenant(), list);
+    return this.svc.dashboard(currentTenant(), list, zoneId ? assertUuid(zoneId, 'zoneId') : undefined);
+  }
+
+  /** 问题2（1027 整合）：产销差看板导出 xlsx，列与看板一致。 */
+  @Get('dashboard/export')
+  @Permissions('metering:read')
+  async dashboardExport(
+    @Res({ passthrough: true }) res: Response,
+    @Query('period') period?: string,
+    @Query('periods') periods?: string,
+    @Query('zoneId') zoneId?: string,
+  ) {
+    const list = (periods ?? period ?? '')
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .slice(0, 24);
+    if (list.length === 0 || list.some((p) => !isValidPeriod(p))) {
+      throw new BadRequestException({ code: 'INVALID_PERIOD' });
+    }
+    const data = await this.svc.dashboard(
+      currentTenant(),
+      list,
+      zoneId ? assertUuid(zoneId, 'zoneId') : undefined,
+    );
+    const header = ['账期', '分区编码', '分区名称', '区域', '考核表数', '挂接表数', '考核表水量m³', '挂接水量m³', '未计量水量m³', '漏损率%', '未抄考核表'];
+    const aoa: unknown[][] = [header];
+    for (const p of data) {
+      for (const r of p.rows) {
+        aoa.push([
+          p.period, r.dma.code, r.dma.name, r.dma.region ?? '',
+          r.checkMeterCount, r.linkedMeterCount, r.checkQty, r.linkedQty,
+          r.unmeasuredQty, r.leakageRate ?? '—', r.unreadCheckMeters,
+        ]);
+      }
+    }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), '产销差');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="dma-dashboard-${new Date().toISOString().slice(0, 10)}.xlsx"`,
+    );
+    res.send(buf);
   }
 
   @Get('zones/:id')

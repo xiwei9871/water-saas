@@ -5,12 +5,12 @@ import {
   SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import { Alert, App as AntdApp, AutoComplete, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Tag } from 'antd';
+import { Alert, App as AntdApp, AutoComplete, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Tabs, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   InstallReason,
   InstallationStatus,
@@ -154,17 +154,12 @@ export default function Meters() {
   const [detailLoading, setDetailLoading] = useState(false);
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<Meter[]>('/meters', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(statusFilter ? { status: statusFilter } : {}),
+        const res = { data: await fetchAll<Meter>('/meters', {            ...(statusFilter ? { status: statusFilter } : {}),
             ...(search ? { q: search } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -176,22 +171,17 @@ export default function Meters() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   const loadInstallations = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setInstLoading(true);
       try {
-        const res = await api.get<MeterInstallation[]>('/meter-installations', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(instStatus ? { status: instStatus } : {}),
+        const res = { data: await fetchAll<MeterInstallation>('/meter-installations', {            ...(instStatus ? { status: instStatus } : {}),
             ...(instMeter ? { meterId: instMeter.id } : {}),
             ...(instAccountId ? { waterAccountId: instAccountId } : {}),
-          },
-        });
+          }) };
         setInstRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -203,15 +193,12 @@ export default function Meters() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void loadInstallations(instPage, instPageSize));
-  }, [loadInstallations, instPage, instPageSize]);
+    queueMicrotask(() => void loadInstallations());
+  }, [loadInstallations]);
 
   // The endpoints return a page, not a total — allow "next page" exactly
   // when the current page came back full.
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  const total = rows.length;
   const instTotal = useMemo(
     () =>
       (instPage - 1) * instPageSize +
@@ -271,7 +258,7 @@ export default function Meters() {
         message.success('水表已更新');
       }
       setMeterModal(null);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -301,7 +288,7 @@ export default function Meters() {
       );
       message.success('装表完成');
       setInstallOpen(false);
-      await Promise.all([load(page, pageSize), loadInstallations(instPage, instPageSize)]);
+      await Promise.all([load(), loadInstallations()]);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -329,7 +316,7 @@ export default function Meters() {
       );
       message.success('拆表完成');
       setRemoveTarget(null);
-      await Promise.all([load(page, pageSize), loadInstallations(instPage, instPageSize)]);
+      await Promise.all([load(), loadInstallations()]);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -364,7 +351,7 @@ export default function Meters() {
       );
       message.success('换表完成');
       setReplaceTarget(null);
-      await Promise.all([load(page, pageSize), loadInstallations(instPage, instPageSize)]);
+      await Promise.all([load(), loadInstallations()]);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -589,8 +576,8 @@ export default function Meters() {
   const editTransitions =
     meterModal?.mode === 'edit' ? PATCH_TRANSITIONS[meterModal.meter.status] : [];
 
-  return (
-    <>
+  // Y1（1027 整合）：水表管理 / 装卸记录拆为两个标签页，分页互不影响。
+  const metersCard = (
       <Card
         title="水表管理"
         extra={
@@ -605,6 +592,8 @@ export default function Meters() {
               }}
             />
             <Select
+                    showSearch
+                    optionFilterProp="label"
               allowClear
               placeholder="按状态筛选"
               style={{ width: 130 }}
@@ -619,7 +608,7 @@ export default function Meters() {
             />
             <Button
               icon={<ReloadOutlined />}
-              onClick={() => void load(page, pageSize)}
+              onClick={() => void load()}
             >
               刷新
             </Button>
@@ -636,7 +625,7 @@ export default function Meters() {
           size="middle"
           loading={loading}
           columns={meterColumns}
-          dataSource={rows}
+          dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
           pagination={{
             current: page,
             pageSize,
@@ -649,8 +638,10 @@ export default function Meters() {
           }}
         />
       </Card>
+  );
 
-      <div ref={instCardRef} style={{ marginTop: 16 }}>
+  const installsCard = (
+      <div ref={instCardRef}>
         {focusWa && instAccountId === focusWa && (
           <FocusTaskBar
             focusId={focusWa}
@@ -681,6 +672,8 @@ export default function Meters() {
                 </Tag>
               )}
               <Select
+                    showSearch
+                    optionFilterProp="label"
                 allowClear
                 placeholder="按状态筛选"
                 style={{ width: 120 }}
@@ -717,7 +710,7 @@ export default function Meters() {
               </span>
               <Button
                 icon={<ReloadOutlined />}
-                onClick={() => void loadInstallations(instPage, instPageSize)}
+                onClick={() => void loadInstallations()}
               >
                 刷新
               </Button>
@@ -742,7 +735,7 @@ export default function Meters() {
             size="middle"
             loading={instLoading}
             columns={instColumns}
-            dataSource={instRows}
+            dataSource={instRows.slice((instPage - 1) * instPageSize, instPage * instPageSize)}
             pagination={{
               current: instPage,
               pageSize: instPageSize,
@@ -756,6 +749,16 @@ export default function Meters() {
           />
         </Card>
       </div>
+  );
+
+  return (
+    <>
+      <Tabs
+        items={[
+          { key: 'meters', label: '水表管理', children: metersCard },
+          { key: 'installs', label: '装卸记录', children: installsCard },
+        ]}
+      />
 
       {/* 登记 / 编辑水表 */}
       <Modal maskClosable={false}

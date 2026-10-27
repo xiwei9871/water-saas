@@ -8,7 +8,7 @@ import { App as AntdApp, Alert, Button, Card, Descriptions, Form, Input, Modal, 
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   OrgUnit,
   RemoteImportReport,
@@ -94,13 +94,8 @@ export default function RemoteSources() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get<RemoteSource[]>('/remote-sources', {
-        params: {
-          take: pageSize,
-          skip: (page - 1) * pageSize,
-          ...(q.trim() ? { q: q.trim() } : {}),
-        },
-      });
+      const res = { data: await fetchAll<RemoteSource>('/remote-sources', {          ...(q.trim() ? { q: q.trim() } : {}),
+        }) };
       setRows(res.data);
     } catch (err) {
       message.error(apiErrorText(err));
@@ -341,11 +336,11 @@ export default function RemoteSources() {
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         pagination={{
           current: page,
           pageSize,
-          total: (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
+          total: rows.length,
           onChange: (p, s) => {
             setPage(p);
             setPageSize(s);

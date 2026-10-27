@@ -9,7 +9,7 @@ import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, 
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText, ApiError } from '../../api/client';
+import { api, fetchAll, apiErrorText, ApiError } from '../../api/client';
 import type {
   ConsumptionComponent,
   ConsumptionSettlement,
@@ -150,14 +150,11 @@ export default function Settlements() {
   const prefillEstimateReason = useCallback(
     async (accountId: string, period: string) => {
       try {
-        const rd = await api.get<MeterReading[]>('/meter-readings', {
-          params: {
+        const rd = { data: await fetchAll<MeterReading>('/meter-readings', {
             waterAccountId: accountId,
             period,
             resultType: 'NO_READ',
-            take: 5,
-          },
-        });
+          }) };
         const noRead = rd.data.find((r) => r.exceptionCode) ?? rd.data[0];
         const code = noRead?.exceptionCode;
         if (noRead && code) {
@@ -202,19 +199,14 @@ export default function Settlements() {
   const effectiveAccountId = canCustomerRead ? waterAccountId : accountIdInput;
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<ConsumptionSettlement[]>('/consumption-settlements', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(effectiveAccountId ? { waterAccountId: effectiveAccountId } : {}),
+        const res = { data: await fetchAll<ConsumptionSettlement>('/consumption-settlements', {            ...(effectiveAccountId ? { waterAccountId: effectiveAccountId } : {}),
             ...(period ? { period: period.format('YYYYMM') } : {}),
             ...(status ? { status } : {}),
             ...(isEstimated !== undefined ? { isEstimated: String(isEstimated) } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -226,8 +218,8 @@ export default function Settlements() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   const { accountLabel, accountInfo } = useWaterAccountLabels(
     rows.map((r) => r.waterAccountId),
@@ -238,10 +230,7 @@ export default function Settlements() {
     batchItems.map((i) => i.waterAccountId),
   );
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  
 
   const openDetail = async (row: ConsumptionSettlement) => {
     setDetailLoading(true);
@@ -270,7 +259,7 @@ export default function Settlements() {
     } finally {
       setActing(null);
       // Resync even on failure so a stale status/action button can't linger.
-      await load(page, pageSize);
+      await load();
     }
   };
 
@@ -321,7 +310,7 @@ export default function Settlements() {
       );
       message.success('结算已生成（草稿）');
       setGenOpen(false);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       // SETTLEMENT_ALREADY_EXISTS / ESTIMATE_REASON_REQUIRED / NO_INSTALLATION_IN_PERIOD…
       message.error(apiErrorText(err));
@@ -387,7 +376,7 @@ export default function Settlements() {
       message.success(
         `批量生成完成：成功 ${res.data.counts.generated + res.data.counts.generatedEstimated} 户，跳过 ${res.data.counts.skippedExists} 户，失败 ${res.data.counts.failed} 户`,
       );
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -656,6 +645,8 @@ export default function Settlements() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 100 }}
@@ -683,7 +674,7 @@ export default function Settlements() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -724,7 +715,7 @@ export default function Settlements() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={shownRows}
+        dataSource={shownRows.slice((page - 1) * pageSize, page * pageSize)}
         scroll={{ x: 1100, y: 'calc(100vh - 340px)' }}
         pagination={
           focusList.focusing
@@ -732,7 +723,7 @@ export default function Settlements() {
             : {
                 current: page,
                 pageSize,
-                total,
+                total: shownRows.length,
                 showSizeChanger: true,
                 onChange: (p, size) => {
                   setPage(p);

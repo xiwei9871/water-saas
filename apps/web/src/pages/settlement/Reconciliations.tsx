@@ -6,8 +6,8 @@ import {
 import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Select, Space, Spin, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { useCallback, useEffect, useState, useRef } from 'react';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   MeterReading,
   ReconStatus,
@@ -190,18 +190,13 @@ export default function Reconciliations() {
   const effectiveAccountId = waterAccountId;
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<Reconciliation[]>('/reconciliations', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(effectiveAccountId ? { waterAccountId: effectiveAccountId } : {}),
+        const res = { data: await fetchAll<Reconciliation>('/reconciliations', {            ...(effectiveAccountId ? { waterAccountId: effectiveAccountId } : {}),
             ...(status ? { status } : {}),
             ...(period ? { period: period.format('YYYYMM') } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -213,8 +208,8 @@ export default function Reconciliations() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
   const loadDriftHints = useCallback(async () => {
     try {
@@ -233,10 +228,7 @@ export default function Reconciliations() {
     rows.map((r) => r.waterAccountId),
   );
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  
 
   const { focusId, clear: clearFocus } = useFocusParams();
   const focusDone = useRef<string | null>(null);
@@ -252,6 +244,7 @@ export default function Reconciliations() {
   // A3 任务三态分组：按补差记录 id（后端经 waterAccountId+period 回联任务）。
   const taskGroup = useTaskGroup<Reconciliation>('reconciliation', rows, (r) => r.id);
   const shownRows = taskGroup.filtered;
+  const total = shownRows.length;
 
   const openDetail = async (row: Reconciliation) => {
     setDetailLoading(true);
@@ -295,7 +288,7 @@ export default function Reconciliations() {
       message.success(`${text}${extra}`);
       setCreateOpen(false);
       void loadDriftHints();
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       // RECONCILIATION_EXISTS / EMPTY_SPAN / UNBILLED_SPAN / ANCHOR_NOT_FOUND…
       message.error(apiErrorText(err));
@@ -469,6 +462,8 @@ export default function Reconciliations() {
             </span>
           )}
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 110 }}
@@ -491,7 +486,7 @@ export default function Reconciliations() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -531,7 +526,7 @@ export default function Reconciliations() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={shownRows}
+        dataSource={shownRows.slice((page - 1) * pageSize, page * pageSize)}
         // 列宽总和超过视口 —— scroll.x 让溢出发生在表格内而不是整页。
         scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
         pagination={{

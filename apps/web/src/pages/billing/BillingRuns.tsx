@@ -10,7 +10,7 @@ import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, 
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   Bill,
   BillingRun,
@@ -64,6 +64,7 @@ export default function BillingRuns() {
   // U2 任务分组：批次任务经其账单上的任务回联。
   const taskGroup = useTaskGroup<BillingRun>('billingRun', rows, (r) => r.id);
   const shownRows = taskGroup.filtered;
+  const total = shownRows.length;
 
   const [detail, setDetail] = useState<BillingRunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -78,17 +79,12 @@ export default function BillingRuns() {
   const [createForm] = Form.useForm<CreateFormValues>();
 
   const load = useCallback(
-    async (p: number, size: number) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<BillingRun[]>('/billing-runs', {
-          params: {
-            take: size,
-            skip: (p - 1) * size,
-            ...(period ? { period: period.format('YYYYMM') } : {}),
+        const res = { data: await fetchAll<BillingRun>('/billing-runs', {            ...(period ? { period: period.format('YYYYMM') } : {}),
             ...(status ? { status } : {}),
-          },
-        });
+          }) };
         setRows(res.data);
       } catch (err) {
         message.error(apiErrorText(err));
@@ -100,13 +96,10 @@ export default function BillingRuns() {
   );
 
   useEffect(() => {
-    queueMicrotask(() => void load(page, pageSize));
-  }, [load, page, pageSize]);
+    queueMicrotask(() => void load());
+  }, [load]);
 
-  const total = useMemo(
-    () => (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
-    [page, pageSize, rows.length],
-  );
+  
 
   const fetchPreflight = async (p: string) => {
     setPreflightLoading(true);
@@ -159,7 +152,7 @@ export default function BillingRuns() {
         }），核对后可执行开账`,
       );
       setCreateOpen(false);
-      await load(page, pageSize);
+      await load();
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -196,7 +189,7 @@ export default function BillingRuns() {
       message.error(apiErrorText(err));
     } finally {
       setActing(null);
-      await load(page, pageSize);
+      await load();
       // 若详情抽屉正开着，同步刷新它。
       if (detail?.id === run.id) void openDetail(run);
     }
@@ -399,6 +392,8 @@ export default function BillingRuns() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 140 }}
@@ -411,7 +406,7 @@ export default function BillingRuns() {
               setPage(1);
             }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page, pageSize)}>
+          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
           {canWrite && (
@@ -436,7 +431,7 @@ export default function BillingRuns() {
         size="middle"
         loading={loading}
         columns={columns}
-        dataSource={shownRows}
+        dataSource={shownRows.slice((page - 1) * pageSize, page * pageSize)}
         pagination={{
           current: page,
           pageSize,

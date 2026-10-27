@@ -19,7 +19,7 @@ import {
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import {
   enumLabel,
   fmtDate,
@@ -146,7 +146,7 @@ export default function ServiceOrders() {
   const { focusId, clear: clearFocus } = useFocusParams();
 
   const [items, setItems] = useState<ServiceOrder[]>([]);
-  const [total, setTotal] = useState(0);
+  
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string>();
@@ -179,35 +179,31 @@ export default function ServiceOrders() {
   const [execForm] = Form.useForm();
 
   const load = useCallback(
-    async (p = page) => {
+    async () => {
       setLoading(true);
       try {
-        const res = await api.get<{ total: number; items: ServiceOrder[] }>(
+        const all = await fetchAll<ServiceOrder>(
           '/service-orders',
           {
-            params: {
-              take: 20,
-              skip: (p - 1) * 20,
-              ...(status ? { status } : {}),
-              ...(serviceType ? { serviceType } : {}),
-              ...(range?.[0] ? { from: range[0].format('YYYY-MM-DD') } : {}),
-              ...(range?.[1] ? { to: range[1].format('YYYY-MM-DD') } : {}),
-            },
+            ...(status ? { status } : {}),
+            ...(serviceType ? { serviceType } : {}),
+            ...(range?.[0] ? { from: range[0].format('YYYY-MM-DD') } : {}),
+            ...(range?.[1] ? { to: range[1].format('YYYY-MM-DD') } : {}),
           },
+          'items',
         );
-        setItems(res.data.items);
-        setTotal(res.data.total);
+        setItems(all);
       } catch (e) {
         message.error(apiErrorText(e));
       } finally {
         setLoading(false);
       }
     },
-    [page, status, serviceType, range, message],
+    [status, serviceType, range, message],
   );
 
   useEffect(() => {
-    void load(page);
+    void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, status, serviceType, range]);
 
@@ -254,7 +250,7 @@ export default function ServiceOrders() {
       setAction(null);
       form.resetFields();
       await openDetail(detail.id);
-      void load(page);
+      void load();
     } catch (e) {
       message.error(apiErrorText(e));
     }
@@ -314,7 +310,7 @@ export default function ServiceOrders() {
       setAction(null);
       execForm.resetFields();
       await openDetail(detail.id);
-      void load(page);
+      void load();
     } catch (e) {
       message.error(apiErrorText(e));
     }
@@ -336,7 +332,7 @@ export default function ServiceOrders() {
       message.success(`工单 ${res.data.orderNo} 已提交`);
       setCreateOpen(false);
       form.resetFields();
-      void load(1);
+      void load();
       setPage(1);
     } catch (e) {
       message.error(apiErrorText(e));
@@ -428,6 +424,8 @@ export default function ServiceOrders() {
       extra={
         <Space>
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="服务类型"
             style={{ width: 160 }}
@@ -439,6 +437,8 @@ export default function ServiceOrders() {
             }}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 120 }}
@@ -457,7 +457,7 @@ export default function ServiceOrders() {
             }}
             style={{ width: 240 }}
           />
-          <Button icon={<ReloadOutlined />} onClick={() => void load(page)} />
+          <Button icon={<ReloadOutlined />} onClick={() => void load()} />
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
             发起工单
           </Button>
@@ -480,14 +480,14 @@ export default function ServiceOrders() {
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={shownItems}
+        dataSource={shownItems.slice((page - 1) * 20, page * 20)}
         rowClassName={(r) => (r.id === focusId ? FOCUS_ROW_CLASS : '')}
         pagination={
           focusList.focusing
             ? false
             : {
                 current: page,
-                total,
+                total: shownItems.length,
                 pageSize: 20,
                 onChange: setPage,
                 showTotal: (t) => `共 ${t} 条`,
@@ -518,7 +518,9 @@ export default function ServiceOrders() {
             label="服务类型"
             rules={[{ required: true, message: '请选择服务类型' }]}
           >
-            <Select options={TYPE_OPTIONS} placeholder="选择处置类型" />
+            <Select
+                    showSearch
+                    optionFilterProp="label" options={TYPE_OPTIONS} placeholder="选择处置类型" />
           </Form.Item>
           <Form.Item
             noStyle
@@ -528,6 +530,8 @@ export default function ServiceOrders() {
               activeInstallations.length > 0 ? (
                 <Form.Item name="meterInstallationId" label="关联表位(安装记录)">
                   <Select
+                    showSearch
+                    optionFilterProp="label"
                     allowClear
                     options={activeInstallations.map((i) => ({
                       value: i.id,

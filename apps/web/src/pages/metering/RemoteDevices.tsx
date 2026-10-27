@@ -4,7 +4,7 @@ import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   MeterInstallation,
   RemoteDevice,
@@ -108,14 +108,9 @@ export default function RemoteDevices() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get<RemoteDevice[]>('/remote-devices', {
-        params: {
-          take: pageSize,
-          skip: (page - 1) * pageSize,
-          ...(sourceId ? { remoteSourceId: sourceId } : {}),
+      const res = { data: await fetchAll<RemoteDevice>('/remote-devices', {          ...(sourceId ? { remoteSourceId: sourceId } : {}),
           ...(q.trim() ? { q: q.trim() } : {}),
-        },
-      });
+        }) };
       setRows(res.data);
     } catch (err) {
       message.error(apiErrorText(err));
@@ -362,11 +357,11 @@ export default function RemoteDevices() {
         size="small"
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={rows.slice((page - 1) * pageSize, page * pageSize)}
         pagination={{
           current: page,
           pageSize,
-          total: (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
+          total: rows.length,
           onChange: (p, s) => {
             setPage(p);
             setPageSize(s);

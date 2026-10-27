@@ -382,10 +382,10 @@ export class DmaService {
    * 水量口径（两侧一致，纯计量不含计费）：期内最新有效读数 − 期前最近
    * 读数，无前期读数时退到安装初始读数。
    */
-  async dashboard(ctx: TenantCtx, periods: string[]) {
+  async dashboard(ctx: TenantCtx, periods: string[], zoneId?: string) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const zones = await tx.dmaZone.findMany({
-        where: { tenantId: ctx.tenantId, status: 'ACTIVE' },
+        where: { tenantId: ctx.tenantId, status: 'ACTIVE', ...(zoneId ? { id: zoneId } : {}) },
         orderBy: { code: 'asc' },
       });
       const result: {

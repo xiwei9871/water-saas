@@ -22,7 +22,7 @@ const REMOTE_PAYLOAD_LABELS: Record<string, string> = {
   uploadTime: '上报时间',
   sn: '流水号',
 };
-import { api, apiErrorText } from '../../api/client';
+import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   RawRemoteEvent,
   RawRemoteEventDetail,
@@ -97,16 +97,11 @@ export default function RemoteEvents() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get<RawRemoteEvent[]>('/remote-events', {
-        params: {
-          take: pageSize,
-          skip: (page - 1) * pageSize,
-          ...(sourceId ? { remoteSourceId: sourceId } : {}),
+      const res = { data: await fetchAll<RawRemoteEvent>('/remote-events', {          ...(sourceId ? { remoteSourceId: sourceId } : {}),
           ...(status ? { processingStatus: status } : {}),
           ...(period.trim() ? { businessPeriod: period.trim() } : {}),
           ...(deviceKey.trim() ? { vendorDeviceKey: deviceKey.trim() } : {}),
-        },
-      });
+        }) };
       setRows(res.data);
     } catch (err) {
       message.error(apiErrorText(err));
@@ -241,6 +236,8 @@ export default function RemoteEvents() {
             options={sources.map((s) => ({ value: s.id, label: `${s.code} ${s.name}` }))}
           />
           <Select
+                    showSearch
+                    optionFilterProp="label"
             allowClear
             placeholder="状态"
             style={{ width: 130 }}
@@ -299,7 +296,7 @@ export default function RemoteEvents() {
             : {
                 current: page,
                 pageSize,
-                total: (page - 1) * pageSize + rows.length + (rows.length === pageSize ? 1 : 0),
+                total: rows.length,
                 onChange: (p, s) => {
                   setPage(p);
                   setPageSize(s);

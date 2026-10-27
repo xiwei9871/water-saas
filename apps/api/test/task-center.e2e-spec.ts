@@ -684,12 +684,12 @@ describe('U2 业务页任务分组：GET /tasks/biz-flags', () => {
         },
       });
     await mk('PENDING');
-    let flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.qc).expect(200)).body;
+    let flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.admin).expect(200)).body;
     expect(flags.openIds).toContain(bizId);
     expect(flags.doneIds).not.toContain(bizId);
     // 全部办结 → 移入 done
     await owner.task.updateMany({ where: { bizId, tenantId: T }, data: { status: 'DONE' } });
-    flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.qc).expect(200)).body;
+    flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.admin).expect(200)).body;
     expect(flags.openIds).not.toContain(bizId);
     expect(flags.doneIds).toContain(bizId);
   });
@@ -730,17 +730,17 @@ describe('U2 业务页任务分组：GET /tasks/biz-flags', () => {
         },
       });
     await mkTask('PENDING');
-    let flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    let flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.admin).expect(200)).body;
     expect(flags.openIds).toContain(recon.id);
     expect(flags.doneIds).not.toContain(recon.id);
     await mkTask('DONE'); // 同户同期再补一条已了结任务 —— 仍被 open 压住
-    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.admin).expect(200)).body;
     expect(flags.openIds).toContain(recon.id);
     await owner.task.updateMany({
       where: { tenantId: T, bizType: 'waterAccount', bizId: wa.id },
       data: { status: 'DONE' },
     });
-    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.admin).expect(200)).body;
     expect(flags.openIds).not.toContain(recon.id);
     expect(flags.doneIds).toContain(recon.id);
     // period 不匹配的任务不连累该记录（202805 不在 (202803,202804]）。
@@ -759,7 +759,7 @@ describe('U2 业务页任务分组：GET /tasks/biz-flags', () => {
         context: { waterAccountId: wa.id, period: '202805' },
       },
     });
-    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.qc).expect(200)).body;
+    flags = (await get(`/tasks/biz-flags?bizType=reconciliation`, tokens.admin).expect(200)).body;
     expect(flags.openIds).not.toContain(recon.id);
     expect(flags.doneIds).toContain(recon.id);
   });
@@ -781,10 +781,39 @@ describe('U2 业务页任务分组：GET /tasks/biz-flags', () => {
         context: { noticeId },
       },
     });
-    const flags = (await get(`/tasks/biz-flags?bizType=collectionNotice`, tokens.qc).expect(200))
+    const flags = (await get(`/tasks/biz-flags?bizType=collectionNotice`, tokens.admin).expect(200))
       .body;
     expect(flags.openIds).toContain(noticeId);
     expect(flags.doneIds).not.toContain(noticeId);
+  });
+
+  it('问题4：openIds 按当前账号口径——他人的未结环节不压在我头上', async () => {
+    const bizId = randomUUID();
+    // 待领池任务（service:write）：qc 无该权限 → 对 qc 不算未完成；admin 可见。
+    await owner.task.create({
+      data: {
+        tenantId: T, type: 'SVC_EXECUTE', title: 'p4', bizType: 'service_order', bizId,
+        reason: 'r', requiredPerm: 'service:write', status: 'PENDING', priority: 'NORMAL',
+        candidateCount: 1,
+      },
+    });
+    let flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.qc).expect(200)).body;
+    expect(flags.openIds).not.toContain(bizId);
+    flags = (await get(`/tasks/biz-flags?bizType=service_order`, tokens.admin).expect(200)).body;
+    expect(flags.openIds).toContain(bizId);
+    // 指派给 billerA 后：只对指派人未完成（billerB 同权但非指派 → 不显示）。
+    const t2 = await owner.task.create({
+      data: {
+        tenantId: T, type: 'COLLECTION', title: 'p4b', bizType: 'settleAccount', bizId,
+        reason: 'r', requiredPerm: 'billing:write', status: 'ASSIGNED', assigneeId: ids.staff_billerA,
+        priority: 'NORMAL', candidateCount: 1,
+      },
+    });
+    expect(t2.assigneeId).toBe(ids.staff_billerA);
+    flags = (await get(`/tasks/biz-flags?bizType=settleAccount`, tokens.billerA).expect(200)).body;
+    expect(flags.openIds).toContain(bizId);
+    flags = (await get(`/tasks/biz-flags?bizType=settleAccount`, tokens.billerB).expect(200)).body;
+    expect(flags.openIds).not.toContain(bizId);
   });
 });
 
@@ -882,7 +911,8 @@ describe('A1 任务指派/派送', () => {
     });
     await post(`/tasks/${t.id}/assign`, { assigneeId: ids.staff_billerA }).expect(201);
     // 去重索引含 ASSIGNED：同键直接 INSERT 应冲突被吸收 → 仍只有一条 open。
-    const flags = (await get(`/tasks/biz-flags?bizType=settleAccount`, tokens.qc).expect(200)).body;
+    // 问题4 口径：ASSIGNED 单只对指派人（及上级）计入 open —— 用 billerA 查。
+    const flags = (await get(`/tasks/biz-flags?bizType=settleAccount`, tokens.billerA).expect(200)).body;
     expect(flags.openIds).toContain(bizId);
     expect(flags.doneIds).not.toContain(bizId);
   });
@@ -959,7 +989,7 @@ describe('1026-v2 X6 — 抄表计划分组口径：全部抄完且无未结任�
     const { plan: p4 } = await mkPlan('4', a4, { read: false });
 
     const flags = (
-      await get(`/tasks/biz-flags?bizType=readingPlan`, tokens.qc).expect(200)
+      await get(`/tasks/biz-flags?bizType=readingPlan`, tokens.admin).expect(200)
     ).body as { openIds: string[]; doneIds: string[]; blockers: Record<string, { unreadItems: number; openTasks: boolean }> };
 
     expect(flags.doneIds).toContain(p1.id);

@@ -553,6 +553,8 @@ function DetailQuery() {
           </Form.Item>
           <Form.Item name="usageCategories" label="用水类别">
             <Select
+                    showSearch
+                    optionFilterProp="label"
               mode="multiple"
               allowClear
               options={USAGE_CATEGORY_OPTIONS}
@@ -563,6 +565,8 @@ function DetailQuery() {
           </Form.Item>
           <Form.Item name="statuses" label="户状态">
             <Select
+                    showSearch
+                    optionFilterProp="label"
               mode="multiple"
               allowClear
               style={{ minWidth: 140 }}
@@ -576,6 +580,8 @@ function DetailQuery() {
           </Form.Item>
           <Form.Item name="estimated" label="估抄">
             <Select
+                    showSearch
+                    optionFilterProp="label"
               allowClear
               style={{ width: 120 }}
               placeholder="全部"
