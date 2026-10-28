@@ -196,10 +196,13 @@ export function buildMonthlyChecks(
 ): CheckResult[] {
   const out: CheckResult[] = [];
 
-  // R1 资金存量滚动（勾稽·阻断）
+  // R1 资金存量滚动（勾稽·阻断）——「本期实收」取已分摊到账单的部分
+  // （当期实收+陈欠回收）：未分摊收款（预存入金/在途款）不减欠费，
+  // 其组成由 R2 单独校验，避免预存制用户被结构性误报。
+  const applied = i.currentCollected + i.arrearsCollected;
   out.push(moneyEq('R1', '资金存量滚动：期末欠费＝期初欠费＋本期应收−本期实收',
-    'BLOCK', i.arrearsTotal, i.arrearsStart + i.arAmount - i.collected,
-    (d) => `期初欠费 ${money(i.arrearsStart)} + 本期应收 ${money(i.arAmount)} − 本期实收 ${money(i.collected)} = 应期末欠费 ${money(i.arrearsStart + i.arAmount - i.collected)}，报表为 ${money(i.arrearsTotal)}，差额 ${f2(d)} 元，请核查数据来源（欠费计算/收款分摊/某月遗漏重复）。`,
+    'BLOCK', i.arrearsTotal, i.arrearsStart + i.arAmount - applied,
+    (d) => `期初欠费 ${money(i.arrearsStart)} + 本期应收 ${money(i.arAmount)} − 本期实收分摊 ${money(applied)} = 应期末欠费 ${money(i.arrearsStart + i.arAmount - applied)}，报表为 ${money(i.arrearsTotal)}，差额 ${f2(d)} 元，请核查数据来源（欠费计算/收款分摊/某月遗漏重复）。`,
     'arrears'));
 
   // R2 实收构成（勾稽·阻断）
