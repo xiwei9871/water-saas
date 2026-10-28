@@ -3,6 +3,7 @@ import { App as AntdApp, Button, Alert, Card, DatePicker, Descriptions, Space, S
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
+import { ReportCheckBadge } from '../../components/ReportCheck';
 import { enumLabel, fmtCent, fmtDate, fmtPeriod, USAGE_CATEGORY_LABELS } from '../common';
 import { PAY_CHANNEL_LABELS } from '../payment/common';
 import Table from '../../components/PageTable';
@@ -89,7 +90,14 @@ export default function Analysis({ kind }: { kind: AnalysisKind }) {
   }, [load]);
 
   return (
-    <Card title={TITLES[kind]}>
+    <Card
+      title={
+        <Space>
+          {TITLES[kind]}
+          <ReportCheckBadge results={data?.checkResults as never} />
+        </Space>
+      }
+    >
       <Space style={{ marginBottom: 16 }}>
         {kind === 'ops-daily' && (
           <DatePicker value={date} onChange={(d) => d && setDate(d)} allowClear={false} />

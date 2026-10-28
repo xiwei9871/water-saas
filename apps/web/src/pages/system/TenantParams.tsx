@@ -53,6 +53,30 @@ const KNOWN_PARAMS: Record<string, { name: string; desc: string }> = {
     name: '账单缴费期限（天）',
     desc: '出账后多少天为缴费截止日。未设置时默认 15 天。',
   },
+  'report.check.priceDeviationPct': {
+    name: '自检·综合单价偏离阈值(%)',
+    desc: '报表数据自检 R4：综合单价较去年同期偏离超过该百分比记警告。默认 20。',
+  },
+  'report.check.revenueChangePct': {
+    name: '自检·营收同比/环比阈值(%)',
+    desc: '报表数据自检 R6：应收同比或环比绝对值超过该百分比记警告。默认 30。',
+  },
+  'report.check.arrearsRateMax': {
+    name: '自检·欠费率上限(%)',
+    desc: '报表数据自检 R8：欠费总额÷本期应收超过该百分比记警告。默认 30。',
+  },
+  'report.check.estRateMax': {
+    name: '自检·估抄率警告线(%)',
+    desc: '报表数据自检 R7：估抄率超过该百分比记警告。默认 20。',
+  },
+  'report.check.usageAnomalyX': {
+    name: '自检·单户用量异常倍数',
+    desc: '报表数据自检 R12：本期用量超过近 3 期均值该倍数的户列入异常清单。默认 3。',
+  },
+  'report.check.bigPayment': {
+    name: '自检·大额收款阈值(元)',
+    desc: '报表数据自检 R13：单笔收款超过该金额列入大额清单。默认 100000。',
+  },
 };
 
 const prettyValue = (key: string, v: unknown): string => {

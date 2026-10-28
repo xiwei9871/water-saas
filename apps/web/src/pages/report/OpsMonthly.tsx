@@ -11,6 +11,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import TrendChart from '../../components/TrendChart';
+import { ReportCheckBadge, type CheckResult } from '../../components/ReportCheck';
 import { abbrevParts } from '../../utils/numfmt';
 import Table from '../../components/PageTable';
 
@@ -84,7 +85,7 @@ export default function OpsMonthly() {
   );
   const [orgUnitId, setOrgUnitId] = useState<string>();
   const [orgs, setOrgs] = useState<OrgRow[]>([]);
-  const [data, setData] = useState<{ meta: Meta; sections: Section[] } | null>(null);
+  const [data, setData] = useState<{ meta: Meta; sections: Section[]; checkResults?: CheckResult[] } | null>(null);
   const [yearTrend, setYearTrend] = useState<YearRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [view, setView] = useState<'chart' | 'table'>('table');
@@ -222,6 +223,7 @@ export default function OpsMonthly() {
               <Typography.Text type="secondary">{data.meta.companyName}</Typography.Text>
               <Typography.Title level={4} style={{ margin: '4px 0' }}>
                 营销经营月报表
+                <ReportCheckBadge results={data?.checkResults} />
               </Typography.Title>
               <Typography.Text type="secondary">
                 统计周期：{data.meta.periodLabel}　填报单位：{data.meta.companyName}

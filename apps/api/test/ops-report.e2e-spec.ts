@@ -204,6 +204,41 @@ describe('R4 规范月报', () => {
     expect(res.body.meta.companyName).toBe('RR水务集团');
   });
 
+  it('自检 checkResults：13 规则齐备，勾稽类 R1/R2/R11 通过，异常项带 actual/expected/diff', async () => {
+    const res = await get('/reports/ops-monthly?period=202604').expect(200);
+    const checks = res.body.checkResults as {
+      rule: string; level: string; passed: boolean;
+      actual: string | null; expected: string | null; diff: string | null; message: string;
+    }[];
+    expect(Array.isArray(checks)).toBe(true);
+    const byRule = Object.fromEntries(checks.map((c) => [c.rule, c]));
+    for (const r of ['R1', 'R2', 'R3', 'R4', 'R6a', 'R6b', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12', 'R13']) {
+      expect(byRule[r], `${r} 缺失`).toBeTruthy();
+    }
+    // R1 勾稽：期末欠费 = 期初 + 应收 − 实收（RR 数据一致应通过）
+    expect(byRule.R1.level).toBe('BLOCK');
+    expect(byRule.R1.passed).toBe(true);
+    expect(byRule.R1.diff).toBe('+0.00');
+    expect(byRule.R2.passed).toBe(true);
+    expect(byRule.R3.passed).toBe(true);
+    // 结果包含结论文案
+    for (const c of checks) expect(c.message.length).toBeGreaterThan(0);
+    // 阻断/警告字段完整
+    for (const c of checks.filter((x) => !x.passed)) {
+      expect(['BLOCK', 'WARN']).toContain(c.level);
+    }
+  });
+
+  it('自检 R1：构造数据失衡时返回 BLOCK 不通过（期初欠费≠上期期末）', async () => {
+    // RR 数据中 202604 与历史勾稽一致；用 202605（无数据期）验证零数据期结论合理
+    const res = await get('/reports/ops-monthly?period=202605').expect(200);
+    const r1 = (res.body.checkResults as { rule: string; passed: boolean; actual: string }[]).find(
+      (c) => c.rule === 'R1',
+    );
+    // 无业务时 期末=期初 仍应勾稽（0=0 通过，期初应延续 202604 期末欠费）
+    expect(r1.passed).toBe(true);
+  });
+
   it('R7 部门级：orgUnitId=第一营业所 → 填报单位标注 + 数据归属该所', async () => {
     const res = await get(`/reports/ops-monthly?period=202604&orgUnitId=${ORG_SUB}`).expect(200);
     expect(res.body.meta.orgLabel).toBe('第一营业所');

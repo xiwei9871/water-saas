@@ -7,6 +7,7 @@ import {
 import { type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { METRIC_DICT, METRIC_DICT_VERSION } from './metric-dictionary.js';
+import { buildDailyChecks, loadCheckThresholds } from './report-checks.js';
 
 const monthWindow = (period: string): { gte: Date; lt: Date } => {
   const y = parseInt(period.slice(0, 4), 10);
@@ -204,6 +205,22 @@ export class AnalysisService {
         HAVING sum(b.total_amount - COALESCE(a.paid,0)) > 0
         ORDER BY arrears DESC LIMIT 10`;
 
+      // 1028 v3 数据自检（日报子集）：R2 实收构成 / R10 当日抄表进度 /
+      // R13 当日大额收款。
+      const thresholds = await loadCheckThresholds(tx, ctx.tenantId);
+      const bigCents = BigInt(Math.round(thresholds.bigPayment * 100));
+      const bigToday = await tx.$queryRaw<{ amount: bigint; label: string }[]>`
+        SELECT p.amount, concat_ws(' ', sa.settle_no, sa.name) AS label
+        FROM payment p
+        JOIN settle_account sa ON sa.tenant_id = p.tenant_id
+          AND sa.id = p.settle_account_id
+        WHERE p.tenant_id = ${ctx.tenantId}::uuid
+          AND p.status IN ('RECEIVED','DAY_CLOSED')
+          AND p.received_at::date = ${q.date}::date
+          AND p.amount > ${bigCents}
+          ${orgIn}
+        ORDER BY p.amount DESC LIMIT 10`;
+
       const plan0 = plan[0] ?? { total: 0, read: 0, noRead: 0 };
       return {
         date: q.date,
@@ -226,6 +243,19 @@ export class AnalysisService {
         byChannel,
         byReader,
         anomalies: { bigReversals, topArrears },
+        checkResults: buildDailyChecks(
+          {
+            collected: Number(collected[0]?.amount ?? 0n),
+            currentCollected: Number(collected[0]?.current ?? 0n),
+            arrearsCollected: Number(collected[0]?.arrears ?? 0n),
+            planRead: plan0.read,
+            planTotal: plan0.total,
+            bigPayments: bigToday.map(
+              (r) => `${r.label ?? ''} ¥${(Number(r.amount) / 100).toLocaleString('zh-CN')}`,
+            ),
+          },
+          thresholds,
+        ),
       };
     });
   }

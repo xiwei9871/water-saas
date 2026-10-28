@@ -7,6 +7,12 @@ import {
 import type { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { METRIC_DICT, METRIC_DICT_VERSION } from './metric-dictionary.js';
+import {
+  buildMonthlyChecks,
+  buildYearlyChecks,
+  loadCheckThresholds,
+  type CheckThresholds,
+} from './report-checks.js';
 
 /**
  * 窗口化经营指标引擎（2026-10-16 修订意见 Q1/Q2/R4/R5/R7/H1 共用内核）。
@@ -336,6 +342,146 @@ export class OpsReportService {
     };
   }
 
+  /**
+   * 数据自检（1028 v3）补充数据：期初户数 / 已结算未出账 / 单户用量
+   * 异常 / 大额收款 —— 窗口口径与 metricsWindow 完全同源。
+   */
+  private async checkExtras(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    from: string,
+    to: string,
+    thresholds: CheckThresholds,
+  ): Promise<{
+    openingAccounts: number;
+    missingBills: number;
+    usageAnomalies: string[];
+    bigPayments: string[];
+  }> {
+    const inScope = await aggregationScopeAccountIds(tx, ctx);
+    const waW = aggOwnPredicate(inScope, Prisma.sql`w.id`);
+    const waCs = aggOwnPredicate(inScope, Prisma.sql`cs.water_account_id`);
+
+    const orgIn =
+      ctx.scope === 'ALL'
+        ? Prisma.empty
+        : Prisma.sql`AND p.org_unit_id = ANY(${ctx.orgScope}::uuid[])`;
+    const gte = monthStart(from);
+    const lt = monthEndExclusive(to);
+    const bigCents = BigInt(Math.round(thresholds.bigPayment * 100));
+    const x = thresholds.usageAnomalyX;
+
+    const [openRow, missRow, anomalyRows, bigRows] = await Promise.all([
+      // 期初在册：窗口前已立户、且当前仍为 NORMAL（或销户日在窗口内之后）
+      tx.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM water_account w
+        WHERE w.tenant_id = ${ctx.tenantId}::uuid
+          AND w.status = 'NORMAL'
+          AND w.opened_at < ${gte}::date
+          AND (w.closed_at IS NULL OR w.closed_at >= ${gte}::date)
+          ${waW}`,
+      // 完整性：窗口内已 FINAL 结算但没有有效账单（=遗漏户）
+      tx.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n
+        FROM consumption_settlement cs
+        WHERE cs.tenant_id = ${ctx.tenantId}::uuid
+          AND cs.period >= ${from} AND cs.period <= ${to}
+          AND cs.status = 'FINAL'
+          ${waCs}
+          AND NOT EXISTS (
+            SELECT 1 FROM bill b
+            WHERE b.tenant_id = cs.tenant_id
+              AND b.source_type = 'SETTLEMENT' AND b.source_id = cs.id
+              AND b.bill_kind <> 'REVERSAL' AND b.status <> 'REVERSED')`,
+      // R12 单户用量异常：本期结算量 > X × 近 3 期均值（近 3 期各户独立取）
+      tx.$queryRaw<{ accountNo: string }[]>`
+        WITH cur AS (
+          SELECT cs.water_account_id, cs.total_usage_qty
+          FROM consumption_settlement cs
+          WHERE cs.tenant_id = ${ctx.tenantId}::uuid
+            AND cs.period = ${to} AND cs.status = 'FINAL'
+            ${waCs}
+        ),
+        prev3 AS (
+          SELECT water_account_id, avg(total_usage_qty) AS avg_qty
+          FROM (
+            SELECT cs.water_account_id, cs.total_usage_qty,
+                   row_number() OVER (
+                     PARTITION BY cs.water_account_id ORDER BY cs.period DESC
+                   ) AS rn
+            FROM consumption_settlement cs
+            JOIN cur ON cur.water_account_id = cs.water_account_id
+            WHERE cs.tenant_id = ${ctx.tenantId}::uuid
+              AND cs.period < ${to} AND cs.status = 'FINAL'
+          ) s
+          WHERE rn <= 3
+          GROUP BY water_account_id
+        )
+        SELECT wa.account_no AS "accountNo"
+        FROM cur
+        JOIN prev3 ON prev3.water_account_id = cur.water_account_id
+        JOIN water_account wa ON wa.tenant_id = ${ctx.tenantId}::uuid
+          AND wa.id = cur.water_account_id
+        WHERE prev3.avg_qty > 0
+          AND cur.total_usage_qty > ${x}::numeric * prev3.avg_qty
+        ORDER BY wa.account_no LIMIT 20`,
+      // R13 大额收款：窗口内单笔 > 阈值
+      tx.$queryRaw<{ amount: bigint; label: string }[]>`
+        SELECT p.amount,
+               concat_ws(' ', sa.settle_no, sa.name) AS label
+        FROM payment p
+        JOIN settle_account sa ON sa.tenant_id = p.tenant_id
+          AND sa.id = p.settle_account_id
+        WHERE p.tenant_id = ${ctx.tenantId}::uuid
+          AND p.status IN ('RECEIVED','DAY_CLOSED')
+          AND p.received_at >= ${gte} AND p.received_at < ${lt}
+          AND p.amount > ${bigCents}
+          ${orgIn}
+        ORDER BY p.amount DESC LIMIT 10`,
+    ]);
+
+    return {
+      openingAccounts: openRow[0]?.n ?? 0,
+      missingBills: missRow[0]?.n ?? 0,
+      usageAnomalies: anomalyRows.map((r) => r.accountNo),
+      bigPayments: bigRows.map(
+        (r) => `${r.label ?? ''} ¥${(Number(r.amount) / 100).toLocaleString('zh-CN')}`,
+      ),
+    };
+  }
+
+  /** 月度活动检测（R9 缺失月用）：该月是否有任何业务数据。 */
+  private async monthHasActivity(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    period: string,
+  ): Promise<boolean> {
+    const inScope = await aggregationScopeAccountIds(tx, ctx);
+    const waB = aggOwnPredicate(inScope, Prisma.sql`b.water_account_id`);
+    const waCs = aggOwnPredicate(inScope, Prisma.sql`cs.water_account_id`);
+    const waI = aggOwnPredicate(inScope, Prisma.sql`i.water_account_id`);
+    const orgIn =
+      ctx.scope === 'ALL'
+        ? Prisma.empty
+        : Prisma.sql`AND p.org_unit_id = ANY(${ctx.orgScope}::uuid[])`;
+    const gte = monthStart(period);
+    const lt = monthEndExclusive(period);
+    const rows = await tx.$queryRaw<{ n: number }[]>`
+      SELECT (
+        (SELECT count(*) FROM bill b WHERE b.tenant_id = ${ctx.tenantId}::uuid
+          AND b.period = ${period} AND b.bill_kind <> 'REVERSAL' ${waB}) +
+        (SELECT count(*) FROM consumption_settlement cs
+          WHERE cs.tenant_id = ${ctx.tenantId}::uuid AND cs.period = ${period} ${waCs}) +
+        (SELECT count(*) FROM meter_reading r
+          JOIN meter_installation i ON i.tenant_id = r.tenant_id AND i.id = r.installation_id
+          WHERE r.tenant_id = ${ctx.tenantId}::uuid AND r.period = ${period} ${waI}) +
+        (SELECT count(*) FROM payment p WHERE p.tenant_id = ${ctx.tenantId}::uuid
+          AND p.status IN ('RECEIVED','DAY_CLOSED')
+          AND p.received_at >= ${gte} AND p.received_at < ${lt} ${orgIn})
+      )::int AS n`;
+    return (rows[0]?.n ?? 0) > 0;
+  }
+
   // ------------------------------------------------------------------
   // R4 营销经营月报表 —— doc §3.4：六大类 21 指标 × 本期/同比/累计
   // ------------------------------------------------------------------
@@ -343,14 +489,21 @@ export class OpsReportService {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const { effCtx, orgLabel } = await this.resolveScope(tx, ctx, q.orgUnitId);
       const prevYear = shiftPeriod(q.period, -12);
+      const prevMonth = shiftPeriod(q.period, -1);
       const yearStart = `${q.period.slice(0, 4)}01`;
       const prevYearStart = `${prevYear.slice(0, 4)}01`;
-      const [cur, prev, cum, prevCum] = await Promise.all([
-        this.metricsWindow(tx, effCtx, q.period, q.period),
-        this.metricsWindow(tx, effCtx, prevYear, prevYear),
-        this.metricsWindow(tx, effCtx, yearStart, q.period),
-        this.metricsWindow(tx, effCtx, prevYearStart, prevYear),
+      const [thresholds, [cur, prev, cum, prevCum, prevM]] = await Promise.all([
+        loadCheckThresholds(tx, ctx.tenantId),
+        Promise.all([
+          this.metricsWindow(tx, effCtx, q.period, q.period),
+          this.metricsWindow(tx, effCtx, prevYear, prevYear),
+          this.metricsWindow(tx, effCtx, yearStart, q.period),
+          this.metricsWindow(tx, effCtx, prevYearStart, prevYear),
+          // R6 环比：上一自然月窗口
+          this.metricsWindow(tx, effCtx, prevMonth, prevMonth),
+        ]),
       ]);
+      const extras = await this.checkExtras(tx, effCtx, q.period, q.period, thresholds);
       const meta = await this.reportMeta(tx, ctx, orgLabel);
 
       type Row = {
@@ -457,9 +610,46 @@ export class OpsReportService {
       rg.cum = revGrowth(Y.ar, PY.ar);
       rg.prevCum = null;
 
+      // 1028 v3 数据自检：13 规则五维校验，结果随报表同返。
+      const priceOf = (m: WindowMetrics) =>
+        num(m.soldQty) > 0 ? Number(m.waterFee) / 100 / num(m.soldQty) : null;
+      const checkResults = buildMonthlyChecks(
+        {
+          arAmount: Number(cur.arAmount),
+          collected: Number(cur.collected),
+          currentCollected: Number(cur.currentCollected),
+          arrearsCollected: Number(cur.arrearsCollected),
+          arrearsTotal: Number(cur.arrearsTotal),
+          arrearsStart: Number(cur.arrearsStart),
+          recoveryRate: pct(
+            cur.currentCollected === 0n ? 0 : Number(cur.currentCollected),
+            Number(cur.arAmount),
+          ),
+          compositePrice: priceOf(cur),
+          compositePricePrev: priceOf(prev),
+          arYoy: revGrowth(Number(cur.arAmount), Number(prev.arAmount) || null),
+          arMom: revGrowth(Number(cur.arAmount), Number(prevM.arAmount) || null),
+          readAcc: pct(cur.qcPassed, cur.qcTotal),
+          readCov: pct(cur.planRead, cur.planTotal),
+          estRate: pct(cur.estCount, cur.estTotal),
+          readTimely: pct(cur.timely, cur.timelyTotal),
+          accountCount: cur.accountCount,
+          openingAccounts: extras.openingAccounts,
+          openedCount: cur.openedCount,
+          closedCount: cur.closedCount,
+          planRead: cur.planRead,
+          planTotal: cur.planTotal,
+          missingBills: extras.missingBills,
+          usageAnomalies: extras.usageAnomalies,
+          bigPayments: extras.bigPayments,
+        },
+        thresholds,
+      );
+
       return {
         meta: { ...meta, periodLabel: `${q.period.slice(0, 4)} 年 ${+q.period.slice(4)} 月`, unit: meta.amountUnit },
         period: q.period,
+        checkResults,
         sections: sections.map((s) => ({
           ...s,
           rows: s.rows.map((r, i) => ({
@@ -484,11 +674,18 @@ export class OpsReportService {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const { effCtx, orgLabel } = await this.resolveScope(tx, ctx, q.orgUnitId);
       const meta = await this.reportMeta(tx, ctx, orgLabel);
+      const thresholds = await loadCheckThresholds(tx, ctx.tenantId);
       const months = Array.from({ length: 12 }, (_, i) =>
         `${year}${String(i + 1).padStart(2, '0')}`);
+      const monthWindows: WindowMetrics[] = [];
+      const missingMonths: string[] = [];
       const rows = [] as Record<string, number | string | null>[];
       for (const m of months) {
         const w = await this.metricsWindow(tx, effCtx, m, m);
+        monthWindows.push(w);
+        if (!(await this.monthHasActivity(tx, effCtx, m))) {
+          missingMonths.push(`${+m.slice(4)}月`);
+        }
         rows.push({
           month: `${+m.slice(4)} 月`,
           period: m,
@@ -514,9 +711,61 @@ export class OpsReportService {
         compositePrice: sum('soldQty') > 0 ? sum('waterFee') / sum('soldQty') : null,
         arrearsTotal: rows[11]?.arrearsTotal ?? null,
       };
+
+      // 1028 v3 数据自检（年报口径）：年度窗口 + Σ各月 + 缺失月。
+      const yw = await this.metricsWindow(tx, effCtx, `${year}01`, `${year}12`);
+      const ywp = await this.metricsWindow(
+        tx, effCtx, `${Number(year) - 1}01`, `${Number(year) - 1}12`);
+      const yExtras = await this.checkExtras(
+        tx, effCtx, `${year}01`, `${year}12`, thresholds);
+      const sumW = (pick: (m: WindowMetrics) => bigint) =>
+        monthWindows.reduce((s, m) => s + Number(pick(m)), 0);
+      const yoyOf = (a: number, b: number) =>
+        b === 0 ? null : ((a - b) / Math.abs(b)) * 100;
+      const priceOf = (m: WindowMetrics) =>
+        num(m.soldQty) > 0 ? Number(m.waterFee) / 100 / num(m.soldQty) : null;
+      const checkResults = buildYearlyChecks(
+        {
+          arAmount: Number(yw.arAmount),
+          collected: Number(yw.collected),
+          currentCollected: Number(yw.currentCollected),
+          arrearsCollected: Number(yw.arrearsCollected),
+          arrearsTotal: Number(yw.arrearsTotal),
+          arrearsStart: Number(yw.arrearsStart),
+          recoveryRate: pct(
+            yw.currentCollected === 0n ? 0 : Number(yw.currentCollected),
+            Number(yw.arAmount),
+          ),
+          compositePrice: priceOf(yw),
+          compositePricePrev: priceOf(ywp),
+          arYoy: yoyOf(Number(yw.arAmount), Number(ywp.arAmount)),
+          readAcc: pct(yw.qcPassed, yw.qcTotal),
+          readCov: pct(yw.planRead, yw.planTotal),
+          estRate: pct(yw.estCount, yw.estTotal),
+          readTimely: pct(yw.timely, yw.timelyTotal),
+          accountCount: yw.accountCount,
+          openingAccounts: yExtras.openingAccounts,
+          openedCount: yw.openedCount,
+          closedCount: yw.closedCount,
+          planRead: yw.planRead,
+          planTotal: yw.planTotal,
+          usageAnomalies: yExtras.usageAnomalies,
+          bigPayments: yExtras.bigPayments,
+          yearVsMonthSum: [
+            { label: '售水量(m³)', year: num(yw.soldQty), months: monthWindows.reduce((s, m) => s + num(m.soldQty), 0), isMoney: false },
+            { label: '售水收入(元)', year: Number(yw.waterFee), months: sumW((m) => m.waterFee) },
+            { label: '应收(元)', year: Number(yw.arAmount), months: sumW((m) => m.arAmount) },
+            { label: '实收(元)', year: Number(yw.collected), months: sumW((m) => m.collected) },
+          ],
+          missingMonths,
+        },
+        thresholds,
+      );
+
       return {
         meta: { ...meta, periodLabel: `${year} 年度`, unit: meta.amountUnit },
         year,
+        checkResults,
         columns: q.columns ?? [
           'soldQty', 'waterFee', 'collected', 'recoveryRate', 'compositePrice', 'arrearsTotal',
         ],

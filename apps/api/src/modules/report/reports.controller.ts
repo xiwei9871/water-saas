@@ -15,6 +15,7 @@ import { assertUuid } from '../../common/uuid.js';
 import { AnalysisService } from './analysis.service.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { OpsReportService } from './ops-report.service.js';
+import { checkSummaryLines } from './report-checks.js';
 import { ReportService } from './report.service.js';
 
 /** period is char(6) YYYYMM — same guard as billing/metering controllers. */
@@ -370,6 +371,8 @@ export class ReportsController {
       [meta.companyName],
       [`营销经营月报表`],
       [`统计周期：${meta.periodLabel}　填报单位：${meta.companyName}${meta.orgLabel === '全公司' ? '' : ' · ' + meta.orgLabel}　金额单位：${meta.unit}　报表期：${meta.periodLabel}`],
+      // 1028 v3 表头附注：自检结论 + 异常项清单，随表留档。
+      ...checkSummaryLines(data.checkResults).map((l) => [l] as (string | number | null)[]),
       [],
       ['序号', '指标名称', '单位', '本月数', '上年同月', '同比增减(%)', '本年累计', '上年同期累计', '累计增减(%)'],
     ];
@@ -421,6 +424,8 @@ export class ReportsController {
       [meta.companyName],
       ['营销经营年度汇总表'],
       [`统计周期：${meta.periodLabel}　填报单位：${meta.companyName}${meta.orgLabel === '全公司' ? '' : ' · ' + meta.orgLabel}　金额单位：${meta.unit}　报表期：${meta.periodLabel}`],
+      // 1028 v3 表头附注：自检结论 + 异常项清单。
+      ...checkSummaryLines(data.checkResults).map((l) => [l] as (string | number | null)[]),
       [],
       ['月份', ...cols.map((c) => COLS[c] ?? c)],
       ...data.rows.map((r) => [
