@@ -46,8 +46,9 @@ interface ActivateFormValues {
  */
 export default function MobileActivate() {
   const { message } = AntdApp.useApp();
-  const { user } = useAuth();
+  const { user, hasPerm } = useAuth();
   const myId = user?.id ?? '';
+  const isManager = hasPerm('iam:write') || hasPerm('*');
   const [rows, setRows] = useState<WaterAccount[]>([]);
   const [loading, setLoading] = useState(false);
   const [activateFor, setActivateFor] = useState<WaterAccount | null>(null);
@@ -60,8 +61,12 @@ export default function MobileActivate() {
       const res = await api.get<WaterAccount[]>('/water-accounts', {
         params: { status: 'PENDING_ASSIGN', take: 200 },
       });
-      // 服务端按 customer:read 放行；现场只应看到派给自己的上号任务。
-      setRows(res.data.filter((r) => !r.assignReaderId || r.assignReaderId === myId));
+      // 服务端按 customer:read 放行；抄表员只见派给自己的，管理岗(iam:write)全量。
+      setRows(
+        isManager
+          ? res.data
+          : res.data.filter((r) => !r.assignReaderId || r.assignReaderId === myId),
+      );
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
