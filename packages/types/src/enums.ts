@@ -82,7 +82,11 @@ export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
 export const CALC_TYPES = ['PER_QTY', 'FIXED', 'PERCENT'] as const;
 export type CalcType = (typeof CALC_TYPES)[number];
 
-export const ACCOUNT_STATUSES = ['NORMAL', 'SUSPENDED', 'CLOSED'] as const;
+export const ACCOUNT_STATUSES = [
+  'NORMAL', 'SUSPENDED', 'CLOSED',
+  /** 1028v2 放号-上号：已放号待现场上号（预占）、已上号待信息补全。 */
+  'PENDING_ASSIGN', 'PENDING_COMPLETE',
+] as const;
 export type AccountStatus = (typeof ACCOUNT_STATUSES)[number];
 
 export const ACCOUNT_EVENT_TYPES = ['TRANSFER', 'SUSPEND', 'RESUME', 'CLOSE'] as const;

@@ -1,10 +1,11 @@
+import Select from '../../components/CopySelect';
 import {
   CloudUploadOutlined,
   EditOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import { App as AntdApp, Alert, Button, Card, Descriptions, Form, Input, Modal, Select, Space, Tag, Typography, Upload } from 'antd';
+import {App as AntdApp, Alert, Button, Card, Descriptions, Form, Input, Modal, Space, Tag, Typography, Upload} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';

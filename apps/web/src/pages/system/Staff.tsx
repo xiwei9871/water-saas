@@ -1,10 +1,11 @@
+import Select from '../../components/CopySelect';
 import {
   EditOutlined,
   KeyOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, Form, Input, Modal, Select, Space, Tag, TreeSelect } from 'antd';
+import {App as AntdApp, Button, Card, Form, Input, Modal, Space, Tag, TreeSelect} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import type { DataNode } from 'antd/es/tree';
 import dayjs from 'dayjs';

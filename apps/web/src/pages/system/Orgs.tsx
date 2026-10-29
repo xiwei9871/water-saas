@@ -1,28 +1,11 @@
+import Select from '../../components/CopySelect';
 import {
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import {
-  App as AntdApp,
-  Button,
-  Card,
-  Col,
-  Descriptions,
-  Empty,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Row,
-  Select,
-  Space,
-  Tag,
-  Tree,
-  TreeSelect,
-  Typography,
-} from 'antd';
+import {App as AntdApp, Button, Card, Col, Descriptions, Empty, Form, Input, Modal, Popconfirm, Row, Space, Tag, Tree, TreeSelect, Typography} from 'antd';
 import type { DataNode } from 'antd/es/tree';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';

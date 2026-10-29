@@ -29,6 +29,27 @@ export interface TaskTypeDef {
 
 export const TASK_TYPES: TaskTypeDef[] = [
   {
+    // 1028v2 放号-上号：放号后按指定抄表员直接指派，现场复核四项
+    // 一致 + 录表号后上号（完成标准由上号接口 autoCompleteByBiz 反写）。
+    code: 'ACCOUNT_ACTIVATE',
+    name: '立户上号',
+    fallbackPerm: 'customer:read',
+    bizRoute: '/customer/water-accounts?focusId={bizId}',
+    requiredContext: ['archiveNo', 'accountNo', 'addr'],
+    guide: '请到 客户管理→用水户，对待上号户 {archiveNo} 现场复核四项一致（表号/档案号/地址/用户名），录入表号后点「上号」。',
+    evidenceRequired: false,
+  },
+  {
+    // 1028v2：已上号（待补全）户回厅补录客户/结算户/合同 → complete-info 办结。
+    code: 'ACCOUNT_COMPLETE_INFO',
+    name: '立户信息补录',
+    fallbackPerm: 'customer:write',
+    bizRoute: '/customer/onboard?completeId={bizId}',
+    requiredContext: ['archiveNo', 'accountNo'],
+    guide: '请到 客户管理→立户向导，对待补全户 {accountNo}（档案号 {archiveNo}）补齐客户/结算户/合同信息并提交补录。',
+    evidenceRequired: false,
+  },
+  {
     code: 'SUPPLEMENT',
     name: '补差任务',
     fallbackPerm: 'billing:write',

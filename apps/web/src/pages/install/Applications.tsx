@@ -1,10 +1,12 @@
+import Select from '../../components/CopySelect';
 import { CloseOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Select, Space, Steps, Tag, Typography, Upload } from 'antd';
+import {App as AntdApp, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Space, Steps, Tag, Typography, Upload} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
-import { fmtDate, USAGE_CATEGORY_OPTIONS } from '../common';
+import { cleanBody, fmtDate, newIdemKey, USAGE_CATEGORY_OPTIONS } from '../common';
+import { StaffSelect } from '../pickers';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   FOCUS_ROW_CLASS,
@@ -221,6 +223,95 @@ export default function InstallApplications() {
     nav(`/customer/onboard?applyNo=${encodeURIComponent(app.applyNo)}`);
   };
 
+  // ---- 1028v2 放号：INSTALLING 申请 → 生成「待上号」预占户 + 档案号 + 指派上号任务 ----
+  const [allocFor, setAllocFor] = useState<Apply | null>(null);
+  const [allocForm] = Form.useForm<{
+    meterQty: number;
+    caliber?: string;
+    readerId: string;
+    segNo?: string;
+    archiveStart?: string;
+  }>();
+  const [allocSaving, setAllocSaving] = useState(false);
+  const [allocResult, setAllocResult] = useState<{
+    applyNo: string;
+    reader: { name: string };
+    accounts: { accountNo: string; archiveNo: string }[];
+  } | null>(null);
+
+  const openAlloc = (app: Apply) => {
+    allocForm.setFieldsValue({
+      meterQty: 1,
+      caliber: app.installCaliber ?? app.caliberReq ?? undefined,
+      segNo: '01',
+      readerId: undefined,
+      archiveStart: undefined,
+    });
+    setAllocResult(null);
+    setAllocFor(app);
+  };
+
+  const submitAlloc = async () => {
+    let values;
+    try {
+      values = await allocForm.validateFields();
+    } catch {
+      return;
+    }
+    if (!allocFor) return;
+    setAllocSaving(true);
+    try {
+      const res = await api.post<{
+        applyNo: string;
+        reader: { id: string; name: string };
+        count: number;
+        accounts: { accountNo: string; archiveNo: string }[];
+      }>(
+        `/install/applications/${allocFor.id}/allocate`,
+        cleanBody({
+          meterQty: values.meterQty,
+          caliber: values.caliber,
+          readerId: values.readerId,
+          segNo: values.segNo,
+          archiveStart: values.archiveStart,
+        }),
+        { headers: { 'Idempotency-Key': newIdemKey() } },
+      );
+      message.success(`放号完成：${res.data.count} 户，上号任务已指派 ${res.data.reader.name}`);
+      setAllocResult(res.data);
+      void load();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setAllocSaving(false);
+    }
+  };
+
+  /** 放号清单打印：新开打印页（标签/清单一并给出）。 */
+  const printAllocList = () => {
+    if (!allocResult || !allocFor) return;
+    const w = window.open('', '_blank', 'width=760,height=560');
+    if (!w) return;
+    const rows = allocResult.accounts
+      .map(
+        (a) =>
+          `<tr><td>${a.archiveNo}</td><td>${a.accountNo}</td><td>${allocFor.applicantName}</td><td>${allocFor.addr}</td><td>${allocFor.contactPhone ?? '—'}</td></tr>`,
+      )
+      .join('');
+    w.document.write(
+      `<html><head><title>放号清单 ${allocResult.applyNo}</title><style>` +
+        `body{font-family:sans-serif;padding:24px}h2{margin:0 0 4px}` +
+        `table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:6px 8px;font-size:13px}` +
+        `</style></head><body>` +
+        `<h2>放号上号清单</h2>` +
+        `<p>报装单号：${allocResult.applyNo}　指派抄表员：${allocResult.reader.name}　打印时间：${new Date().toLocaleString()}</p>` +
+        `<table><thead><tr><th>档案号</th><th>户号</th><th>申请人</th><th>地址</th><th>电话</th></tr></thead><tbody>${rows}</tbody></table>` +
+        `</body></html>`,
+    );
+    w.document.close();
+    w.print();
+  };
+
   const cols: ColumnsType<Apply> = [
     { title: '申请号', dataIndex: 'applyNo', width: 150 },
     { title: '合同号', dataIndex: 'contractNo', width: 140, render: (v: string | null) => v ?? '—' },
@@ -258,8 +349,11 @@ export default function InstallApplications() {
                 {a.label}
               </Button>
             ))}
-          {canWrite && (r.status === 'INSTALLING' || r.status === 'APPROVED') && (
-            <Button size="small" type="primary" onClick={() => goOnboard(r)}>归档立户</Button>
+          {canWrite && r.status === 'INSTALLING' && (
+            <Button size="small" type="primary" onClick={() => openAlloc(r)}>放号</Button>
+          )}
+          {canWrite && r.status === 'APPROVED' && (
+            <Button size="small" onClick={() => goOnboard(r)}>直接立户</Button>
           )}
         </Space>
       ),
@@ -584,6 +678,64 @@ export default function InstallApplications() {
           </Descriptions>
         )}
       </Drawer>
+
+      {/* 1028v2 放号弹窗：装表登记完成(INSTALLING)的申请 → 批量生成「待上号」预占户 */}
+      <Modal maskClosable={false}
+        open={allocFor !== null}
+        title={allocFor ? `放号 — ${allocFor.applyNo}（${allocFor.applicantName}）` : ''}
+        okText="确认放号"
+        cancelText="关闭"
+        confirmLoading={allocSaving}
+        onOk={() => void submitAlloc()}
+        onCancel={() => setAllocFor(null)}
+        destroyOnHidden
+      >
+        {!allocResult ? (
+          <Form form={allocForm} layout="vertical">
+            <Form.Item
+              name="meterQty"
+              label="放号数量（表户数）"
+              rules={[{ required: true, message: '请输入数量' }]}
+              extra="同一申请可放 1–50 户（如一户多表/分户）"
+            >
+              <InputNumber min={1} max={50} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="readerId" label="指派抄表员（上号任务执行人）" rules={[{ required: true, message: '请选择抄表员' }]}>
+              <StaffSelect placeholder="选择上号任务执行人" />
+            </Form.Item>
+            <Space wrap>
+              <Form.Item name="caliber" label="表计口径" style={{ width: 160 }}>
+                <Input placeholder="DN15" />
+              </Form.Item>
+              <Form.Item name="segNo" label="抄表日段号(01–31)" style={{ width: 160 }}>
+                <Input placeholder="01" maxLength={2} />
+              </Form.Item>
+              <Form.Item name="archiveStart" label="起始档案号（选填）" style={{ width: 200 }}>
+                <Input placeholder="缺省自动续号" />
+              </Form.Item>
+            </Space>
+          </Form>
+        ) : (
+          <>
+            <Card size="small" title={`已放号 ${allocResult.accounts.length} 户 · 抄表员 ${allocResult.reader.name}`} style={{ marginBottom: 12 }}>
+              <Table
+                size="small"
+                rowKey="accountNo"
+                pagination={false}
+                columns={[
+                  { title: '档案号', dataIndex: 'archiveNo', width: 140 },
+                  { title: '户号', dataIndex: 'accountNo', width: 160 },
+                ]}
+                dataSource={allocResult.accounts}
+              />
+            </Card>
+            <Space>
+              <Button type="primary" onClick={printAllocList}>打印标签/清单</Button>
+              <Button onClick={() => nav(`/customer/water-accounts?status=PENDING_ASSIGN`)}>查看待上号户</Button>
+            </Space>
+          </>
+        )}
+      </Modal>
     </Card>
   );
 }

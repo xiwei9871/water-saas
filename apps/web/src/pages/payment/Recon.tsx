@@ -1,5 +1,6 @@
+import Select from '../../components/CopySelect';
 import { UploadOutlined } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, Drawer, Form, Input, Select, Space, Tag, Typography, Upload } from 'antd';
+import {App as AntdApp, Button, Card, Drawer, Form, Input, Space, Tag, Typography, Upload} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';

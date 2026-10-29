@@ -49,7 +49,12 @@ export class JwtAuthGuard implements CanActivate {
 
     const req = context.switchToHttp().getRequest<Request>();
     const header = req.headers.authorization;
-    const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined;
+    // EventSource（SSE）无法设置 Authorization 头，允许 access_token 查询参数。
+    const token = header?.startsWith('Bearer ')
+      ? header.slice(7)
+      : typeof req.query.access_token === 'string'
+        ? req.query.access_token
+        : undefined;
     if (!token) {
       throw new UnauthorizedException({ code: 'AUTH_TOKEN_MISSING' });
     }

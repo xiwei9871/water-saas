@@ -1,4 +1,5 @@
-import { Alert, App as AntdApp, Card, Select, Space, Statistic, Tag, Typography } from 'antd';
+import Select from '../../components/CopySelect';
+import {Alert, App as AntdApp, Card, Space, Statistic, Tag, Typography} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';

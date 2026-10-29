@@ -5,6 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Subject } from 'rxjs';
 import { Prisma, TaskPriority, TaskStatus } from '@prisma/client';
 import { TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
@@ -69,6 +70,16 @@ const FALLBACK = new Map(TASK_TYPES.map((t) => [t.code, t]));
 @Injectable()
 export class TaskService {
   constructor(private readonly prisma: TenantPrismaService) {}
+
+  /** 1028v2 任务实时置顶：任务创建/指派/领取/完成/取消时向租户广播，
+   * 前端 SSE 收到后即时刷新列表。立即+延迟双发：createTask 常在调用方
+   * 事务内，延迟推送保证提交后前端能查到。 */
+  private readonly changes = new Subject<{ tenantId: string }>();
+  readonly changes$ = this.changes.asObservable();
+  private emitChange(tenantId: string) {
+    this.changes.next({ tenantId });
+    setTimeout(() => this.changes.next({ tenantId }), 800);
+  }
 
   // ------------------------------------------------------------------
   // T3 字典：type → {perm, dueDays, priority}，TASK_TYPE_PERM 即时生效
@@ -181,6 +192,7 @@ export class TaskService {
         DO NOTHING
       RETURNING id`;
     if (inserted.length > 0) {
+      this.emitChange(ctx.tenantId);
       return {
         id: inserted[0].id,
         type: input.type,
@@ -528,6 +540,7 @@ export class TaskService {
         where: { id },
         data: { status: 'ASSIGNED', assigneeId, updatedBy: ctx.staffId },
       });
+      this.emitChange(ctx.tenantId);
       return tx.task.findUniqueOrThrow({ where: { id }, select: TASK_SELECT });
     });
   }
@@ -598,6 +611,7 @@ export class TaskService {
       if (flipped.count === 0) {
         throw new ConflictException({ code: 'TASK_ALREADY_CLAIMED', assigneeId: row.assigneeId });
       }
+      this.emitChange(ctx.tenantId);
       return tx.task.findUniqueOrThrow({ where: { id }, select: TASK_SELECT });
     });
   }
@@ -670,6 +684,7 @@ export class TaskService {
         }
         throw new ConflictException({ code: 'TASK_NOT_CLAIMED_BY_ME', status: row.status });
       }
+      this.emitChange(ctx.tenantId);
       return tx.task.findUniqueOrThrow({ where: { id }, select: TASK_SELECT });
     });
   }
@@ -822,6 +837,7 @@ export class TaskService {
         if (!row) throw new NotFoundException({ code: 'TASK_NOT_FOUND' });
         throw new ConflictException({ code: 'TASK_NOT_OPEN' });
       }
+      this.emitChange(ctx.tenantId);
       return tx.task.findUniqueOrThrow({ where: { id }, select: TASK_SELECT });
     });
   }

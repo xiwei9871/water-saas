@@ -1,5 +1,6 @@
+import Select from '../components/CopySelect';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { App as AntdApp, Button, Card, Checkbox, Col, Drawer, Progress, Row, Select, Space, Spin, Statistic, Tag, Tooltip, Typography } from 'antd';
+import {App as AntdApp, Button, Card, Checkbox, Col, Drawer, Progress, Row, Space, Spin, Statistic, Tag, Tooltip, Typography} from 'antd';
 import {
   AlertOutlined,
   ArrowDownOutlined,

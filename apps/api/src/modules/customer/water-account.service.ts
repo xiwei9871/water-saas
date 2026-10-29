@@ -46,6 +46,10 @@ export const WATER_ACCOUNT_SELECT = {
   sourceApplyNo: true,
   contractNo: true,
   contractScan: true,
+  archiveNo: true,
+  assignReaderId: true,
+  pendingCaliber: true,
+  activatedAt: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.WaterAccountSelect;

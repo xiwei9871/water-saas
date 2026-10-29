@@ -43,12 +43,16 @@ export const ACCOUNT_STATUS_LABELS: Record<AccountStatus, string> = {
   NORMAL: '正常',
   SUSPENDED: '暂停',
   CLOSED: '销户',
+  PENDING_ASSIGN: '待上号',
+  PENDING_COMPLETE: '已上号(待补全)',
 };
 
 export const ACCOUNT_STATUS_COLORS: Record<AccountStatus, string> = {
   NORMAL: 'green',
   SUSPENDED: 'orange',
   CLOSED: 'default',
+  PENDING_ASSIGN: 'purple',
+  PENDING_COMPLETE: 'orange',
 };
 
 export const METER_STATUS_LABELS: Record<MeterStatus, string> = {

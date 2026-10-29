@@ -1,25 +1,6 @@
+import Select from '../../components/CopySelect';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  App as AntdApp,
-  Badge,
-  Button,
-  Card,
-  Drawer,
-  Empty,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Progress,
-  Segmented,
-  Select,
-  Space,
-  Spin,
-  Statistic,
-  Tag,
-  Typography,
-  Upload,
-} from 'antd';
+import {App as AntdApp, Badge, Button, Card, Drawer, Empty, Form, Input, InputNumber, Modal, Progress, Segmented, Space, Spin, Statistic, Tag, Typography, Upload} from 'antd';
 import {
   CameraOutlined,
   CheckOutlined,
@@ -42,6 +23,7 @@ const newIdemKey = () =>
     ? crypto.randomUUID()
     : `m-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
 import { api, apiErrorText } from '../../api/client';
+import MobileActivate from './MobileActivate';
 import { useAuth } from '../../auth/AuthContext';
 import { cleanBody, enumLabel, USAGE_CATEGORY_LABELS } from '../common';
 import { EXCEPTION_CODE_LABELS } from '../metering/common';
@@ -175,6 +157,8 @@ export default function MobileReading() {
   const location = useLocation();
   const { message } = AntdApp.useApp();
 
+  // 1028v2：抄表 / 立户上号 双工作面。
+  const [mode, setMode] = useState<'reading' | 'activate'>('reading');
   const [plans, setPlans] = useState<PlanRow[]>([]);
   const [planId, setPlanId] = useState<string>();
   const [items, setItems] = useState<PlanItem[]>([]);
@@ -629,6 +613,21 @@ export default function MobileReading() {
         </Space>
       </div>
 
+      {/* 1028v2 立户上号（H5）：抄表/上号 双工作面切换 */}
+      <Segmented
+        block
+        size="large"
+        style={{ margin: '4px 0 10px' }}
+        value={mode}
+        onChange={(v) => setMode(v as 'reading' | 'activate')}
+        options={[
+          { value: 'reading', label: '抄表' },
+          { value: 'activate', label: '立户上号' },
+        ]}
+      />
+      {mode === 'activate' && <MobileActivate />}
+      {mode === 'reading' && (
+      <>
       <Card size="small" style={{ marginBottom: 8 }}>
         <Space direction="vertical" style={{ width: '100%' }} size={8}>
           <Select
@@ -772,6 +771,10 @@ export default function MobileReading() {
                       }>('/meter-readings/recognize', {
                         image: dataUrl,
                         prev: Number(current.prevReadingValue) || undefined,
+                      }, {
+                        // 服务端本地管线上限 ~25s + LLM 兜底 ~75s，不能用
+                        // 全局 15s 默认超时——否则本地慢时移动端必然误判失败。
+                        timeout: 100_000,
                       })
                       .then((r) => {
                         if (r.data?.value !== undefined) applyResult(r.data);
@@ -1153,6 +1156,8 @@ export default function MobileReading() {
           </Form.Item>
         </Form>
       </Modal>
+      </>
+      )}
     </div>
   );
 }

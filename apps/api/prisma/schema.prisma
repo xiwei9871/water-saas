@@ -59,6 +59,10 @@ enum AccountStatus {
   NORMAL
   SUSPENDED
   CLOSED
+  /** 1028v2 放号-上号：已放号待现场上号（预占，不计入在册户数）。 */
+  PENDING_ASSIGN
+  /** 1028v2：已上号待信息补全（合同/客户/结算户待补录）。 */
+  PENDING_COMPLETE
 }
 
 enum AccountEventType {
@@ -606,6 +610,16 @@ model WaterAccount {
   /** R6/Q5：供用水合同编号 + 合同扫描件（立户时自报装申请带入/手填）。 */
   contractNo      String?       @map("contract_no")
   contractScan    Json?         @map("contract_scan") @db.JsonB
+  /** 1028v2 放号：用户档案号（区域码+段号+流水，待上号户的对外标识）。 */
+  archiveNo       String?       @map("archive_no")
+  /** 放号时指定的抄表员（上号任务指派人）。 */
+  assignReaderId  String?       @map("assign_reader_id") @db.Uuid
+  /** 放号登记的表计口径（上号复核参考）。 */
+  pendingCaliber  String?       @map("pending_caliber")
+  /** 上号现场复核结果（四项一致确认）。 */
+  activateReview  Json?         @map("activate_review") @db.JsonB
+  /** 上号时间。 */
+  activatedAt     DateTime?     @map("activated_at")
   createdAt       DateTime      @default(now()) @map("created_at")
   createdBy       String?       @map("created_by") @db.Uuid
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -622,6 +636,7 @@ model WaterAccount {
 
   @@unique([tenantId, accountNo])
   @@unique([tenantId, id])
+  @@unique([tenantId, archiveNo])
   @@index([tenantId, customerId])
   @@index([tenantId, settleAccountId])
   @@index([tenantId, usageCategory])

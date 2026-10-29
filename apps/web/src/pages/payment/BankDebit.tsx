@@ -1,5 +1,6 @@
+import Select from '../../components/CopySelect';
 import { PlayCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, Drawer, Form, Input, Modal, Select, Space, Tabs, Tag } from 'antd';
+import {App as AntdApp, Button, Card, Drawer, Form, Input, Modal, Space, Tabs, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';

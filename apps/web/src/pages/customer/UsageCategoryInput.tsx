@@ -6,6 +6,7 @@ export default function UsageCategoryInput(props: {
   id?: string;
   value?: string;
   onChange?: (value: string) => void;
+  disabled?: boolean;
 }) {
   return (
     <Select

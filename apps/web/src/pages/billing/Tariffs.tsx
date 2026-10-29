@@ -1,3 +1,4 @@
+import Select from '../../components/CopySelect';
 import {
   CheckCircleOutlined,
   CopyOutlined,
@@ -9,7 +10,7 @@ import {
   SearchOutlined,
   StopOutlined,
 } from '@ant-design/icons';
-import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Spin, Tag } from 'antd';
+import {Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Space, Spin, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';

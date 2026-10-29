@@ -1,3 +1,4 @@
+import Select from '../../components/CopySelect';
 import {
   EditOutlined,
   PlusOutlined,
@@ -5,7 +6,7 @@ import {
   SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import { Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, InputNumber, Modal, Select, Space, Tag } from 'antd';
+import {Alert, App as AntdApp, Button, Card, Checkbox, DatePicker, Drawer, Form, Input, InputNumber, Modal, Space, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
@@ -68,7 +69,9 @@ const EVENT_TEXT: Record<
   close: { title: '销户', ok: '确认销户', success: '已销户' },
 };
 
-const STATUS_OPTIONS = (['NORMAL', 'SUSPENDED', 'CLOSED'] as const).map((s) => ({
+const STATUS_OPTIONS = (
+  ['PENDING_ASSIGN', 'PENDING_COMPLETE', 'NORMAL', 'SUSPENDED', 'CLOSED'] as const
+).map((s) => ({
   value: s,
   label: enumLabel(ACCOUNT_STATUS_LABELS, s),
 }));
@@ -177,6 +180,22 @@ export default function WaterAccounts() {
   const [hhCurrent, setHhCurrent] = useState<number | null>(null);
   const [hhProfiles, setHhProfiles] = useState<HouseholdProfile[]>([]);
 
+  // ---- 1028v2 上号弹窗（PENDING_ASSIGN → PENDING_COMPLETE） ----
+  const [activateFor, setActivateFor] = useState<WaterAccount | null>(null);
+  const [activateForm] = Form.useForm<{
+    meterNo: string;
+    initialReading: string;
+    meterNoOk: boolean;
+    archiveNoOk: boolean;
+    addrOk: boolean;
+    nameOk: boolean;
+    serialNo?: string;
+    brand?: string;
+    model?: string;
+    caliber?: string;
+    maxDial?: number;
+  }>();
+
   // ---- E8 360° 抽屉 ----
   const [drawer360Id, setDrawer360Id] = useState<string | null>(null);
 
@@ -195,6 +214,7 @@ export default function WaterAccounts() {
   useEffect(() => {
     const no = searchParams.get('accountNo');
     const cid = searchParams.get('customerId');
+    const st = searchParams.get('status');
     queueMicrotask(() => {
       if (no !== null) {
         setQInput(no);
@@ -202,6 +222,10 @@ export default function WaterAccounts() {
         setPage(1);
       }
       if (cid) setCustomerId(cid);
+      if (st) {
+        setStatus(st as AccountStatus);
+        setPage(1);
+      }
     });
   }, [searchParams]);
 
@@ -571,6 +595,49 @@ export default function WaterAccounts() {
     }
   };
 
+  /** 1028v2 上号提交：挂表 + 口径核录 → PENDING_COMPLETE。 */
+  const submitActivate = async () => {
+    let values;
+    try {
+      values = await activateForm.validateFields();
+    } catch {
+      return;
+    }
+    if (!activateFor) return;
+    setSaving(true);
+    try {
+      await api.post(
+        `/water-accounts/${activateFor.id}/activate`,
+        cleanBody({
+          meterNo: values.meterNo,
+          initialReading: values.initialReading,
+          review: {
+            meterNoOk: values.meterNoOk === true,
+            archiveNoOk: values.archiveNoOk === true,
+            addrOk: values.addrOk === true,
+            nameOk: values.nameOk === true,
+          },
+          meterInfo: cleanBody({
+            serialNo: values.serialNo,
+            brand: values.brand,
+            model: values.model,
+            caliber: values.caliber,
+            maxDial: values.maxDial,
+          }),
+        }),
+        { headers: { 'Idempotency-Key': newIdemKey() } },
+      );
+      message.success('上号完成，该户进入「已上号（待补全）」');
+      setActivateFor(null);
+      activateForm.resetFields();
+      await load();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const submitEvent = async () => {
     let values: EventFormValues;
     try {
@@ -682,8 +749,15 @@ export default function WaterAccounts() {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 80,
+      width: 120,
       render: (s: AccountStatus) => <AccountStatusTag status={s} />,
+    },
+    {
+      title: '档案号',
+      dataIndex: 'archiveNo',
+      key: 'archiveNo',
+      width: 120,
+      render: (v: string | null) => v ?? '—',
     },
     {
       title: '开户日期',
@@ -700,9 +774,29 @@ export default function WaterAccounts() {
             width: 300,
             render: (_: unknown, record: WaterAccount) => {
               const closed = record.status === 'CLOSED';
+              const pending = record.status === 'PENDING_ASSIGN';
+              const completing = record.status === 'PENDING_COMPLETE';
               return (
                 <Space size={4} wrap>
-                  {!closed && (
+                  {pending && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      onClick={() => setActivateFor(record)}
+                    >
+                      上号
+                    </Button>
+                  )}
+                  {completing && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      onClick={() => navigate(`/customer/onboard?completeId=${record.id}`)}
+                    >
+                      去补录
+                    </Button>
+                  )}
+                  {!closed && !pending && !completing && (
                     <Button
                       size="small"
                       icon={<EditOutlined />}
@@ -1441,6 +1535,80 @@ export default function WaterAccounts() {
               placeholder="默认换表"
             />
           </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 1028v2 上号：待上号 → 已上号（待补全）。装表+口径核录一体表单。 */}
+      <Modal maskClosable={false}
+        open={activateFor !== null}
+        title={
+          activateFor
+            ? `上号 — ${activateFor.accountNo}（档案号 ${activateFor.archiveNo ?? '—'}）`
+            : ''
+        }
+        okText="确认上号"
+        cancelText="取消"
+        confirmLoading={saving}
+        onOk={() => void submitActivate()}
+        onCancel={() => setActivateFor(null)}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`上号 = 装表确认：逐项复核一致后挂装水表，该户进入「已上号（待补全）」。地址：${activateFor?.addr ?? '—'}`}
+        />
+        <Form form={activateForm} layout="vertical">
+          <Form.Item
+            name="meterNo"
+            label="现场安装水表表号"
+            rules={[{ required: true, message: '请输入表号' }]}
+            extra="表号与档案一致则直接挂装；未建档将按下方要素补建表卡"
+          >
+            <Input placeholder="物理表号" />
+          </Form.Item>
+          <Form.Item
+            name="initialReading"
+            label="表底初始读数"
+            rules={[{ required: true, message: '请输入初始读数' }, DECIMAL_RULE]}
+          >
+            <Input placeholder="默认 0" />
+          </Form.Item>
+          <Card size="small" title="四项一致复核（全部确认后方可上号）" style={{ marginBottom: 12 }}>
+            {([
+              ['meterNoOk', `水表号与档案一致（档案号 ${activateFor?.archiveNo ?? '—'}）`],
+              ['archiveNoOk', '档案号与用户档案一致'],
+              ['addrOk', '安装地址一致'],
+              ['nameOk', '用户名称一致'],
+            ] as const).map(([name, label]) => (
+              <Form.Item
+                key={name}
+                name={name}
+                valuePropName="checked"
+                style={{ marginBottom: 4 }}
+                rules={[{
+                  validator: (_r, v) =>
+                    v ? Promise.resolve() : Promise.reject(new Error('须确认一致')),
+                }]}
+              >
+                <Checkbox>{label}</Checkbox>
+              </Form.Item>
+            ))}
+          </Card>
+          <Card size="small" title="表计未建档时补建要素（选填）" style={{ marginBottom: 0 }}>
+            <Space wrap>
+              <Form.Item name="serialNo" label="出厂编号" style={{ marginBottom: 8 }}><Input style={{ width: 150 }} /></Form.Item>
+              <Form.Item name="brand" label="品牌" style={{ marginBottom: 8 }}><Input style={{ width: 110 }} /></Form.Item>
+              <Form.Item name="model" label="型号" style={{ marginBottom: 8 }}><Input style={{ width: 110 }} /></Form.Item>
+              <Form.Item name="caliber" label="口径" style={{ marginBottom: 8 }}>
+                <Input style={{ width: 90 }} placeholder={activateFor?.pendingCaliber ?? 'DN15'} />
+              </Form.Item>
+              <Form.Item name="maxDial" label="最大读数" style={{ marginBottom: 8 }}>
+                <InputNumber min={0} style={{ width: 110 }} />
+              </Form.Item>
+            </Space>
+          </Card>
         </Form>
       </Modal>
     </Card>

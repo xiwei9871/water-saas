@@ -246,6 +246,11 @@ export interface WaterAccount {
   /** R6：供用水合同编号 + 扫描件（立户自报装申请带入/手填）。 */
   contractNo?: string | null;
   contractScan?: string[] | null;
+  /** 1028v2 放号-上号：档案号 / 指派抄表员 / 预占口径 / 上号完成时间。 */
+  archiveNo?: string | null;
+  assignReaderId?: string | null;
+  pendingCaliber?: string | null;
+  activatedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   customer: { id: string; customerNo: string; name: string; custType: CustType };

@@ -6,6 +6,7 @@ import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
 import { assertUsageCategory } from '../../common/usage-categories.js';
 import { InstallService, type CreateApplyBody } from './install.service.js';
+import { AllocationService, type ActivateInput, type AllocateInput } from './allocation.service.js';
 import type { OnboardWireBody } from '../customer/onboard-wire.js';
 
 const STATUSES = new Set(['SUBMITTED', 'SURVEYED', 'APPROVED', 'INSTALLING', 'COMPLETED', 'REJECTED', 'CANCELLED']);
@@ -20,6 +21,7 @@ export class InstallController {
   constructor(
     private readonly prisma: TenantPrismaService,
     private readonly svc: InstallService,
+    private readonly alloc: AllocationService,
   ) {}
 
   @Get()
@@ -199,6 +201,16 @@ export class InstallController {
         data: { contractNo, updatedBy: ctx.staffId },
       });
     });
+  }
+
+  /** B1 放号（1028v2）：工程验收完成的申请批量生成档案号 + 待上号
+   *  用水户（PENDING_ASSIGN 预占）+ 立户上号任务指派给指定抄表员。
+   *  替代原「归档立户 → 立户向导」流程——归档改由上号成功反写。 */
+  @Post(':id/allocate')
+  @Permissions('install:write')
+  allocate(@Param('id') id: string, @Body() body: AllocateInput) {
+    const ctx = currentTenant();
+    return this.alloc.allocate(ctx, assertUuid(id, 'id'), body ?? ({} as AllocateInput));
   }
 
   /** R3：归档确认 —— 立户唯一入口是 onboard(sourceApplyNo)；本端点只做状态核对。 */

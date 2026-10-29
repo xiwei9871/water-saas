@@ -1,9 +1,10 @@
+import Select from '../../components/CopySelect';
 import {
   PrinterOutlined,
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, Descriptions, Drawer, Popconfirm, Select, Space, Spin, Tag } from 'antd';
+import {App as AntdApp, Button, Card, Descriptions, Drawer, Popconfirm, Space, Spin, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, fetchAll, apiErrorText } from '../../api/client';

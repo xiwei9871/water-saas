@@ -1,10 +1,11 @@
+import Select from '../../components/CopySelect';
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
   DownloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, Tabs, Checkbox, DatePicker, Form, Input, InputNumber, Modal, Radio, Select, Space, Tag, Typography } from 'antd';
+import {App as AntdApp, Button, Card, Tabs, Checkbox, DatePicker, Form, Input, InputNumber, Modal, Radio, Space, Tag, Typography} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useEffect, useMemo, useState } from 'react';

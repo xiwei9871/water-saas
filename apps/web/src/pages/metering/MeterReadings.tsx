@@ -1,3 +1,4 @@
+import Select from '../../components/CopySelect';
 import {
   CheckOutlined,
   CloseOutlined,
@@ -9,7 +10,7 @@ import {
   UploadOutlined,
   WarningOutlined,
 } from '@ant-design/icons';
-import { Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popover, Select, Space, Spin, Tag, Tooltip, Typography, Upload } from 'antd';
+import {Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, Modal, Popover, Space, Spin, Tag, Tooltip, Typography, Upload} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';

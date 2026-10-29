@@ -10,8 +10,11 @@ import {
   Post,
   Query,
   Req,
+  Sse,
+  type MessageEvent,
 } from '@nestjs/common';
 import type { Request } from 'express';
+import { filter, map } from 'rxjs';
 import { assertUuid } from '../../common/uuid.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TASK_TYPE_CODES } from './task.types.js';
@@ -28,7 +31,8 @@ export class TaskController {
     return ((req as Request & { user?: { perms?: string[] } }).user?.perms ?? []) as string[];
   }
 
-  /** GET /tasks?box=todo|done|alert&type=&take=&skip= */
+  /** GET /tasks?box=todo|done|alert&type=&take=&skip=&sort=createdAt_desc
+   *  sort 仅支持 createdAt_desc（默认）：最新任务置顶（1028v2）。 */
   @Get()
   list(
     @Req() req: Request,
@@ -36,9 +40,13 @@ export class TaskController {
     @Query('type') type?: string,
     @Query('take', new DefaultValuePipe(50), ParseIntPipe) take = 50,
     @Query('skip', new DefaultValuePipe(0), ParseIntPipe) skip = 0,
+    @Query('sort') sort?: string,
   ) {
     if (!BOXES.has(box)) {
       throw new BadRequestException({ code: 'INVALID_TASK_BOX', box });
+    }
+    if (sort && sort !== 'createdAt_desc') {
+      throw new BadRequestException({ code: 'INVALID_TASK_SORT', sort });
     }
     if (type && !TASK_TYPE_CODES.includes(type)) {
       throw new BadRequestException({ code: 'INVALID_TASK_TYPE', type });
@@ -71,6 +79,18 @@ export class TaskController {
   }
 
   /** GET /tasks/:id — 详情 + 候选人 + canClaim。 */
+  /** GET /tasks/events — SSE 实时推送（1028v2 任务置顶）：本租户任务有
+   * 任何创建/指派/领取/完成/取消即推送一条 change 事件，前端据此即时
+   * 刷新列表实现"创建即置顶"。EventSource 走 ?access_token= 鉴权。 */
+  @Sse('events')
+  events(@Req() req: Request) {
+    const tenantId = (req as Request & { user?: { tenantId?: string } }).user?.tenantId;
+    return this.svc.changes$.pipe(
+      filter((e) => e.tenantId === tenantId),
+      map(() => ({ data: { type: 'change', ts: Date.now() } }) as MessageEvent),
+    );
+  }
+
   @Get(':id')
   detail(@Req() req: Request, @Param('id') id: string) {
     assertUuid(id, 'id');

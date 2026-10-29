@@ -1,3 +1,4 @@
+import Select from '../../components/CopySelect';
 import {
   CheckOutlined,
   EyeOutlined,
@@ -8,12 +9,13 @@ import {
   UserAddOutlined,
   UserSwitchOutlined,
 } from '@ant-design/icons';
-import { App as AntdApp, Alert, Badge, Button, Card, Descriptions, Drawer, Form, Input, Modal, Select, Space, Tabs, Tag, Upload } from 'antd';
+import {App as AntdApp, Alert, Badge, Button, Card, Descriptions, Drawer, Form, Input, Modal, Space, Tabs, Tag, Upload} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
+import { useTaskStream } from '../../hooks/useTaskStream';
 import {
   TASK_PRIORITY_LABELS,
   TASK_SOURCE_LABELS,
@@ -62,7 +64,7 @@ export default function Tasks() {
       setLoading(true);
       try {
         const res = await api.get<{ items: TaskItem[]; total: number }>('/tasks', {
-          params: { box: b, take: size, skip: (p - 1) * size, ...(typeFilter ? { type: typeFilter } : {}) },
+          params: { box: b, sort: 'createdAt_desc', take: size, skip: (p - 1) * size, ...(typeFilter ? { type: typeFilter } : {}) },
         });
         setRows(res.data.items);
         setTotal(res.data.total);
@@ -78,6 +80,10 @@ export default function Tasks() {
   useEffect(() => {
     void load(box, page, pageSize);
   }, [load, box, page, pageSize]);
+
+  // 1028v2 任务实时置顶：SSE 推送到达即时静默刷新——antd Table 保留
+  // 滚动位置、勾选按 id 保持，不打断进行中的操作（V6）。
+  useTaskStream(() => void load(box, page, pageSize));
 
   const openDetail = async (id: string) => {
     try {

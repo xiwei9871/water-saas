@@ -33,7 +33,7 @@ import {
 import { parseOnboardWire, type OnboardWireBody } from './onboard-wire.js';
 import { TaskService } from '../task/task.service.js';
 
-const ACCOUNT_STATUSES = new Set(['NORMAL', 'SUSPENDED', 'CLOSED']);
+const ACCOUNT_STATUSES = new Set(['NORMAL', 'SUSPENDED', 'CLOSED', 'PENDING_ASSIGN', 'PENDING_COMPLETE']);
 
 const pageArgs = (take?: string, skip?: string) => ({
   take: Math.min(Math.max(parseInt(take ?? '50', 10) || 50, 1), 200),
@@ -85,7 +85,7 @@ export class WaterAccountController {
       ...pageArgs(take, skip),
       customerId,
       settleAccountId,
-      status: status as 'NORMAL' | 'SUSPENDED' | 'CLOSED' | undefined,
+      status: status as 'NORMAL' | 'SUSPENDED' | 'CLOSED' | 'PENDING_ASSIGN' | 'PENDING_COMPLETE' | undefined,
       accountNo,
       q,
     });

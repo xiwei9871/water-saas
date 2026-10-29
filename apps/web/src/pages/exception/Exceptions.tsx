@@ -1,3 +1,4 @@
+import Select from '../../components/CopySelect';
 import {
   CheckOutlined,
   EyeOutlined,
@@ -5,7 +6,7 @@ import {
   StopOutlined,
   UserAddOutlined,
 } from '@ant-design/icons';
-import { App as AntdApp, Alert, Button, Card, Collapse, Descriptions, Drawer, Input, Modal, Select, Space, Statistic, Tabs, Tag, Timeline, Typography } from 'antd';
+import {App as AntdApp, Alert, Button, Card, Collapse, Descriptions, Drawer, Input, Modal, Space, Statistic, Tabs, Tag, Timeline, Typography} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';

@@ -38,6 +38,14 @@ const MIN_DIGITS = 4;
 const MAX_INT_DIGITS = 6;
 const TARGET_HEIGHT = 140; // band crop normalize height
 const TIMEOUT_MS = 25_000;
+/**
+ * 本地管线内部时限：各处循环到点即退出。
+ * 必须小于 TIMEOUT_MS——否则超时只拒 Promise、管线仍占着单例 tesseract
+ * worker 空转，后续请求排队连环超时（死亡螺旋）。
+ */
+const LOCAL_BUDGET_MS = 18_000;
+/** 本地迟迟无高置信结果时提前并行启动 LLM 兜底，避免串行叠加时延。 */
+const LLM_KICKOFF_MS = 6_000;
 
 const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T> =>
   Promise.race([
@@ -92,22 +100,33 @@ export class MeterOcrService implements OnModuleDestroy {
     if (this.disabled) {
       return this.empty('OCR_DISABLED', '识别模块已停用，请人工读数');
     }
+    // 本地管线与 LLM 兜底并行：本地 LLM_KICKOFF_MS 内未决出即提前启动 LLM
+    // （本地快出结果时计时器被清掉，不产生多余调用）。
+    let llmP: Promise<MeterOcrResult | null> | null = null;
+    const kickLlm = () =>
+      (llmP ??= this.tryLlm(dataUrl, prev).catch((err) => {
+        this.logger.warn(`meter ocr llm failed: ${String(err)}`);
+        return null;
+      }));
+    const llmTimer = setTimeout(kickLlm, LLM_KICKOFF_MS);
+    llmTimer.unref?.();
+
     let local: MeterOcrResult;
+    const deadline = Date.now() + LOCAL_BUDGET_MS;
     try {
-      local = await withTimeout(this.pipeline(dataUrl), TIMEOUT_MS);
+      local = await withTimeout(this.pipeline(dataUrl, deadline), TIMEOUT_MS);
     } catch (err) {
       this.logger.warn(`meter ocr failed: ${String(err)}`);
       local = this.empty(
         err instanceof Error && err.message === 'OCR_TIMEOUT' ? 'OCR_TIMEOUT' : 'OCR_FAILED',
         '照片识别失败，请人工读数',
       );
+    } finally {
+      clearTimeout(llmTimer);
     }
     // 本地结果足够可信直接返回；低置信/拒识 → 多模态 LLM 兜底（若已配置）
     if (local.value !== null && local.confidence >= 70) return local;
-    const llm = await this.tryLlm(dataUrl, prev).catch((err) => {
-      this.logger.warn(`meter ocr llm failed: ${String(err)}`);
-      return null;
-    });
+    const llm = await kickLlm();
     if (llm) return llm;
     // LLM 不可用时只余弱本地推断：压置信度到预填阈值（55）以下，避免错值自动入框
     if (local.value !== null && local.method === 'pointer' && local.confidence < 70) {
@@ -120,7 +139,7 @@ export class MeterOcrService implements OnModuleDestroy {
     return { value: null, confidence: 0, method: 'none', details: { candidates: [], flags: [flag] }, message };
   }
 
-  private async pipeline(dataUrl: string): Promise<MeterOcrResult> {
+  private async pipeline(dataUrl: string, deadline: number): Promise<MeterOcrResult> {
     const base = sharp(Buffer.from(dataUrl, 'base64'), { failOn: 'error' }).rotate();
     const meta = await base.metadata();
     if (!meta.width || !meta.height) return this.empty('IMAGE_INVALID', '图片无法解析，请人工读数');
@@ -129,14 +148,18 @@ export class MeterOcrService implements OnModuleDestroy {
     // 正立照片第一轮即达标返回，无额外开销。
     let best: MeterOcrResult | null = null;
     for (const deg of [0, 180, 90, 270] as const) {
-      const r = await this.pipelineRotated(deg === 0 ? base : base.clone().rotate(deg));
+      if (Date.now() > deadline) break; // 时限用尽即停，释放单例 worker 给后续请求
+      const r = await this.pipelineRotated(
+        deg === 0 ? base : base.clone().rotate(deg),
+        deadline,
+      );
       if (!best || r.confidence > best.confidence) best = r;
       if (r.value !== null && r.confidence >= 70) break;
     }
     return best ?? this.empty('OCR_FAILED', '照片识别失败，请人工读数');
   }
 
-  private async pipelineRotated(img: Sharp): Promise<MeterOcrResult> {
+  private async pipelineRotated(img: Sharp, deadline: number): Promise<MeterOcrResult> {
     const resized = img.clone().resize({ width: 1500, withoutEnlargement: true });
     const [{ data: rgbData, info: rgbInfo }, { data: grayData, info: grayInfo }, pngBuf] =
       await Promise.all([
@@ -163,7 +186,7 @@ export class MeterOcrService implements OnModuleDestroy {
     const strong = circles.filter((c) => c.score >= 20);
     if (strong.length >= 6) return this.tryPointer(sGrayI_, sRgb_, pngBuf, pngScale);
 
-    const roller = await this.tryRoller(pngBuf, gray, rgb);
+    const roller = await this.tryRoller(pngBuf, gray, rgb, deadline);
     if (roller) return roller;
 
     return this.tryPointer(sGrayI_, sRgb_, pngBuf, pngScale);
@@ -200,6 +223,7 @@ export class MeterOcrService implements OnModuleDestroy {
     pngBuf: Buffer,
     gray: GrayImage,
     rgb: RgbImage,
+    deadline: number,
   ): Promise<MeterOcrResult | null> {
     const bands = findDigitBands(gray, 3);
     if (bands.length === 0) return null;
@@ -227,6 +251,7 @@ export class MeterOcrService implements OnModuleDestroy {
     const rawSeen: Array<{ text: string; conf: number; band: number }> = [];
 
     for (const [bandIdx, band] of bands.entries()) {
+      if (Date.now() > deadline) break; // 时限用尽，让出 worker
       const scale = TARGET_HEIGHT / band.height;
       const win = digitWindowX(gray, band);
       // The decimal wheel often sits slightly below the detected strip —
@@ -267,6 +292,7 @@ export class MeterOcrService implements OnModuleDestroy {
         const psms = [PSM.SPARSE_TEXT, PSM.SINGLE_LINE];
 
         for (const variant of variants) {
+          if (Date.now() > deadline) break;
           for (const psm of psms) {
             await worker.setParameters({
               tessedit_char_whitelist: DIGIT_WHITELIST,

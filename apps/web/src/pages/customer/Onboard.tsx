@@ -1,24 +1,10 @@
-import {
-  Alert,
-  App as AntdApp,
-  Button,
-  Card,
-  DatePicker,
-  Descriptions,
-  Form,
-  Input,
-  InputNumber,
-  Radio,
-  Result,
-  Select,
-  Space,
-  Steps,
-} from 'antd';
+import Select from '../../components/CopySelect';
+import {Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Form, Input, InputNumber, Radio, Result, Space, Steps} from 'antd';
 import dayjs from 'dayjs';
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
-import type { InstallReason, Meter, OnboardResult, ReadingBook } from '../../api/types';
+import type { InstallReason, Meter, OnboardResult, ReadingBook, WaterAccountDetail } from '../../api/types';
 import {
   enumLabel,
   CUST_TYPE_LABELS,
@@ -111,6 +97,14 @@ export default function Onboard() {
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<OnboardResult | null>(null);
+  /** 1028v2 补录完成态（complete-info 的返回不含客户/表明细，单独成态）。 */
+  const [completeResult, setCompleteResult] = useState<{
+    accountNo: string;
+    archiveNo: string | null;
+    customerName: string;
+    settleName: string;
+    meterNo: string | null;
+  } | null>(null);
   const [form] = Form.useForm<WizardValues>();
   const [params] = useSearchParams();
   /** 报装纳入（C1）：来源报装单——选中后带入申请人/地址/口径/表号/初始读数，
@@ -122,6 +116,11 @@ export default function Onboard() {
   const [existingMeter, setExistingMeter] = useState<Meter | null>(null);
   /** B1 立户即入册：可选抄表册列表（无 metering:read 时隐藏选择器）。 */
   const [bookOptions, setBookOptions] = useState<{ value: string; label: string }[]>([]);
+  /** 1028v2 场景①：上号后补录 — ?completeId= 直进，锁定该「已上号（待补全）」户，
+      水表步跳过（上号已挂表），提交走 complete-info 转正常。 */
+  const completeId = params.get('completeId');
+  const [pendingAccount, setPendingAccount] = useState<WaterAccountDetail | null>(null);
+  const isCompleteMode = pendingAccount !== null;
 
   const custMode = Form.useWatch('custMode', form) ?? 'new';
   const settleMode = Form.useWatch('settleMode', form) ?? 'default';
@@ -129,9 +128,11 @@ export default function Onboard() {
   const usageCategory = Form.useWatch('acctUsageCategory', form);
   const isMonitoring = usageCategory === 'MONITORING';
 
-  const visibleSteps = isMonitoring
-    ? CONTENT_STEPS.filter((s) => MONITORING_CONTENTS.includes(s.content))
-    : CONTENT_STEPS;
+  const visibleSteps = isCompleteMode
+    ? CONTENT_STEPS.filter((s) => s.content !== 3)
+    : isMonitoring
+      ? CONTENT_STEPS.filter((s) => MONITORING_CONTENTS.includes(s.content))
+      : CONTENT_STEPS;
 
   // 切到监控表后原始 step 可能越界（原在客户/结算户步）——渲染期收拢，
   // 不改 state；切回普通类别后回到原本所在步骤。
@@ -165,6 +166,40 @@ export default function Onboard() {
   };
 
   const currentContent = visibleSteps[safeStep].content;
+
+  // 1028v2 场景①：?completeId= → 拉待补全户并预填（户号/类别/地址/合同）。
+  useEffect(() => {
+    if (!completeId) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await api.get<WaterAccountDetail>(`/water-accounts/${completeId}`);
+        if (!alive) return;
+        if (res.data.status !== 'PENDING_COMPLETE') {
+          message.warning('该户不在「已上号（待补全）」状态');
+          return;
+        }
+        setPendingAccount(res.data);
+        queueMicrotask(() =>
+          form.setFieldsValue({
+            custMode: 'existing',
+            settleMode: 'existing',
+            acctUsageCategory: res.data.usageCategory,
+            acctAddr: res.data.addr,
+            acctAccountNo: res.data.accountNo,
+            acctContractNo: res.data.contractNo ?? undefined,
+            acctHouseholdSize: res.data.householdSize ?? undefined,
+          }),
+        );
+      } catch (err) {
+        message.error(apiErrorText(err));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [completeId]);
 
   // 加载待立户报装单（装表中/已审批），供"来源报装单"选择。
   useEffect(() => {
@@ -298,6 +333,70 @@ export default function Onboard() {
     } catch {
       return;
     }
+
+    // 1028v2 场景① 补录提交：客户/结算户可新建（先建后补录）→ complete-info。
+    if (isCompleteMode && pendingAccount) {
+      setSubmitting(true);
+      try {
+        let customerId = values.customerId;
+        if (custMode === 'new') {
+          const c = await api.post<{ id: string }>(
+            '/customers',
+            cleanBody({
+              name: values.custName,
+              custType: values.custType,
+              idType: values.custIdType,
+              idNo: values.custIdNo,
+              phone: values.custPhone,
+              addr: values.custAddr,
+            }),
+            { headers: { 'Idempotency-Key': `${idemKey}-cust` } },
+          );
+          customerId = c.data.id;
+        }
+        let settleAccountId = values.settleAccountId;
+        if (settleMode === 'new') {
+          const s = await api.post<{ id: string }>(
+            '/settle-accounts',
+            cleanBody({ name: values.settleName, phone: values.settlePhone }),
+            { headers: { 'Idempotency-Key': `${idemKey}-settle` } },
+          );
+          settleAccountId = s.data.id;
+        }
+        if (!customerId || !settleAccountId) {
+          message.warning('请选择客户与结算户');
+          return;
+        }
+        await api.post(
+          `/water-accounts/${pendingAccount.id}/complete-info`,
+          cleanBody({
+            customerId,
+            settleAccountId,
+            contractNo: values.acctContractNo,
+            readingBookId: values.acctReadingBookId,
+            householdSize: values.acctHouseholdSize,
+            addr: values.acctAddr,
+          }),
+          { headers: { 'Idempotency-Key': idemKey } },
+        );
+        // complete-info 返回精简户体——重拉详情取客户/结算户/表名展示。
+        const d = await api.get<WaterAccountDetail>(`/water-accounts/${pendingAccount.id}`);
+        setCompleteResult({
+          accountNo: d.data.accountNo,
+          archiveNo: d.data.archiveNo ?? null,
+          customerName: d.data.customer?.name ?? '—',
+          settleName: d.data.settleAccount?.name ?? '—',
+          meterNo: d.data.meterInstallations?.[0]?.meter?.meterNo ?? null,
+        });
+        message.success('信息补录完成，该户已转正常');
+      } catch (err) {
+        message.error(apiErrorText(err));
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
     const body: Record<string, unknown> = {
       account: cleanBody({
         usageCategory: values.acctUsageCategory,
@@ -376,10 +475,44 @@ export default function Onboard() {
   const resetWizard = () => {
     form.resetFields();
     setSourceApply(null);
+    setPendingAccount(null);
+    setCompleteResult(null);
     setIdemKey(newIdemKey());
     setStep(0);
     setResult(null);
   };
+
+  if (completeResult) {
+    return (
+      <Card title="立户向导">
+        <Result
+          status="success"
+          title="信息补录完成"
+          subTitle="该户已转为「正常」状态，进入正常抄表计费。"
+          extra={[
+            <Link
+              key="view"
+              to={`/customer/water-accounts?accountNo=${encodeURIComponent(completeResult.accountNo)}`}
+            >
+              <Button type="primary">查看用水户</Button>
+            </Link>,
+          ]}
+        />
+        <Descriptions
+          bordered
+          size="small"
+          column={{ xs: 1, md: 2 }}
+          items={[
+            { key: 'acct', label: '户号', children: completeResult.accountNo },
+            { key: 'arch', label: '档案号', children: completeResult.archiveNo ?? '—' },
+            { key: 'cust', label: '客户', children: completeResult.customerName },
+            { key: 'settle', label: '结算户', children: completeResult.settleName },
+            { key: 'meter', label: '表号', children: completeResult.meterNo ?? '—' },
+          ]}
+        />
+      </Card>
+    );
+  }
 
   if (result) {
     return (
@@ -446,7 +579,7 @@ export default function Onboard() {
       {/* 各步常驻挂载（隐藏而非卸载），提交时 validateFields 才能覆盖全部字段；
           模式互斥的字段仍随 radio 卸载，从而不被误校验。 */}
       {/* 报装纳入（C1）：有在途申请时提供"来源报装单"选择，带入要素并联动办结。 */}
-      {applyOptions.length > 0 && (
+      {applyOptions.length > 0 && !isCompleteMode && (
         <Alert
           type="info"
           showIcon
@@ -478,6 +611,15 @@ export default function Onboard() {
           }
         />
       )}
+      {isCompleteMode && pendingAccount && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`上号后补录 — 户号 ${pendingAccount.accountNo}（档案号 ${pendingAccount.archiveNo ?? '—'}）`}
+          description="该户已现场上号并完成装表。请补齐正式客户与结算户信息；提交后转为「正常」户进入抄表计费。水表已在挂装，无需再录。"
+        />
+      )}
       <Form
         form={form}
         layout="vertical"
@@ -496,7 +638,7 @@ export default function Onboard() {
           rules={[{ required: true, message: '请选择用水类别' }]}
           style={{ maxWidth: 360 }}
         >
-          <UsageCategoryInput />
+          <UsageCategoryInput disabled={isCompleteMode} />
         </Form.Item>
         {isMonitoring && (
           <Alert
@@ -571,14 +713,18 @@ export default function Onboard() {
           <Form.Item name="settleMode" label="结算户">
             <Radio.Group
               options={[
-                { value: 'default', label: '默认与户主一致' },
+                // 补录模式必须给出明确结算户（complete-info 需要 settleAccountId），
+                // 不提供「默认与户主一致」。
+                ...(!isCompleteMode
+                  ? [{ value: 'default', label: '默认与户主一致' }]
+                  : []),
                 { value: 'new', label: '新建结算户' },
                 { value: 'existing', label: '选择已有结算户' },
               ]}
               optionType="button"
             />
           </Form.Item>
-          {settleMode === 'default' && (
+          {settleMode === 'default' && !isCompleteMode && (
             <p style={{ color: '#888' }}>
               系统将按客户的姓名与联系电话自动开立同名结算户。
             </p>
@@ -619,13 +765,15 @@ export default function Onboard() {
           <Form.Item
             name="acctAccountNo"
             label="户号"
-            extra="留空则由系统自动生成"
+            extra={isCompleteMode ? '放号时已分配，不可修改' : '留空则由系统自动生成'}
           >
-            <Input />
+            <Input disabled={isCompleteMode} />
           </Form.Item>
-          <Form.Item name="acctOpenedAt" label="开户日期">
-            <DatePicker style={{ width: '100%' }} />
-          </Form.Item>
+          {!isCompleteMode && (
+            <Form.Item name="acctOpenedAt" label="开户日期">
+              <DatePicker style={{ width: '100%' }} />
+            </Form.Item>
+          )}
           <Form.Item
             name="acctContractNo"
             label="供用水合同编号"
@@ -756,7 +904,7 @@ export default function Onboard() {
         )}
         {safeStep === visibleSteps.length - 1 && (
           <Button type="primary" loading={submitting} onClick={() => void submit()}>
-            提交立户
+            {isCompleteMode ? '提交补录' : '提交立户'}
           </Button>
         )}
       </Space>

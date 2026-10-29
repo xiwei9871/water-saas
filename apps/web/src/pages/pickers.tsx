@@ -1,4 +1,5 @@
-import { App as AntdApp, Button, Popover, Select, Space, Tag, TreeSelect, Typography } from 'antd';
+import Select from '../components/CopySelect';
+import {App as AntdApp, Button, Popover, Space, Tag, TreeSelect, Typography} from 'antd';
 import { CheckOutlined, CopyOutlined } from '@ant-design/icons';
 import type { DataNode } from 'antd/es/tree';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';

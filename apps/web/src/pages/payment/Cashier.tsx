@@ -1,10 +1,11 @@
+import Select from '../../components/CopySelect';
 import {
   ClearOutlined,
   PayCircleOutlined,
   PrinterOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import { Alert, App as AntdApp, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Select, Space, Statistic, Tag, Tooltip } from 'antd';
+import {Alert, App as AntdApp, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Statistic, Tag, Tooltip} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';

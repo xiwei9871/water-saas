@@ -226,15 +226,30 @@ export class OpsReportService {
             AND COALESCE(p.received_at, e.created_at) >= ${gte}
             AND COALESCE(p.received_at, e.created_at) < ${lt}
             ${aggOwnPredicate(inScope, Prisma.sql`b.water_account_id`)}`,
-        tx.$queryRaw<{ period: string; remaining: bigint }[]>`
+        // 1028v3 核查 F1/F3/F4：期初/期末欠费取「时点余额」——期初=窗口
+        // 开始前已核销分摊、期末=窗口截止前已核销分摊；此前用全时分摊会把
+        // 期内收款提前计入期初、期后收款提前计入期末，两期均被低估。
+        tx.$queryRaw<{ period: string; rem_start: bigint; rem_end: bigint }[]>`
           SELECT b.period,
-                 (b.total_amount - COALESCE(a.paid, 0))::bigint AS remaining
+                 GREATEST(b.total_amount - COALESCE(pb.paid, 0), 0)::bigint AS rem_start,
+                 GREATEST(b.total_amount - COALESCE(pe.paid, 0), 0)::bigint AS rem_end
           FROM bill b
           LEFT JOIN LATERAL (
             SELECT sum(pa.amount)::bigint AS paid FROM payment_alloc pa
-            WHERE pa.tenant_id = b.tenant_id AND pa.bill_id = b.id) a ON true
+            LEFT JOIN payment p ON p.tenant_id = pa.tenant_id AND p.id = pa.payment_id
+            LEFT JOIN prepayment_ledger_entry e
+              ON e.tenant_id = pa.tenant_id AND e.id = pa.prepayment_entry_id
+            WHERE pa.tenant_id = b.tenant_id AND pa.bill_id = b.id
+              AND COALESCE(p.received_at, e.created_at) < ${gte}) pb ON true
+          LEFT JOIN LATERAL (
+            SELECT sum(pa.amount)::bigint AS paid FROM payment_alloc pa
+            LEFT JOIN payment p ON p.tenant_id = pa.tenant_id AND p.id = pa.payment_id
+            LEFT JOIN prepayment_ledger_entry e
+              ON e.tenant_id = pa.tenant_id AND e.id = pa.prepayment_entry_id
+            WHERE pa.tenant_id = b.tenant_id AND pa.bill_id = b.id
+              AND COALESCE(p.received_at, e.created_at) < ${lt}) pe ON true
           WHERE b.tenant_id = ${ctx.tenantId}::uuid
-            AND b.status IN ('POSTED','PARTIAL_PAID')
+            AND b.status IN ('POSTED','PARTIAL_PAID','PAID')
             AND b.bill_kind <> 'REVERSAL' ${waB}`,
         tx.$queryRaw<{ amount: bigint | null }[]>`
           SELECT sum(bi.amount)::bigint AS amount
@@ -257,14 +272,17 @@ export class OpsReportService {
           FROM prepayment_ledger_entry e
           JOIN settle_account sa ON sa.tenant_id = e.tenant_id AND sa.id = e.settle_account_id
           WHERE e.tenant_id = ${ctx.tenantId}::uuid AND sa.status <> 'CLOSED'`,
+        // 1028v3 核查 2.3/F7：户数口径剔除监控表户（MONITORING 为计量
+        // 监控点、非计费用水户）；opened_at 可能为空，回退 created_at。
         tx.$queryRaw<{ active: number; opened: number; closed: number }[]>`
           SELECT count(*) FILTER (WHERE w.status = 'NORMAL')::int AS active,
-                 count(*) FILTER (WHERE w.opened_at >= ${gte}::date
-                                   AND w.opened_at < ${lt}::date)::int AS opened,
+                 count(*) FILTER (WHERE COALESCE(w.opened_at, w.created_at) >= ${gte}::date
+                                   AND COALESCE(w.opened_at, w.created_at) < ${lt}::date)::int AS opened,
                  count(*) FILTER (WHERE w.closed_at >= ${gte}::date
                                    AND w.closed_at < ${lt}::date)::int AS closed
           FROM water_account w
-          WHERE w.tenant_id = ${ctx.tenantId}::uuid ${waW}`,
+          WHERE w.tenant_id = ${ctx.tenantId}::uuid
+            AND w.usage_category <> 'MONITORING' ${waW}`,
         tx.$queryRaw<{ qc: string; cnt: number }[]>`
           SELECT r.qc_status::text AS qc, count(*)::int AS cnt
           FROM meter_reading r
@@ -282,8 +300,12 @@ export class OpsReportService {
           SELECT i.status::text AS status, count(*)::int AS cnt
           FROM reading_plan_item i
           JOIN reading_plan p ON p.tenant_id = i.tenant_id AND p.id = i.plan_id
+          JOIN water_account wa2 ON wa2.tenant_id = i.tenant_id
+            AND wa2.id = i.water_account_id
           WHERE i.tenant_id = ${ctx.tenantId}::uuid
             AND p.period >= ${from} AND p.period <= ${to}
+            AND wa2.status = 'NORMAL' AND wa2.billable
+            AND wa2.usage_category <> 'MONITORING'
             ${waI}
           GROUP BY i.status`,
         tx.$queryRaw<{ est: number; total: number }[]>`
@@ -321,11 +343,11 @@ export class OpsReportService {
       currentCollected: allocSplit[0]?.current ?? 0n,
       arrearsCollected: allocSplit[0]?.arrears ?? 0n,
       arrearsTotal: arrearsRows
-        .filter((r) => r.period <= to && r.remaining > 0n)
-        .reduce((s, r) => s + r.remaining, 0n),
+        .filter((r) => r.period <= to && r.rem_end > 0n)
+        .reduce((s, r) => s + r.rem_end, 0n),
       arrearsStart: arrearsRows
-        .filter((r) => r.period < from && r.remaining > 0n)
-        .reduce((s, r) => s + r.remaining, 0n),
+        .filter((r) => r.period < from && r.rem_start > 0n)
+        .reduce((s, r) => s + r.rem_start, 0n),
       cumAr: cumAr[0]?.amount ?? 0n,
       prepayBalance: prepay[0]?.balance ?? 0n,
       accountCount: accountStats[0]?.active ?? 0,
@@ -372,12 +394,14 @@ export class OpsReportService {
     const x = thresholds.usageAnomalyX;
 
     const [openRow, missRow, anomalyRows, bigRows] = await Promise.all([
-      // 期初在册：窗口前已立户、且当前仍为 NORMAL（或销户日在窗口内之后）
+      // 期初在册：窗口开始前已立户且尚未销户（含窗口内销户的户——
+      // 它们期初在册、同时计入 closedCount，等式才平衡）；剔除监控表户；
+      // opened_at 为空的历史导入户按 created_at 计入期初。
       tx.$queryRaw<{ n: number }[]>`
         SELECT count(*)::int AS n FROM water_account w
         WHERE w.tenant_id = ${ctx.tenantId}::uuid
-          AND w.status = 'NORMAL'
-          AND w.opened_at < ${gte}::date
+          AND w.usage_category <> 'MONITORING'
+          AND COALESCE(w.opened_at, w.created_at) < ${gte}::date
           AND (w.closed_at IS NULL OR w.closed_at >= ${gte}::date)
           ${waW}`,
       // 完整性：窗口内已 FINAL 结算但没有有效账单（=遗漏户）

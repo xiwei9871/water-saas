@@ -1,9 +1,10 @@
 import { ArrowRightOutlined } from '@ant-design/icons';
 import { Badge, Card, Col, Row, Typography } from 'antd';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
+import { useTaskStream } from '../hooks/useTaskStream';
 import { APP_ROUTES, leafRoutes } from '../routes';
 
 const fmtDate = (d: Date): string =>
@@ -30,20 +31,23 @@ export default function Workbench() {
   const [taskBadge, setTaskBadge] = useState<{ todo: number; escalated: number; alerts: number } | null>(null);
   const [exBadge, setExBadge] = useState<{ total: number } | null>(null);
 
+  const load = useCallback(() => {
+    api.get<{ todo: number; escalated: number; alerts: number }>('/tasks/badge')
+      .then((r) => setTaskBadge(r.data)).catch(() => undefined);
+    if (hasPerm('exception:read')) {
+      api.get<{ total: number }>('/exceptions/badge')
+        .then((r) => setExBadge(r.data)).catch(() => undefined);
+    }
+  }, [hasPerm]);
+
   useEffect(() => {
-    let stopped = false;
-    const load = () => {
-      api.get<{ todo: number; escalated: number; alerts: number }>('/tasks/badge')
-        .then((r) => !stopped && setTaskBadge(r.data)).catch(() => undefined);
-      if (hasPerm('exception:read')) {
-        api.get<{ total: number }>('/exceptions/badge')
-          .then((r) => !stopped && setExBadge(r.data)).catch(() => undefined);
-      }
-    };
     void load();
     const t = setInterval(load, 60_000);
-    return () => { stopped = true; clearInterval(t); };
-  }, [hasPerm]);
+    return () => clearInterval(t);
+  }, [load]);
+
+  // 1028v2 任务实时置顶：任务变更推送立即刷新角标（保留 60s 轮询兜底）。
+  useTaskStream(load);
 
   // 一级模块组（叶子取模块第一个可见子项作为落地，含子功能标注）
   const groups = useMemo(() => {
