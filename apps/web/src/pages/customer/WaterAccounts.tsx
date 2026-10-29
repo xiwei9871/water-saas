@@ -153,7 +153,11 @@ export default function WaterAccounts() {
   const [q, setQ] = useState(searchParams.get('accountNo') ?? '');
   // RC1-5: 新建后回到第一页并高亮该行。
   const [highlightId, setHighlightId] = useState<string | null>(null);
-  const [status, setStatus] = useState<AccountStatus | undefined>(undefined);
+  // ?status= 深链同 ?accountNo 一样走初始 state——首请求即带筛选，
+  // 否则先发的无筛选响应会后到覆盖筛选结果（竞态）。
+  const [status, setStatus] = useState<AccountStatus | undefined>(
+    (searchParams.get('status') as AccountStatus | null) ?? undefined,
+  );
   const [customerId, setCustomerId] = useState<string | undefined>(
     searchParams.get('customerId') ?? undefined,
   );
