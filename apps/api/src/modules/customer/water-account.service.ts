@@ -76,7 +76,7 @@ const INSTALLATION_TIMELINE = {
   },
 };
 
-type AccountStatus = 'NORMAL' | 'SUSPENDED' | 'CLOSED';
+type AccountStatus = 'NORMAL' | 'SUSPENDED' | 'CLOSED' | 'PENDING_ASSIGN' | 'PENDING_COMPLETE';
 type EventType = 'TRANSFER' | 'SUSPEND' | 'RESUME' | 'CLOSE';
 
 export interface WaterAccountBody {

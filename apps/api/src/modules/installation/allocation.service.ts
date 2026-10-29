@@ -416,7 +416,7 @@ export class AllocationService {
         }
         const already = await tx.bookMeter.findFirst({
           where: { tenantId: ctx.tenantId, bookId: book.id, waterAccountId: wa.id },
-          select: { id: true },
+          select: { bookId: true },
         });
         if (!already) {
           await tx.$queryRaw`
