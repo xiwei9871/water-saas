@@ -155,7 +155,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
         <Stat title="其中陈欠回收">{yuan(t.arrearsCollected)}</Stat>
         <Stat title="抄表进度">{`${t.doneReads ?? 0}/${t.plannedReads ?? 0}`}</Stat>
         <Stat title="抄见率">{pct(t.readCoverage)}</Stat>
-        <Stat title="欠费总额(元)">{yuan(t.arrearsTotal)}</Stat>
+        <Stat title="期末欠费余额(元)">{yuan(t.arrearsTotal)}</Stat>
         <Stat title="在册户数">{qty(t.accountCount)}</Stat>
       </Space>
       <Table<Row> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
@@ -249,9 +249,9 @@ const MONTHLY_METRICS: { key: string; title: string; fmt: (v: unknown) => string
   { key: 'ARREARS_COLLECTED', title: '陈欠回收(元)', fmt: yuan },
   { key: 'RECOVERY_RATE', title: '水费回收率', fmt: pct },
   { key: 'ARREARS_RECOVERY_RATE', title: '欠费回收率', fmt: pct },
-  { key: 'ARREARS_TOTAL', title: '欠费总额(元)', fmt: yuan },
+  { key: 'ARREARS_TOTAL', title: '期末欠费余额(元)', fmt: yuan },
   { key: 'ARREARS_RATE', title: '欠费率', fmt: pct },
-  { key: 'COMPOSITE_PRICE', title: '综合单价(元/m³)', fmt: (v) => (v == null ? '—' : (Number(v) / 100).toFixed(2)) },
+  { key: 'COMPOSITE_PRICE', title: '综合单价(元/m³)', fmt: (v) => (v == null ? '—' : Number(v).toFixed(2)) },
   { key: 'REVENUE_GROWTH', title: '营收同比', fmt: pct },
   { key: 'REVENUE_GROWTH_MOM', title: '营收环比', fmt: pct },
   { key: 'READ_ACCURACY', title: '抄表准确率', fmt: pct },

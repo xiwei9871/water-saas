@@ -239,6 +239,79 @@ describe('R4 规范月报', () => {
     expect(r1.passed).toBe(true);
   });
 
+  it('自检 R1/G1：期前提前收款付当月账单 → 销账口径滚动仍平衡', async () => {
+    // 202605 账单 50 元在 2026-03-15（窗口前两个月）收款销账。
+    // 旧口径 R1 只数窗口内收款 → 应收+50 实收 0 误报 -50；
+    // 新口径 windowPaid 覆盖期前提前销账 → 期末 0 = 期初 0 + 应收 50 − 销账 50。
+    const b2 = (
+      await owner.query(
+        `INSERT INTO bill (id, tenant_id, settle_account_id, water_account_id, period,
+                           bill_kind, source_type, source_id, status, is_estimated,
+                           total_amount, issued_at, due_date, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, '202605', 'NORMAL', 'MANUAL', gen_random_uuid(),
+                 'POSTED', false, 5000, '2026-03-10', '2026-06-01', now(), now())
+         RETURNING id::text`,
+        [TG, settleId, waId],
+      )
+    ).rows[0].id;
+    const p2 = (
+      await owner.query(
+        `INSERT INTO payment (id, tenant_id, payment_no, settle_account_id, cashier_id,
+                              org_unit_id, channel, amount, status, received_at,
+                              created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, 'RRPAY2', $2, $3, $4, 'CASH', 5000,
+                 'RECEIVED', '2026-03-15 10:00:00+08', now(), now())
+         RETURNING id::text`,
+        [TG, settleId, STAFF_ADMIN, ORG_SUB],
+      )
+    ).rows[0].id;
+    await owner.query(
+      `INSERT INTO payment_alloc (id, tenant_id, payment_id, bill_id, amount, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 5000, now(), now())`,
+      [TG, p2, b2],
+    );
+    const res = await get('/reports/ops-monthly?period=202605').expect(200);
+    const checks = res.body.checkResults as { rule: string; passed: boolean; diff: string }[];
+    const r1 = checks.find((c) => c.rule === 'R1');
+    expect(r1.passed).toBe(true);
+    expect(r1.diff).toBe('+0.00');
+  });
+
+  it('自检 R11/G2：监控表户与待上号户均不计入在册滚动', async () => {
+    const pick = async () => {
+      const r = await get('/reports/ops-monthly?period=202604').expect(200);
+      return (r.body.checkResults as { rule: string; passed: boolean; actual: string }[]).find(
+        (c) => c.rule === 'R11',
+      );
+    };
+    const before = await pick();
+    const cust = (
+      await owner.query(
+        `SELECT customer_id::text AS c, settle_account_id::text AS s
+         FROM water_account WHERE id = $1`,
+        [waId],
+      )
+    ).rows[0];
+    // 监控表户（期内立户、不收费）+ 待上号户（放号中、未入册）
+    await owner.query(
+      `INSERT INTO water_account (id, tenant_id, customer_id, settle_account_id, account_no, addr,
+                                  usage_category, status, billable, opened_at, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, 'RR-MON-1', '监控点', 'MONITORING', 'NORMAL', false,
+               '2026-04-10', '2026-04-10', now()),
+              (gen_random_uuid(), $1, $2, $3, 'RR-PEND-1', '待上号', 'RES_METERED', 'PENDING_ASSIGN', false,
+               NULL, '2026-04-11', now())`,
+      [TG, cust.c, cust.s],
+    );
+    const after = await pick();
+    expect(after.actual).toBe(before.actual); // 两类户均不入册
+    expect(after.passed).toBe(true);
+    // 销账后清理，避免影响后续套件
+    await owner.query(
+      `DELETE FROM water_account WHERE tenant_id = $1 AND account_no IN ('RR-MON-1','RR-PEND-1')`,
+      [TG],
+    );
+  });
+
   it('R7 部门级：orgUnitId=第一营业所 → 填报单位标注 + 数据归属该所', async () => {
     const res = await get(`/reports/ops-monthly?period=202604&orgUnitId=${ORG_SUB}`).expect(200);
     expect(res.body.meta.orgLabel).toBe('第一营业所');
@@ -268,7 +341,7 @@ describe('Q1 汇总趋势', () => {
     expect(res.body.rows.length).toBe(2);
     const y2026 = res.body.rows.find((r: { year: number }) => r.year === 2026);
     expect(y2026.soldQty).toBe(100);
-    expect(y2026.collected).toBe(300);
+    expect(y2026.collected).toBe(350); // 300(4月) + 50(3月预付5月单, G1用例)
     expect(y2026.yoy.soldQty).toBeNull(); // 2025 无数据 → null
   });
 
@@ -276,7 +349,7 @@ describe('Q1 汇总趋势', () => {
     const res = await get('/reports/summary-trend?groupBy=ORG&years=1&endYear=2026').expect(200);
     const sub = res.body.rows.find((r: { group: string }) => r.group === '第一营业所');
     expect(sub).toBeDefined();
-    expect(sub.collected).toBe(300); // 收款按 payment.org_unit_id 归属
+    expect(sub.collected).toBe(350); // 300(4月) + 50(3月预付单) 同属第一营业所
   });
 
   it('CATEGORY：按用水类别分组', async () => {

@@ -168,6 +168,8 @@ export interface MonthlyCheckInput {
   collected: number; // 本期实收（分）
   currentCollected: number; // 当期实收（分）
   arrearsCollected: number; // 陈欠收取（分）
+  /** 窗口期账单在期末前的全部销账（分，含期前提前收款）——R1 专用 */
+  windowPaid: number;
   arrearsTotal: number; // 期末欠费（分）
   arrearsStart: number; // 期初欠费（分）
   recoveryRate: number | null; // %
@@ -196,13 +198,14 @@ export function buildMonthlyChecks(
 ): CheckResult[] {
   const out: CheckResult[] = [];
 
-  // R1 资金存量滚动（勾稽·阻断）——「本期实收」取已分摊到账单的部分
-  // （当期实收+陈欠回收）：未分摊收款（预存入金/在途款）不减欠费，
-  // 其组成由 R2 单独校验，避免预存制用户被结构性误报。
-  const applied = i.currentCollected + i.arrearsCollected;
+  // R1 资金存量滚动（勾稽·阻断）——1029 G1：「本期实收」对窗口期
+  // 账单按销账口径计（windowPaid 含期前提前收款，如 9 月末收款付
+  // 10 月单），陈欠回收仍按窗口内收款计；未分摊收款（预存入金/
+  // 在途款）不减欠费，其组成由 R2 单独校验。
+  const applied = i.windowPaid + i.arrearsCollected;
   out.push(moneyEq('R1', '资金存量滚动：期末欠费＝期初欠费＋本期应收−本期实收',
     'BLOCK', i.arrearsTotal, i.arrearsStart + i.arAmount - applied,
-    (d) => `期初欠费 ${money(i.arrearsStart)} + 本期应收 ${money(i.arAmount)} − 本期实收分摊 ${money(applied)} = 应期末欠费 ${money(i.arrearsStart + i.arAmount - applied)}，报表为 ${money(i.arrearsTotal)}，差额 ${f2(d)} 元，请核查数据来源（欠费计算/收款分摊/某月遗漏重复）。`,
+    (d) => `期初欠费 ${money(i.arrearsStart)} + 本期应收 ${money(i.arAmount)} − 本期销账 ${money(applied)}（含提前收款 ${money(Math.max(0, i.windowPaid - i.currentCollected))} + 陈欠回收 ${money(i.arrearsCollected)}）= 应期末欠费 ${money(i.arrearsStart + i.arAmount - applied)}，报表为 ${money(i.arrearsTotal)}，差额 ${f2(d)} 元，请核查数据来源（欠费计算/收款分摊/某月遗漏重复）。`,
     'arrears'));
 
   // R2 实收构成（勾稽·阻断）
@@ -262,7 +265,7 @@ export function buildMonthlyChecks(
 
   // R8 欠费率区间（合理性·警告）
   const arRate = i.arAmount > 0 ? (i.arrearsTotal / i.arAmount) * 100 : (i.arrearsTotal > 0 ? 100 : 0);
-  out.push(rateCheck('R8', '欠费率区间：欠费总额÷本期应收 ∈ 合理区间（可配）',
+  out.push(rateCheck('R8', '欠费率区间：期末欠费余额÷本期应收 ∈ 合理区间（可配）',
     'WARN', arRate, t.arrearsRateMax,
     `欠费率 ${f2(arRate)}%（欠费 ${money(i.arrearsTotal)} ÷ 应收 ${money(i.arAmount)}）超出 0~${f2(t.arrearsRateMax)}%，请关注欠费收缴。`,
     'arrears'));

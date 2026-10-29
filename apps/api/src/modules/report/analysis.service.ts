@@ -126,7 +126,8 @@ export class AnalysisService {
                     AND b.status IN ('POSTED','PARTIAL_PAID')
                     AND b.bill_kind <> 'REVERSAL') AS arrears,
                (SELECT count(*)::int FROM water_account w
-                  WHERE w.tenant_id = ${ctx.tenantId}::uuid AND w.status = 'NORMAL') AS accounts`;
+                  WHERE w.tenant_id = ${ctx.tenantId}::uuid AND w.status = 'NORMAL'
+                    AND w.usage_category <> 'MONITORING') AS accounts`;
 
       // 按组织（柜台）实收
       const byOrg = await tx.$queryRaw<
@@ -461,16 +462,20 @@ export class AnalysisService {
       >`
         SELECT (SELECT count(*)::int FROM water_account w
                   WHERE w.tenant_id = ${ctx.tenantId}::uuid
-                    AND w.status = 'NORMAL' ${waScoped}) AS active,
+                    AND w.status = 'NORMAL'
+                    AND w.usage_category <> 'MONITORING' ${waScoped}) AS active,
                (SELECT count(*)::int FROM water_account w
                   WHERE w.tenant_id = ${ctx.tenantId}::uuid
-                    AND w.opened_at < ${monthStartDate}::date
+                    AND COALESCE(w.opened_at, w.created_at) < ${monthStartDate}::date
                     AND (w.closed_at IS NULL OR w.closed_at >= ${monthStartDate}::date)
+                    AND w.usage_category <> 'MONITORING'
+                    AND w.status NOT IN ('PENDING_ASSIGN','PENDING_COMPLETE')
                     ${waScoped}) AS "startActive",
                (SELECT count(*)::int FROM water_account w
                   WHERE w.tenant_id = ${ctx.tenantId}::uuid
                     AND w.closed_at >= ${monthStartDate}::date
-                    AND w.closed_at < ${w.lt}::date ${waScoped}) AS "closedInMonth"`;
+                    AND w.closed_at < ${w.lt}::date
+                    AND w.usage_category <> 'MONITORING' ${waScoped}) AS "closedInMonth"`;
 
       // 抄表到位率：到表抄见（ACTUAL/REMOTE）的计划项 ÷ 计划项数
       const arrivalRows = await tx.$queryRaw<{ arrived: number }[]>`
@@ -490,6 +495,7 @@ export class AnalysisService {
         SELECT count(DISTINCT w.id)::int AS smart
         FROM water_account w
         WHERE w.tenant_id = ${ctx.tenantId}::uuid AND w.status = 'NORMAL'
+          AND w.usage_category <> 'MONITORING'
           AND EXISTS (
             SELECT 1 FROM remote_device_binding rb
             JOIN meter_installation mi
@@ -507,6 +513,7 @@ export class AnalysisService {
         SELECT count(*)::int AS "zeroStreak"
         FROM water_account w
         WHERE w.tenant_id = ${ctx.tenantId}::uuid AND w.status = 'NORMAL' ${waScoped}
+          AND w.usage_category <> 'MONITORING'
           AND NOT EXISTS (
             SELECT 1 FROM consumption_settlement cs
             WHERE cs.tenant_id = w.tenant_id AND cs.water_account_id = w.id
@@ -908,13 +915,18 @@ export class AnalysisService {
         { active: number; opened: number; closed: number }[]
       >`
         SELECT (SELECT count(*)::int FROM water_account w
-                  WHERE w.tenant_id = ${ctx.tenantId}::uuid AND w.status = 'NORMAL') AS active,
+                  WHERE w.tenant_id = ${ctx.tenantId}::uuid AND w.status = 'NORMAL'
+                    AND w.usage_category <> 'MONITORING') AS active,
                (SELECT count(*)::int FROM water_account w
                   WHERE w.tenant_id = ${ctx.tenantId}::uuid
-                    AND w.opened_at >= ${gte}::date AND w.opened_at < ${lt}::date) AS opened,
+                    AND COALESCE(w.opened_at, w.created_at) >= ${gte}::date
+                    AND COALESCE(w.opened_at, w.created_at) < ${lt}::date
+                    AND w.usage_category <> 'MONITORING'
+                    AND w.status NOT IN ('PENDING_ASSIGN','PENDING_COMPLETE')) AS opened,
                (SELECT count(*)::int FROM water_account w
                   WHERE w.tenant_id = ${ctx.tenantId}::uuid
-                    AND w.closed_at >= ${gte}::date AND w.closed_at < ${lt}::date) AS closed`;
+                    AND w.closed_at >= ${gte}::date AND w.closed_at < ${lt}::date
+                    AND w.usage_category <> 'MONITORING') AS closed`;
 
       // 坏账核销清单（G2）
       const writeoffs = await tx.$queryRaw<

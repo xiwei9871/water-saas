@@ -38,6 +38,8 @@ export interface WindowMetrics {
   collected: bigint;
   currentCollected: bigint;
   arrearsCollected: bigint;
+  /** 窗口期账单在期末前的全部销账（含期前提前收款），R1 资金滚动用 */
+  windowPaid: bigint;
   arrearsTotal: bigint;
   arrearsStart: bigint;
   cumAr: bigint;
@@ -210,12 +212,20 @@ export class OpsReportService {
             AND p.received_at >= ${gte} AND p.received_at < ${lt} ${orgIn}`,
         // 当期实收 = 窗口内账单的销账额（销账发生在窗口内、且按期口径）；
         // 陈欠收取 = 更早账单的销账额。与 analysis.service 同口径。
-        tx.$queryRaw<{ current: bigint | null; arrears: bigint | null }[]>`
+        // 1029 G1：另返回 windowPaid = 窗口期账单在期末前的全部销账
+        // （含提前收款）——R1 资金滚动需要它，否则"9 月收款付 10 月单"
+        // 会被误判为欠费滞留。
+        tx.$queryRaw<{ current: bigint | null; arrears: bigint | null; windowPaid: bigint | null }[]>`
           SELECT sum(CASE WHEN b.period >= ${from} AND b.period <= ${to}
+                           AND COALESCE(p.received_at, e.created_at) >= ${gte}
                            AND (b.due_date IS NULL
                                 OR COALESCE(p.received_at, e.created_at)::date <= b.due_date)
                           THEN a.amount ELSE 0 END)::bigint AS current,
-                 sum(CASE WHEN b.period < ${from} THEN a.amount ELSE 0 END)::bigint AS arrears
+                 sum(CASE WHEN b.period < ${from}
+                           AND COALESCE(p.received_at, e.created_at) >= ${gte}
+                          THEN a.amount ELSE 0 END)::bigint AS arrears,
+                 sum(CASE WHEN b.period >= ${from} AND b.period <= ${to}
+                          THEN a.amount ELSE 0 END)::bigint AS "windowPaid"
           FROM payment_alloc a
           JOIN bill b ON b.tenant_id = a.tenant_id AND b.id = a.bill_id
           LEFT JOIN payment p ON p.tenant_id = a.tenant_id AND p.id = a.payment_id
@@ -223,8 +233,10 @@ export class OpsReportService {
           LEFT JOIN prepayment_ledger_entry e
             ON e.tenant_id = a.tenant_id AND e.id = a.prepayment_entry_id
           WHERE a.tenant_id = ${ctx.tenantId}::uuid
-            AND COALESCE(p.received_at, e.created_at) >= ${gte}
+            AND b.period <= ${to}
             AND COALESCE(p.received_at, e.created_at) < ${lt}
+            AND (COALESCE(p.received_at, e.created_at) >= ${gte}
+                 OR (b.period >= ${from} AND b.period <= ${to}))
             ${aggOwnPredicate(inScope, Prisma.sql`b.water_account_id`)}`,
         // 1028v3 核查 F1/F3/F4：期初/期末欠费取「时点余额」——期初=窗口
         // 开始前已核销分摊、期末=窗口截止前已核销分摊；此前用全时分摊会把
@@ -274,15 +286,20 @@ export class OpsReportService {
           WHERE e.tenant_id = ${ctx.tenantId}::uuid AND sa.status <> 'CLOSED'`,
         // 1028v3 核查 2.3/F7：户数口径剔除监控表户（MONITORING 为计量
         // 监控点、非计费用水户）；opened_at 可能为空，回退 created_at。
+        // 1029 G2：三项户数一律取「窗口时点快照」而非当前状态——
+        // active = 期末在册（期前已立户且期末未销户），历史周期回放
+        // 也能还原当时在册数；pending 户（放号/补录中）尚未入册不计。
         tx.$queryRaw<{ active: number; opened: number; closed: number }[]>`
-          SELECT count(*) FILTER (WHERE w.status = 'NORMAL')::int AS active,
+          SELECT count(*) FILTER (WHERE COALESCE(w.opened_at, w.created_at) < ${lt}::date
+                                   AND (w.closed_at IS NULL OR w.closed_at >= ${lt}::date))::int AS active,
                  count(*) FILTER (WHERE COALESCE(w.opened_at, w.created_at) >= ${gte}::date
                                    AND COALESCE(w.opened_at, w.created_at) < ${lt}::date)::int AS opened,
                  count(*) FILTER (WHERE w.closed_at >= ${gte}::date
                                    AND w.closed_at < ${lt}::date)::int AS closed
           FROM water_account w
           WHERE w.tenant_id = ${ctx.tenantId}::uuid
-            AND w.usage_category <> 'MONITORING' ${waW}`,
+            AND w.usage_category <> 'MONITORING'
+            AND w.status NOT IN ('PENDING_ASSIGN','PENDING_COMPLETE') ${waW}`,
         tx.$queryRaw<{ qc: string; cnt: number }[]>`
           SELECT r.qc_status::text AS qc, count(*)::int AS cnt
           FROM meter_reading r
@@ -342,6 +359,7 @@ export class OpsReportService {
       collected: collected[0]?.amount ?? 0n,
       currentCollected: allocSplit[0]?.current ?? 0n,
       arrearsCollected: allocSplit[0]?.arrears ?? 0n,
+      windowPaid: allocSplit[0]?.windowPaid ?? 0n,
       arrearsTotal: arrearsRows
         .filter((r) => r.period <= to && r.rem_end > 0n)
         .reduce((s, r) => s + r.rem_end, 0n),
@@ -403,6 +421,7 @@ export class OpsReportService {
           AND w.usage_category <> 'MONITORING'
           AND COALESCE(w.opened_at, w.created_at) < ${gte}::date
           AND (w.closed_at IS NULL OR w.closed_at >= ${gte}::date)
+          AND w.status NOT IN ('PENDING_ASSIGN','PENDING_COMPLETE')
           ${waW}`,
       // 完整性：窗口内已 FINAL 结算但没有有效账单（=遗漏户）
       tx.$queryRaw<{ n: number }[]>`
@@ -596,7 +615,7 @@ export class OpsReportService {
         {
           name: '三、欠费',
           rows: [
-            row('ARREARS_TOTAL', '欠费总额（期末）', '元', (f) => f.arrearsTotal, { stock: true }),
+            row('ARREARS_TOTAL', '期末欠费余额', '元', (f) => f.arrearsTotal, { stock: true }),
             row('ARREARS_RATE', '欠费率', '%', (f) => f.arrearsRate, { stock: true }),
             row('ARREARS_RECOVERY_RATE', '欠费回收率（陈欠）', '%', (f) => f.arrearsRecRate, { stock: true }),
           ],
@@ -643,6 +662,7 @@ export class OpsReportService {
           collected: Number(cur.collected),
           currentCollected: Number(cur.currentCollected),
           arrearsCollected: Number(cur.arrearsCollected),
+          windowPaid: Number(cur.windowPaid),
           arrearsTotal: Number(cur.arrearsTotal),
           arrearsStart: Number(cur.arrearsStart),
           recoveryRate: pct(
@@ -717,7 +737,7 @@ export class OpsReportService {
           waterFee: Number(w.waterFee) / 100,
           collected: Number(w.collected) / 100,
           recoveryRate: pct(Number(w.currentCollected), Number(w.arAmount)),
-          compositePrice: num(w.soldQty) > 0 ? Number(w.waterFee) / num(w.soldQty) : null,
+          compositePrice: num(w.soldQty) > 0 ? Number(w.waterFee) / 100 / num(w.soldQty) : null,
           arrearsTotal: Number(w.arrearsTotal) / 100,
         });
       }
@@ -754,6 +774,7 @@ export class OpsReportService {
           collected: Number(yw.collected),
           currentCollected: Number(yw.currentCollected),
           arrearsCollected: Number(yw.arrearsCollected),
+          windowPaid: Number(yw.windowPaid),
           arrearsTotal: Number(yw.arrearsTotal),
           arrearsStart: Number(yw.arrearsStart),
           recoveryRate: pct(
