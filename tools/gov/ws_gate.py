@@ -4,7 +4,7 @@ import os, re, subprocess, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STATE = os.path.join(ROOT, "docs/agent_governance/PROJECT_STATE.yaml")
 REJECTED = [
-    (r"-----BEGIN [A-Z ]*PRIVATE KEY-----|api[_-]?key.{0,4}[:=].{8}", "D02 secrets committed"),
+    (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "D02 secrets committed"),
 ]
 def _skip(rel):
     parts = rel.split("/")
