@@ -6,8 +6,9 @@ STATE = os.path.join(ROOT, "docs/agent_governance/PROJECT_STATE.yaml")
 REJECTED = [
     (r"-----BEGIN [A-Z ]*PRIVATE KEY-----|api[_-]?key.{0,4}[:=].{8}", "D02 secrets committed"),
 ]
-SKIP = (".git", "node_modules", ".venv", "venv", "tools/gov", "docs/agent_governance",
-        "outputs", "dist", "build", "__pycache__", ".worktrees")
+def _skip(rel):
+    parts = rel.split("/")
+    return any(p in ("node_modules", ".git", ".venv", "venv", "__pycache__", ".worktrees", "dist", "build") for p in parts) or rel.startswith(("tools/gov", "docs/agent_governance", "outputs"))
 
 def sh(*a):
     return subprocess.run(a, cwd=ROOT, capture_output=True, text=True).stdout.strip()
@@ -35,7 +36,10 @@ def gate_decisions():
     for dp, _d, fs in os.walk(ROOT):
         for fn in fs:
             rel = os.path.relpath(os.path.join(dp, fn), ROOT)
-            if rel.startswith(SKIP) or os.path.getsize(os.path.join(dp, fn)) > 2_000_000: continue
+            if _skip(rel): continue
+            try:
+                if os.path.getsize(os.path.join(dp, fn)) > 2_000_000: continue
+            except OSError: continue
             try: txt = open(os.path.join(dp, fn), errors="ignore").read()
             except OSError: continue
             for pat, label in REJECTED:
