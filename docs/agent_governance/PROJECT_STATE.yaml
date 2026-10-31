@@ -1,0 +1,18 @@
+schema: project-state/v2
+project: water-saas
+business:
+  branch: chore/project-continuity-v101
+  head_commit: 6b08db5
+  phase: IN_DEVELOPMENT
+governance:
+  branch: chore/project-continuity-v101
+  note: governance commits never invalidate the business baseline
+pending:
+  human_gate: MERGE_REVIEW_REQUIRED
+  next_safe_action: user reviews governance PR
+  forbidden_next: [D01, D02, D03, D04]
+docs:
+  decisions: docs/agent_governance/DECISIONS.md
+  context: docs/agent_governance/PROJECT_CONTEXT.md
+  handoff: docs/agent_governance/HANDOFF.md
+  gates: tools/gov/ws_gate.py
