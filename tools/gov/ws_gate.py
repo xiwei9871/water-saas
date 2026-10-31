@@ -4,7 +4,7 @@ import os, re, subprocess, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STATE = os.path.join(ROOT, "docs/agent_governance/PROJECT_STATE.yaml")
 REJECTED = [
-    (r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|api[_-]?key\s*[:=]\s*["'][A-Za-z0-9]{16}", "D02 violated"),
+    (r"-----BEGIN [A-Z ]*PRIVATE KEY-----|api[_-]?key.{0,4}[:=].{8}", "D02 secrets committed"),
 ]
 SKIP = (".git", "node_modules", ".venv", "venv", "tools/gov", "docs/agent_governance",
         "outputs", "dist", "build", "__pycache__", ".worktrees")
