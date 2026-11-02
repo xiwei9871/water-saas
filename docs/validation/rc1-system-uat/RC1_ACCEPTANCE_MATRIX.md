@@ -34,7 +34,7 @@
 | 项 | 状态 | 证据 |
 |---|---|---|
 | Chromium UAT | **PASS** | stage-2.1 playwright-cli 全链路 + 4 截图（docs/validation/meter-model-stage2-review/） |
-| WebKit | **NOT_VERIFIED** | 未执行 |
+| WebKit | **PASS** | playwright webkit 登录+区号管理+移动三模块渲染正常（uat-webkit-*.png） |
 | 三岗位试用 | **NOT_VERIFIED** | 需人工组织，未跑 |
 
 ## G5 版本与部署
