@@ -407,7 +407,9 @@ describe('onboard wizard (立户)', () => {
       })
       .expect(201);
     expect(res.body.readingBook).toMatchObject({ id: book.body.id });
-    expect(res.body.planJoined).toMatchObject({ planId: plan.body.id, period });
+    // R10-2 次月纳入：当月新户一律不进在途计划（planJoined=null），
+    // 次月计划按区段+频次归集。
+    expect(res.body.planJoined).toBeNull();
 
     // book_meter membership + plan item both landed in the same tx
     const member = await owner.query(
@@ -415,11 +417,12 @@ describe('onboard wizard (立户)', () => {
       [res.body.waterAccount.id, book.body.id],
     );
     expect(member.rowCount).toBe(1);
+    // R10-2：当月在途计划不再有该户计划项（次月计划生成时才纳入）。
     const item = await owner.query(
       `SELECT 1 FROM reading_plan_item WHERE plan_id = $1 AND water_account_id = $2`,
       [plan.body.id, res.body.waterAccount.id],
     );
-    expect(item.rowCount).toBe(1);
+    expect(item.rowCount).toBe(0);
 
     // account list surfaces the book
     const list = await request(app.getHttpServer())

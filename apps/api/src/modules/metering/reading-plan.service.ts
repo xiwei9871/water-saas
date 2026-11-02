@@ -559,9 +559,17 @@ export class ReadingPlanService {
       orderBy: { seqNo: 'asc' },
     });
     // 1102：频次已归属用户——计划项只含本月该抄的户；book.cadence 为
-    // 历史兼容列不再参与归集。跳过成员数透传给前端提示。
+    // 历史兼容列不再参与归集，但旧册仍保留册级告警供展示层提示。
     const skipped = members.length - liveMembers.length;
-    const cadenceWarning = skipped > 0 ? 'SOME_MEMBERS_NOT_DUE' : null;
+    const cadenceWarning = !isBookDue(
+      book.cadence as BookCadence,
+      book.anchor_period,
+      body.period,
+    )
+      ? 'BOOK_NOT_DUE_THIS_PERIOD'
+      : skipped > 0
+        ? 'SOME_MEMBERS_NOT_DUE'
+        : null;
     return { ...plan, items, cadenceWarning, skippedNotDue: skipped };
   }
 

@@ -181,7 +181,7 @@ export class AllocationService {
       const installMeters = Array.isArray(app.installMeters)
         ? (app.installMeters as { meterNo?: string; caliber?: string }[])
         : [];
-      if (installMeters.length === 0 && !app.installCompletedAt) {
+      if (installMeters.length === 0 && !app.installCompletedAt && !app.installMeterNo) {
         throw new ConflictException({
           code: 'INSTALL_INFO_REQUIRED',
           message: '须先填报水表安装信息（安装完成后、放号前）',
