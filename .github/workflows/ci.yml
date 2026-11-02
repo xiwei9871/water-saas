@@ -1,0 +1,53 @@
+name: ci
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**', 'chore/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: watersaas_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - name: Create ws_app role (owner for migrate, runtime user for tests)
+        run: |
+          psql "postgresql://postgres:postgres@localhost:5432/watersaas_test" \
+            -c "CREATE ROLE ws_app LOGIN PASSWORD 'ws_app_pw'" || true
+          psql "postgresql://postgres:postgres@localhost:5432/watersaas_test" \
+            -c "ALTER DATABASE watersaas_test OWNER TO ws_app"
+      - name: Migrate fresh DB (verifies all migrations incl. RC additions)
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/watersaas_test
+          MIGRATION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/watersaas_test
+        run: pnpm exec prisma migrate deploy
+      - name: API build
+        run: pnpm --filter api build
+      - name: Web build
+        run: pnpm --filter web build
+      - name: API lint
+        run: pnpm --filter api lint
+      - name: e2e (serial, shared test DB)
+        working-directory: apps/api
+        env:
+          DATABASE_URL_TEST: postgresql://ws_app:ws_app_pw@localhost:5432/watersaas_test
+          MIGRATION_DATABASE_URL_TEST: postgresql://postgres:postgres@localhost:5432/watersaas_test
+        run: pnpm test:e2e

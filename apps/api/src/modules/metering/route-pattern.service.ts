@@ -86,14 +86,14 @@ export class RoutePatternService {
         select: ROUTE_PATTERN_SELECT,
       });
       if (ctx.scope === 'ALL') return rows;
-      // scoped：只回「本组织子树册内有户」的区号模式。
+      // scoped：同区号跨组织时，模式 entries 可能含组织外户——
+      // 只回「全部条目都在本组织子树册内」的模式（防读越权数据）。
       const waIds = await this.scopedWaIds(tx, ctx);
-      const acctZones = await tx.waterAccount.findMany({
-        where: { tenantId: ctx.tenantId, id: { in: [...(waIds ?? [])] } },
-        select: { zoneNo: true },
+      const inScope = waIds ?? new Set<string>();
+      return rows.filter((r) => {
+        const entries = (r.entries as unknown as PatternEntry[]) ?? [];
+        return entries.length > 0 && entries.every((e) => inScope.has(e.waterAccountId));
       });
-      const readableZones = new Set(acctZones.map((a) => a.zoneNo));
-      return rows.filter((r) => readableZones.has(r.zoneNo));
     });
   }
 
@@ -108,6 +108,7 @@ export class RoutePatternService {
     }
     // P0-3：scoped 保存前须确认该区号下有本组织子树册内户。
     await this.assertZoneReadable(tx, ctx, body.zoneNo);
+    const scoped = await this.scopedWaIds(tx, ctx, body.zoneNo);
     const accounts = await tx.waterAccount.findMany({
       where: {
         tenantId: ctx.tenantId,
@@ -118,10 +119,13 @@ export class RoutePatternService {
       select: { id: true, routeKey: true },
       orderBy: { routeKey: 'asc' },
     });
-    if (accounts.length === 0) {
+    // 同区跨组织：scoped 只纳入本组织子树册内户的键序，
+    // 不把组织外户的排序写入模式（防数据归属泄漏+apply 越权）。
+    const inScope = scoped === null ? accounts : accounts.filter((a) => scoped.has(a.id));
+    if (inScope.length === 0) {
       throw new BadRequestException({ code: 'PATTERN_EMPTY_ZONE' });
     }
-    const entries: PatternEntry[] = accounts.map((a) => ({
+    const entries: PatternEntry[] = inScope.map((a) => ({
       waterAccountId: a.id,
       routeKey: Number(a.routeKey),
     }));

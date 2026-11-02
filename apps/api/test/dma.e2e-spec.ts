@@ -222,9 +222,14 @@ describe('C1/C2 DMA 管理 + 产销差（20261026 D1-D4：考核表=监控表户
     expect(emptyRow.checkQty).toBe('0.00');
     expect(emptyRow.leakageRate).toBeNull();
 
-    // 6. 摘除考核表（effective_to=现在≈10月）→ 摘除后的月份不再计入；
-    //    摘除当月及历史期仍按"当时有效"计入（失效窗口语义）。
+    // 6. 摘除考核表 → 摘除后的月份不再计入；摘除当月及历史期仍按
+    //    "当时有效"计入（失效窗口语义）。del() 写 effective_to=now()，
+    //    当运行月落入 P2 时窗口天然覆盖 → 回填到 P 月内使断言确定性。
     await del(`/dma/check-meters/${chkLink.id}`).expect(200);
+    await owner.query(
+      `UPDATE dma_check_meter SET effective_to = '2026-10-25T00:00:00Z' WHERE id = $1`,
+      [chkLink.id],
+    );
     const P2 = '202611';
     await seedReading(chkInstId, chkMeter.id, P2, 1200);
     const dash3 = (await get(`/dma/dashboard?periods=${P},${P2}`).expect(200)).body as {
