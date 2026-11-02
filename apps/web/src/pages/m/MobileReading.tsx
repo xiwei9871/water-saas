@@ -67,8 +67,7 @@ interface ProgressRow {
   total: number;
 }
 
-/** 非户表（非居民/特种/监控）抄表强制拍照 —— 文档第四步口径。 */
-const FORCED_PHOTO_CATEGORIES = new Set(['NON_RES', 'SPECIAL', 'MONITORING']);
+// R8-3：APP 抄表无论是否正常均须拍照（取消「非正常才拍」限制）。
 
 /** 离线待上传队列项 —— localStorage 持久化，联网后手动/自动上传。
  *  url 缺省 /meter-readings；异常上报走 /service-orders。 */
@@ -259,9 +258,8 @@ export default function MobileReading() {
   const current =
     pending.find((i) => i.id === currentId) ?? pending[0];
   const done = progress ? progress.READ + progress.NO_READ + progress.SKIPPED : 0;
-  const photoRequired = current
-    ? FORCED_PHOTO_CATEGORIES.has(current.usageCategory ?? '')
-    : false;
+  // R8-3：APP 抄表无论是否正常均须拍照（取消「非正常才拍」限制）。
+  const photoRequired = true;
 
   const filteredItems = useMemo(() => {
     let list = items;
@@ -394,7 +392,7 @@ export default function MobileReading() {
       return;
     }
     if (photoRequired && !photo) {
-      message.warning('该户为非户表/监控表，按规范必须先拍照');
+      message.warning('抄表必须拍照留底');
       return;
     }
     void submit({
@@ -621,8 +619,8 @@ export default function MobileReading() {
         value={mode}
         onChange={(v) => setMode(v as 'reading' | 'activate')}
         options={[
-          { value: 'reading', label: '抄表' },
-          { value: 'activate', label: '立户上号' },
+          { value: 'reading', label: '抄表作业' },
+          { value: 'activate', label: '装表上户' },
         ]}
       />
       {mode === 'activate' && <MobileActivate />}

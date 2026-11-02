@@ -8,7 +8,18 @@ import {
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
-import { isValidPeriod } from '../../common/reading-cadence.js';
+import {
+  isValidPeriod,
+  BOOK_CADENCES,
+  type BookCadence,
+} from '../../common/reading-cadence.js';
+import {
+  collectModeOf,
+  isRemoteZone,
+  isValidZoneNo,
+  zoneSegCode,
+  SEG_NO_RE,
+} from '../../common/metering-model.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import {
@@ -25,6 +36,7 @@ import { CustomerService, type CustomerBody } from './customer.service.js';
 import { MeterService, type MeterBody } from './meter.service.js';
 import { MeterInstallationService } from './meter-installation.service.js';
 import { SequenceService } from '../../common/sequence.service.js';
+import { TaskService } from '../task/task.service.js';
 import {
   SettleAccountService,
   SETTLE_ACCOUNT_SELECT,
@@ -50,6 +62,13 @@ export const WATER_ACCOUNT_SELECT = {
   assignReaderId: true,
   pendingCaliber: true,
   activatedAt: true,
+  zoneNo: true,
+  segNo: true,
+  cadence: true,
+  anchorPeriod: true,
+  routeKey: true,
+  returnedAt: true,
+  returnReason: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.WaterAccountSelect;
@@ -76,7 +95,7 @@ const INSTALLATION_TIMELINE = {
   },
 };
 
-type AccountStatus = 'NORMAL' | 'SUSPENDED' | 'CLOSED' | 'PENDING_ASSIGN' | 'PENDING_COMPLETE';
+type AccountStatus = 'NORMAL' | 'SUSPENDED' | 'CLOSED' | 'PENDING_ASSIGN' | 'PENDING_COMPLETE' | 'RETURNED';
 type EventType = 'TRANSFER' | 'SUSPEND' | 'RESUME' | 'CLOSE';
 
 export interface WaterAccountBody {
@@ -89,11 +108,21 @@ export interface WaterAccountBody {
   /** R6：供用水合同编号 + 扫描件（立户写入档案，可检索）。 */
   contractNo?: string;
   contractScan?: Prisma.InputJsonValue;
+  /** R13/R2：频次（默认每月）+ 区号/段号归集属性。 */
+  cadence?: string;
+  anchorPeriod?: string | null;
+  zoneNo?: string | null;
+  segNo?: string | null;
 }
 
 export interface WaterAccountPatchBody {
   usageCategory?: string;
   addr?: string;
+  /** R13/R2：频次 + 区号/段号（用户级属性，不跟表走）。 */
+  cadence?: string;
+  anchorPeriod?: string | null;
+  zoneNo?: string | null;
+  segNo?: string | null;
 }
 
 /** 抄表 APP 现场更正联系信息 —— metering:write 可用；只放白名单字段。 */
@@ -127,6 +156,12 @@ export interface OnboardBody {
     householdSize?: number;
     /** R6：供用水合同编号（报装带入或手工立户手填，可选）。 */
     contractNo?: string;
+    /** R13 频次归属用户：默认每月；QUARTERLY 需 anchorPeriod。 */
+    cadence?: string;
+    anchorPeriod?: string;
+    /** R2 立户归集：区号（必带抄表员）/ 段号（区段管理模式）。 */
+    zoneNo?: string;
+    segNo?: string;
   };
   meter?: MeterBody;
   meterId?: string;
@@ -169,6 +204,7 @@ export class WaterAccountService {
     private readonly settles: SettleAccountService,
     private readonly meters: MeterService,
     private readonly installs: MeterInstallationService,
+    private readonly tasks: TaskService,
   ) {}
 
   /**
@@ -489,10 +525,12 @@ export class WaterAccountService {
       await assertCustomerReadScopeTx(tx, ctx, body.customerId);
       await assertSettleScopeTx(tx, ctx, body.settleAccountId);
     }
+    this.assertCadence(body.cadence, body.anchorPeriod);
+    this.assertZoneSeg(body.zoneNo, body.segNo);
     const accountNo =
       body.accountNo?.trim() ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'account_no', 'A', ctx.staffId));
-    return conflictOnUnique(
+    const wa = await conflictOnUnique(
       tx.waterAccount.create({
         data: {
           tenantId: ctx.tenantId,
@@ -507,12 +545,187 @@ export class WaterAccountService {
           openedAt: body.openedAt ?? new Date(),
           contractNo: body.contractNo ?? null,
           contractScan: body.contractScan ?? Prisma.DbNull,
+          cadence: body.cadence ?? 'MONTHLY',
+          anchorPeriod: body.anchorPeriod ?? null,
+          zoneNo: body.zoneNo ?? null,
+          segNo: body.segNo ?? null,
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
         },
         select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
       }),
     );
+    // R2/R10：区段归集同步入册；区段管理缺段号 → 建补赋段号提示任务。
+    await this.syncZoneBook(tx, ctx, wa.id, wa.zoneNo, wa.segNo);
+    return wa;
+  }
+
+  /** 用户级频次校验（R13：频次挂户不挂表/册；季度需首抄月锚点）。 */
+  private assertCadence(cadence: string | undefined, anchorPeriod: string | null | undefined) {
+    if (cadence !== undefined && !BOOK_CADENCES.includes(cadence as BookCadence)) {
+      throw new BadRequestException({ code: 'INVALID_CADENCE' });
+    }
+    if (
+      anchorPeriod !== undefined &&
+      anchorPeriod !== null &&
+      !isValidPeriod(anchorPeriod)
+    ) {
+      throw new BadRequestException({ code: 'INVALID_ANCHOR_PERIOD' });
+    }
+    if (cadence === 'QUARTERLY' && (anchorPeriod ?? null) === null) {
+      throw new BadRequestException({ code: 'QUARTERLY_ANCHOR_REQUIRED' });
+    }
+  }
+
+  private assertZoneSeg(zoneNo: string | null | undefined, segNo: string | null | undefined) {
+    if (zoneNo !== undefined && zoneNo !== null && !isValidZoneNo(zoneNo)) {
+      throw new BadRequestException({ code: 'ZONE_NO_INVALID', zoneNo });
+    }
+    if (segNo !== undefined && segNo !== null && !SEG_NO_RE.test(segNo)) {
+      throw new BadRequestException({ code: 'SEG_NO_INVALID', segNo });
+    }
+  }
+
+  /**
+   * 区段归集 → 册成员同步（R2/R7/R10）：
+   *  - 「区段管理」：zoneNo+segNo → 挂入对应区段册（find-or-create，
+   *    bookNo=区段号）；缺段号 → 建「补赋段号」提示任务（R10-1）。
+   *  - 「抄表员直管」：zoneNo → 挂入区号册（bookNo=区号，无段号）。
+   *  zoneNo 为空 → 不归集（远传/未分配）。远传区号 111 归远传册。
+   *  R10-2：新户当月不进在途计划，次月计划按区段+频次自然归集——
+   *  本函数只建 book_meter 成员，不触碰在途 reading_plan_item。
+   */
+  async syncZoneBook(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+    zoneNo: string | null,
+    segNo: string | null,
+  ) {
+    const mode = await collectModeOf(tx, ctx.tenantId);
+    const effSeg = mode === 'ZONE_SEGMENT' ? segNo : null;
+    const wa = await tx.waterAccount.findFirst({
+      where: { tenantId: ctx.tenantId, id: waterAccountId },
+      select: { id: true, accountNo: true, zoneNo: true, segNo: true },
+    });
+    if (!wa) return;
+    if (!zoneNo) {
+      if (mode === 'ZONE_SEGMENT' && !wa.segNo) {
+        await this.ensureSegAssignTask(tx, ctx, waterAccountId, wa.accountNo);
+      }
+      return;
+    }
+    if (mode === 'ZONE_SEGMENT' && !effSeg) {
+      await this.ensureSegAssignTask(tx, ctx, waterAccountId, wa.accountNo);
+      return;
+    }
+    const bookNo = zoneSegCode(zoneNo, effSeg);
+    const segLabel = effSeg ? `·段${effSeg}` : '';
+    let book = await tx.readingBook.findFirst({
+      where: { tenantId: ctx.tenantId, zoneNo, segNo: effSeg },
+      select: { id: true, bookNo: true, name: true, orgUnitId: true },
+    });
+    if (!book) {
+      // 区段册锚定组织：区号绑定抄表员的组织 → 操作人组织 → 根组织兜底。
+      const zone = await tx.readerZone.findFirst({
+        where: { tenantId: ctx.tenantId, zoneNo, status: 'ACTIVE' },
+        select: { readerId: true },
+      });
+      const reader = zone?.readerId
+        ? await tx.staff.findFirst({
+            where: { tenantId: ctx.tenantId, id: zone.readerId },
+            select: { orgUnitId: true },
+          })
+        : null;
+      const orgUnitId =
+        reader?.orgUnitId ??
+        ctx.orgScope[0] ??
+        (
+          await tx.orgUnit.findFirst({
+            where: { tenantId: ctx.tenantId, parentId: null },
+            select: { id: true },
+          })
+        )?.id ??
+        (
+          await tx.orgUnit.findFirst({
+            where: { tenantId: ctx.tenantId },
+            select: { id: true },
+          })
+        )?.id;
+      if (!orgUnitId) throw new BadRequestException({ code: 'ORG_UNIT_MISSING' });
+      try {
+        book = await tx.readingBook.create({
+          data: {
+            tenantId: ctx.tenantId,
+            bookNo,
+            name: `区${zoneNo}${segLabel}册`,
+            orgUnitId,
+            readerId: zone?.readerId ?? null,
+            zoneNo,
+            segNo: effSeg,
+            cadence: 'MONTHLY',
+            meterChannel: isRemoteZone(zoneNo) ? 'REMOTE_AUTO' : 'MECHANICAL',
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+          select: { id: true, bookNo: true, name: true, orgUnitId: true },
+        });
+      } catch (e) {
+        if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+        book = await tx.readingBook.findFirstOrThrow({
+          where: { tenantId: ctx.tenantId, zoneNo, segNo: effSeg },
+          select: { id: true, bookNo: true, name: true, orgUnitId: true },
+        });
+      }
+    }
+    const membership = await tx.bookMeter.findFirst({
+      where: { tenantId: ctx.tenantId, waterAccountId },
+      select: { bookId: true },
+    });
+    if (membership?.bookId === book.id) return;
+    await tx.$queryRaw`
+      SELECT id FROM reading_book
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${book.id}::uuid
+      FOR UPDATE`;
+    if (membership) {
+      await tx.bookMeter.deleteMany({
+        where: { tenantId: ctx.tenantId, waterAccountId },
+      });
+    }
+    const seqNo =
+      ((await tx.bookMeter.aggregate({
+        where: { tenantId: ctx.tenantId, bookId: book.id },
+        _max: { seqNo: true },
+      }))._max.seqNo ?? 0) + 1;
+    await tx.bookMeter.create({
+      data: {
+        tenantId: ctx.tenantId,
+        bookId: book.id,
+        waterAccountId,
+        seqNo,
+        createdBy: ctx.staffId,
+        updatedBy: ctx.staffId,
+      },
+    });
+  }
+
+  /** R10-1：区段管理缺段号 → 待办提示（dedupe：同户同类型只有一个在途任务）。 */
+  private async ensureSegAssignTask(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    waterAccountId: string,
+    accountNo: string,
+  ) {
+    await this.tasks.createTask(tx, ctx, {
+      type: 'ACCOUNT_SEG_ASSIGN',
+      title: `新户 ${accountNo} 未赋段号`,
+      bizType: 'WATER_ACCOUNT',
+      bizId: waterAccountId,
+      bizLabel: accountNo,
+      reason: '区段管理模式下未赋段号，无法纳入抄表计划',
+      context: { waterAccountNo: accountNo },
+      dueDays: 7,
+    });
   }
 
   /**
@@ -866,6 +1079,10 @@ export class WaterAccountService {
       contractScan: (srcApp?.contractScan ?? undefined) as
         | Prisma.InputJsonValue
         | undefined,
+      cadence: body.account.cadence,
+      anchorPeriod: body.account.anchorPeriod,
+      zoneNo: body.account.zoneNo,
+      segNo: body.account.segNo,
     });
 
     // 3b. 一户多人口申报 — first declaration effective from the open period.
@@ -972,39 +1189,8 @@ export class WaterAccountService {
         },
       });
       readingBook = { id: book.id, bookNo: book.bookNo, name: book.name };
-      // 本期在途计划 → 补录计划项（在抄表员下一次同步即出现在待抄清单）。
-      const curPeriod = periodOf(new Date());
-      const plan = await tx.readingPlan.findFirst({
-        where: {
-          tenantId: ctx.tenantId,
-          bookId: book.id,
-          period: curPeriod,
-          status: { in: ['OPEN', 'IN_PROGRESS'] },
-        },
-        select: { id: true, period: true },
-      });
-      if (plan) {
-        const itemSeq =
-          (await tx.readingPlanItem
-            .aggregate({
-              where: { tenantId: ctx.tenantId, planId: plan.id },
-              _max: { seqNo: true },
-            })
-            .then((a) => a._max.seqNo ?? 0)) + 1;
-        await tx.readingPlanItem.create({
-          data: {
-            tenantId: ctx.tenantId,
-            planId: plan.id,
-            waterAccountId: waterAccount.id,
-            seqNo: itemSeq,
-            plannedInstallationId: installation.id,
-            status: 'PENDING',
-            createdBy: ctx.staffId,
-            updatedBy: ctx.staffId,
-          },
-        });
-        planJoined = { planId: plan.id, period: plan.period };
-      }
+      // R10-2 次月纳入：当月新户一律不进在途计划（当月批次已排定，
+      // 避免插抄/漏抄）——自次月计划生成时按区段+频次自然归集。
     }
 
     return {
@@ -1049,8 +1235,16 @@ export class WaterAccountService {
         settle?.settleNo === MONITORING_SETTLE_NO,
       );
     }
+    // R13/R2：频次/区段为户级属性——合并校验（PATCH 值回落存量行）。
+    const mergedCadence = body.cadence ?? existing.cadence;
+    const mergedAnchor =
+      body.anchorPeriod === undefined ? existing.anchorPeriod : body.anchorPeriod;
+    this.assertCadence(mergedCadence, mergedAnchor);
+    const mergedZone = body.zoneNo === undefined ? existing.zoneNo : body.zoneNo;
+    const mergedSeg = body.segNo === undefined ? existing.segNo : body.segNo;
+    this.assertZoneSeg(mergedZone, mergedSeg);
     req.auditBefore = existing;
-    return tx.waterAccount.update({
+    const updated = await tx.waterAccount.update({
       where: { tenantId_id: { tenantId: ctx.tenantId, id } },
       data: {
         usageCategory: body.usageCategory,
@@ -1059,10 +1253,23 @@ export class WaterAccountService {
           ? { billable: body.usageCategory !== 'MONITORING' }
           : {}),
         addr: body.addr,
+        cadence: body.cadence,
+        anchorPeriod: body.anchorPeriod === undefined ? undefined : body.anchorPeriod,
+        zoneNo: body.zoneNo === undefined ? undefined : body.zoneNo,
+        segNo: body.segNo === undefined ? undefined : body.segNo,
         updatedBy: ctx.staffId,
       },
       select: { ...WATER_ACCOUNT_SELECT, ...ACCOUNT_INCLUDE },
     });
+    // 区段变化 → 册成员重挂 + 补赋段号任务闭环（R10）。
+    if (body.zoneNo !== undefined || body.segNo !== undefined) {
+      await this.syncZoneBook(tx, ctx, id, updated.zoneNo, updated.segNo);
+      if (updated.zoneNo && updated.segNo) {
+        await this.tasks.autoCompleteByBiz(
+          tx, ctx, 'ACCOUNT_SEG_ASSIGN', 'WATER_ACCOUNT', id, '已补赋段号');
+      }
+    }
+    return updated;
   }
 
   /**

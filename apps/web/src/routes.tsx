@@ -67,6 +67,7 @@ import Orgs from './pages/system/Orgs';
 import Roles from './pages/system/Roles';
 import Staff from './pages/system/Staff';
 import TenantParams from './pages/system/TenantParams';
+import ReaderZones from './pages/system/ReaderZones';
 
 /**
  * THE menu + route source of truth.
@@ -500,6 +501,7 @@ export const APP_ROUTES: AppRoute[] = [
     perms: ['iam:read'],
     children: [
       { key: 'system-orgs', path: '/system/orgs', label: '组织管理', element: <Orgs /> },
+      { key: 'system-zones', path: '/system/zones', label: '区号管理', element: <ReaderZones /> },
       { key: 'system-staff', path: '/system/staff', label: '用户管理', element: <Staff /> },
       { key: 'system-roles', path: '/system/roles', label: '角色权限', element: <Roles /> },
       { key: 'system-params', path: '/system/params', label: '租户参数', element: <TenantParams /> },

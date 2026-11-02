@@ -420,9 +420,13 @@ export interface ReadingBook {
   readerId: string | null;
   readerName: string | null;
   scheduleDay: number | null;
+  /** 1102 R13：频次已归属用户，册 cadence 为历史兼容展示列。 */
   cadence: BookCadence;
   /** QUARTERLY 必填首抄月 YYYYMM；其余恒为 null。 */
   anchorPeriod: string | null;
+  /** 1102 R7：区号 + 段号（bookNo = 区号+段号）。 */
+  zoneNo?: string | null;
+  segNo?: string | null;
   meterChannel: MeterChannel;
   /** ACTIVE | DISABLED — 停用的册不再生成抄表计划。 */
   status?: string;

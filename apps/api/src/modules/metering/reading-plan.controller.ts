@@ -193,6 +193,67 @@ export class ReadingPlanController {
     );
   }
 
+  /**
+   * POST /reading-plans/auto-generate — R5 手动兜底入口：为「明日」对应的
+   * 抄表段生成计划（与 18–24 点定时任务同一逻辑，幂等）。
+   */
+  @Post('auto-generate')
+  @Permissions('metering:write')
+  autoGenerate() {
+    return this.svc.autoGenerateForDate(currentTenant(), new Date());
+  }
+
+  /**
+   * POST /reading-plans/redistribute — R6 超段均分：
+   * {zoneNo, period, sourceSegs[], targetSegs[]}，把源段未抄任务
+   * 均分到 ≤ 总段数−N 的目标段。
+   */
+  @Post('redistribute')
+  @Permissions('metering:write')
+  redistribute(
+    @Body()
+    body: {
+      zoneNo?: string;
+      period?: string;
+      sourceSegs?: string[];
+      targetSegs?: string[];
+    },
+  ) {
+    if (!body?.zoneNo || !body?.period || !body?.sourceSegs?.length || !body?.targetSegs?.length) {
+      throw new BadRequestException({ code: 'REDISTRIBUTE_FIELDS_REQUIRED' });
+    }
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.redistributeTx(tx, ctx, {
+        zoneNo: body.zoneNo!,
+        period: assertPeriod(body.period),
+        sourceSegs: body.sourceSegs!,
+        targetSegs: body.targetSegs!,
+      }),
+    );
+  }
+
+  /**
+   * POST /reading-plans/:id/reorder — R15 人工调序：
+   * {orderedItemIds:[...]} 全量计划项新顺序；写回用户级 routeKey。
+   */
+  @Post(':id/reorder')
+  @Permissions('metering:write')
+  reorder(
+    @Param('id') id: string,
+    @Body() body: { orderedItemIds?: string[] },
+    @Req() req: Request,
+  ) {
+    assertUuid(id, 'id');
+    if (!Array.isArray(body?.orderedItemIds) || body.orderedItemIds.length === 0) {
+      throw new BadRequestException({ code: 'REORDER_ITEMS_REQUIRED' });
+    }
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.reorderTx(tx, ctx, id, body.orderedItemIds!, req),
+    );
+  }
+
   /** POST /reading-plans/:id/start — OPEN → IN_PROGRESS. */
   @Post(':id/start')
   @Permissions('metering:write')

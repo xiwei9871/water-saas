@@ -63,6 +63,8 @@ enum AccountStatus {
   PENDING_ASSIGN
   /** 1028v2：已上号待信息补全（合同/客户/结算户待补录）。 */
   PENDING_COMPLETE
+  /** 1102 R1 退号：放号后退回作废的档案号（不再出现在待上号列表）。 */
+  RETURNED
 }
 
 enum AccountEventType {
@@ -620,6 +622,20 @@ model WaterAccount {
   activateReview  Json?         @map("activate_review") @db.JsonB
   /** 上号时间。 */
   activatedAt     DateTime?     @map("activated_at")
+  /** R1 退号留痕：退号时间/原因（操作人走 audit_log）。 */
+  returnedAt      DateTime?     @map("returned_at")
+  returnReason    String?       @map("return_reason")
+  /** 1102 区号：抄表员的数字代码（01、02…；远传户特殊区号 111）。 */
+  zoneNo          String?       @map("zone_no")
+  /** 1102 段号：月内抄表批次 01..16（「区段管理」模式用；直管模式为空）。 */
+  segNo           String?       @map("seg_no")
+  /** R13 频次归属用户：MONTHLY 每月 / ODD_MONTH 单月 / EVEN_MONTH 双月 /
+      QUARTERLY 季度（anchorPeriod 定首抄月）。不随换表改变。 */
+  cadence         String        @default("MONTHLY")
+  /** QUARTERLY 首抄月锚点 YYYYMM。 */
+  anchorPeriod    String?       @map("anchor_period") @db.Char(6)
+  /** R15 用户级路线键：同一区号下跨频次稳定排序（插入取中点）。 */
+  routeKey        Decimal?      @map("route_key") @db.Decimal(20, 6)
   createdAt       DateTime      @default(now()) @map("created_at")
   createdBy       String?       @map("created_by") @db.Uuid
   updatedAt       DateTime      @updatedAt @map("updated_at")
@@ -967,10 +983,15 @@ model ReadingBook {
   orgUnitId   String   @map("org_unit_id") @db.Uuid
   readerId    String?  @map("reader_id") @db.Uuid
   scheduleDay Int?     @map("schedule_day")
-  // MONTHLY | BIMONTHLY — book-level cadence (一册同节奏).
+  // 1102 R13：频次已归属用户，册不再区分周期——本列仅为历史兼容展示，
+  // 新册一律写 MONTHLY 占位，计划归集按水户 cadence 判断。
   cadence      String   @default("MONTHLY")
-  // BIMONTHLY anchor YYYYMM — sets the odd/even month rhythm.
+  // Legacy anchor（旧季度册展示用）；新模型锚点在 water_account.anchor_period。
   anchorPeriod String?  @map("anchor_period") @db.Char(6)
+  /** 1102 R7 区段号编码：区号 + 段号，bookNo = zoneNo+segNo（如 0116）；
+      「抄表员直管」模式 segNo 为空（区号册）。 */
+  zoneNo      String?  @map("zone_no")
+  segNo       String?  @map("seg_no")
   // MECHANICAL | REMOTE_MANUAL | REMOTE_AUTO (REMOTE_AUTO = metadata only).
   meterChannel String   @default("MECHANICAL") @map("meter_channel")
   // ACTIVE | DISABLED — 停用的册不再生成抄表计划，历史数据保留。
@@ -2093,6 +2114,12 @@ model InstallApplication {
   certType       String?            @map("cert_type")
   certNo         String?            @map("cert_no")
   certPhoto      Json?              @map("cert_photo") @db.JsonB
+  /** R11 多水表多口径：申请水表数量（≤9999）+ 口径明细 [{caliber, qty}]。 */
+  meterQty       Int?               @map("meter_qty")
+  caliberDetails Json?              @map("caliber_details") @db.JsonB
+  /** R12 水表安装明细（安装完成后、放号前填报）：
+      [{meterNo, caliber, brand, serialNo, maxDial, initialReading, installedAt}]。 */
+  installMeters  Json?              @map("install_meters") @db.JsonB
   rejectReason   String?            @map("reject_reason")
   waterAccountId String?            @map("water_account_id") @db.Uuid
   createdAt      DateTime           @default(now()) @map("created_at")
@@ -2243,4 +2270,68 @@ model DmaMeterLink {
   @@index([tenantId, checkMeterId])
   @@index([tenantId, meterId])
   @@map("dma_meter_link")
+}
+
+// ---------------------------------------------------------------------------
+// 1102 抄表业务模型重构（区号/段号/频次三维）
+// ---------------------------------------------------------------------------
+
+/// R14 区号—抄表员绑定维护：一个区号同一时间只绑一名抄表员。
+/// 远传水表占特殊区号 111（readerId 可空，不派人工抄表）。
+model ReaderZone {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  /** 区号：抄表员数字代码 '01'..'99'；'111' 保留为远传专用区号。 */
+  zoneNo    String   @map("zone_no")
+  /** 当前绑定的抄表员（staff.id）；远传/已解绑为空。 */
+  readerId  String?  @map("reader_id") @db.Uuid
+  /** ACTIVE | DISABLED — 停用后区号释放可重新分配。 */
+  status    String   @default("ACTIVE")
+  remark    String?
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, zoneNo])
+  @@unique([tenantId, id])
+  @@map("reader_zone")
+}
+
+/// R3 工作日/节假日日历（租户可维护）。默认周一~周五为工作日；
+/// 本表登记两类例外：HOLIDAY 节假日（工作日→不抄）、WORKDAY 调休上班日
+///（周末→抄）。无记录按周一至周五兜底。
+model TenantCalendarDay {
+  tenantId String   @map("tenant_id") @db.Uuid
+  day      DateTime @db.Date
+  kind     String   // HOLIDAY | WORKDAY
+  name     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@id([tenantId, day])
+  @@map("tenant_calendar_day")
+}
+
+/// R15 抄表顺序模式：把当前 routeKey 排序保存为命名模式，
+/// 一个区号可存多个、可切换、可设默认。
+model RoutePattern {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  /** 模式归属的区号（抄表员路线）。 */
+  zoneNo    String   @map("zone_no")
+  name      String
+  isDefault Boolean  @default(false) @map("is_default")
+  /** [{waterAccountId, routeKey}] — 保存时刻的路线键快照。 */
+  entries   Json     @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, id])
+  @@index([tenantId, zoneNo])
+  @@map("route_pattern")
 }

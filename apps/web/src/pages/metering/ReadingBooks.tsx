@@ -6,7 +6,7 @@ import {
   ReloadOutlined,
   TeamOutlined,
 } from '@ant-design/icons';
-import {App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Space, Spin, Tag, Typography} from 'antd';
+import {App as AntdApp, Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Space, Spin, Tag, Typography} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -45,9 +45,12 @@ interface BookFormValues {
   orgUnitId: string;
   readerId?: string;
   scheduleDay?: number | null;
-  cadence: BookCadence;
+  cadence?: BookCadence;
   anchorMonth?: dayjs.Dayjs | null;
   meterChannel: MeterChannel;
+  /** 1102 R7/R2：区号 + 段号（区段号编码）。 */
+  zoneNo?: string;
+  segNo?: string;
 }
 
 const CADENCE_LABELS: Record<BookCadence, string> = {
@@ -100,6 +103,15 @@ export default function ReadingBooks() {
   const [focusParams, setFocusParams] = useSearchParams();
   const focusWa = focusParams.get('wa');
 
+  const [zoneOptions, setZoneOptions] = useState<
+    { value: string; label: string; readerId?: string | null; isRemote?: boolean }[]
+  >([]);
+  const [collectMode, setCollectMode] = useState<'READER_DIRECT' | 'ZONE_SEGMENT'>('ZONE_SEGMENT');
+  const segOptions = Array.from({ length: 16 }, (_, i) => ({
+    value: String(i + 1).padStart(2, '0'),
+    label: `段 ${String(i + 1).padStart(2, '0')}`,
+  }));
+
   const [modal, setModal] = useState<ModalState>(null);
   const [idemKey, setIdemKey] = useState('');
   const [saving, setSaving] = useState(false);
@@ -134,6 +146,12 @@ export default function ReadingBooks() {
 
   useEffect(() => {
     queueMicrotask(() => void load());
+    api.get<{ zoneNo: string; readerId: string | null; readerName: string | null; isRemote: boolean; label: string }[]>('/reading-zones/options')
+      .then((r) => setZoneOptions(r.data.map((z) => ({ value: z.zoneNo, label: z.label, readerId: z.readerId, isRemote: z.isRemote }))))
+      .catch(() => undefined);
+    api.get<{ collectMode: 'READER_DIRECT' | 'ZONE_SEGMENT' }>('/metering/calendar')
+      .then((r) => setCollectMode(r.data.collectMode ?? 'ZONE_SEGMENT'))
+      .catch(() => undefined);
   }, [load]);
 
   // 组织/抄表员名称已由 API 内嵌（orgUnitName/readerName）；取不到按规范显 '—'。
@@ -152,7 +170,6 @@ export default function ReadingBooks() {
     // 无 iam:read 时组织字段不渲染 —— 默认挂到当前用户所属组织。
     form.setFieldsValue({
       orgUnitId: user?.orgUnitId,
-      cadence: 'MONTHLY',
       meterChannel: 'MECHANICAL',
     });
     openModal({ kind: 'create' });
@@ -164,8 +181,8 @@ export default function ReadingBooks() {
       orgUnitId: book.orgUnitId,
       readerId: book.readerId ?? undefined,
       scheduleDay: book.scheduleDay,
-      cadence: book.cadence ?? 'MONTHLY',
-      anchorMonth: book.anchorPeriod ? dayjs(`${book.anchorPeriod}01`) : null,
+      zoneNo: book.zoneNo ?? undefined,
+      segNo: book.segNo ?? undefined,
       meterChannel: book.meterChannel ?? 'MECHANICAL',
     });
     openModal({ kind: 'edit', book });
@@ -190,13 +207,9 @@ export default function ReadingBooks() {
             orgUnitId: canIamRead ? values.orgUnitId : (values.orgUnitId ?? user?.orgUnitId),
             readerId: canIamRead ? values.readerId : undefined,
             scheduleDay: values.scheduleDay ?? undefined,
-            cadence: values.cadence,
+            zoneNo: values.zoneNo,
+            segNo: values.segNo ?? null,
             meterChannel: values.meterChannel,
-            // 仅季度册带首抄月锚点（DB CHECK 同步）。
-            anchorPeriod:
-              values.cadence === 'QUARTERLY'
-                ? values.anchorMonth?.format('YYYYMM')
-                : undefined,
           }),
           { headers: { 'Idempotency-Key': idemKey } },
         );
@@ -211,12 +224,9 @@ export default function ReadingBooks() {
               ? { orgUnitId: values.orgUnitId, readerId: values.readerId ?? null }
               : {}),
             scheduleDay: values.scheduleDay ?? null,
-            cadence: values.cadence,
+            zoneNo: values.zoneNo ?? null,
+            segNo: values.segNo ?? null,
             meterChannel: values.meterChannel,
-            anchorPeriod:
-              values.cadence === 'QUARTERLY'
-                ? (values.anchorMonth?.format('YYYYMM') ?? null)
-                : null,
           }),
         );
         message.success('抄表册已更新');
@@ -673,34 +683,26 @@ export default function ReadingBooks() {
               <StaffSelect placeholder="选择抄表员（可空）" />
             </Form.Item>
           )}
-          <Form.Item name="scheduleDay" label="计划抄表日">
-            <InputNumber min={1} max={31} precision={0} style={{ width: '100%' }} placeholder="1-31，可空" />
-          </Form.Item>
-          <Form.Item
-            name="cadence"
-            label="抄表周期"
-            rules={[{ required: true, message: '请选择抄表周期' }]}
-          >
+          <Form.Item name="zoneNo" label="区号（抄表员）" extra="选区号自动带出绑定抄表员">
             <Select
-              options={(Object.keys(CADENCE_LABELS) as BookCadence[]).map((c) => ({
-                value: c,
-                label: enumLabel(CADENCE_LABELS, c),
-              }))}
+              allowClear
+              options={zoneOptions}
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择区号"
+              onChange={(v: string | undefined) => {
+                const z = zoneOptions.find((o) => o.value === v);
+                if (z?.readerId) form.setFieldValue('readerId', z.readerId);
+              }}
             />
           </Form.Item>
-          <Form.Item noStyle shouldUpdate={(a, b) => a.cadence !== b.cadence}>
-            {({ getFieldValue }) =>
-              getFieldValue('cadence') === 'QUARTERLY' ? (
-                <Form.Item
-                  name="anchorMonth"
-                  label="季度首抄月"
-                  rules={[{ required: true, message: '季度抄表必须选择首抄月' }]}
-                  extra="确定每 3 个月一期的节奏：如 2026-01 表示 1/4/7/10 月抄表，2026-02 表示 2/5/8/11 月抄表"
-                >
-                  <DatePicker picker="month" style={{ width: '100%' }} allowClear={false} />
-                </Form.Item>
-              ) : null
-            }
+          {collectMode !== 'READER_DIRECT' && (
+            <Form.Item name="segNo" label="段号（月内抄表批次）" extra="01–16，对应当月第 N 个工作日">
+              <Select allowClear options={segOptions} placeholder="选择段号" />
+            </Form.Item>
+          )}
+          <Form.Item name="scheduleDay" label="计划抄表日（旧字段，可空）">
+            <InputNumber min={1} max={31} precision={0} style={{ width: '100%' }} placeholder="1-31，可空" />
           </Form.Item>
           <Form.Item
             name="meterChannel"
