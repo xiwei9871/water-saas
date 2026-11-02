@@ -33,14 +33,68 @@ interface PatternEntry {
 export class RoutePatternService {
   constructor(private readonly prisma: TenantPrismaService) {}
 
+  /**
+   * P0-3 组织范围：scoped 调用者只能触达「本组织子树册内」的户/模式。
+   * 返回该租户内调用者可触达的水表户 ID 集合（ALL 范围返回 null = 不限）。
+   */
+  private async scopedWaIds(
+    tx: Tx,
+    ctx: TenantCtx,
+    zoneNo?: string,
+  ): Promise<Set<string> | null> {
+    if (ctx.scope === 'ALL') return null;
+    const books = await tx.readingBook.findMany({
+      where: { tenantId: ctx.tenantId },
+      select: { id: true, orgUnitId: true },
+    });
+    const inScopeBookIds = new Set(
+      books.filter((b) => orgInScope(ctx, b.orgUnitId)).map((b) => b.id),
+    );
+    const members = await tx.bookMeter.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        bookId: { in: [...inScopeBookIds] },
+      },
+      select: { waterAccountId: true },
+    });
+    if (!zoneNo) return new Set(members.map((m) => m.waterAccountId));
+    // BookMeter 无户关联 → 再按 zoneNo 过滤户
+    const inZone = await tx.waterAccount.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: { in: members.map((m) => m.waterAccountId) },
+        zoneNo,
+      },
+      select: { id: true },
+    });
+    return new Set(inZone.map((a) => a.id));
+  }
+
+  /** 模式的 zoneNo 下是否有可触达户（读权限判定）；空集即越权。 */
+  private async assertZoneReadable(tx: Tx, ctx: TenantCtx, zoneNo: string) {
+    const waIds = await this.scopedWaIds(tx, ctx, zoneNo);
+    if (waIds !== null && waIds.size === 0) {
+      throw new BadRequestException({ code: 'PATTERN_ZONE_OUT_OF_SCOPE', zoneNo });
+    }
+  }
+
   list(ctx: TenantCtx, zoneNo?: string) {
-    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
-      tx.routePattern.findMany({
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.routePattern.findMany({
         where: { tenantId: ctx.tenantId, zoneNo: zoneNo || undefined },
         orderBy: [{ zoneNo: 'asc' }, { name: 'asc' }],
         select: ROUTE_PATTERN_SELECT,
-      }),
-    );
+      });
+      if (ctx.scope === 'ALL') return rows;
+      // scoped：只回「本组织子树册内有户」的区号模式。
+      const waIds = await this.scopedWaIds(tx, ctx);
+      const acctZones = await tx.waterAccount.findMany({
+        where: { tenantId: ctx.tenantId, id: { in: [...(waIds ?? [])] } },
+        select: { zoneNo: true },
+      });
+      const readableZones = new Set(acctZones.map((a) => a.zoneNo));
+      return rows.filter((r) => readableZones.has(r.zoneNo));
+    });
   }
 
   /** 保存当前区号排序为命名模式（isDefault 时清同区号其它默认）。 */
@@ -52,6 +106,8 @@ export class RoutePatternService {
     if (!body.zoneNo?.trim() || !body.name?.trim()) {
       throw new BadRequestException({ code: 'PATTERN_FIELDS_REQUIRED' });
     }
+    // P0-3：scoped 保存前须确认该区号下有本组织子树册内户。
+    await this.assertZoneReadable(tx, ctx, body.zoneNo);
     const accounts = await tx.waterAccount.findMany({
       where: {
         tenantId: ctx.tenantId,
@@ -139,6 +195,8 @@ export class RoutePatternService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!pattern) throw new NotFoundException({ code: 'PATTERN_NOT_FOUND' });
+    // P0-3：scoped 删除前同样校验区号可读（模式必须能在本范围列表中见到）。
+    await this.assertZoneReadable(tx, ctx, pattern.zoneNo);
     req.auditBefore = pattern;
     await tx.routePattern.delete({ where: { id } });
     return { id, deleted: true };
@@ -150,6 +208,7 @@ export class RoutePatternService {
       where: { tenantId: ctx.tenantId, id },
     });
     if (!pattern) throw new NotFoundException({ code: 'PATTERN_NOT_FOUND' });
+    await this.assertZoneReadable(tx, ctx, pattern.zoneNo);
     await tx.routePattern.updateMany({
       where: { tenantId: ctx.tenantId, zoneNo: pattern.zoneNo },
       data: { isDefault: false },

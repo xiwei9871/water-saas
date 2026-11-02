@@ -141,6 +141,7 @@ beforeAll(async () => {
   await owner.query(
     `INSERT INTO role_permission (tenant_id, role_id, permission_id, created_at, updated_at)
      VALUES ($1,$2,$3,now(),now()),($1,$4,$5,now(),now()),($1,$4,$6,now(),now()),
+            ($1,$4,$3,now(),now()),
             ($1,$7,$8,now(),now()),($9,$10,$11,now(),now())
      ON CONFLICT DO NOTHING`,
     [T9A, ROLE_VIEWER_A, PERM_MET_READ, ROLE_WRITER_A, PERM_MET_WRITE,
@@ -171,6 +172,14 @@ beforeAll(async () => {
      ON CONFLICT (tenant_id, key) DO UPDATE SET value='"ZONE_SEGMENT"'`,
     [T9A],
   );
+
+  // P0-2：违章类型字典（FIELD 上报须字典匹配）
+  await owner.query(
+    `INSERT INTO sys_dict (id, tenant_id, category, code, name, seq, status, created_at, updated_at)
+     SELECT gen_random_uuid(), $1, 'VIOLATION_TYPE', c.code, c.name, c.seq, 'ACTIVE', now(), now()
+       FROM (VALUES ('TAMPER','破坏计量',1),('PRIVATE_CONN','私接管线',2),
+                    ('THEFT','偷水',3),('SEAL_BROKEN','封条破损',4)) AS c(code,name,seq)
+     ON CONFLICT DO NOTHING`, [T9A]);
 
   const moduleFixture: TestingModule = await Test.createTestingModule({
     imports: [AppModule],
@@ -491,5 +500,169 @@ describe('A5 permission negatives', () => {
       (z: { zoneNo: string }) => z.zoneNo === Z2);
     const r = await patch(`/reading-zones/${a.id}`, { status: 'DISABLED' }, tenantBToken);
     expect(r.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 2.1 P0 增补：日历真实天数 / 问题上报真实通道 / 模式全操作范围 / billable
+// ---------------------------------------------------------------------------
+describe('P0-1 monthWorkdays 真实天数', () => {
+  it('2026-11 无例外=21 工作日，预留6→15 段', async () => {
+    const r = await get('/metering/calendar?period=202611').expect(200);
+    expect(r.body.reserveDays).toBe(6);
+    expect(r.body.segments).toHaveLength(15);
+    expect(r.body.segments[0].date).toBe('2026-11-02');
+  });
+  it('2027-02（28 天非闰）20 工作日', async () => {
+    const r = await get('/metering/calendar?period=202702').expect(200);
+    expect(r.body.segments).toHaveLength(14);
+  });
+  it('2028-02（闰年 29 天）21 工作日', async () => {
+    const r = await get('/metering/calendar?period=202802').expect(200);
+    expect(r.body.segments).toHaveLength(15);
+  });
+  it('2027-04（30 天）22 工作日', async () => {
+    const r = await get('/metering/calendar?period=202704').expect(200);
+    expect(r.body.segments).toHaveLength(16);
+  });
+  it('月末例外登记 29/30/31 日不被截断', async () => {
+    await post('/metering/calendar', { day: '2027-01-29', kind: 'HOLIDAY' }).expect(201);
+    await post('/metering/calendar', { day: '2027-01-30', kind: 'WORKDAY' }).expect(201);
+    await post('/metering/calendar', { day: '2027-01-31', kind: 'HOLIDAY' }).expect(201);
+    const r = await get('/metering/calendar?period=202701').expect(200);
+    const byDay = Object.fromEntries(r.body.exceptions.map((x: {day:string;kind:string})=>[x.day,x.kind]));
+    expect(byDay['2027-01-29']).toBe('HOLIDAY');
+    expect(byDay['2027-01-30']).toBe('WORKDAY');
+    expect(byDay['2027-01-31']).toBe('HOLIDAY');
+  });
+});
+
+describe('P0-2 问题上报四类真实通道', () => {
+  let waId = '';
+  it('准备目标户', async () => {
+    waId = await onboard('REPORT');
+    await post('/meter-readings/does-not-matter', {}).catch(() => undefined);
+  });
+  it('FAULT/METER_GROUP_CLEANING/SITE_RECTIFICATION → 表务工单 201', async () => {
+    for (const t of ['FAULT', 'METER_GROUP_CLEANING', 'SITE_RECTIFICATION']) {
+      const r = await post('/service-orders', {
+        waterAccountId: waId,
+        serviceType: t,
+        reason: `[现场上报] ${RUN} ${t}`,
+        payload: { photoRefs: [`data:image/png;base64,T9-${t}`] },
+      });
+      expect(r.status).toBe(201);
+      expect(r.body.serviceType).toBe(t);
+      // 照片确实入库（payload.photoRefs 带出）
+      const detail = await get(`/service-orders/${r.body.id}`).expect(200);
+      expect(JSON.stringify(detail.body)).toContain(`T9-${t}`);
+    }
+  });
+  it('未注册类型 REPLACE → 400 SERVICE_TYPE_INVALID', async () => {
+    const r = await post('/service-orders', {
+      waterAccountId: waId, serviceType: 'REPLACE', reason: 'x',
+    });
+    expect(r.status).toBe(400);
+    expect(r.body.code).toBe('SERVICE_TYPE_INVALID');
+  });
+  it('VIOLATION → /violations 通道（FIELD 须描述+照片），非表务工单', async () => {
+    const noPhoto = await post('/violations', {
+      sourceType: 'FIELD', waterAccountId: waId, violationType: 'TAMPER',
+      occurredDate: '2026-11-05', description: 'test',
+    });
+    expect(noPhoto.status).toBe(400);
+    expect(noPhoto.body.code).toBe('VIOLATION_PHOTO_REQUIRED');
+    const ok = await post('/violations', {
+      sourceType: 'FIELD', waterAccountId: waId, violationType: 'TAMPER',
+      occurredDate: '2026-11-05', description: `${RUN} 破坏计量`,
+      photoRefs: ['data:image/png;base64,T9V'],
+    });
+    expect(ok.status).toBe(201);
+    const list = await get('/violations').expect(200);
+    const items = list.body.items ?? list.body;
+    const row = items.find((x: { id: string }) => x.id === ok.body.id);
+    expect(row).toBeTruthy();
+    expect(row.sourceType).toBe('FIELD');
+  });
+  it('抄表员(writer 无 metering:service) FIELD 上报可行、稽查登记被拒', async () => {
+    const ins = await post('/violations', {
+      sourceType: 'INSPECT', waterAccountId: waId, violationType: 'TAMPER',
+      occurredDate: '2026-11-05', description: 'x',
+    }, writerToken);
+    expect(ins.status).toBe(403);
+    expect(ins.body.code).toBe('VIOLATION_INSPECT_ONLY');
+  });
+});
+
+describe('P0-3 路线模式全操作组织范围', () => {
+  it('scoped writer 读列表只见子树内区号模式；存/删/默认越区被拒', async () => {
+    // 管理员在 Z2 建模式（之前 A5 用例已建，重新建一个确保存在）
+    const pat = await post('/route-patterns', { zoneNo: Z2, name: `P3-${RUN}` }).expect(201);
+    // scoped writer 列表不含 Z2 模式（Z2 户挂在 ORG_A 册）
+    const listW = await get('/route-patterns', writerToken);
+    expect(Array.isArray(listW.body)).toBe(true);
+    const ids = listW.body.map((p: { id: string }) => p.id);
+    expect(ids).not.toContain(pat.body.id);
+    // 存：WRITER 子树外区号被拒
+    const sv = await post('/route-patterns', { zoneNo: Z2, name: 'x' }, writerToken);
+    expect(sv.status).toBe(400);
+    expect(sv.body.code).toBe('PATTERN_ZONE_OUT_OF_SCOPE');
+    // 设默认/删除：scoped 被拒
+    expect((await post(`/route-patterns/${pat.body.id}/default`, {}, writerToken)).body.code)
+      .toBe('PATTERN_ZONE_OUT_OF_SCOPE');
+    const del = await request(app.getHttpServer())
+      .delete(`/route-patterns/${pat.body.id}`).set(auth(writerToken));
+    expect(del.body.code).toBe('PATTERN_ZONE_OUT_OF_SCOPE');
+    // admin 全范围不受影响
+    expect((await post(`/route-patterns/${pat.body.id}/default`, {})).status).toBe(201);
+    expect((await request(app.getHttpServer())
+      .delete(`/route-patterns/${pat.body.id}`).set(auth(adminToken))).status).toBe(200);
+  });
+});
+
+describe('P0-4 billable 状态一致', () => {
+  it('PENDING_ASSIGN→false / NORMAL→true / RETURNED→false / CLOSED 非监控→true', async () => {
+    // 正常立户（NORMAL）：billable=true
+    const normal = await onboard('BILL');
+    const n = (await owner.query(`SELECT billable FROM water_account WHERE id=$1`, [normal])).rows[0];
+    expect(n.billable).toBe(true);
+    // 放号（PENDING_ASSIGN）：false
+    const appRes = await post('/install/applications', {
+      applicantName: `T9B ${RUN}`, addr: 'B Rd', usageCategory: 'RES_METERED', meterQty: 1,
+    }).expect(201);
+    for (const to of ['SURVEYED', 'APPROVED']) {
+      await post(`/install/applications/${appRes.body.id}/transition`, { to }).expect(201);
+    }
+    await post(`/install/applications/${appRes.body.id}/transition`,
+      { to: 'INSTALLING', installCompletedAt: '2026-11-01' }).expect(201);
+    const alloc = await post(`/install/applications/${appRes.body.id}/allocate`,
+      { meterQty: 1, readerId: STAFF_READER_A }).expect(201);
+    const waId = alloc.body.accounts[0].id;
+    const pa = (await owner.query(`SELECT status,billable FROM water_account WHERE id=$1`, [waId])).rows[0];
+    expect(pa.status).toBe('PENDING_ASSIGN');
+    expect(pa.billable).toBe(false);
+    // 退号（RETURNED）：false
+    await post('/install/applications/deallocate', { accountIds: [waId], reason: 'r' }).expect(201);
+    const ret = (await owner.query(`SELECT status,billable FROM water_account WHERE id=$1`, [waId])).rows[0];
+    expect(ret.status).toBe('RETURNED');
+    expect(ret.billable).toBe(false);
+    // CLOSED（经状态机）：billable 保持类别推导值（CHECK 允许）；先拆表才能销户
+    const closeMe = await onboard('CLOSEM');
+    const inst = (await owner.query(
+      `SELECT id FROM meter_installation WHERE water_account_id=$1 AND status='ACTIVE'`,
+      [closeMe])).rows[0];
+    await post(`/meter-installations/${inst.id}/remove`, {
+      finalReading: 0, removedAt: '2026-11-06', reason: 'close test',
+    }).expect(201);
+    const cl = await post(`/water-accounts/${closeMe}/close`,
+      { effectiveDate: '2026-11-06' });
+    expect(cl.status).toBe(201);
+    const c = (await owner.query(`SELECT status,billable FROM water_account WHERE id=$1`, [closeMe])).rows[0];
+    expect(c.status).toBe('CLOSED');
+    expect(c.billable).toBe(true);
+    // 普通编辑不得改 status（状态机保护）
+    const bypass = await patch(`/water-accounts/${closeMe}`, { status: 'NORMAL' });
+    const after = (await owner.query(`SELECT status FROM water_account WHERE id=$1`, [closeMe])).rows[0];
+    expect(after.status).toBe('CLOSED');
   });
 });

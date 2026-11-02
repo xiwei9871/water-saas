@@ -1230,28 +1230,48 @@ function FieldContactForm({
   );
 }
 
-/** R8 独立「问题上报」模块：户号关联 + 类型 + 描述 + 照片 → 自动建表务工单。 */
+/** R8 独立「问题上报」模块：四类问题——表务工单（注册类型）或违章核查。 */
 function MobileReport() {
   const { message } = AntdApp.useApp();
-  const [form] = Form.useForm<{ accountNo: string; serviceType: string; desc?: string }>();
+  const [form] = Form.useForm<{ accountNo: string; reportType: string; violationType?: string; desc?: string }>();
   const [photo, setPhoto] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 上报类型 → 后端通道：真实 SERVICE_TYPES 建工单；VIOLATION 走违章核查流程
+  const REPORT_TYPES = [
+    { value: 'FAULT', label: '水表故障/损坏（抢修工单）' },
+    { value: 'METER_GROUP_CLEANING', label: '表井污浊/清洁（清洁工单）' },
+    { value: 'SITE_RECTIFICATION', label: '现场整改（整改工单）' },
+    { value: 'VIOLATION', label: '疑似违章用水（稽查核查）' },
+  ] as const;
   const submit = async () => {
     const v = await form.validateFields();
     setBusy(true);
     try {
-      // 户号 → waterAccountId（人读输入，后端按号解析）
-      const wa = await api.get<{ id: string }[]>('/water-accounts', {
+      const wa = await api.get<{ id: string; accountNo: string }[]>('/water-accounts', {
         params: { accountNo: v.accountNo.trim(), take: 1 },
       });
       if (!wa.data.length) { message.error('户号不存在'); return; }
-      await api.post('/service-orders', {
-        waterAccountId: wa.data[0].id,
-        serviceType: v.serviceType,
-        reason: `[现场上报] ${v.desc ?? ''}`.trim(),
-        photoRef: photo ?? undefined,
-      });
-      message.success('问题已上报，已生成工单');
+      const waId = wa.data[0].id;
+      if (v.reportType === 'VIOLATION') {
+        // 疑似违章→既有违章核查流程（sourceType=FIELD 抄表员上报）
+        await api.post('/violations', {
+          sourceType: 'FIELD',
+          waterAccountId: waId,
+          violationType: v.violationType ?? 'TAMPER',
+          occurredDate: new Date().toISOString().slice(0, 10),
+          description: v.desc ?? '',
+          photoRefs: photo ? [photo] : [],
+        });
+        message.success('疑似违章已上报，稽查岗将现场核实');
+      } else {
+        await api.post('/service-orders', {
+          waterAccountId: waId,
+          serviceType: v.reportType,
+          reason: `[现场上报] ${v.desc ?? ''}`.trim(),
+          payload: photo ? { photoRefs: [photo] } : undefined,
+        });
+        message.success('问题已上报，工单已生成');
+      }
       form.resetFields();
       setPhoto(null);
     } catch (err) {
@@ -1266,15 +1286,22 @@ function MobileReport() {
         <Form.Item name="accountNo" label="关联户号" rules={[{ required: true, message: '请输入户号' }]}>
           <Input placeholder="输入用水户号" />
         </Form.Item>
-        <Form.Item name="serviceType" label="问题类型" rules={[{ required: true, message: '请选择类型' }]}>
-          <Select options={[
-            { value: 'FAULT', label: '水表故障/损坏' },
-            { value: 'REPLACE', label: '需换表' },
-            { value: 'VIOLATION', label: '疑似违章用水' },
-            { value: 'OTHER', label: '其他现场问题' },
-          ]} />
+        <Form.Item name="reportType" label="问题类型" rules={[{ required: true, message: '请选择类型' }]}>
+          <Select options={[...REPORT_TYPES]} />
         </Form.Item>
-        <Form.Item name="desc" label="问题描述">
+        <Form.Item noStyle shouldUpdate={(a, b) => a.reportType !== b.reportType}>
+          {({ getFieldValue }) => getFieldValue('reportType') === 'VIOLATION' ? (
+            <Form.Item name="violationType" label="违章类型" initialValue="TAMPER">
+              <Select options={[
+                { value: 'TAMPER', label: '破坏计量/铅封' },
+                { value: 'PRIVATE_CONN', label: '私接管线' },
+                { value: 'THEFT', label: '偷水' },
+                { value: 'SEAL_BROKEN', label: '封条破损' },
+              ]} />
+            </Form.Item>
+          ) : null}
+        </Form.Item>
+        <Form.Item name="desc" label="问题描述" rules={[{ required: true, message: '请填写现场描述' }]}>
           <Input.TextArea rows={3} placeholder="描述现场情况（位置、现象）" />
         </Form.Item>
         <Upload

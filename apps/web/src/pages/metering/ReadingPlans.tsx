@@ -6,7 +6,7 @@ import {
   StopOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
-import {Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, Modal, Popconfirm, Progress, Radio, Space, Spin, Tag, Tooltip} from 'antd';
+import {Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, Modal, Popconfirm, Progress, Radio, Space, Spin, Tag, Tooltip, Typography} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -695,12 +695,20 @@ export default function ReadingPlans() {
             title: '操作',
             key: 'actions',
             width: 80,
-            render: (_: unknown, item: ReadingPlanItem) =>
-              ENTRYABLE.includes(item.status) ? (
-                <Button size="small" type="primary" ghost onClick={() => openEntry(item)}>
-                  录入
-                </Button>
-              ) : null,
+            render: (_: unknown, item: ReadingPlanItem) => (
+              <Space size={4}>
+                {ENTRYABLE.includes(item.status) ? (
+                  <Button size="small" type="primary" ghost onClick={() => openEntry(item)}>
+                    录入
+                  </Button>
+                ) : null}
+                {item.status === 'READ' && item.completedReadingId ? (
+                  <Button size="small" onClick={() => void viewPhoto(item.completedReadingId!)}>
+                    照片
+                  </Button>
+                ) : null}
+              </Space>
+            ),
           } satisfies ColumnsType<ReadingPlanItem>[number],
         ]
       : []),
@@ -742,6 +750,47 @@ export default function ReadingPlans() {
       message.error(apiErrorText(err));
     } finally {
       setReorderSaving(false);
+    }
+  };
+
+  // ---- R9-2 照片历史：已抄项取回读数照片 ----
+  const [photoFor, setPhotoFor] = useState<string | null>(null);
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+  const viewPhoto = async (readingId: string) => {
+    setPhotoFor(readingId);
+    setPhotoUrl(null);
+    try {
+      const r = await api.get<MeterReading>(`/meter-readings/${readingId}`);
+      setPhotoUrl(r.data.photoRef ?? null);
+      if (!r.data.photoRef) message.info('该条读数未留存照片');
+    } catch (err) {
+      message.error(apiErrorText(err));
+    }
+  };
+
+  // ---- R6 超段均分：zoneNo+period+源/目标段，预览执行结果 ----
+  const [rdOpen, setRdOpen] = useState(false);
+  const [rdForm] = Form.useForm<{ zoneNo: string; period: string; sourceSegs: string; targetSegs: string }>();
+  const [rdBusy, setRdBusy] = useState(false);
+  const [rdResult, setRdResult] = useState<{ moved: number } | null>(null);
+  const runRedistribute = async () => {
+    const v = await rdForm.validateFields();
+    const parse = (s: string) => s.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+    setRdBusy(true);
+    try {
+      const r = await api.post<{ moved: number }>('/reading-plans/redistribute', {
+        zoneNo: v.zoneNo.trim(),
+        period: v.period.trim(),
+        sourceSegs: parse(v.sourceSegs),
+        targetSegs: parse(v.targetSegs),
+      });
+      setRdResult(r.data);
+      message.success(`均分完成：迁移 ${r.data.moved} 条待抄任务`);
+      void load();
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setRdBusy(false);
     }
   };
 
@@ -789,6 +838,11 @@ export default function ReadingPlans() {
           <Button icon={<ReloadOutlined />} onClick={() => void load()}>
             刷新
           </Button>
+          {canWrite && (
+            <Button onClick={() => { rdForm.resetFields(); setRdResult(null); setRdOpen(true); }}>
+              超段均分
+            </Button>
+          )}
           {canWrite && (
             <Button
               type="primary"
@@ -985,6 +1039,55 @@ export default function ReadingPlans() {
             },
           ]}
         />
+      </Modal>
+
+      {/* R6 超段均分 */}
+      <Modal
+        maskClosable={false}
+        title="超段任务均分（R6）"
+        open={rdOpen}
+        onOk={() => void runRedistribute()}
+        onCancel={() => setRdOpen(false)}
+        confirmLoading={rdBusy}
+        okText="执行均分"
+        destroyOnHidden
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          把源段计划的待抄任务按目标段数轮询均分；同户已存在目标计划则不重复迁移。
+        </Typography.Paragraph>
+        <Form form={rdForm} layout="vertical">
+          <Form.Item name="zoneNo" label="区号" rules={[{ required: true, message: '请输入区号' }]}>
+            <Input placeholder="如 01" maxLength={3} />
+          </Form.Item>
+          <Form.Item name="period" label="账期" rules={[{ required: true, message: '请输入账期' }]}>
+            <Input placeholder="YYYYMM（如 202611）" maxLength={6} />
+          </Form.Item>
+          <Form.Item name="sourceSegs" label="源段号（逗号分隔）" rules={[{ required: true, message: '请输入源段' }]}>
+            <Input placeholder="如 14,15,16" />
+          </Form.Item>
+          <Form.Item name="targetSegs" label="目标段号（逗号分隔）" rules={[{ required: true, message: '请输入目标段' }]}>
+            <Input placeholder="如 08,09,10" />
+          </Form.Item>
+        </Form>
+        {rdResult && (
+          <Alert type="success" showIcon
+            message={`均分完成：共迁移 ${rdResult.moved} 条待抄任务到目标段计划`} />
+        )}
+      </Modal>
+
+      {/* R9-2 照片历史 */}
+      <Modal
+        title="抄表照片"
+        open={photoFor !== null}
+        onCancel={() => setPhotoFor(null)}
+        footer={null}
+        width={420}
+      >
+        {photoUrl ? (
+          <img src={photoUrl} alt="抄表照片" style={{ width: '100%' }} />
+        ) : (
+          <Spin />
+        )}
       </Modal>
 
       {/* 单条抄表录入 */}

@@ -130,6 +130,13 @@ export const isWorkday = (
   return w >= 1 && w <= 5;
 };
 
+/** 某月真实天数（28/29/30/31，闰年 2-29 正确）。period = 'YYYYMM'。 */
+export function daysInMonth(period: string): number {
+  const y = parseInt(period.slice(0, 4), 10);
+  const m = parseInt(period.slice(4), 10);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
 /** 当月全部工作日（升序业务日字符串）。period = 'YYYYMM'。 */
 export function monthWorkdays(
   period: string,
@@ -137,11 +144,10 @@ export function monthWorkdays(
 ): string[] {
   const y = period.slice(0, 4);
   const m = period.slice(4);
-  const last = addBizDays(`${y}-${m}-01`, 32);
+  const last = daysInMonth(period);
   const out: string[] = [];
-  for (let i = 1; i <= 31; i++) {
+  for (let i = 1; i <= last; i++) {
     const d = `${y}-${m}-${String(i).padStart(2, '0')}`;
-    if (d >= last) break;
     if (isWorkday(d, overrides)) out.push(d);
   }
   return out;

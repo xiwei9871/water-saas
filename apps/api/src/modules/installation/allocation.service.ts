@@ -10,6 +10,7 @@ import { TenantCtx, orgInScope } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
 import { TaskService } from '../task/task.service.js';
+import { WaterAccountService } from '../customer/water-account.service.js';
 
 /**
  * 1028v2 报装「放号 → 现场上号 → 信息补录」三段流（B1~B4 / C1~C4）。
@@ -65,6 +66,7 @@ export class AllocationService {
     private readonly prisma: TenantPrismaService,
     private readonly seq: SequenceService,
     private readonly tasks: TaskService,
+    private readonly accounts: WaterAccountService,
   ) {}
 
   /** 预占主体（find-or-create）：customer.systemKey=PENDING_ONBOARD +
@@ -365,6 +367,7 @@ export class AllocationService {
         where: { tenantId: ctx.tenantId, id: { in: input.accountIds } },
         data: {
           status: 'RETURNED',
+          billable: false,
           returnedAt: now,
           returnReason: reason,
           updatedBy: ctx.staffId,
@@ -609,6 +612,12 @@ export class AllocationService {
             updatedBy: ctx.staffId,
           },
         });
+        // A3 区段一致性：与 updateTx 同一不变式——区段变更须同步册成员。
+        const synced = await tx.waterAccount.findUniqueOrThrow({
+          where: { id: wa.id },
+          select: { zoneNo: true, segNo: true },
+        });
+        await this.accounts.syncZoneBook(tx, ctx, wa.id, synced.zoneNo, synced.segNo);
       }
       // 补录人数（可选）→ household_profile 当期生效档案。
       if (input.householdSize !== undefined && input.householdSize !== null) {

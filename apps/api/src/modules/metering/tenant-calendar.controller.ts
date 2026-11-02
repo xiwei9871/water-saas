@@ -23,6 +23,7 @@ import {
   PARAM_MONTH_END_RESERVE,
   parseBizDay,
   bizDayStr,
+  daysInMonth,
 } from '../../common/metering-model.js';
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -50,7 +51,7 @@ export class TenantCalendarController {
           tx,
           ctx.tenantId,
           parseBizDay(`${p.slice(0, 4)}-${p.slice(4)}-01`),
-          parseBizDay(`${p.slice(0, 4)}-${p.slice(4)}-28`),
+          parseBizDay(`${p.slice(0, 4)}-${p.slice(4)}-${String(daysInMonth(p)).padStart(2, '0')}`),
         ),
         monthEndReserveOf(tx, ctx.tenantId),
         collectModeOf(tx, ctx.tenantId),

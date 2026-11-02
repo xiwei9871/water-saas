@@ -155,6 +155,9 @@ export default function ReaderZones() {
       render: (_, r) => canWrite && (
         <Space>
           <Button size="small" onClick={() => { setModal({ mode: 'edit', zone: r }); form.setFieldsValue({ zoneNo: r.zoneNo, readerId: r.readerId ?? undefined, remark: r.remark ?? '' }); }}>变更</Button>
+          {r.zoneNo !== '111' && (
+            <Button size="small" onClick={() => void openPatterns(r.zoneNo)}>路线</Button>
+          )}
           {r.status === 'ACTIVE' && r.zoneNo !== '111' && (
             <Button size="small" danger onClick={() => void unbind(r)}>解绑</Button>
           )}
@@ -162,6 +165,44 @@ export default function ReaderZones() {
       ),
     },
   ];
+
+  // ---- R15 路线模式管理：保存当前顺序/应用/设默认/删除 ----
+  interface Pattern {
+    id: string;
+    name: string;
+    isDefault: boolean;
+    entries: { waterAccountId: string; routeKey: number }[];
+  }
+  const [patZone, setPatZone] = useState<string | null>(null);
+  const [patRows, setPatRows] = useState<Pattern[]>([]);
+  const [patBusy, setPatBusy] = useState(false);
+  const [patName, setPatName] = useState('');
+  const loadPatterns = async (zoneNo: string) => {
+    const r = await api.get<Pattern[]>('/route-patterns', { params: { zoneNo } });
+    setPatRows(r.data);
+  };
+  const openPatterns = async (zoneNo: string) => {
+    setPatZone(zoneNo);
+    try { await loadPatterns(zoneNo); } catch (err) { message.error(apiErrorText(err)); }
+  };
+  const patAction = async (fn: () => Promise<unknown>, ok: string) => {
+    setPatBusy(true);
+    try { await fn(); message.success(ok); await loadPatterns(patZone!); }
+    catch (err) { message.error(apiErrorText(err)); }
+    finally { setPatBusy(false); }
+  };
+  const savePattern = () => patAction(async () => {
+    await api.post('/route-patterns', { zoneNo: patZone, name: patName.trim() });
+    setPatName('');
+  }, '已按当前 routeKey 顺序保存模式');
+  const applyPattern = (id: string) => patAction(async () => {
+    const r = await api.post<{ applied: number }>(`/route-patterns/${id}/apply`);
+    message.info(`已应用到 ${r.data.applied} 户`);
+  }, '模式已应用');
+  const setDefaultPattern = (id: string) => patAction(
+    () => api.post(`/route-patterns/${id}/default`), '已设默认');
+  const removePattern = (id: string) => patAction(
+    () => api.delete(`/route-patterns/${id}`), '已删除');
 
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -254,6 +295,54 @@ export default function ReaderZones() {
           </Form.Item>
           <Form.Item name="remark" label="备注"><Input /></Form.Item>
         </Form>
+      </Modal>
+
+      {/* R15 路线模式管理弹窗 */}
+      <Modal
+        title={`路线模式 — 区号 ${patZone ?? ''}`}
+        open={patZone !== null}
+        onCancel={() => setPatZone(null)}
+        footer={null}
+        destroyOnHidden
+        width={620}
+      >
+        <Space.Compact style={{ width: '100%', marginBottom: 12 }}>
+          <Input
+            placeholder="新模式名称（按当前 routeKey 顺序保存）"
+            value={patName}
+            onChange={(e) => setPatName(e.target.value)}
+          />
+          <Button type="primary" disabled={!patName.trim()} loading={patBusy}
+            onClick={() => void savePattern()}>
+            保存当前顺序
+          </Button>
+        </Space.Compact>
+        <Table<Pattern>
+          rowKey="id"
+          size="small"
+          pagination={false}
+          dataSource={patRows}
+          columns={[
+            { title: '模式名', dataIndex: 'name' },
+            { title: '户数', width: 70, render: (_, r) => r.entries?.length ?? 0 },
+            {
+              title: '默认', dataIndex: 'isDefault', width: 70,
+              render: (v: boolean) => (v ? <Tag color="green">默认</Tag> : '—'),
+            },
+            {
+              title: '操作', key: 'op', width: 200,
+              render: (_, r) => (
+                <Space size={4}>
+                  <Button size="small" loading={patBusy} onClick={() => void applyPattern(r.id)}>应用</Button>
+                  {!r.isDefault && (
+                    <Button size="small" loading={patBusy} onClick={() => void setDefaultPattern(r.id)}>设默认</Button>
+                  )}
+                  <Button size="small" danger loading={patBusy} onClick={() => void removePattern(r.id)}>删除</Button>
+                </Space>
+              ),
+            },
+          ]}
+        />
       </Modal>
     </Space>
   );
