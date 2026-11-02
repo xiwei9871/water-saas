@@ -257,7 +257,9 @@ describe('1028v2 放号-上号-补录', () => {
     }).expect(201);
     await post(`/install/applications/${res2.body.id}/transition`, { to: 'SURVEYED' }).expect(201);
     await post(`/install/applications/${res2.body.id}/transition`, { to: 'APPROVED' }).expect(201);
-    await post(`/install/applications/${res2.body.id}/transition`, { to: 'INSTALLING' }).expect(201);
+    await post(`/install/applications/${res2.body.id}/transition`, {
+      to: 'INSTALLING', installCompletedAt: '2026-11-01',
+    }).expect(201);
     const alloc = (await post(`/install/applications/${res2.body.id}/allocate`, {
       meterQty: 1, readerId: STAFF_ADMIN,
     }).expect(201)).body;

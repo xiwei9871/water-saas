@@ -8,6 +8,14 @@ import {
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { isBookDue, type BookCadence } from '../../common/reading-cadence.js';
+import {
+  calendarOverrides,
+  isRemoteZone,
+  monthEndReserveOf,
+  segmentCalendar,
+  workdayIndex,
+  collectModeOf,
+} from '../../common/metering-model.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
   embedOrgNames,
@@ -422,21 +430,69 @@ export class ReadingPlanService {
       where: { tenantId: ctx.tenantId, bookId: body.bookId },
       orderBy: [{ seqNo: 'asc' }, { waterAccountId: 'asc' }],
     });
-    // Members whose account has since been CLOSED are skipped — a closed
-    // point has nothing to read and would only produce dead plan items.
+    // 1102 R13/R4/R15：计划归集改按用户级频次判断「本月是否该抄」，
+    // 远传区号户不派人工计划，顺序按用户级路线键 routeKey。
     const liveAccounts = await tx.waterAccount.findMany({
       where: {
         tenantId: ctx.tenantId,
         id: { in: members.map((m) => m.waterAccountId) },
-        status: { not: 'CLOSED' },
+        status: { notIn: ['CLOSED', 'RETURNED'] },
       },
-      select: { id: true },
+      select: {
+        id: true,
+        cadence: true,
+        anchorPeriod: true,
+        zoneNo: true,
+        routeKey: true,
+        addr: true,
+        archiveNo: true,
+        accountNo: true,
+      },
     });
-    const liveIds = new Set(liveAccounts.map((a) => a.id));
-    const liveMembers = members.filter((m) => liveIds.has(m.waterAccountId));
-    if (liveMembers.length === 0) {
+    const acctById = new Map(liveAccounts.map((a) => [a.id, a]));
+    const dueMembers = members.filter((m) => {
+      const a = acctById.get(m.waterAccountId);
+      if (!a || isRemoteZone(a.zoneNo)) return false;
+      return isBookDue(
+        a.cadence as BookCadence,
+        a.anchorPeriod,
+        body.period!,
+      );
+    });
+    if (dueMembers.length === 0) {
       throw new BadRequestException({ code: 'EMPTY_BOOK' });
     }
+    // R15 冷启动：无 routeKey 的户按「地址 → 档案号/户号」初始赋键，
+    // 从当前最大键续排；已有键不动（跨频次稳定）。
+    const keyed = dueMembers
+      .map((m) => acctById.get(m.waterAccountId)!)
+      .filter((a) => a.routeKey !== null);
+    const maxKey = keyed.reduce(
+      (mx, a) => Math.max(mx, Number(a.routeKey)),
+      0,
+    );
+    const unkeyed = dueMembers
+      .map((m) => acctById.get(m.waterAccountId)!)
+      .filter((a) => a.routeKey === null)
+      .sort((x, y) =>
+        `${x.addr ?? ''}|${x.archiveNo ?? x.accountNo}`.localeCompare(
+          `${y.addr ?? ''}|${y.archiveNo ?? y.accountNo}`,
+        ),
+      );
+    for (let i = 0; i < unkeyed.length; i++) {
+      const k = maxKey + 1000 * (i + 1);
+      await tx.waterAccount.update({
+        where: { id: unkeyed[i].id },
+        data: { routeKey: k, updatedBy: ctx.staffId },
+      });
+      unkeyed[i].routeKey = new Prisma.Decimal(k);
+    }
+    // 计划顺序 = routeKey 升序（键相同/空缺按册内序号兜底）。
+    const liveMembers = [...dueMembers].sort((a, b) => {
+      const ka = Number(acctById.get(a.waterAccountId)!.routeKey ?? 9e18);
+      const kb = Number(acctById.get(b.waterAccountId)!.routeKey ?? 9e18);
+      return ka - kb || a.seqNo - b.seqNo;
+    });
 
     // Snapshot-time ACTIVE installation per account. The schema deliberately
     // allows several ACTIVE installations per water_account （一户多表 phase-2);
@@ -502,17 +558,19 @@ export class ReadingPlanService {
       select: PLAN_ITEM_SELECT,
       orderBy: { seqNo: 'asc' },
     });
-    // Non-due periods (e.g. an off-cycle catch-up on a non-monthly book) are
-    // legal operational cases — warn, never block. The backend owns the
-    // due math; the UI only surfaces this flag.
-    const cadenceWarning = isBookDue(
+    // 1102：频次已归属用户——计划项只含本月该抄的户；book.cadence 为
+    // 历史兼容列不再参与归集，但旧册仍保留册级告警供展示层提示。
+    const skipped = members.length - liveMembers.length;
+    const cadenceWarning = !isBookDue(
       book.cadence as BookCadence,
       book.anchor_period,
       body.period,
     )
-      ? null
-      : 'BOOK_NOT_DUE_THIS_PERIOD';
-    return { ...plan, items, cadenceWarning };
+      ? 'BOOK_NOT_DUE_THIS_PERIOD'
+      : skipped > 0
+        ? 'SOME_MEMBERS_NOT_DUE'
+        : null;
+    return { ...plan, items, cadenceWarning, skippedNotDue: skipped };
   }
 
   /**
@@ -716,6 +774,245 @@ export class ReadingPlanService {
       }
       throw e;
     }
+  }
+
+  /**
+   * R5 自动生成次日计划：baseDate 的下一个工作日若是当月第 N 个抄表段，
+   * 为段号=N 的在用区段册生成次日计划（planDate=次日，幂等跳过已生成）。
+   * 「抄表员直管」区号册（segNo 空）在第 1 个工作日随段号 01 一并生成。
+   */
+  async autoGenerateForDate(ctx: TenantCtx, baseDate: Date) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const y = baseDate.getFullYear();
+      const m = baseDate.getMonth();
+      const overrides = await calendarOverrides(
+        tx, ctx.tenantId, new Date(y, m - 1, 1), new Date(y, m + 2, 0),
+      );
+      const next = new Date(y, m, baseDate.getDate() + 1);
+      const idx = workdayIndex(next, overrides);
+      if (idx === null) return { segNo: null, planDate: null, generated: [] as string[] };
+      const period = `${next.getFullYear()}${String(next.getMonth() + 1).padStart(2, '0')}`;
+      const reserve = await monthEndReserveOf(tx, ctx.tenantId);
+      const segs = segmentCalendar(period, overrides, reserve);
+      if (idx > segs.length) {
+        return { segNo: null, planDate: next, generated: [] as string[] };
+      }
+      const segNo = segs[idx - 1].segNo;
+      // 段号册（segNo=N）+ 直管区号册（N=1 时 segNo 为空的一并生成）。
+      const books = await tx.readingBook.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          status: 'ACTIVE',
+          OR: idx === 1 ? [{ segNo }, { segNo: null }] : [{ segNo }],
+        },
+        select: { id: true, zoneNo: true, segNo: true },
+      });
+      const generated: string[] = [];
+      for (const b of books) {
+        if (isRemoteZone(b.zoneNo)) continue; // R4-2 远传不派人工计划
+        const exists = await tx.readingPlan.findFirst({
+          where: {
+            tenantId: ctx.tenantId,
+            bookId: b.id,
+            period,
+            status: { not: 'CLOSED' },
+          },
+          select: { id: true },
+        });
+        if (exists) continue; // 幂等：同册同期已生成跳过
+        try {
+          await this.generateTx(tx, ctx, {
+            bookId: b.id,
+            period,
+            planDate: next,
+          });
+          generated.push(b.id);
+        } catch (e) {
+          // 空册/无到期户跳过（EMPTY_BOOK），其余错误上抛。
+          const code = (e as { response?: { code?: string } }).response?.code;
+          if (code !== 'EMPTY_BOOK') throw e;
+        }
+      }
+      return { segNo, planDate: next, generated };
+    });
+  }
+
+  /**
+   * R6 超段均分：任选 N 段（sourceSegs），其本月未抄任务均分到
+   * ≤ 总段数−N 的目标段（targetSegs）。计划项级迁移（本月临时调整，
+   * 户段号归属不变），目标段无计划则先按常规生成再承接。
+   */
+  async redistributeTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    body: { zoneNo: string; period: string; sourceSegs: string[]; targetSegs: string[] },
+  ) {
+    const { zoneNo, period, sourceSegs, targetSegs } = body;
+    if (!zoneNo || !period || !sourceSegs?.length || !targetSegs?.length) {
+      throw new BadRequestException({ code: 'REDISTRIBUTE_FIELDS_REQUIRED' });
+    }
+    const segCount = (await tx.readingBook.findMany({
+      where: { tenantId: ctx.tenantId, zoneNo, segNo: { not: null } },
+      select: { segNo: true },
+    })).length;
+    if (targetSegs.length > Math.max(0, segCount - sourceSegs.length)) {
+      throw new BadRequestException({
+        code: 'REDISTRIBUTE_TARGET_OVERFLOW',
+        max: segCount - sourceSegs.length,
+      });
+    }
+    const planOf = async (segNo: string) => {
+      const book = await tx.readingBook.findFirst({
+        where: { tenantId: ctx.tenantId, zoneNo, segNo },
+        select: { id: true },
+      });
+      if (!book) return null;
+      return tx.readingPlan.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          bookId: book.id,
+          period,
+          status: { in: ['OPEN', 'IN_PROGRESS'] },
+        },
+        select: { id: true },
+      });
+    };
+    const srcPlans = (await Promise.all(sourceSegs.map(planOf))).filter(
+      (p): p is { id: string } => !!p,
+    );
+    if (!srcPlans.length) {
+      throw new BadRequestException({ code: 'REDISTRIBUTE_NO_SOURCE_PLANS' });
+    }
+    const pendingItems = await tx.readingPlanItem.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        planId: { in: srcPlans.map((p) => p.id) },
+        status: 'PENDING',
+      },
+      orderBy: [{ planId: 'asc' }, { seqNo: 'asc' }],
+      select: { id: true, waterAccountId: true, plannedInstallationId: true },
+    });
+    if (!pendingItems.length) return { moved: 0 };
+    // 目标计划：无则按 book+period 生成（无到期户时建空计划承接）。
+    const targetPlanIds: string[] = [];
+    for (const seg of targetSegs) {
+      let p = await planOf(seg);
+      if (!p) {
+        const book = await tx.readingBook.findFirst({
+          where: { tenantId: ctx.tenantId, zoneNo, segNo: seg },
+          select: { id: true },
+        });
+        if (!book) continue;
+        const created = await tx.readingPlan.create({
+          data: {
+            tenantId: ctx.tenantId,
+            bookId: book.id,
+            period,
+            planDate: new Date(),
+            status: 'OPEN',
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+          select: { id: true },
+        });
+        p = created;
+      }
+      targetPlanIds.push(p.id);
+    }
+    if (!targetPlanIds.length) {
+      throw new BadRequestException({ code: 'REDISTRIBUTE_NO_TARGET_BOOKS' });
+    }
+    // 均摊：按目标段数轮询分配（取每计划当前最大 seq 续排）。
+    const seqOf = new Map<string, number>();
+    for (const pid of targetPlanIds) {
+      const agg = await tx.readingPlanItem.aggregate({
+        where: { tenantId: ctx.tenantId, planId: pid },
+        _max: { seqNo: true },
+      });
+      seqOf.set(pid, agg._max.seqNo ?? 0);
+    }
+    let moved = 0;
+    for (let i = 0; i < pendingItems.length; i++) {
+      const target = targetPlanIds[i % targetPlanIds.length];
+      const item = pendingItems[i];
+      // 同户已在目标计划 → 直接删源项（不重复抄）。
+      const dup = await tx.readingPlanItem.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          planId: target,
+          waterAccountId: item.waterAccountId,
+        },
+        select: { id: true },
+      });
+      await tx.readingPlanItem.delete({ where: { id: item.id } });
+      if (!dup) {
+        seqOf.set(target, (seqOf.get(target) ?? 0) + 1);
+        await tx.readingPlanItem.create({
+          data: {
+            tenantId: ctx.tenantId,
+            planId: target,
+            waterAccountId: item.waterAccountId,
+            seqNo: seqOf.get(target)!,
+            plannedInstallationId: item.plannedInstallationId,
+            status: 'PENDING',
+            createdBy: ctx.staffId,
+            updatedBy: ctx.staffId,
+          },
+        });
+      }
+      moved += 1;
+    }
+    return { moved, targets: targetPlanIds };
+  }
+
+  /**
+   * R15 人工调序：orderedItemIds 给全量计划项的新顺序——计划项 seqNo
+   * 重排，同时把顺序写回用户级 routeKey（同一区号下跨频次稳定）。
+   */
+  async reorderTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    planId: string,
+    orderedItemIds: string[],
+    req: Request,
+  ) {
+    const plan = await tx.readingPlan.findFirst({
+      where: { tenantId: ctx.tenantId, id: planId },
+      select: { id: true, bookId: true, status: true },
+    });
+    if (!plan) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
+    await this.assertPlanBookInScope(tx, ctx, plan.bookId);
+    const items = await tx.readingPlanItem.findMany({
+      where: { tenantId: ctx.tenantId, planId },
+      select: { id: true, waterAccountId: true },
+    });
+    if (items.length !== orderedItemIds.length) {
+      throw new BadRequestException({ code: 'REORDER_ITEMS_MISMATCH' });
+    }
+    const itemById = new Map(items.map((i) => [i.id, i]));
+    for (const iid of orderedItemIds) {
+      if (!itemById.has(iid)) {
+        throw new BadRequestException({ code: 'REORDER_ITEM_NOT_IN_PLAN', itemId: iid });
+      }
+    }
+    req.auditBefore = items;
+    for (let i = 0; i < orderedItemIds.length; i++) {
+      const item = itemById.get(orderedItemIds[i])!;
+      await tx.readingPlanItem.update({
+        where: { id: item.id },
+        data: { seqNo: i + 1 },
+      });
+      // routeKey 用稀疏键（步长 1000）便于后续插入取中点。
+      await tx.waterAccount.update({
+        where: { id: item.waterAccountId },
+        data: { routeKey: (i + 1) * 1000, updatedBy: ctx.staffId },
+      });
+    }
+    return tx.readingPlanItem.findMany({
+      where: { tenantId: ctx.tenantId, planId },
+      select: PLAN_ITEM_SELECT,
+      orderBy: { seqNo: 'asc' },
+    });
   }
 
   /**

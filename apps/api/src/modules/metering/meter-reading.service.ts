@@ -914,6 +914,15 @@ export class MeterReadingService {
       });
       if (flipped.count === 0) throw itemAlreadyDone(item.status);
       readings.push(reading);
+      // R15-5 顺序学习：实际抄表偏离 routeKey 顺序时，把该户 routeKey
+      // 调整到上一个已抄户之后（插入取中点），下次计划按新顺序排。
+      if (input.resultType !== 'NO_READ') {
+        try {
+          await this.learnRouteKey(tx, ctx, plan.id, item);
+        } catch {
+          // 学习失败不阻断抄录。
+        }
+      }
       // 任务书 T12：录入即检测「突增突减/读数倒挂」→ 自动建复核任务（metering:qc）。
       const review = await this.detectEntryAnomaly(tx, ctx, {
         readingId: reading.id,
@@ -927,6 +936,51 @@ export class MeterReadingService {
       if (review) reviewTasks.push(review);
     }
     return { readings, reviewTasks };
+  }
+
+  /**
+   * R15-5：把刚抄完户的 routeKey 插到「上一个已抄户」之后——
+   * 若其键已在正确位置（顺序抄）则不动；跳序抄则取中点重排。
+   */
+  private async learnRouteKey(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    planId: string,
+    item: ItemCtx,
+  ) {
+    const siblings = await tx.readingPlanItem.findMany({
+      where: { tenantId: ctx.tenantId, planId },
+      select: { seqNo: true, waterAccountId: true, completedReadingId: true },
+      orderBy: { seqNo: 'asc' },
+    });
+    const doneIds = siblings
+      .filter((s) => s.completedReadingId && s.waterAccountId !== item.waterAccountId)
+      .map((s) => s.waterAccountId);
+    if (!doneIds.length) return;
+    const keys = await tx.waterAccount.findMany({
+      where: { tenantId: ctx.tenantId, id: { in: [...doneIds, item.waterAccountId] } },
+      select: { id: true, routeKey: true },
+    });
+    const keyOf = new Map(keys.map((k) => [k.id, Number(k.routeKey ?? Infinity)]));
+    const me = keyOf.get(item.waterAccountId) ?? Infinity;
+    // 上一个已抄户 = 本计划中 seq 在该户之前、已完成里 routeKey 最大者。
+    const prevDone = doneIds
+      .map((id) => keyOf.get(id) ?? -Infinity)
+      .reduce((a, b) => Math.max(a, b), -Infinity);
+    if (me === Infinity || me <= prevDone) {
+      // 插在上一已抄户与其后邻居之间（取中点，无邻居则 +1000）。
+      const nextKey = siblings
+        .filter((s) => s.waterAccountId !== item.waterAccountId)
+        .map((s) => keyOf.get(s.waterAccountId) ?? Infinity)
+        .filter((k) => k > prevDone && k !== Infinity)
+        .reduce((a, b) => Math.min(a, b), Infinity);
+      const newKey =
+        nextKey === Infinity ? prevDone + 1000 : prevDone + (nextKey - prevDone) / 2;
+      await tx.waterAccount.update({
+        where: { id: item.waterAccountId },
+        data: { routeKey: newKey, updatedBy: ctx.staffId },
+      });
+    }
   }
 
   /**

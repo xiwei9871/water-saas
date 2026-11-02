@@ -1,6 +1,6 @@
 import { BadRequestException, Body, ConflictException, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import type { InstallApplyStatus } from '@prisma/client';
-import { Permissions } from '../../common/permissions.decorator.js';
+import { AnyPermissions, Permissions } from '../../common/permissions.decorator.js';
 import { currentTenant } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { assertUuid } from '../../common/uuid.js';
@@ -211,6 +211,114 @@ export class InstallController {
   allocate(@Param('id') id: string, @Body() body: AllocateInput) {
     const ctx = currentTenant();
     return this.alloc.allocate(ctx, assertUuid(id, 'id'), body ?? ({} as AllocateInput));
+  }
+
+  /**
+   * R12 水表安装填报（安装完成后、放号前）：{meters:[{meterNo, caliber?,
+   * brand?, serialNo?, maxDial?, initialReading?, installedAt?}]}。
+   * 填报完成（installCompletedAt 写入）才允许放号；表号选库存表自动带入。
+   */
+  @Post(':id/install-meters')
+  @AnyPermissions('install:write', 'metering:write')
+  installMeters(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      meters?: {
+        meterNo?: string;
+        caliber?: string;
+        brand?: string;
+        serialNo?: string;
+        maxDial?: unknown;
+        initialReading?: unknown;
+        installedAt?: string;
+      }[];
+    },
+  ) {
+    if (!Array.isArray(body?.meters) || body.meters.length === 0) {
+      throw new BadRequestException({ code: 'INSTALL_METERS_REQUIRED' });
+    }
+    const meters = body.meters;
+    for (const m of meters) {
+      if (!m?.meterNo?.trim()) {
+        throw new BadRequestException({ code: 'INSTALL_METER_NO_REQUIRED' });
+      }
+    }
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const app = await tx.installApplication.findFirst({
+        where: { tenantId: ctx.tenantId, id: assertUuid(id, 'id') },
+      });
+      if (!app) throw new BadRequestException({ code: 'APPLY_NOT_FOUND' });
+      if (app.status !== 'INSTALLING' && app.status !== 'APPROVED') {
+        throw new ConflictException({
+          code: 'INSTALL_STAGE_INVALID',
+          message: '水表安装信息须在审批后、放号前填报',
+          status: app.status,
+        });
+      }
+      // 选表带入：登记时核对库存表档案——表号存在则校口径一致性，
+      // 不在库则按填报要素补建（status=AVAILABLE，上号时挂装）。
+      const out: { meterNo: string; caliber?: string | null }[] = [];
+      for (const m of meters) {
+        const meterNo = m.meterNo!.trim();
+        const meter = await tx.meter.findFirst({
+          where: { tenantId: ctx.tenantId, meterNo },
+        });
+        if (meter) {
+          if (m.caliber && meter.caliber && m.caliber !== meter.caliber) {
+            throw new BadRequestException({
+              code: 'INSTALL_METER_CALIBER_MISMATCH',
+              meterNo,
+            });
+          }
+        } else {
+          await tx.meter.create({
+            data: {
+              tenantId: ctx.tenantId,
+              meterNo,
+              serialNo: m.serialNo ?? null,
+              brand: m.brand ?? null,
+              caliber: m.caliber ?? null,
+              maxDial: m.maxDial != null ? Number(m.maxDial) : null,
+              status: 'AVAILABLE',
+              createdBy: ctx.staffId,
+              updatedBy: ctx.staffId,
+            },
+          });
+        }
+        out.push({ meterNo, caliber: m.caliber ?? null });
+      }
+      return tx.installApplication.update({
+        where: { id: app.id },
+        data: {
+          installMeters: out.map((o, i) => ({
+            ...o,
+            brand: meters[i].brand ?? null,
+            serialNo: meters[i].serialNo ?? null,
+            maxDial: meters[i].maxDial ?? null,
+            initialReading: meters[i].initialReading ?? null,
+            installedAt: meters[i].installedAt ?? null,
+          })),
+          installMeterNo: out[0]?.meterNo ?? app.installMeterNo,
+          installCaliber: out[0]?.caliber ?? app.installCaliber,
+          installCompletedAt: new Date(),
+          status: app.status === 'APPROVED' ? 'INSTALLING' : app.status,
+          updatedBy: ctx.staffId,
+        },
+      });
+    });
+  }
+
+  /** R1 退号：批量退回「待上号、未绑表」档案号（install:write）。 */
+  @Post('/deallocate')
+  @Permissions('install:write')
+  deallocate(@Body() body: { accountIds?: string[]; reason?: string }) {
+    const ctx = currentTenant();
+    return this.alloc.deallocate(ctx, {
+      accountIds: body?.accountIds ?? [],
+      reason: body?.reason,
+    });
   }
 
   /** R3：归档确认 —— 立户唯一入口是 onboard(sourceApplyNo)；本端点只做状态核对。 */

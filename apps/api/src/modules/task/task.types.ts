@@ -144,6 +144,16 @@ export const TASK_TYPES: TaskTypeDef[] = [
     evidenceRequired: true,
   },
   {
+    // 1102 R10：「区段管理」模式下新户未赋段号 → 提示抄表人员补赋。
+    code: 'ACCOUNT_SEG_ASSIGN',
+    name: '补赋段号',
+    fallbackPerm: 'metering:write',
+    bizRoute: '/customer/water-accounts?focusId={bizId}',
+    requiredContext: ['waterAccountNo'],
+    guide: '请到 客户管理→用水户，为户 {waterAccountNo} 补赋段号（区段号缺失无法纳入抄表计划）。',
+    evidenceRequired: false,
+  },
+  {
     // 20261021 整改 任务E：违章处置任务（稽查核实/处理）。
     code: 'VIOLATION_HANDLE',
     name: '违章处置',

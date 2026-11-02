@@ -21,6 +21,10 @@ export interface OnboardWireBody {
     openedAt?: unknown;
     householdSize?: unknown;
     contractNo?: string;
+    cadence?: string;
+    anchorPeriod?: string;
+    zoneNo?: string;
+    segNo?: string;
   };
   meter?: MeterBody & { maxDial?: unknown };
   meterId?: string;
@@ -112,6 +116,10 @@ export function parseOnboardWire(
             })()
           : undefined,
       contractNo: body.account.contractNo?.trim() || undefined,
+      cadence: body.account.cadence?.trim() || undefined,
+      anchorPeriod: body.account.anchorPeriod?.trim() || undefined,
+      zoneNo: body.account.zoneNo?.trim() || undefined,
+      segNo: body.account.segNo?.trim() || undefined,
     },
     meter: body.meter
       ? {

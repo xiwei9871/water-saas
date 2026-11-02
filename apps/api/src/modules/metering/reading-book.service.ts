@@ -16,6 +16,12 @@ import {
   type BookCadence,
   type MeterChannel,
 } from '../../common/reading-cadence.js';
+import {
+  isRemoteZone,
+  isValidZoneNo,
+  zoneSegCode,
+  SEG_NO_RE,
+} from '../../common/metering-model.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
   embedOrgNames,
@@ -59,6 +65,9 @@ export interface ReadingBookBody {
   cadence?: BookCadence;
   anchorPeriod?: string | null;
   meterChannel?: MeterChannel;
+  /** 1102 R7：区号 + 段号（区段号编码；直管模式 segNo 为空）。 */
+  zoneNo?: string;
+  segNo?: string | null;
 }
 
 export interface ReadingBookPatchBody {
@@ -292,9 +301,26 @@ export class ReadingBookService {
     }
     this.validateCadence(body.cadence, body.anchorPeriod, body.meterChannel);
     await this.assertRefs(tx, ctx, body);
+    // R7 区段号编码：给了区号（+段号）→ bookNo = 区号+段号（如 0116）。
+    if (body.zoneNo !== undefined && !isValidZoneNo(body.zoneNo)) {
+      throw new BadRequestException({ code: 'ZONE_NO_INVALID', zoneNo: body.zoneNo });
+    }
+    if (body.segNo !== undefined && body.segNo !== null && !SEG_NO_RE.test(body.segNo)) {
+      throw new BadRequestException({ code: 'SEG_NO_INVALID', segNo: body.segNo });
+    }
     const bookNo =
       body.bookNo?.trim() ||
+      (body.zoneNo ? zoneSegCode(body.zoneNo, body.segNo) : undefined) ||
       (await this.seq.nextFormatted(tx, ctx.tenantId, 'book_no', 'B', ctx.staffId));
+    // R14-3：选了区号 → 带出绑定抄表员（readerId 未显式指定时）。
+    let readerId = body.readerId ?? null;
+    if (body.zoneNo && readerId === null) {
+      const zone = await tx.readerZone.findFirst({
+        where: { tenantId: ctx.tenantId, zoneNo: body.zoneNo, status: 'ACTIVE' },
+        select: { readerId: true },
+      });
+      readerId = zone?.readerId ?? null;
+    }
     return conflictOnUnique(
       tx.readingBook.create({
         data: {
@@ -302,11 +328,13 @@ export class ReadingBookService {
           bookNo,
           name: body.name,
           orgUnitId: body.orgUnitId,
-          readerId: body.readerId ?? null,
+          readerId,
           scheduleDay: body.scheduleDay ?? null,
           cadence: body.cadence ?? 'MONTHLY',
           anchorPeriod: body.anchorPeriod ?? null,
-          meterChannel: body.meterChannel ?? 'MECHANICAL',
+          zoneNo: body.zoneNo ?? null,
+          segNo: body.segNo ?? null,
+          meterChannel: body.meterChannel ?? (isRemoteZone(body.zoneNo) ? 'REMOTE_AUTO' : 'MECHANICAL'),
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
         },

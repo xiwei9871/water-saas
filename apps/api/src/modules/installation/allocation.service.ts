@@ -32,11 +32,18 @@ const PENDING_SETTLE_NO = 'SYS-PENDING';
 export interface AllocateInput {
   meterQty: number;
   caliber?: string;
+  /** R11 按口径明细放号：[{caliber, qty}]，合计 = 放号总数。 */
+  caliberDetails?: { caliber: string; qty: number }[];
   readerId: string;
   /** 人工修订起始档案号（缺省按 区域码+段号+流水 自动续号）。 */
   archiveStart?: string;
-  /** 抄表日段号 01..31（缺省 01）。 */
+  /** 抄表段号 01..16（缺省 01；R4 段号=月内抄表批次）。 */
   segNo?: string;
+  /** R2：区号（缺省取指定抄表员绑定的区号）。 */
+  zoneNo?: string;
+  /** R13：放号户的抄表频次（默认每月）。 */
+  cadence?: string;
+  anchorPeriod?: string;
 }
 
 export interface ActivateInput {
@@ -170,25 +177,63 @@ export class AllocationService {
       if (existed > 0) {
         throw new ConflictException({ code: 'ALREADY_ALLOCATED', count: existed });
       }
-      const qty = Math.max(1, Math.min(50, Math.floor(input.meterQty || 1)));
+      // R12：安装信息（installMeters 或装表完成时间）填报完成才允许放号。
+      const installMeters = Array.isArray(app.installMeters)
+        ? (app.installMeters as { meterNo?: string; caliber?: string }[])
+        : [];
+      if (installMeters.length === 0 && !app.installCompletedAt && !app.installMeterNo) {
+        throw new ConflictException({
+          code: 'INSTALL_INFO_REQUIRED',
+          message: '须先填报水表安装信息（安装完成后、放号前）',
+        });
+      }
+      const qty = Math.max(1, Math.min(9999, Math.floor(input.meterQty || 1)));
       const reader = await tx.staff.findFirst({
         where: { tenantId: ctx.tenantId, id: input.readerId, status: 'ACTIVE' },
         select: { id: true, name: true, orgUnitId: true },
       });
       if (!reader) throw new BadRequestException({ code: 'READER_NOT_FOUND' });
       const seg = (input.segNo ?? '01').padStart(2, '0');
-      if (!/^\d{2}$/.test(seg) || +seg < 1 || +seg > 31) {
+      if (!/^\d{2}$/.test(seg) || +seg < 1 || +seg > 16) {
         throw new BadRequestException({ code: 'SEG_NO_INVALID', seg });
+      }
+      // R11 口径明细校验：逐口径放号，合计必须 = 放号总数。
+      const details = (input.caliberDetails ?? []).filter((d) => d && d.qty > 0);
+      if (details.length) {
+        const sum = details.reduce((s, d) => s + Math.floor(d.qty), 0);
+        if (sum !== qty) {
+          throw new BadRequestException({
+            code: 'CALIBER_DETAILS_MISMATCH',
+            total: qty,
+            sum,
+          });
+        }
       }
       const area = await this.areaCode(tx, ctx, reader.orgUnitId);
       const archiveNos = await this.nextArchiveNos(
         tx, ctx, area, seg, qty, input.archiveStart,
       );
       const principal = await this.pendingPrincipal(tx, ctx);
-      const caliber = input.caliber ?? app.installCaliber ?? app.caliberReq ?? null;
+      const fallbackCaliber =
+        input.caliber ?? app.installCaliber ?? app.caliberReq ?? null;
+      // R11：口径明细展开成逐户口径序列（DN15×100 → 100 个 'DN15'…）。
+      const caliberSeq: (string | null)[] = details.length
+        ? details.flatMap((d) => Array(Math.floor(d.qty)).fill(d.caliber))
+        : archiveNos.map(() => fallbackCaliber);
+      // R2 区号：显式入参优先 → 抄表员绑定区号兜底。
+      let zoneNo = input.zoneNo?.trim() || null;
+      if (!zoneNo) {
+        const z = await tx.readerZone.findFirst({
+          where: { tenantId: ctx.tenantId, readerId: reader.id, status: 'ACTIVE' },
+          select: { zoneNo: true },
+        });
+        zoneNo = z?.zoneNo ?? null;
+      }
+      const cadence = input.cadence ?? 'MONTHLY';
 
       const accounts: { id: string; accountNo: string; archiveNo: string; taskId: string }[] = [];
-      for (const archiveNo of archiveNos) {
+      for (const [idx, archiveNo] of archiveNos.entries()) {
+        const caliber = caliberSeq[idx] ?? fallbackCaliber;
         const accountNo = await this.seq.nextFormatted(
           tx, ctx.tenantId, 'account_no', 'A', ctx.staffId);
         const wa = await tx.waterAccount.create({
@@ -204,6 +249,10 @@ export class AllocationService {
             archiveNo,
             assignReaderId: reader.id,
             pendingCaliber: caliber,
+            zoneNo,
+            segNo: seg,
+            cadence,
+            anchorPeriod: input.anchorPeriod ?? null,
             sourceApplyNo: app.applyNo,
             contractNo: app.contractNo ?? null,
             contractScan: app.contractScan ?? undefined,
@@ -238,6 +287,85 @@ export class AllocationService {
         count: accounts.length,
         accounts,
       };
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // R1 退号：批量退回「待上号、未绑定水表」的档案号——状态=已退号（作废），
+  // 释放档案号；已指派的上号任务同步取消（原则二闭环）。
+  // ------------------------------------------------------------------
+  async deallocate(
+    ctx: TenantCtx,
+    input: { accountIds: string[]; reason?: string },
+  ) {
+    if (!Array.isArray(input.accountIds) || input.accountIds.length === 0) {
+      throw new BadRequestException({ code: 'ACCOUNT_IDS_REQUIRED' });
+    }
+    if (!input.reason?.trim()) {
+      throw new BadRequestException({ code: 'RETURN_REASON_REQUIRED' });
+    }
+    const reason = input.reason.trim();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const rows = await tx.waterAccount.findMany({
+        where: { tenantId: ctx.tenantId, id: { in: input.accountIds } },
+        select: { id: true, archiveNo: true, status: true },
+      });
+      if (rows.length !== input.accountIds.length) {
+        throw new NotFoundException({ code: 'ACCOUNT_NOT_FOUND' });
+      }
+      for (const r of rows) {
+        if (r.status !== 'PENDING_ASSIGN') {
+          // 已上号/已补全/已退号的户禁止退号。
+          throw new ConflictException({
+            code: 'RETURN_NOT_ALLOWED',
+            archiveNo: r.archiveNo,
+            status: r.status,
+          });
+        }
+      }
+      const bound = await tx.meterInstallation.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: { in: input.accountIds },
+          status: 'ACTIVE',
+        },
+        select: { waterAccountId: true },
+      });
+      if (bound) {
+        throw new ConflictException({
+          code: 'RETURN_NOT_ALLOWED',
+          waterAccountId: bound.waterAccountId,
+        });
+      }
+      const now = new Date();
+      await tx.waterAccount.updateMany({
+        where: { tenantId: ctx.tenantId, id: { in: input.accountIds } },
+        data: {
+          status: 'RETURNED',
+          returnedAt: now,
+          returnReason: reason,
+          updatedBy: ctx.staffId,
+        },
+      });
+      // 已指派的上号任务同步作废（CANCELLED），抄表员待办不再显示。
+      for (const r of rows) {
+        await tx.task.updateMany({
+          where: {
+            tenantId: ctx.tenantId,
+            type: 'ACCOUNT_ACTIVATE',
+            bizType: 'WATER_ACCOUNT',
+            bizId: r.id,
+            status: { in: ['PENDING', 'CLAIMED', 'ASSIGNED'] },
+          },
+          data: {
+            status: 'CANCELLED',
+            cancelledAt: now,
+            cancelReason: `退号：${reason}`,
+            updatedBy: ctx.staffId,
+          },
+        });
+      }
+      return { returned: rows.map((r) => ({ id: r.id, archiveNo: r.archiveNo })) };
     });
   }
 
@@ -373,6 +501,10 @@ export class AllocationService {
       readingBookId?: string;
       householdSize?: number;
       addr?: string;
+      zoneNo?: string;
+      segNo?: string;
+      cadence?: string;
+      anchorPeriod?: string;
     },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
@@ -438,40 +570,22 @@ export class AllocationService {
               updatedBy: ctx.staffId,
             },
           });
-          const curPeriod = `${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-          const activeInst = await tx.meterInstallation.findFirst({
-            where: { tenantId: ctx.tenantId, waterAccountId: wa.id, status: 'ACTIVE' },
-            select: { id: true },
-          });
-          const plan = await tx.readingPlan.findFirst({
-            where: {
-              tenantId: ctx.tenantId,
-              bookId: book.id,
-              period: curPeriod,
-              status: { in: ['OPEN', 'IN_PROGRESS'] },
-            },
-            select: { id: true },
-          });
-          if (plan && activeInst) {
-            const itemSeq =
-              ((await tx.readingPlanItem.aggregate({
-                where: { tenantId: ctx.tenantId, planId: plan.id },
-                _max: { seqNo: true },
-              }))._max.seqNo ?? 0) + 1;
-            await tx.readingPlanItem.create({
-              data: {
-                tenantId: ctx.tenantId,
-                planId: plan.id,
-                waterAccountId: wa.id,
-                seqNo: itemSeq,
-                plannedInstallationId: activeInst.id,
-                status: 'PENDING',
-                createdBy: ctx.staffId,
-                updatedBy: ctx.staffId,
-              },
-            });
-          }
+          // R10-2 次月纳入：当月新户不进在途计划，次月按区段+频次归集。
         }
+      }
+      // R2/R13：补录时的区段/频次同步到户档案（并联动归集入册）。
+      if (input.zoneNo !== undefined || input.segNo !== undefined ||
+          input.cadence !== undefined) {
+        await tx.waterAccount.update({
+          where: { id: wa.id },
+          data: {
+            zoneNo: input.zoneNo ?? wa.zoneNo,
+            segNo: input.segNo ?? wa.segNo,
+            cadence: input.cadence ?? wa.cadence,
+            anchorPeriod: input.anchorPeriod ?? wa.anchorPeriod,
+            updatedBy: ctx.staffId,
+          },
+        });
       }
       // 补录人数（可选）→ household_profile 当期生效档案。
       if (input.householdSize !== undefined && input.householdSize !== null) {
