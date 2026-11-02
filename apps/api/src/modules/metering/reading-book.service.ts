@@ -41,6 +41,8 @@ export const READING_BOOK_SELECT = {
   scheduleDay: true,
   cadence: true,
   anchorPeriod: true,
+  zoneNo: true,
+  segNo: true,
   meterChannel: true,
   status: true,
   createdAt: true,

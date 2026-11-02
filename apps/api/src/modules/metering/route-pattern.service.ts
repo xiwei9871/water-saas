@@ -6,7 +6,7 @@ import {
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
-import type { TenantCtx } from '../../common/tenant-context.js';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 
 type Tx = Prisma.TransactionClient;
 
@@ -89,7 +89,11 @@ export class RoutePatternService {
     });
   }
 
-  /** 应用模式：把快照 routeKey 写回对应用水户。 */
+  /**
+   * 应用模式：把快照 routeKey 写回对应用水户。
+   * A2/A5 组织权限：scoped 调用者只能写本组织子树册内的户——
+   * 逐户经 book_meter 解析所属册组织校验，无册户仅 ALL 可写。
+   */
   async applyTx(tx: Tx, ctx: TenantCtx, id: string, req: Request) {
     const pattern = await tx.routePattern.findFirst({
       where: { tenantId: ctx.tenantId, id },
@@ -97,7 +101,31 @@ export class RoutePatternService {
     if (!pattern) throw new NotFoundException({ code: 'PATTERN_NOT_FOUND' });
     req.auditBefore = pattern;
     const entries = (pattern.entries as unknown as PatternEntry[]) ?? [];
+    const waIds = entries.map((e) => e.waterAccountId);
+    const memberships = waIds.length
+      ? await tx.bookMeter.findMany({
+          where: { tenantId: ctx.tenantId, waterAccountId: { in: waIds } },
+          select: { waterAccountId: true, bookId: true },
+        })
+      : [];
+    const books = memberships.length
+      ? await tx.readingBook.findMany({
+          where: { tenantId: ctx.tenantId, id: { in: memberships.map((m) => m.bookId) } },
+          select: { id: true, orgUnitId: true },
+        })
+      : [];
+    const orgOfBook = new Map(books.map((b) => [b.id, b.orgUnitId]));
+    const orgOf = new Map(
+      memberships.map((m) => [m.waterAccountId, orgOfBook.get(m.bookId) ?? null]),
+    );
     for (const e of entries) {
+      const orgUnitId = orgOf.get(e.waterAccountId) ?? null;
+      if (!orgInScope(ctx, orgUnitId)) {
+        throw new BadRequestException({
+          code: 'PATTERN_OUT_OF_SCOPE',
+          waterAccountId: e.waterAccountId,
+        });
+      }
       await tx.waterAccount.updateMany({
         where: { tenantId: ctx.tenantId, id: e.waterAccountId },
         data: { routeKey: e.routeKey, updatedBy: ctx.staffId },

@@ -75,13 +75,30 @@ export async function monthEndReserveOf(
 // ---------------------------------------------------------------------------
 // R3 工作日历：默认周一~周五为工作日；tenant_calendar_day 登记例外
 // HOLIDAY（节假日，工作→不抄）/ WORKDAY（调休上班日，周末→抄）。
+// 全部按「业务日字符串 YYYY-MM-DD」计算：即时点先换算到业务时区
+// Asia/Shanghai 得业务日，再按字符串历表比较——与服务器本地时区无关，
+// 不会跨日偏移（A5）。
 // ---------------------------------------------------------------------------
 type Tx = Prisma.TransactionClient;
 
-const dayKey = (d: Date): string =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
-    d.getDate(),
-  ).padStart(2, '0')}`;
+/** 租户业务时区（水司业务日口径固定上海时区，不随部署机时区漂移）。 */
+export const BIZ_TZ = 'Asia/Shanghai';
+const bizDayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: BIZ_TZ });
+
+/** 任意时点 → 租户业务日字符串 'YYYY-MM-DD'。 */
+export const bizDayStr = (d: Date): string => bizDayFmt.format(d);
+
+/** 业务日字符串 → UTC 零点 Date（写库/比较用，跨时区稳定）。 */
+export const parseBizDay = (s: string): Date => new Date(`${s}T00:00:00.000Z`);
+
+/** 业务日字符串加 n 天（跨月/跨年正常）。 */
+export const addBizDays = (s: string, n: number): string => {
+  const d = parseBizDay(s);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+const weekdayOf = (s: string): number => parseBizDay(s).getUTCDay();
 
 /** 拉取租户日历例外 → Map<YYYY-MM-DD, 'HOLIDAY'|'WORKDAY'>（指定年月窗口）。 */
 export async function calendarOverrides(
@@ -95,32 +112,36 @@ export async function calendarOverrides(
     select: { day: true, kind: true },
   });
   const map = new Map<string, 'HOLIDAY' | 'WORKDAY'>();
-  for (const r of rows) map.set(dayKey(r.day), r.kind as 'HOLIDAY' | 'WORKDAY');
+  // 存储语义=UTC 零点的业务日 → 取 ISO 前 10 位，与服务器本地时区无关。
+  for (const r of rows) {
+    map.set(r.day.toISOString().slice(0, 10), r.kind as 'HOLIDAY' | 'WORKDAY');
+  }
   return map;
 }
 
 export const isWorkday = (
-  d: Date,
+  day: string,
   overrides: Map<string, 'HOLIDAY' | 'WORKDAY'>,
 ): boolean => {
-  const ov = overrides.get(dayKey(d));
+  const ov = overrides.get(day);
   if (ov === 'WORKDAY') return true;
   if (ov === 'HOLIDAY') return false;
-  const w = d.getDay();
+  const w = weekdayOf(day);
   return w >= 1 && w <= 5;
 };
 
-/** 当月全部工作日（升序日期）。period = 'YYYYMM'。 */
+/** 当月全部工作日（升序业务日字符串）。period = 'YYYYMM'。 */
 export function monthWorkdays(
   period: string,
   overrides: Map<string, 'HOLIDAY' | 'WORKDAY'>,
-): Date[] {
-  const y = parseInt(period.slice(0, 4), 10);
-  const m = parseInt(period.slice(4), 10) - 1;
-  const days = new Date(y, m + 1, 0).getDate();
-  const out: Date[] = [];
-  for (let i = 1; i <= days; i++) {
-    const d = new Date(y, m, i);
+): string[] {
+  const y = period.slice(0, 4);
+  const m = period.slice(4);
+  const last = addBizDays(`${y}-${m}-01`, 32);
+  const out: string[] = [];
+  for (let i = 1; i <= 31; i++) {
+    const d = `${y}-${m}-${String(i).padStart(2, '0')}`;
+    if (d >= last) break;
     if (isWorkday(d, overrides)) out.push(d);
   }
   return out;
@@ -129,7 +150,7 @@ export function monthWorkdays(
 /**
  * 当月抄表段表：段号 N ↔ 当月第 N 个工作日（1 起）。月末预留 reserveDays
  * 个工作日不排抄表 → 可用段数 = 工作日数 − reserveDays，再封顶 16。
- * 返回 [{segNo:'01', date}]，长度即当月实际批次数（动态，不必凑满 16）。
+ * 返回 [{segNo:'01', date:UTC零点}]，长度即当月实际批次数（动态）。
  */
 export function segmentCalendar(
   period: string,
@@ -140,30 +161,28 @@ export function segmentCalendar(
   const usable = Math.max(0, Math.min(MAX_SEG_NO, days.length - reserveDays));
   return days.slice(0, usable).map((d, i) => ({
     segNo: String(i + 1).padStart(2, '0'),
-    date: d,
+    date: parseBizDay(d),
   }));
 }
 
-/** 某日是其月的第几个工作日（1 起；非工作日返回 null）。 */
+/** 某业务日是其月的第几个工作日（1 起；非工作日返回 null）。 */
 export function workdayIndex(
-  d: Date,
+  day: string,
   overrides: Map<string, 'HOLIDAY' | 'WORKDAY'>,
 ): number | null {
-  if (!isWorkday(d, overrides)) return null;
-  const period = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
-  const days = monthWorkdays(period, overrides);
-  const k = dayKey(d);
-  const i = days.findIndex((x) => dayKey(x) === k);
+  if (!isWorkday(day, overrides)) return null;
+  const days = monthWorkdays(`${day.slice(0, 4)}${day.slice(5, 7)}`, overrides);
+  const i = days.indexOf(day);
   return i < 0 ? null : i + 1;
 }
 
-/** 下一工作日（顺延查找，最多向前 10 天）。 */
+/** 下一工作业务日（顺延查找，最多向前 45 天，覆盖长假）。 */
 export function nextWorkday(
-  from: Date,
+  fromDay: string,
   overrides: Map<string, 'HOLIDAY' | 'WORKDAY'>,
-): Date | null {
-  for (let i = 1; i <= 10; i++) {
-    const d = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i);
+): string | null {
+  for (let i = 1; i <= 45; i++) {
+    const d = addBizDays(fromDay, i);
     if (isWorkday(d, overrides)) return d;
   }
   return null;

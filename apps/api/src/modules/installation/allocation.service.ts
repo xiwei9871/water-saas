@@ -187,7 +187,30 @@ export class AllocationService {
           message: '须先填报水表安装信息（安装完成后、放号前）',
         });
       }
-      const qty = Math.max(1, Math.min(9999, Math.floor(input.meterQty || 1)));
+      // A4：meterQty 必须为 1–9999 整数——越界/非整数明确报错，禁止静默截断。
+      const qty = Number(input.meterQty);
+      if (!Number.isInteger(qty) || qty < 1 || qty > 9999) {
+        throw new BadRequestException({
+          code: 'METER_QTY_INVALID',
+          message: '放号数量必须是 1–9999 的整数',
+          value: input.meterQty,
+        });
+      }
+      // A4：不得超过申请批准数量（meterQty）与已填报安装明细数。
+      if (app.meterQty != null && qty > app.meterQty) {
+        throw new ConflictException({
+          code: 'QTY_EXCEEDS_APPROVED',
+          approved: app.meterQty,
+          requested: qty,
+        });
+      }
+      if (installMeters.length > 0 && qty > installMeters.length) {
+        throw new ConflictException({
+          code: 'QTY_EXCEEDS_INSTALLED',
+          installed: installMeters.length,
+          requested: qty,
+        });
+      }
       const reader = await tx.staff.findFirst({
         where: { tenantId: ctx.tenantId, id: input.readerId, status: 'ACTIVE' },
         select: { id: true, name: true, orgUnitId: true },

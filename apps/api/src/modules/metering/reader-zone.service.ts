@@ -14,7 +14,7 @@ import {
 } from '../../common/metering-model.js';
 import { embedStaffNames } from '../../common/account-identity.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
-import type { TenantCtx } from '../../common/tenant-context.js';
+import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 
 type Tx = Prisma.TransactionClient;
 
@@ -85,9 +85,13 @@ export class ReaderZoneService {
   private async assertReader(tx: Tx, ctx: TenantCtx, readerId: string) {
     const reader = await tx.staff.findFirst({
       where: { tenantId: ctx.tenantId, id: readerId, status: 'ACTIVE' },
-      select: { id: true },
+      select: { id: true, orgUnitId: true },
     });
     if (!reader) throw new BadRequestException({ code: 'READER_NOT_FOUND' });
+    // A5 组织权限：scoped 调用者只能绑定本组织子树内的员工为抄表员。
+    if (!orgInScope(ctx, reader.orgUnitId)) {
+      throw new BadRequestException({ code: 'READER_OUT_OF_SCOPE' });
+    }
   }
 
   /** 新增绑定：zoneNo 唯一；非远传区号必须指定抄表员。 */

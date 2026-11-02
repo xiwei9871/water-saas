@@ -157,7 +157,7 @@ export default function MobileReading() {
   const { message } = AntdApp.useApp();
 
   // 1028v2：抄表 / 立户上号 双工作面。
-  const [mode, setMode] = useState<'reading' | 'activate'>('reading');
+  const [mode, setMode] = useState<'reading' | 'activate' | 'report'>('reading');
   const [plans, setPlans] = useState<PlanRow[]>([]);
   const [planId, setPlanId] = useState<string>();
   const [items, setItems] = useState<PlanItem[]>([]);
@@ -611,18 +611,20 @@ export default function MobileReading() {
         </Space>
       </div>
 
-      {/* 1028v2 立户上号（H5）：抄表/上号 双工作面切换 */}
+      {/* R8 三模块：抄表作业 / 问题上报 / 装表上户 */}
       <Segmented
         block
         size="large"
         style={{ margin: '4px 0 10px' }}
         value={mode}
-        onChange={(v) => setMode(v as 'reading' | 'activate')}
+        onChange={(v) => setMode(v as 'reading' | 'activate' | 'report')}
         options={[
           { value: 'reading', label: '抄表作业' },
+          { value: 'report', label: '问题上报' },
           { value: 'activate', label: '装表上户' },
         ]}
       />
+      {mode === 'report' && <MobileReport />}
       {mode === 'activate' && <MobileActivate />}
       {mode === 'reading' && (
       <>
@@ -1225,5 +1227,70 @@ function FieldContactForm({
         </Button>
       </Form>
     </Space>
+  );
+}
+
+/** R8 独立「问题上报」模块：户号关联 + 类型 + 描述 + 照片 → 自动建表务工单。 */
+function MobileReport() {
+  const { message } = AntdApp.useApp();
+  const [form] = Form.useForm<{ accountNo: string; serviceType: string; desc?: string }>();
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    const v = await form.validateFields();
+    setBusy(true);
+    try {
+      // 户号 → waterAccountId（人读输入，后端按号解析）
+      const wa = await api.get<{ id: string }[]>('/water-accounts', {
+        params: { accountNo: v.accountNo.trim(), take: 1 },
+      });
+      if (!wa.data.length) { message.error('户号不存在'); return; }
+      await api.post('/service-orders', {
+        waterAccountId: wa.data[0].id,
+        serviceType: v.serviceType,
+        reason: `[现场上报] ${v.desc ?? ''}`.trim(),
+        photoRef: photo ?? undefined,
+      });
+      message.success('问题已上报，已生成工单');
+      form.resetFields();
+      setPhoto(null);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card size="small" title="现场问题上报">
+      <Form form={form} layout="vertical">
+        <Form.Item name="accountNo" label="关联户号" rules={[{ required: true, message: '请输入户号' }]}>
+          <Input placeholder="输入用水户号" />
+        </Form.Item>
+        <Form.Item name="serviceType" label="问题类型" rules={[{ required: true, message: '请选择类型' }]}>
+          <Select options={[
+            { value: 'FAULT', label: '水表故障/损坏' },
+            { value: 'REPLACE', label: '需换表' },
+            { value: 'VIOLATION', label: '疑似违章用水' },
+            { value: 'OTHER', label: '其他现场问题' },
+          ]} />
+        </Form.Item>
+        <Form.Item name="desc" label="问题描述">
+          <Input.TextArea rows={3} placeholder="描述现场情况（位置、现象）" />
+        </Form.Item>
+        <Upload
+          accept="image/*" capture="environment" maxCount={1} showUploadList={false}
+          customRequest={async ({ file, onSuccess }) => {
+            try { setPhoto(await compressPhoto(file as File)); onSuccess?.({}); }
+            catch { message.error('照片处理失败'); }
+          }}
+        >
+          <Button block danger={!photo}>{photo ? '已拍照（点击重拍）' : '拍照留底'}</Button>
+        </Upload>
+        <Button type="primary" block size="large" style={{ marginTop: 12 }}
+          loading={busy} onClick={() => void submit()}>
+          提交上报
+        </Button>
+      </Form>
+    </Card>
   );
 }

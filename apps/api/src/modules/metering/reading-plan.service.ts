@@ -15,6 +15,10 @@ import {
   segmentCalendar,
   workdayIndex,
   collectModeOf,
+  bizDayStr,
+  parseBizDay,
+  addBizDays,
+  nextWorkday,
 } from '../../common/metering-model.js';
 import { orgInScope, type TenantCtx } from '../../common/tenant-context.js';
 import {
@@ -777,63 +781,103 @@ export class ReadingPlanService {
   }
 
   /**
-   * R5 自动生成次日计划：baseDate 的下一个工作日若是当月第 N 个抄表段，
-   * 为段号=N 的在用区段册生成次日计划（planDate=次日，幂等跳过已生成）。
+   * R5/A1 自动生成「下一个工作抄表日」计划：以 baseDate 的业务日为基准，
+   * 按租户工作日历找「下一个工作日」（周五晚→下周一、节前→节后，跨月
+   * 跨年正常）；该日若是当月第 N 个抄表段（≤ 可用段数）则对段号=N 的
+   * 在用区段册生成计划（planDate=该工作日），同册同期幂等跳过。
    * 「抄表员直管」区号册（segNo 空）在第 1 个工作日随段号 01 一并生成。
+   * 每次运行写 plan_gen_run（OK/SKIPPED/FAILED）支持补偿重试。
    */
   async autoGenerateForDate(ctx: TenantCtx, baseDate: Date) {
-    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      const y = baseDate.getFullYear();
-      const m = baseDate.getMonth();
-      const overrides = await calendarOverrides(
-        tx, ctx.tenantId, new Date(y, m - 1, 1), new Date(y, m + 2, 0),
-      );
-      const next = new Date(y, m, baseDate.getDate() + 1);
-      const idx = workdayIndex(next, overrides);
-      if (idx === null) return { segNo: null, planDate: null, generated: [] as string[] };
-      const period = `${next.getFullYear()}${String(next.getMonth() + 1).padStart(2, '0')}`;
-      const reserve = await monthEndReserveOf(tx, ctx.tenantId);
-      const segs = segmentCalendar(period, overrides, reserve);
-      if (idx > segs.length) {
-        return { segNo: null, planDate: next, generated: [] as string[] };
-      }
-      const segNo = segs[idx - 1].segNo;
-      // 段号册（segNo=N）+ 直管区号册（N=1 时 segNo 为空的一并生成）。
-      const books = await tx.readingBook.findMany({
-        where: {
-          tenantId: ctx.tenantId,
-          status: 'ACTIVE',
-          OR: idx === 1 ? [{ segNo }, { segNo: null }] : [{ segNo }],
-        },
-        select: { id: true, zoneNo: true, segNo: true },
-      });
-      const generated: string[] = [];
-      for (const b of books) {
-        if (isRemoteZone(b.zoneNo)) continue; // R4-2 远传不派人工计划
-        const exists = await tx.readingPlan.findFirst({
+    const runDay = bizDayStr(baseDate);
+    const runDate = parseBizDay(runDay);
+    try {
+      const r = await this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+        // 日历例外窗口覆盖前后各 45 天（跨月/跨年/长假）。
+        const overrides = await calendarOverrides(
+          tx,
+          ctx.tenantId,
+          parseBizDay(addBizDays(runDay, -45)),
+          parseBizDay(addBizDays(runDay, 45)),
+        );
+        // A1：取「下一个工作日」而非「明天」——周五/节假日顺延。
+        const next = nextWorkday(runDay, overrides);
+        if (!next) {
+          await this.logGenRun(tx, ctx, runDate, null, null, 'SKIPPED', 0, 'NO_NEXT_WORKDAY');
+          return { segNo: null, planDate: null, generated: [] as string[] };
+        }
+        const idx = workdayIndex(next, overrides)!;
+        const period = `${next.slice(0, 4)}${next.slice(5, 7)}`;
+        const reserve = await monthEndReserveOf(tx, ctx.tenantId);
+        const segs = segmentCalendar(period, overrides, reserve);
+        if (idx > segs.length) {
+          await this.logGenRun(tx, ctx, runDate, parseBizDay(next), null, 'SKIPPED', 0,
+            `IN_MONTH_END_RESERVE(idx=${idx})`);
+          return { segNo: null, planDate: next, generated: [] as string[] };
+        }
+        const segNo = segs[idx - 1].segNo;
+        const books = await tx.readingBook.findMany({
           where: {
             tenantId: ctx.tenantId,
-            bookId: b.id,
-            period,
-            status: { not: 'CLOSED' },
+            status: 'ACTIVE',
+            OR: idx === 1 ? [{ segNo }, { segNo: null }] : [{ segNo }],
           },
-          select: { id: true },
+          select: { id: true, zoneNo: true, segNo: true, orgUnitId: true },
         });
-        if (exists) continue; // 幂等：同册同期已生成跳过
-        try {
-          await this.generateTx(tx, ctx, {
-            bookId: b.id,
-            period,
-            planDate: next,
+        const generated: string[] = [];
+        for (const b of books) {
+          if (isRemoteZone(b.zoneNo)) continue; // R4-2 远传不派人工计划
+          // A5：scoped 操作员只能触达本组织子树的册（与 generate 同口径）。
+          if (!orgInScope(ctx, b.orgUnitId)) continue;
+          const exists = await tx.readingPlan.findFirst({
+            where: {
+              tenantId: ctx.tenantId,
+              bookId: b.id,
+              period,
+              status: { not: 'CLOSED' },
+            },
+            select: { id: true },
           });
-          generated.push(b.id);
-        } catch (e) {
-          // 空册/无到期户跳过（EMPTY_BOOK），其余错误上抛。
-          const code = (e as { response?: { code?: string } }).response?.code;
-          if (code !== 'EMPTY_BOOK') throw e;
+          if (exists) continue; // 幂等：同册同期已生成跳过
+          try {
+            await this.generateTx(tx, ctx, {
+              bookId: b.id,
+              period,
+              planDate: parseBizDay(next),
+            });
+            generated.push(b.id);
+          } catch (e) {
+            // 空册/无到期户跳过（EMPTY_BOOK），其余错误上抛记 FAILED。
+            const code = (e as { response?: { code?: string } }).response?.code;
+            if (code !== 'EMPTY_BOOK') throw e;
+          }
         }
-      }
-      return { segNo, planDate: next, generated };
+        await this.logGenRun(tx, ctx, runDate, parseBizDay(next), segNo, 'OK', generated.length);
+        return { segNo, planDate: parseBizDay(next), generated };
+      });
+      return r;
+    } catch (err) {
+      // 失败也落运行记录（尽力而为，不二次抛失败）+ 记日志重抛。
+      try {
+        await this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+          this.logGenRun(tx, ctx, runDate, null, null, 'FAILED', 0, String(err).slice(0, 500)));
+      } catch { /* 记录失败不阻断上抛 */ }
+      throw err;
+    }
+  }
+
+  private logGenRun(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    runDate: Date,
+    planDate: Date | null,
+    segNo: string | null,
+    status: string,
+    generated: number,
+    error?: string,
+  ) {
+    return tx.planGenRun.create({
+      data: { tenantId: ctx.tenantId, runDate, planDate, segNo, status, generated, error },
     });
   }
 
@@ -966,8 +1010,14 @@ export class ReadingPlanService {
   }
 
   /**
-   * R15 人工调序：orderedItemIds 给全量计划项的新顺序——计划项 seqNo
-   * 重排，同时把顺序写回用户级 routeKey（同一区号下跨频次稳定）。
+   * R15/A2 人工调序：orderedItemIds 给全量计划项的新顺序——
+   * 1) 校验：计划须 OPEN/IN_PROGRESS（DONE/CLOSED 历史快照禁改）、
+   *    ID 数量一致、无重复、全部属于本计划；
+   * 2) seq_no 两阶段重排：先整体置负避开 UNIQUE(plan_id,seq_no) 冲突，
+   *    再写新序号——并发调序不会中途撞键；
+   * 3) routeKey 保序：把「计划项户集合」既有 routeKey 排序后按新顺序
+   *    原样重贴（同键集合、不新增键值）——跨频次未参与本计划的户键值
+   *    不动，稳定排序不被破坏；无键户从最大键后 +1000 续排。
    */
   async reorderTx(
     tx: Prisma.TransactionClient,
@@ -976,18 +1026,33 @@ export class ReadingPlanService {
     orderedItemIds: string[],
     req: Request,
   ) {
-    const plan = await tx.readingPlan.findFirst({
-      where: { tenantId: ctx.tenantId, id: planId },
-      select: { id: true, bookId: true, status: true },
-    });
-    if (!plan) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
-    await this.assertPlanBookInScope(tx, ctx, plan.bookId);
+    // 锁计划行：并发调序串行化（A2 多用户并发不产生错乱）。
+    const locked = await tx.$queryRaw<{ id: string; book_id: string; status: string }[]>`
+      SELECT id, book_id, status FROM reading_plan
+      WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${planId}::uuid
+      FOR UPDATE`;
+    if (locked.length === 0) throw new NotFoundException({ code: 'PLAN_NOT_FOUND' });
+    const plan = locked[0];
+    if (plan.status === 'DONE' || plan.status === 'CLOSED') {
+      throw new ConflictException({
+        code: 'PLAN_NOT_REORDERABLE',
+        status: plan.status,
+      });
+    }
+    await this.assertPlanBookInScope(tx, ctx, plan.book_id);
     const items = await tx.readingPlanItem.findMany({
       where: { tenantId: ctx.tenantId, planId },
       select: { id: true, waterAccountId: true },
     });
     if (items.length !== orderedItemIds.length) {
-      throw new BadRequestException({ code: 'REORDER_ITEMS_MISMATCH' });
+      throw new BadRequestException({
+        code: 'REORDER_ITEMS_MISMATCH',
+        expected: items.length,
+        got: orderedItemIds.length,
+      });
+    }
+    if (new Set(orderedItemIds).size !== orderedItemIds.length) {
+      throw new BadRequestException({ code: 'REORDER_ITEMS_DUPLICATED' });
     }
     const itemById = new Map(items.map((i) => [i.id, i]));
     for (const iid of orderedItemIds) {
@@ -996,17 +1061,46 @@ export class ReadingPlanService {
       }
     }
     req.auditBefore = items;
+    // 阶段一：seq_no 整体置负，避开 UNIQUE 键逐行更新冲突。
+    await tx.readingPlanItem.updateMany({
+      where: { tenantId: ctx.tenantId, planId },
+      data: { seqNo: { decrement: 1_000_000 } },
+    });
+    // 阶段二：按新顺序写回 1..n。
     for (let i = 0; i < orderedItemIds.length; i++) {
-      const item = itemById.get(orderedItemIds[i])!;
       await tx.readingPlanItem.update({
-        where: { id: item.id },
+        where: { id: orderedItemIds[i] },
         data: { seqNo: i + 1 },
       });
-      // routeKey 用稀疏键（步长 1000）便于后续插入取中点。
-      await tx.waterAccount.update({
-        where: { id: item.waterAccountId },
-        data: { routeKey: (i + 1) * 1000, updatedBy: ctx.staffId },
-      });
+    }
+    // routeKey 保序：取本计划户集合现有键排序 → 按新顺序原样重贴；
+    // 缺口位置从最大键 +1000 续排（不在本计划的户键值不动）。
+    const accounts = await tx.waterAccount.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        id: { in: items.map((i) => i.waterAccountId) },
+      },
+      select: { id: true, routeKey: true },
+    });
+    const keyById = new Map(accounts.map((a) => [a.id, a.routeKey]));
+    const sortedKeys = accounts
+      .map((a) => a.routeKey)
+      .filter((k): k is Prisma.Decimal => k !== null)
+      .map(Number)
+      .sort((x, y) => x - y);
+    const maxKey = sortedKeys[sortedKeys.length - 1] ?? 0;
+    for (let i = 0; i < orderedItemIds.length; i++) {
+      const waId = itemById.get(orderedItemIds[i])!.waterAccountId;
+      const newKey =
+        i < sortedKeys.length
+          ? sortedKeys[i]
+          : maxKey + 1000 * (i - sortedKeys.length + 1);
+      if (Number(keyById.get(waId) ?? NaN) !== newKey) {
+        await tx.waterAccount.update({
+          where: { id: waId },
+          data: { routeKey: newKey, updatedBy: ctx.staffId },
+        });
+      }
     }
     return tx.readingPlanItem.findMany({
       where: { tenantId: ctx.tenantId, planId },

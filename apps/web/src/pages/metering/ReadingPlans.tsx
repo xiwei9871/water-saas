@@ -710,6 +710,41 @@ export default function ReadingPlans() {
     ? detailProgress.PENDING + detailProgress.NO_READ
     : 0;
 
+  // ---- R15 人工调序：上移/下移，保存后写回 routeKey 持久顺序 ----
+  const [reorderOpen, setReorderOpen] = useState(false);
+  const [reorderList, setReorderList] = useState<ReadingPlanItem[]>([]);
+  const [reorderSaving, setReorderSaving] = useState(false);
+  const openReorder = () => {
+    setReorderList([...(detail?.items ?? [])]);
+    setReorderOpen(true);
+  };
+  const move = (idx: number, dir: -1 | 1) => {
+    setReorderList((l) => {
+      const next = [...l];
+      const j = idx + dir;
+      if (j < 0 || j >= next.length) return l;
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
+  };
+  const saveReorder = async () => {
+    if (!detail) return;
+    setReorderSaving(true);
+    try {
+      await api.post(`/reading-plans/${detail.id}/reorder`, {
+        orderedItemIds: reorderList.map((i) => i.id),
+      });
+      message.success('顺序已保存');
+      setReorderOpen(false);
+      void load();
+      await loadDetail(detail.id);
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setReorderSaving(false);
+    }
+  };
+
   return (
     <Card
       title="抄表计划"
@@ -897,6 +932,9 @@ export default function ReadingPlans() {
                     批量录入（剩余 {pendingCount}）
                   </Button>
                 )}
+              {canWrite && WRITABLE_PLAN.includes(detail.status) && detail.items.length > 1 && (
+                <Button onClick={openReorder}>调序</Button>
+              )}
               <Button
                 icon={<ReloadOutlined />}
                 onClick={() => void loadDetail(detail.id)}
@@ -915,6 +953,39 @@ export default function ReadingPlans() {
           </>
         )}
       </Drawer>
+
+      {/* R15 人工调序（上移/下移）——保存写回 routeKey */}
+      <Modal
+        maskClosable={false}
+        title="调整抄表顺序（保存后按 routeKey 持久）"
+        open={reorderOpen}
+        onOk={() => void saveReorder()}
+        onCancel={() => setReorderOpen(false)}
+        confirmLoading={reorderSaving}
+        width={560}
+        destroyOnHidden
+      >
+        <Table<ReadingPlanItem>
+          rowKey="id"
+          size="small"
+          pagination={false}
+          scroll={{ y: 400 }}
+          dataSource={reorderList}
+          columns={[
+            { title: '#', key: 'idx', width: 50, render: (_v, _r, i) => i + 1 },
+            { title: '用水户', key: 'wa', ellipsis: true, render: (_v, item) => accountLabel(item) },
+            {
+              title: '操作', key: 'op', width: 110,
+              render: (_v, _item, i) => (
+                <Space size={4}>
+                  <Button size="small" disabled={i === 0} onClick={() => move(i, -1)}>上移</Button>
+                  <Button size="small" disabled={i === reorderList.length - 1} onClick={() => move(i, 1)}>下移</Button>
+                </Space>
+              ),
+            },
+          ]}
+        />
+      </Modal>
 
       {/* 单条抄表录入 */}
       <Modal maskClosable={false}

@@ -2335,3 +2335,25 @@ model RoutePattern {
   @@index([tenantId, zoneNo])
   @@map("route_pattern")
 }
+
+/**
+ * R5 自动抄表计划生成运行记录：每次 cron/手动触发生成一行，
+ * 记录评估基准日、命中的下一个工作日/段号、生成数、失败原因——
+ * 支持补偿重试与审计（OK/SKIPPED/FAILED）。
+ */
+model PlanGenRun {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  /** 评估基准日（cron 运行当天的业务日）。 */
+  runDate    DateTime  @map("run_date") @db.Date
+  /** 命中的下一个工作日（抄表日）；无则空。 */
+  planDate   DateTime? @map("plan_date") @db.Date
+  segNo      String?   @map("seg_no")
+  status     String    @default("OK")
+  generated  Int       @default(0)
+  error      String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([tenantId, runDate])
+  @@map("plan_gen_run")
+}

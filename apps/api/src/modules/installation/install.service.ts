@@ -37,6 +37,9 @@ export interface CreateApplyBody {
   certType?: string;
   certNo?: string;
   certPhoto?: unknown;
+  /** R11：申请水表数量（1–9999）与口径明细 [{caliber, qty}]（合计须=数量）。 */
+  meterQty?: number;
+  caliberDetails?: { caliber: string; qty: number }[];
 }
 
 @Injectable()
@@ -51,6 +54,25 @@ export class InstallService {
     const applyNo = await this.seq.nextFormatted(tx, ctx.tenantId, 'install_apply', 'BZ', ctx.staffId);
     // 受理即生成供用水合同号（2.2 要素：合同号在受理环节产生）。
     const contractNo = await this.seq.nextFormatted(tx, ctx.tenantId, 'install_contract', 'HT', ctx.staffId);
+    // R11：数量/口径明细校验（申报口径合计须等于申请数量）。
+    if (body.meterQty !== undefined) {
+      const q = Number(body.meterQty);
+      if (!Number.isInteger(q) || q < 1 || q > 9999) {
+        throw new BadRequestException({ code: 'METER_QTY_INVALID', value: body.meterQty });
+      }
+    }
+    const details = (body.caliberDetails ?? []).filter((d) => d && d.qty > 0);
+    if (details.length) {
+      const sum = details.reduce((s, d) => s + Math.floor(d.qty), 0);
+      if (body.meterQty !== undefined && sum !== Number(body.meterQty)) {
+        throw new BadRequestException({ code: 'CALIBER_DETAILS_MISMATCH', sum, meterQty: body.meterQty });
+      }
+      for (const d of details) {
+        if (!Number.isInteger(d.qty) || d.qty < 1) {
+          throw new BadRequestException({ code: 'CALIBER_DETAILS_INVALID', detail: d });
+        }
+      }
+    }
     const app = await tx.installApplication.create({
       data: {
         tenantId: ctx.tenantId,
@@ -69,6 +91,8 @@ export class InstallService {
           ? body.certPhoto.slice(0, 3).map((x) => String(x).slice(0, 800_000))
           : undefined,
         orgUnitId: body.orgUnitId ?? null,
+        meterQty: body.meterQty ?? null,
+        caliberDetails: details.length ? (details as unknown as Prisma.InputJsonValue) : undefined,
         createdBy: ctx.staffId,
         updatedBy: ctx.staffId,
       },
