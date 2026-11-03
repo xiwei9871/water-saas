@@ -16,6 +16,7 @@ export const ROUTE_PATTERN_SELECT = {
   zoneNo: true,
   name: true,
   isDefault: true,
+  entries: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.RoutePatternSelect;
