@@ -41,6 +41,10 @@ interface Apply {
   installMeterNo?: string | null;
   installCaliber?: string | null;
   installCompletedAt?: string | null;
+  /** R11：申请水表数量与口径明细 + 已填报安装明细。 */
+  meterQty?: number | null;
+  caliberDetails?: { caliber: string; qty: number }[] | null;
+  installMeters?: { meterNo: string; caliber?: string | null }[] | null;
   feeRequired?: string | null;
   feeReceived?: string | null;
   feeNote?: string | null;
@@ -53,6 +57,20 @@ interface Apply {
   waterAccountNo?: string | null;
   createdAt: string;
 }
+
+/** R11 口径明细文本解析："DN15×2, DN20×1" → [{caliber,qty}]；非法返回 null。 */
+const parseCaliberDetails = (text?: string): { caliber: string; qty: number }[] | null => {
+  if (!text?.trim()) return null;
+  const out: { caliber: string; qty: number }[] = [];
+  for (const part of text.split(/[,，、]/)) {
+    const m = part.trim().match(/^(.+?)[×xX*](\d+)$/);
+    if (!m) return null;
+    const qty = parseInt(m[2], 10);
+    if (!qty || qty < 1 || !m[1].trim()) return null;
+    out.push({ caliber: m[1].trim(), qty });
+  }
+  return out.length ? out : null;
+};
 
 const STATUS_LABELS: Record<ApplyStatus, string> = {
   SUBMITTED: '已提交', SURVEYED: '已勘察', APPROVED: '已审批',
@@ -152,8 +170,22 @@ export default function InstallApplications() {
 
   const create = async () => {
     const v = await form.validateFields();
+    // R11：口径明细文本解析 "DN15×2, DN20×1"（×/* 均可），
+    // 合计须等于申请数量，否则明确中文报错不提交。
+    const details = parseCaliberDetails(v.caliberDetailsText);
+    if (v.caliberDetailsText && !details) {
+      message.error('口径明细格式有误，请按「DN15×2, DN20×1」填写');
+      return;
+    }
+    if (details && v.meterQty && details.reduce((s, d) => s + d.qty, 0) !== v.meterQty) {
+      message.error(`口径明细合计 ${details.reduce((s, d) => s + d.qty, 0)} 与申请数量 ${v.meterQty} 不一致`);
+      return;
+    }
     try {
-      await api.post('/install/applications', { ...v, certPhoto: certPhotos });
+      await api.post('/install/applications', {
+        ...v, certPhoto: certPhotos,
+        caliberDetails: details ?? undefined,
+      });
       message.success('申请已提交，审批任务已生成');
       setCreateOpen(false);
       setCertPhotos([]);
@@ -197,6 +229,39 @@ export default function InstallApplications() {
     }
   };
 
+  // R12 安装水表填报（安装完成后、放号前必填）
+  const [imFor, setImFor] = useState<Apply | null>(null);
+  const [imText, setImText] = useState('');
+  const [imSaving, setImSaving] = useState(false);
+  const openInstallMeters = (app: Apply) => {
+    setImFor(app);
+    setImText(Array.isArray(app.installMeters)
+      ? app.installMeters.map((m) => m.caliber ? `${m.meterNo}·${m.caliber}` : m.meterNo).join('\n')
+      : '');
+  };
+  const saveInstallMeters = async () => {
+    if (!imFor) return;
+    const lines = imText.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (!lines.length) { message.error('请填写水表清单（每行一个表号，可附口径如 M001·DN15）'); return; }
+    const meters = lines.map((line) => {
+      const [meterNo, caliber] = line.split(/[·,，\s]+/);
+      return { meterNo: meterNo?.trim(), caliber: caliber?.trim() || undefined };
+    });
+    if (meters.some((m) => !m.meterNo)) { message.error('每行须为「表号」或「表号·口径」'); return; }
+    setImSaving(true);
+    try {
+      const res = await api.post<Apply>(`/install/applications/${imFor.id}/install-meters`, { meters });
+      message.success(`已填报 ${meters.length} 只水表，可进入放号`);
+      setImFor(null);
+      void load();
+      setDetail((d) => (d && res.data ? { ...d, ...res.data } : d));
+    } catch (err) {
+      message.error(apiErrorText(err));
+    } finally {
+      setImSaving(false);
+    }
+  };
+
   const nav = useNavigate();
   const [contractNoDraft, setContractNoDraft] = useState('');
   const [contractSaving, setContractSaving] = useState(false);
@@ -230,8 +295,17 @@ export default function InstallApplications() {
     caliber?: string;
     readerId: string;
     segNo?: string;
+    zoneNo?: string;
+    cadence?: string;
+    caliberDetailsText?: string;
     archiveStart?: string;
   }>();
+  const [zoneOptions, setZoneOptions] = useState<{ value: string; label: string; readerId?: string | null }[]>([]);
+  useEffect(() => {
+    api.get<{ zoneNo: string; readerId: string | null; readerName: string | null; isRemote: boolean; label: string }[]>('/reading-zones/options')
+      .then((r) => setZoneOptions(r.data.map((z) => ({ value: z.zoneNo, label: z.label, readerId: z.readerId }))))
+      .catch(() => undefined);
+  }, []);
   const [allocSaving, setAllocSaving] = useState(false);
   const [allocResult, setAllocResult] = useState<{
     applyNo: string;
@@ -241,9 +315,13 @@ export default function InstallApplications() {
 
   const openAlloc = (app: Apply) => {
     allocForm.setFieldsValue({
-      meterQty: 1,
+      meterQty: app.meterQty ?? 1,
       caliber: app.installCaliber ?? app.caliberReq ?? undefined,
       segNo: '01',
+      cadence: 'MONTHLY',
+      caliberDetailsText: Array.isArray(app.caliberDetails)
+        ? app.caliberDetails.map((d: { caliber: string; qty: number }) => `${d.caliber}×${d.qty}`).join(', ')
+        : undefined,
       readerId: undefined,
       archiveStart: undefined,
     });
@@ -259,6 +337,15 @@ export default function InstallApplications() {
       return;
     }
     if (!allocFor) return;
+    const details = parseCaliberDetails(values.caliberDetailsText);
+    if (values.caliberDetailsText && !details) {
+      message.error('口径明细格式有误，请按「DN15×2, DN20×1」填写');
+      return;
+    }
+    if (details && details.reduce((s, d) => s + d.qty, 0) !== values.meterQty) {
+      message.error(`口径明细合计 ${details.reduce((s, d) => s + d.qty, 0)} 与放号数量 ${values.meterQty} 不一致`);
+      return;
+    }
     setAllocSaving(true);
     try {
       const res = await api.post<{
@@ -273,6 +360,9 @@ export default function InstallApplications() {
           caliber: values.caliber,
           readerId: values.readerId,
           segNo: values.segNo,
+          zoneNo: values.zoneNo,
+          cadence: values.cadence,
+          caliberDetails: details ?? undefined,
           archiveStart: values.archiveStart,
         }),
         { headers: { 'Idempotency-Key': newIdemKey() } },
@@ -349,6 +439,11 @@ export default function InstallApplications() {
                 {a.label}
               </Button>
             ))}
+          {canWrite && r.status === 'INSTALLING' && (
+            <Button size="small" onClick={() => openInstallMeters(r)}>
+              {r.installCompletedAt ? `水表 ${r.installMeters?.length ?? 0} 只` : '填报水表'}
+            </Button>
+          )}
           {canWrite && r.status === 'INSTALLING' && (
             <Button size="small" type="primary" onClick={() => openAlloc(r)}>放号</Button>
           )}
@@ -470,7 +565,13 @@ export default function InstallApplications() {
             <Form.Item name="usageCategory" label="用水性质" rules={[{ required: true }]}>
               <Select style={{ width: 160 }} options={USAGE_CATEGORY_OPTIONS} />
             </Form.Item>
-            <Form.Item name="caliberReq" label="申请口径">
+            <Form.Item name="meterQty" label="申请水表数量" extra="1–9999，放号不得超过此数量">
+            <InputNumber min={1} max={9999} precision={0} style={{ width: '100%' }} placeholder="如 152" />
+          </Form.Item>
+          <Form.Item name="caliberDetailsText" label="多口径明细" extra="格式：DN15×100, DN20×50, DN100×2；合计须等于申请数量">
+            <Input placeholder="DN15×100, DN20×50" />
+          </Form.Item>
+          <Form.Item name="caliberReq" label="申请口径">
               <Select allowClear style={{ width: 140 }} options={['DN15', 'DN20', 'DN25', 'DN40', 'DN50', 'DN100'].map((v) => ({ value: v, label: v }))} />
             </Form.Item>
           </Space>
@@ -696,9 +797,12 @@ export default function InstallApplications() {
               name="meterQty"
               label="放号数量（表户数）"
               rules={[{ required: true, message: '请输入数量' }]}
-              extra="同一申请可放 1–50 户（如一户多表/分户）"
+              extra="1–9999；不得超过申请数量与已填报安装水表数"
             >
-              <InputNumber min={1} max={50} style={{ width: '100%' }} />
+              <InputNumber min={1} max={9999} precision={0} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="caliberDetailsText" label="多口径明细" extra="格式 DN15×100, DN20×50；合计须等于放号数量">
+              <Input placeholder="DN15×100, DN20×50" />
             </Form.Item>
             <Form.Item name="readerId" label="指派抄表员（上号任务执行人）" rules={[{ required: true, message: '请选择抄表员' }]}>
               <StaffSelect placeholder="选择上号任务执行人" />
@@ -707,8 +811,20 @@ export default function InstallApplications() {
               <Form.Item name="caliber" label="表计口径" style={{ width: 160 }}>
                 <Input placeholder="DN15" />
               </Form.Item>
-              <Form.Item name="segNo" label="抄表日段号(01–31)" style={{ width: 160 }}>
+              <Form.Item name="zoneNo" label="区号" style={{ width: 180 }}>
+                <Select allowClear showSearch optionFilterProp="label" options={zoneOptions}
+                  placeholder="选区号" />
+              </Form.Item>
+              <Form.Item name="segNo" label="抄表段号(01–16)" style={{ width: 150 }}>
                 <Input placeholder="01" maxLength={2} />
+              </Form.Item>
+              <Form.Item name="cadence" label="抄表频次" style={{ width: 130 }}>
+                <Select options={[
+                  { value: 'MONTHLY', label: '每月' },
+                  { value: 'ODD_MONTH', label: '单月' },
+                  { value: 'EVEN_MONTH', label: '双月' },
+                  { value: 'QUARTERLY', label: '季度' },
+                ]} />
               </Form.Item>
               <Form.Item name="archiveStart" label="起始档案号（选填）" style={{ width: 200 }}>
                 <Input placeholder="缺省自动续号" />
@@ -735,6 +851,28 @@ export default function InstallApplications() {
             </Space>
           </>
         )}
+      </Modal>
+
+      {/* R12 安装水表填报：安装完成后、放号前必须填报水表明细 */}
+      <Modal
+        title={`填报安装水表 — ${imFor?.applyNo ?? ''}`}
+        open={!!imFor}
+        onOk={() => void saveInstallMeters()}
+        onCancel={() => setImFor(null)}
+        confirmLoading={imSaving}
+        okText="保存填报"
+        destroyOnHidden
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          每行一只水表：表号 或 表号·口径（如 M202601·DN15）。填报完成后才允许放号；
+          选表号时自动带入库存表口径并核对一致。
+        </Typography.Paragraph>
+        <Input.TextArea
+          rows={8}
+          value={imText}
+          onChange={(e) => setImText(e.target.value)}
+          placeholder={'M202600001·DN15\nM202600002·DN20'}
+        />
       </Modal>
     </Card>
   );

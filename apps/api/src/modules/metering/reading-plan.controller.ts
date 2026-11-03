@@ -194,13 +194,22 @@ export class ReadingPlanController {
   }
 
   /**
-   * POST /reading-plans/auto-generate — R5 手动兜底入口：为「明日」对应的
-   * 抄表段生成计划（与 18–24 点定时任务同一逻辑，幂等）。
+   * POST /reading-plans/auto-generate — R5/A1 手动兜底+补偿重试入口：
+   * 与 18–24 点定时任务同一业务逻辑；可传 baseDate=YYYY-MM-DD 指定
+   * 评估基准日（默认今天业务日），幂等。
    */
   @Post('auto-generate')
   @Permissions('metering:write')
-  autoGenerate() {
-    return this.svc.autoGenerateForDate(currentTenant(), new Date());
+  autoGenerate(@Body() body?: { baseDate?: unknown }) {
+    let base = new Date();
+    if (body?.baseDate !== undefined) {
+      const s = typeof body.baseDate === 'string' ? body.baseDate.trim() : '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        throw new BadRequestException({ code: 'BASE_DATE_INVALID', value: body.baseDate });
+      }
+      base = new Date(`${s}T12:00:00.000Z`); // 正午 UTC 取业务日，免边界偏移
+    }
+    return this.svc.autoGenerateForDate(currentTenant(), base);
   }
 
   /**

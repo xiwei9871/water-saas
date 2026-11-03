@@ -10,6 +10,7 @@ import { TenantCtx, orgInScope } from '../../common/tenant-context.js';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import { SequenceService } from '../../common/sequence.service.js';
 import { TaskService } from '../task/task.service.js';
+import { WaterAccountService } from '../customer/water-account.service.js';
 
 /**
  * 1028v2 报装「放号 → 现场上号 → 信息补录」三段流（B1~B4 / C1~C4）。
@@ -65,6 +66,7 @@ export class AllocationService {
     private readonly prisma: TenantPrismaService,
     private readonly seq: SequenceService,
     private readonly tasks: TaskService,
+    private readonly accounts: WaterAccountService,
   ) {}
 
   /** 预占主体（find-or-create）：customer.systemKey=PENDING_ONBOARD +
@@ -187,7 +189,30 @@ export class AllocationService {
           message: '须先填报水表安装信息（安装完成后、放号前）',
         });
       }
-      const qty = Math.max(1, Math.min(9999, Math.floor(input.meterQty || 1)));
+      // A4：meterQty 必须为 1–9999 整数——越界/非整数明确报错，禁止静默截断。
+      const qty = Number(input.meterQty);
+      if (!Number.isInteger(qty) || qty < 1 || qty > 9999) {
+        throw new BadRequestException({
+          code: 'METER_QTY_INVALID',
+          message: '放号数量必须是 1–9999 的整数',
+          value: input.meterQty,
+        });
+      }
+      // A4：不得超过申请批准数量（meterQty）与已填报安装明细数。
+      if (app.meterQty != null && qty > app.meterQty) {
+        throw new ConflictException({
+          code: 'QTY_EXCEEDS_APPROVED',
+          approved: app.meterQty,
+          requested: qty,
+        });
+      }
+      if (installMeters.length > 0 && qty > installMeters.length) {
+        throw new ConflictException({
+          code: 'QTY_EXCEEDS_INSTALLED',
+          installed: installMeters.length,
+          requested: qty,
+        });
+      }
       const reader = await tx.staff.findFirst({
         where: { tenantId: ctx.tenantId, id: input.readerId, status: 'ACTIVE' },
         select: { id: true, name: true, orgUnitId: true },
@@ -342,6 +367,7 @@ export class AllocationService {
         where: { tenantId: ctx.tenantId, id: { in: input.accountIds } },
         data: {
           status: 'RETURNED',
+          billable: false,
           returnedAt: now,
           returnReason: reason,
           updatedBy: ctx.staffId,
@@ -586,6 +612,12 @@ export class AllocationService {
             updatedBy: ctx.staffId,
           },
         });
+        // A3 区段一致性：与 updateTx 同一不变式——区段变更须同步册成员。
+        const synced = await tx.waterAccount.findUniqueOrThrow({
+          where: { id: wa.id },
+          select: { zoneNo: true, segNo: true },
+        });
+        await this.accounts.syncZoneBook(tx, ctx, wa.id, synced.zoneNo, synced.segNo);
       }
       // 补录人数（可选）→ household_profile 当期生效档案。
       if (input.householdSize !== undefined && input.householdSize !== null) {

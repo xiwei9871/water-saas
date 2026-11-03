@@ -21,6 +21,9 @@ import {
   COLLECT_MODE_LABELS,
   PARAM_COLLECT_MODE,
   PARAM_MONTH_END_RESERVE,
+  parseBizDay,
+  bizDayStr,
+  daysInMonth,
 } from '../../common/metering-model.js';
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -41,12 +44,15 @@ export class TenantCalendarController {
     const ctx = currentTenant();
     const p = period && PERIOD_RE.test(period)
       ? period
-      : `${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+      : bizDayStr(new Date()).slice(0, 7).replace('-', '');
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      const y = parseInt(p.slice(0, 4), 10);
-      const m = parseInt(p.slice(4), 10) - 1;
       const [overrides, reserve, mode] = await Promise.all([
-        calendarOverrides(tx, ctx.tenantId, new Date(y, m, 1), new Date(y, m + 1, 0)),
+        calendarOverrides(
+          tx,
+          ctx.tenantId,
+          parseBizDay(`${p.slice(0, 4)}-${p.slice(4)}-01`),
+          parseBizDay(`${p.slice(0, 4)}-${p.slice(4)}-${String(daysInMonth(p)).padStart(2, '0')}`),
+        ),
         monthEndReserveOf(tx, ctx.tenantId),
         collectModeOf(tx, ctx.tenantId),
       ]);

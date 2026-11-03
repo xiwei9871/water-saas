@@ -1,19 +1,21 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { TenantPrismaService } from '../../common/tenant-prisma.js';
 import type { TenantCtx } from '../../common/tenant-context.js';
+import { bizDayStr } from '../../common/metering-model.js';
 import { ReadingPlanService } from './reading-plan.service.js';
 
 const SYSTEM_STAFF = '00000000-0000-0000-0000-000000000000';
 
 /**
- * R5 抄表前一工作日 18:00–24:00 自动生成次日计划。
- * 每个抄表日前一晚整点扫描：次日若是当月第 N 个抄表段工作日，
- * 为段号=N 的在用区段册生成次日计划（幂等，已生成跳过）。
- * 多租户范围由 CRON_TENANT_IDS 声明（与检定扫描同口径）。
+ * R5/A1 抄表「下一工作日」计划自动生成：每个工作日 18:00–23:00 整点
+ * 扫描——以当前业务日为基准找下一个工作抄表日，命中段号 N 则对
+ * 段号=N 的区段册生成计划（幂等）。每次运行写 plan_gen_run（含失败
+ * 原因）支持补偿重试；多租户范围由 CRON_TENANT_IDS 声明，未配置
+ * 启动即告警且每次扫描记 WARN（不产生任何生成动作）。
  */
 @Injectable()
-export class ReadingPlanCron {
+export class ReadingPlanCron implements OnModuleInit {
   private readonly logger = new Logger(ReadingPlanCron.name);
 
   constructor(
@@ -21,12 +23,29 @@ export class ReadingPlanCron {
     private readonly plans: ReadingPlanService,
   ) {}
 
-  @Cron('0 0 18-23 * * *', { timeZone: 'Asia/Shanghai' })
-  async generateNextDayPlans(): Promise<void> {
-    const ids = (process.env.CRON_TENANT_IDS ?? '')
+  onModuleInit() {
+    if (this.tenantIds().length === 0) {
+      this.logger.warn(
+        'CRON_TENANT_IDS 未配置——自动生成抄表计划 cron 不会为任何租户执行',
+      );
+    }
+  }
+
+  private tenantIds(): string[] {
+    return (process.env.CRON_TENANT_IDS ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+  }
+
+  @Cron('0 0 18-23 * * *', { timeZone: 'Asia/Shanghai' })
+  async generateNextDayPlans(): Promise<void> {
+    const ids = this.tenantIds();
+    if (ids.length === 0) {
+      this.logger.warn('auto-plan skipped: CRON_TENANT_IDS empty');
+      return;
+    }
+    const runDay = bizDayStr(new Date());
     for (const tenantId of ids) {
       const ctx: TenantCtx = {
         tenantId,
@@ -38,11 +57,14 @@ export class ReadingPlanCron {
         const r = await this.plans.autoGenerateForDate(ctx, new Date());
         if (r.generated.length) {
           this.logger.log(
-            `auto-plan tenant=${tenantId} seg=${r.segNo} generated=${r.generated.length}`,
+            `auto-plan tenant=${tenantId} runDay=${runDay} seg=${r.segNo} generated=${r.generated.length}`,
           );
         }
       } catch (err) {
-        this.logger.error(`auto-plan tenant=${tenantId} failed: ${String(err)}`);
+        // 失败详情已落 plan_gen_run(status=FAILED)，此处告警便于运维补偿重试。
+        this.logger.error(
+          `auto-plan tenant=${tenantId} runDay=${runDay} failed: ${String(err)}`,
+        );
       }
     }
   }

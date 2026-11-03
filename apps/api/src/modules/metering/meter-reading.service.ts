@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -187,6 +188,8 @@ export interface RowError {
  */
 @Injectable()
 export class MeterReadingService {
+  private readonly logger = new Logger(MeterReadingService.name);
+
   constructor(
     private readonly prisma: TenantPrismaService,
     private readonly tasks: TaskService,
@@ -919,8 +922,11 @@ export class MeterReadingService {
       if (input.resultType !== 'NO_READ') {
         try {
           await this.learnRouteKey(tx, ctx, plan.id, item);
-        } catch {
-          // 学习失败不阻断抄录。
+        } catch (e) {
+          // 学习失败不阻断抄录，但必须留痕（A2：禁止静默吞错）。
+          this.logger.warn(
+            `routeKey learn failed plan=${plan.id} item=${item.id} wa=${item.waterAccountId}: ${String(e)}`,
+          );
         }
       }
       // 任务书 T12：录入即检测「突增突减/读数倒挂」→ 自动建复核任务（metering:qc）。

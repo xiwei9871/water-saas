@@ -408,9 +408,13 @@ export class QueryService {
         JOIN customer c ON c.tenant_id = wa.tenant_id AND c.id = wa.customer_id
         JOIN settle_account sa ON sa.tenant_id = b.tenant_id AND sa.id = b.settle_account_id
         LEFT JOIN LATERAL (
+          -- 欠费按业务日口径：收款日（payment.received_at）而非系统入库
+          -- 时间（pa.created_at）；预存分摊无 payment 行时回落 pa.created_at。
           SELECT sum(pa.amount) AS paid FROM payment_alloc pa
+          LEFT JOIN payment p
+            ON p.tenant_id = pa.tenant_id AND p.id = pa.payment_id
           WHERE pa.tenant_id = b.tenant_id AND pa.bill_id = b.id
-            AND pa.created_at::date <= ${q.asOf}::date
+            AND COALESCE(p.received_at, pa.created_at)::date <= ${q.asOf}::date
         ) a ON true
         LEFT JOIN LATERAL (
           SELECT sum(w.amount) AS off_amount FROM bad_debt_writeoff w

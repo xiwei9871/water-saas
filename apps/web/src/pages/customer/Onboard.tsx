@@ -61,6 +61,10 @@ interface WizardValues {
   acctHouseholdSize?: number;
   acctReadingBookId?: string;
   acctContractNo?: string;
+  /** R13/R2：频次 + 区号/段号（区段管理模式段号必填）。 */
+  acctCadence?: string;
+  acctZoneNo?: string;
+  acctSegNo?: string;
   meterMode: MeterMode;
   meterId?: string;
   meterNo?: string;
@@ -127,6 +131,27 @@ export default function Onboard() {
   const meterMode = Form.useWatch('meterMode', form) ?? 'new';
   const usageCategory = Form.useWatch('acctUsageCategory', form);
   const isMonitoring = usageCategory === 'MONITORING';
+  // R2/R13：区号/段号/频次选项（区号带绑定抄表员；归集模式定段号必填性）。
+  const [zoneOptions, setZoneOptions] = useState<{ value: string; label: string }[]>([]);
+  const [collectMode, setCollectMode] = useState<'READER_DIRECT' | 'ZONE_SEGMENT'>('ZONE_SEGMENT');
+  useEffect(() => {
+    api.get<{ zoneNo: string; readerName: string | null; isRemote: boolean; label: string }[]>('/reading-zones/options')
+      .then((r) => setZoneOptions(r.data.map((z) => ({ value: z.zoneNo, label: z.label }))))
+      .catch(() => undefined);
+    api.get<{ collectMode: 'READER_DIRECT' | 'ZONE_SEGMENT' }>('/metering/calendar')
+      .then((r) => setCollectMode(r.data.collectMode ?? 'ZONE_SEGMENT'))
+      .catch(() => undefined);
+  }, []);
+  const segOptions = Array.from({ length: 16 }, (_, i) => ({
+    value: String(i + 1).padStart(2, '0'),
+    label: `段 ${String(i + 1).padStart(2, '0')}`,
+  }));
+  const CADENCE_OPTIONS = [
+    { value: 'MONTHLY', label: '每月' },
+    { value: 'ODD_MONTH', label: '单月' },
+    { value: 'EVEN_MONTH', label: '双月' },
+    { value: 'QUARTERLY', label: '季度' },
+  ];
 
   const visibleSteps = isCompleteMode
     ? CONTENT_STEPS.filter((s) => s.content !== 3)
@@ -405,6 +430,9 @@ export default function Onboard() {
         openedAt: values.acctOpenedAt?.format('YYYY-MM-DD'),
         contractNo: values.acctContractNo,
         householdSize: isMonitoring ? undefined : values.acctHouseholdSize,
+        cadence: values.acctCadence,
+        zoneNo: values.acctZoneNo,
+        segNo: values.acctSegNo,
       }),
       installation: cleanBody({
         initialReading: values.initialReading,
@@ -790,18 +818,38 @@ export default function Onboard() {
               <InputNumber min={1} max={99} precision={0} style={{ width: '100%' }} />
             </Form.Item>
           )}
+          {!isMonitoring && (
+            <Space wrap size={8} style={{ display: 'flex' }}>
+              <Form.Item name="acctZoneNo" label="区号（抄表员）" style={{ minWidth: 180 }}>
+                <Select
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  options={zoneOptions}
+                  placeholder="选择区号自动带出抄表员"
+                />
+              </Form.Item>
+              <Form.Item name="acctSegNo" label="段号" style={{ minWidth: 110 }}
+                extra={collectMode === 'ZONE_SEGMENT' ? '区段管理模式必填' : '直管模式可空'}>
+                <Select allowClear options={segOptions} placeholder="段" />
+              </Form.Item>
+              <Form.Item name="acctCadence" label="抄表频次" style={{ minWidth: 110 }} initialValue="MONTHLY">
+                <Select options={CADENCE_OPTIONS} />
+              </Form.Item>
+            </Space>
+          )}
           {!isMonitoring && bookOptions.length > 0 && (
             <Form.Item
               name="acctReadingBookId"
               label="所属抄表册（选填）"
-              extra="选定后立即入册；若该册本期已有在途抄表计划，将同步补录到该计划"
+              extra="选定后立即入册；新户自次月抄表计划归集（R10），当月计划不受影响"
             >
               <Select
                 allowClear
                 showSearch
                 optionFilterProp="label"
                 options={bookOptions}
-                placeholder="不入册可留空，稍后在抄表册管理中添加"
+                placeholder="不入册可留空，区号+段号会自动归入对应区段册"
               />
             </Form.Item>
           )}

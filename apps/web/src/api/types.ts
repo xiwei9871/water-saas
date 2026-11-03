@@ -251,6 +251,14 @@ export interface WaterAccount {
   assignReaderId?: string | null;
   pendingCaliber?: string | null;
   activatedAt?: string | null;
+  /** 1102 R13/R2/R15：频次/区号/段号/路线键/退号留痕。 */
+  cadence?: string;
+  anchorPeriod?: string | null;
+  zoneNo?: string | null;
+  segNo?: string | null;
+  routeKey?: number | null;
+  returnedAt?: string | null;
+  returnReason?: string | null;
   createdAt: string;
   updatedAt: string;
   customer: { id: string; customerNo: string; name: string; custType: CustType };

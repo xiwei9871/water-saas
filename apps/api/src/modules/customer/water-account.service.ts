@@ -609,13 +609,21 @@ export class WaterAccountService {
       select: { id: true, accountNo: true, zoneNo: true, segNo: true },
     });
     if (!wa) return;
+    // A3：区/段被清空或区段模式缺段号 → 旧册成员必须同步解除
+    // （已生成计划的 plan_item 是历史快照，不触碰）。
     if (!zoneNo) {
-      if (mode === 'ZONE_SEGMENT' && !wa.segNo) {
+      await tx.bookMeter.deleteMany({
+        where: { tenantId: ctx.tenantId, waterAccountId },
+      });
+      if (mode === 'ZONE_SEGMENT') {
         await this.ensureSegAssignTask(tx, ctx, waterAccountId, wa.accountNo);
       }
       return;
     }
     if (mode === 'ZONE_SEGMENT' && !effSeg) {
+      await tx.bookMeter.deleteMany({
+        where: { tenantId: ctx.tenantId, waterAccountId },
+      });
       await this.ensureSegAssignTask(tx, ctx, waterAccountId, wa.accountNo);
       return;
     }

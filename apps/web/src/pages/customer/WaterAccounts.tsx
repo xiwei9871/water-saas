@@ -88,6 +88,9 @@ interface CreateFormValues {
 interface EditFormValues {
   usageCategory: string;
   addr: string;
+  cadence?: string;
+  zoneNo?: string;
+  segNo?: string;
 }
 
 interface TransferFormValues {
@@ -139,7 +142,7 @@ type MeterModalState =
  * URL 参数：?accountNo= / ?customerId=（客户详情抽屉的“查看全部”入口）。
  */
 export default function WaterAccounts() {
-  const { message } = AntdApp.useApp();
+  const { message, modal: antdModal } = AntdApp.useApp();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('customer:write');
   const [searchParams] = useSearchParams();
@@ -167,6 +170,16 @@ export default function WaterAccounts() {
   const [pageSize, setPageSize] = useState(20);
 
   const [modal, setModal] = useState<ModalState>(null);
+  const [zoneOptions, setZoneOptions] = useState<{ value: string; label: string }[]>([]);
+  const segOptions = Array.from({ length: 16 }, (_, i) => ({
+    value: String(i + 1).padStart(2, '0'),
+    label: `段 ${String(i + 1).padStart(2, '0')}`,
+  }));
+  useEffect(() => {
+    api.get<{ label: string; zoneNo: string }[]>('/reading-zones/options')
+      .then((r) => setZoneOptions(r.data.map((z) => ({ value: z.zoneNo, label: z.label }))))
+      .catch(() => undefined);
+  }, []);
   const [idemKey, setIdemKey] = useState('');
   const [saving, setSaving] = useState(false);
   // E6：过户前预取原结算户的预存余额，用于“余额不迁移”警告。
@@ -435,7 +448,13 @@ export default function WaterAccounts() {
     try {
       await api.patch(
         `/water-accounts/${modal.account.id}`,
-        cleanBody({ usageCategory: values.usageCategory, addr: values.addr }),
+        cleanBody({
+          usageCategory: values.usageCategory,
+          addr: values.addr,
+          cadence: values.cadence,
+          zoneNo: values.zoneNo ?? null,
+          segNo: values.segNo ?? null,
+        }),
       );
       message.success('用水户已更新');
       setModal(null);
@@ -791,6 +810,36 @@ export default function WaterAccounts() {
                       上号
                     </Button>
                   )}
+                  {pending && (
+                    <Button
+                      size="small"
+                      danger
+                      onClick={() => {
+                        antdModal.confirm({
+                          title: `退号 ${record.archiveNo ?? record.accountNo}？`,
+                          content: '退回后将释放该档案号并取消上号任务；退号档案号不复用。',
+                          okText: '确认退号',
+                          okButtonProps: { danger: true },
+                          onOk: async () => {
+                            const reason = window.prompt('退号原因（必填）') ?? '';
+                            if (!reason.trim()) throw new Error('need reason');
+                            try {
+                              await api.post('/install/applications/deallocate', {
+                                accountIds: [record.id],
+                                reason: reason.trim(),
+                              });
+                              message.success('已退号');
+                              void load();
+                            } catch (err) {
+                              message.error(apiErrorText(err));
+                            }
+                          },
+                        });
+                      }}
+                    >
+                      退号
+                    </Button>
+                  )}
                   {completing && (
                     <Button
                       size="small"
@@ -808,6 +857,9 @@ export default function WaterAccounts() {
                         editForm.setFieldsValue({
                           usageCategory: record.usageCategory,
                           addr: record.addr,
+                          cadence: record.cadence ?? 'MONTHLY',
+                          zoneNo: record.zoneNo ?? undefined,
+                          segNo: record.segNo ?? undefined,
                         });
                         openModal({ kind: 'edit', account: record });
                       }}
@@ -1066,6 +1118,22 @@ export default function WaterAccounts() {
           >
             <Input />
           </Form.Item>
+          <Form.Item name="cadence" label="抄表频次" extra="户级频次，换表不丢失">
+            <Select options={[
+              { value: 'MONTHLY', label: '每月' },
+              { value: 'ODD_MONTH', label: '单月' },
+              { value: 'EVEN_MONTH', label: '双月' },
+              { value: 'QUARTERLY', label: '季度' },
+            ]} />
+          </Form.Item>
+          <Space wrap>
+            <Form.Item name="zoneNo" label="区号" style={{ minWidth: 180 }}>
+              <Select allowClear showSearch optionFilterProp="label" options={zoneOptions} placeholder="选区号" />
+            </Form.Item>
+            <Form.Item name="segNo" label="段号" style={{ minWidth: 110 }}>
+              <Select allowClear options={segOptions} placeholder="段" />
+            </Form.Item>
+          </Space>
         </Form>
       </Modal>
 
