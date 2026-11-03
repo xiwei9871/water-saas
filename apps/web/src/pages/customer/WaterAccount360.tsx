@@ -295,7 +295,7 @@ export function WaterAccount360({
             />
           )}
           <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="户号">
+            <Descriptions.Item label="用户档案号">
               {account?.accountNo}
             </Descriptions.Item>
             <Descriptions.Item label="状态">

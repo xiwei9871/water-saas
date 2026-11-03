@@ -29,8 +29,8 @@ const idemKey = () =>
 interface ActivateFormValues {
   meterNo: string;
   initialReading: string;
-  meterNoOk: boolean;
-  archiveNoOk: boolean;
+  accountNoOk: boolean;
+  caliberOk: boolean;
   addrOk: boolean;
   nameOk: boolean;
   serialNo?: string;
@@ -94,8 +94,8 @@ export default function MobileActivate() {
           meterNo: values.meterNo,
           initialReading: values.initialReading,
           review: {
-            meterNoOk: values.meterNoOk === true,
-            archiveNoOk: values.archiveNoOk === true,
+            accountNoOk: values.accountNoOk === true,
+            caliberOk: values.caliberOk === true,
             addrOk: values.addrOk === true,
             nameOk: values.nameOk === true,
           },
@@ -142,7 +142,7 @@ export default function MobileActivate() {
             style={{ marginBottom: 8 }}
             title={
               <Space size={6}>
-                <Typography.Text strong>{r.archiveNo ?? '—'}</Typography.Text>
+                <Typography.Text strong>{r.accountNo}</Typography.Text>
                 <Tag color="purple">待上号</Tag>
               </Space>
             }
@@ -153,7 +153,7 @@ export default function MobileActivate() {
             }
           >
             <div style={{ fontSize: 13, lineHeight: 1.8 }}>
-              <div>户号：{r.accountNo}</div>
+              
               <div>
                 <EnvironmentOutlined /> {r.addr}
               </div>
@@ -165,7 +165,7 @@ export default function MobileActivate() {
 
       <Modal maskClosable={false}
         open={activateFor !== null}
-        title={activateFor ? `上号 — ${activateFor.archiveNo ?? activateFor.accountNo}` : ''}
+        title={activateFor ? `上号 — ${activateFor.accountNo}` : ''}
         okText="确认上号"
         cancelText="取消"
         confirmLoading={saving}
@@ -194,8 +194,8 @@ export default function MobileActivate() {
           <Card size="small" title="四项一致复核" style={{ marginBottom: 12 }}>
             {(
               [
-                ['meterNoOk', '水表号与档案一致'],
-                ['archiveNoOk', `档案号一致（${activateFor?.archiveNo ?? '—'}）`],
+                ['accountNoOk', `用户档案号一致（${activateFor?.accountNo ?? '—'}）`],
+                ['caliberOk', `水表口径一致（${activateFor?.pendingCaliber ?? '—'}）`],
                 ['addrOk', '安装地址一致'],
                 ['nameOk', '用户名称一致'],
               ] as const

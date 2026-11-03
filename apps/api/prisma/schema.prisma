@@ -612,13 +612,11 @@ model WaterAccount {
   /** R6/Q5：供用水合同编号 + 合同扫描件（立户时自报装申请带入/手填）。 */
   contractNo      String?       @map("contract_no")
   contractScan    Json?         @map("contract_scan") @db.JsonB
-  /** 1028v2 放号：用户档案号（区域码+段号+流水，待上号户的对外标识）。 */
-  archiveNo       String?       @map("archive_no")
   /** 放号时指定的抄表员（上号任务指派人）。 */
   assignReaderId  String?       @map("assign_reader_id") @db.Uuid
   /** 放号登记的表计口径（上号复核参考）。 */
   pendingCaliber  String?       @map("pending_caliber")
-  /** 上号现场复核结果（四项一致确认）。 */
+  /** 上号现场复核结果（四项一致确认：档案号/口径/地址/用户名）。 */
   activateReview  Json?         @map("activate_review") @db.JsonB
   /** 上号时间。 */
   activatedAt     DateTime?     @map("activated_at")
@@ -627,7 +625,7 @@ model WaterAccount {
   returnReason    String?       @map("return_reason")
   /** 1102 区号：抄表员的数字代码（01、02…；远传户特殊区号 111）。 */
   zoneNo          String?       @map("zone_no")
-  /** 1102 段号：月内抄表批次 01..16（「区段管理」模式用；直管模式为空）。 */
+  /** 1102/1103 段号：月内抄表批次 01..16（统一区段管理，必有段号）。 */
   segNo           String?       @map("seg_no")
   /** R13 频次归属用户：MONTHLY 每月 / ODD_MONTH 单月 / EVEN_MONTH 双月 /
       QUARTERLY 季度（anchorPeriod 定首抄月）。不随换表改变。 */
@@ -652,7 +650,6 @@ model WaterAccount {
 
   @@unique([tenantId, accountNo])
   @@unique([tenantId, id])
-  @@unique([tenantId, archiveNo])
   @@index([tenantId, customerId])
   @@index([tenantId, settleAccountId])
   @@index([tenantId, usageCategory])

@@ -247,7 +247,7 @@ export interface WaterAccount {
   contractNo?: string | null;
   contractScan?: string[] | null;
   /** 1028v2 放号-上号：档案号 / 指派抄表员 / 预占口径 / 上号完成时间。 */
-  archiveNo?: string | null;
+  /** 1103 两号合一：archiveNo 已下线，accountNo 即「用户档案号」。 */
   assignReaderId?: string | null;
   pendingCaliber?: string | null;
   activatedAt?: string | null;
@@ -383,7 +383,7 @@ export interface MeterInstallation {
     id: string;
     accountNo: string;
     status: AccountStatus;
-    /** Round-2: customer name travels with 户号 on operator lists. */
+    /** Round-2: customer name travels with 用户档案号 on operator lists. */
     customer?: { name: string } | null;
   };
 }
@@ -451,7 +451,7 @@ export interface BookMember {
     accountNo: string;
     addr: string;
     status: AccountStatus;
-    /** Round-2: member rows carry customer name alongside 户号. */
+    /** Round-2: member rows carry customer name alongside 用户档案号. */
     customer?: { name: string } | null;
   } | null;
 }
@@ -926,7 +926,7 @@ export interface PaymentAlloc {
   paymentId: string | null;
   prepaymentEntryId: string | null;
   billId: string;
-  /** 账单人读引用（户号 · 账期），服务端内嵌。 */
+  /** 账单人读引用（用户档案号 · 账期），服务端内嵌。 */
   billLabel?: string | null;
   amount: string;
   createdAt: string;
@@ -1226,7 +1226,7 @@ export interface RemoteDeviceBinding {
     meter: { meterNo: string };
     waterAccount: {
       accountNo: string;
-      /** Round-2: 户号旁带客户名。 */
+      /** Round-2: 用户档案号旁带客户名。 */
       customer?: { name: string } | null;
     };
   } | null;

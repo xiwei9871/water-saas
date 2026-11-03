@@ -367,7 +367,7 @@ export default function MeterReadings() {
   };
 
   const columns: ColumnsType<MeterReading> = [
-    { title: '户号', key: 'account', width: 165, render: (_, r) => r.account?.accountNo ?? '—' },
+    { title: '用户档案号', key: 'account', width: 165, render: (_, r) => r.account?.accountNo ?? '—' },
     { title: '客户名称', key: 'customer', width: 190, render: (_, r) => r.account?.customerName ?? '—' },
     { title: '用水地址', key: 'addr', width: 220, render: (_, r) => r.account?.addr ?? '—' },
     {
@@ -553,13 +553,13 @@ export default function MeterReadings() {
       title="抄表记录 / 质检"
       extra={
         <Space wrap>
-          <Input.Search allowClear placeholder="搜索户号、客户或地址" style={{ width: 250 }}
+          <Input.Search allowClear placeholder="搜索用户档案号、客户或地址" style={{ width: 250 }}
             value={searchInput} onChange={e => setSearchInput(e.target.value)}
             onSearch={value => { setQuery(value.trim()); setPage(1); }} />
           <Popover
             trigger="click"
             placement="bottomLeft"
-            title="高级筛选（技术参数，日常按户号搜索即可）"
+            title="高级筛选（技术参数，日常按用户档案号搜索即可）"
             content={
               <Space direction="vertical" style={{ width: 300 }}>
                 <Input.Search
@@ -663,7 +663,7 @@ export default function MeterReadings() {
           summary={
             focusRecord ? (
               <span>
-                户号 {focusRecord.account?.accountNo ?? '—'} · 账期 {focusRecord.period} · 读数{' '}
+                用户档案号 {focusRecord.account?.accountNo ?? '—'} · 账期 {focusRecord.period} · 读数{' '}
                 {String(focusRecord.readingValue ?? '—')} · 质检{' '}
                 {enumLabel(QC_STATUS_LABELS, focusRecord.qcStatus)}
               </span>
@@ -915,7 +915,7 @@ export default function MeterReadings() {
             size="small"
             column={1}
             items={[
-              { key: 'accountNo', label: '户号', children: detail.account?.accountNo ?? '—' },
+              { key: 'accountNo', label: '用户档案号', children: detail.account?.accountNo ?? '—' },
               { key: 'customer', label: '客户名称', children: detail.account?.customerName ?? '—' },
               { key: 'address', label: '用水地址', children: detail.account?.addr ?? '—' },
               { key: 'meterNo', label: '表号', children: detail.meterNo ?? '—' },

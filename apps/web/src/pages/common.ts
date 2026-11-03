@@ -165,7 +165,7 @@ export const enumLabel = (
 
 /**
  * 任务上下文 → 中文业务描述（整改 P4：UI 不渲染裸 JSON/英文键/UUID）。
- * 按任务类型输出「户号 · 账期 · 数值」句式；未识别类型回退到通用
+ * 按任务类型输出「用户档案号 · 账期 · 数值」句式；未识别类型回退到通用
  * 字段映射；均失败返回 null，由调用方决定是否展示折叠的技术详情。
  */
 export const taskContextText = (type: string, ctx: unknown): string | null => {
@@ -188,7 +188,7 @@ export const taskContextText = (type: string, ctx: unknown): string | null => {
   switch (type) {
     case 'METER_REVIEW':
       text = join([
-        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('waterAccountNo') && `用户档案号 ${s('waterAccountNo')}`,
         s('period') && `账期 ${fmtPeriod(s('period'))}`,
         num('usageQty', 'm³', '本期用量'),
         num('avgUsage3', 'm³', '近3期均值'),
@@ -198,7 +198,7 @@ export const taskContextText = (type: string, ctx: unknown): string | null => {
       break;
     case 'SUPPLEMENT':
       text = join([
-        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('waterAccountNo') && `用户档案号 ${s('waterAccountNo')}`,
         s('period') && `账期 ${fmtPeriod(s('period'))}`,
         s('estimatedReadingValue') && `估计止度 ${s('estimatedReadingValue')}`,
         s('actualReadingValue') && `实抄止度 ${s('actualReadingValue')}`,
@@ -218,7 +218,7 @@ export const taskContextText = (type: string, ctx: unknown): string | null => {
       text = join([
         s('originalPaymentNo') && `原收款单 ${s('originalPaymentNo')}`,
         s('reversalPaymentNo') && `红冲收款单 ${s('reversalPaymentNo')}`,
-        s('waterAccountNo') && `户号 ${s('waterAccountNo')}`,
+        s('waterAccountNo') && `用户档案号 ${s('waterAccountNo')}`,
         s('period') && `账期 ${fmtPeriod(s('period'))}`,
         yuan('amountCent') && `金额 ${yuan('amountCent')}`,
         yuan('totalAmountCent') && `金额 ${yuan('totalAmountCent')}`,
@@ -239,7 +239,7 @@ export const taskContextText = (type: string, ctx: unknown): string | null => {
   if (text) return text;
   // 通用兜底：已知业务字段逐个翻译，纯技术字段（*Id/UUID）不展示
   const FIELD_LABELS: Record<string, string> = {
-    waterAccountNo: '户号',
+    waterAccountNo: '用户档案号',
     settleNo: '结算户',
     period: '账期',
     reason: '原因',
@@ -260,8 +260,8 @@ export const taskContextText = (type: string, ctx: unknown): string | null => {
  * Cent 后缀字段转元、period 转 yyyy-MM、其余原样；技术主键一律跳过。
  */
 export const TASK_CONTEXT_FIELD_LABELS: Record<string, string> = {
-  waterAccountNo: '户号',
-  accountNo: '户号',
+  waterAccountNo: '用户档案号',
+  accountNo: '用户档案号',
   settleNo: '结算户',
   customerName: '客户名称',
   period: '账期',
@@ -392,22 +392,22 @@ export const cleanPatch = <T extends Record<string, unknown>>(
   return out;
 };
 
-/** 用水户水合结果：户号与客户名分开，表格里能拆成两列。 */
+/** 用水户水合结果：用户档案号与客户名分开，表格里能拆成两列。 */
 export interface WaterAccountBrief {
   accountNo: string;
   customerName: string;
 }
 
 /**
- * 用水户 id → {户号, 客户名称} 的批量水合 hook：结算/补差等列表只带
+ * 用水户 id → {用户档案号, 客户名称} 的批量水合 hook：结算/补差等列表只带
  * waterAccountId，逐条 GET /water-accounts/:id 解析展示。
  * 需 customer:read —— 没有权限（或单条失败）时 info 返回 null，
  * accountLabel 退化为短 uuid。
  *
  * 返回两个 accessor：
- * - accountInfo(id) → WaterAccountBrief | null  —— 表格分列用（户号列 +
+ * - accountInfo(id) → WaterAccountBrief | null  —— 表格分列用（用户档案号列 +
  *   客户名称列分开渲染）；
- * - accountLabel(id) → '户号 · 客户名称' 单行文本 —— 详情标题、描述位用。
+ * - accountLabel(id) → '用户档案号 · 客户名称' 单行文本 —— 详情标题、描述位用。
  */
 export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
   const { hasPerm } = useAuth();
@@ -459,7 +459,7 @@ export const useWaterAccountLabels = (ids: (string | null | undefined)[]) => {
     (id: string | null | undefined) => {
       if (!id) return '—';
       const b = briefs.get(id);
-      // 人读规范：解析不到户号时显示占位符，绝不显示截断 uuid。
+      // 人读规范：解析不到用户档案号时显示占位符，绝不显示截断 uuid。
       return b ? `${b.accountNo} · ${b.customerName}` : '—';
     },
     [briefs],
@@ -516,3 +516,9 @@ export const useSettleAccountLabels = (ids: (string | null | undefined)[]) => {
     [labels],
   );
 };
+
+/** 1103 项9：口径字典统一（单一出处）——全部口径下拉共用，
+ *  配 showSearch + optionFilterProp 支持关键字录入模糊查询（原则三）。 */
+export const CALIBER_OPTIONS = [
+  'DN15', 'DN20', 'DN25', 'DN40', 'DN50', 'DN80', 'DN100', 'DN150', 'DN200',
+].map((v) => ({ value: v, label: v }));

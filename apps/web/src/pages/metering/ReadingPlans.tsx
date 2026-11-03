@@ -283,7 +283,7 @@ export default function ReadingPlans() {
         .catch(() => {
           if (seq === detailSeq.current) setDetailProgress(null);
         });
-      // 册成员 → 户号/地址水合（册可能已删 —— 退化为短 id）。
+      // 册成员 → 用户档案号/地址水合（册可能已删 —— 退化为短 id）。
       // 追加计划的明细户可能不在册（未入册户挂系统册）——对缺项直查账户补齐。
       api
         .get<ReadingBookDetail>(`/reading-books/${res.data.bookId}`)

@@ -70,7 +70,7 @@ interface ServiceOrder {
   linkRef: Record<string, unknown> | null;
   archivedAt: string | null;
   createdAt: string;
-  /** 后端注入的展示标签（户号+客户名+地址 / 表号 / 来源读数）。 */
+  /** 后端注入的展示标签（用户档案号+客户名+地址 / 表号 / 来源读数）。 */
   waterAccountLabel?: string | null;
   meterLabel?: string | null;
   sourceReadingLabel?: string | null;

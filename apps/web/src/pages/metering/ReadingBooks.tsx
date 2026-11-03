@@ -106,7 +106,6 @@ export default function ReadingBooks() {
   const [zoneOptions, setZoneOptions] = useState<
     { value: string; label: string; readerId?: string | null; isRemote?: boolean }[]
   >([]);
-  const [collectMode, setCollectMode] = useState<'READER_DIRECT' | 'ZONE_SEGMENT'>('ZONE_SEGMENT');
   const segOptions = Array.from({ length: 16 }, (_, i) => ({
     value: String(i + 1).padStart(2, '0'),
     label: `段 ${String(i + 1).padStart(2, '0')}`,
@@ -148,9 +147,6 @@ export default function ReadingBooks() {
     queueMicrotask(() => void load());
     api.get<{ zoneNo: string; readerId: string | null; readerName: string | null; isRemote: boolean; label: string }[]>('/reading-zones/options')
       .then((r) => setZoneOptions(r.data.map((z) => ({ value: z.zoneNo, label: z.label, readerId: z.readerId, isRemote: z.isRemote }))))
-      .catch(() => undefined);
-    api.get<{ collectMode: 'READER_DIRECT' | 'ZONE_SEGMENT' }>('/metering/calendar')
-      .then((r) => setCollectMode(r.data.collectMode ?? 'ZONE_SEGMENT'))
       .catch(() => undefined);
   }, [load]);
 
@@ -460,7 +456,7 @@ export default function ReadingBooks() {
   const memberColumns: ColumnsType<BookMember> = [
     { title: '顺序', dataIndex: 'seqNo', key: 'seqNo', width: 70 },
     {
-      title: '户号',
+      title: '用户档案号',
       key: 'accountNo',
       width: 150,
       render: (_: unknown, m: BookMember) =>
@@ -696,11 +692,9 @@ export default function ReadingBooks() {
               }}
             />
           </Form.Item>
-          {collectMode !== 'READER_DIRECT' && (
-            <Form.Item name="segNo" label="段号（月内抄表批次）" extra="01–16，对应当月第 N 个工作日">
-              <Select allowClear options={segOptions} placeholder="选择段号" />
-            </Form.Item>
-          )}
+          <Form.Item name="segNo" label="段号（月内抄表批次）" extra="01–16，对应当月第 N 个工作日">
+            <Select allowClear options={segOptions} placeholder="选择段号" />
+          </Form.Item>
           <Form.Item name="scheduleDay" label="计划抄表日（旧字段，可空）">
             <InputNumber min={1} max={31} precision={0} style={{ width: '100%' }} placeholder="1-31，可空" />
           </Form.Item>
@@ -761,13 +755,13 @@ export default function ReadingBooks() {
                     </Form.Item>
                   </>
                 ) : (
-                  // 无 customer:read 走业务侧户号搜索，不填 uuid。
+                  // 无 customer:read 走业务侧用户档案号搜索，不填 uuid。
                   <Form.Item
                     name="waterAccountId"
                     rules={[{ required: true, message: '请选择用水户' }]}
                     style={{ minWidth: 300 }}
                   >
-                    <BillingAccountSelect placeholder="搜索户号/客户名" />
+                    <BillingAccountSelect placeholder="搜索用户档案号/客户名" />
                   </Form.Item>
                 )}
                 <Form.Item>

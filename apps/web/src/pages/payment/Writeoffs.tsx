@@ -121,7 +121,7 @@ export default function Writeoffs() {
   const columns: ColumnsType<Writeoff> = [
     { key: 'settleNo', dataIndex: 'settleNo', title: '结算户号' },
     { key: 'settleName', dataIndex: 'settleName', title: '户名' },
-    { key: 'accountNo', dataIndex: 'accountNo', title: '用水户号', render: (v) => v ?? '—' },
+    { key: 'accountNo', dataIndex: 'accountNo', title: '用户档案号', render: (v) => v ?? '—' },
     {
       key: 'amount',
       dataIndex: 'amount',

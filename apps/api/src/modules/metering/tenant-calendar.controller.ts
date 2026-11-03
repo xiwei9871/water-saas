@@ -17,9 +17,6 @@ import {
   monthEndReserveOf,
   segmentCalendar,
   calendarOverrides,
-  collectModeOf,
-  COLLECT_MODE_LABELS,
-  PARAM_COLLECT_MODE,
   PARAM_MONTH_END_RESERVE,
   parseBizDay,
   bizDayStr,
@@ -46,7 +43,7 @@ export class TenantCalendarController {
       ? period
       : bizDayStr(new Date()).slice(0, 7).replace('-', '');
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      const [overrides, reserve, mode] = await Promise.all([
+      const [overrides, reserve] = await Promise.all([
         calendarOverrides(
           tx,
           ctx.tenantId,
@@ -54,18 +51,16 @@ export class TenantCalendarController {
           parseBizDay(`${p.slice(0, 4)}-${p.slice(4)}-${String(daysInMonth(p)).padStart(2, '0')}`),
         ),
         monthEndReserveOf(tx, ctx.tenantId),
-        collectModeOf(tx, ctx.tenantId),
       ]);
       const days = [...overrides.entries()].map(([day, kind]) => ({ day, kind }));
       const segs = segmentCalendar(p, overrides, reserve).map((s) => ({
         segNo: s.segNo,
         date: s.date.toISOString().slice(0, 10),
       }));
+      // R2 修订-1103：统一区段管理，不再返回归集模式。
       return {
         period: p,
         reserveDays: reserve,
-        collectMode: mode,
-        collectModeLabel: COLLECT_MODE_LABELS[mode],
         exceptions: days,
         segments: segs,
       };
@@ -73,30 +68,15 @@ export class TenantCalendarController {
   }
 
   /**
-   * PUT /metering/calendar/config {collectMode?, reserveDays?} — R2/R3
-   * 租户参数：归集模式（存内部枚举值，展示一律中文）+ 月末预留工作日。
+   * PUT /metering/calendar/config {reserveDays?} — R3 月末预留工作日。
+   * R2 修订-1103：归集模式开关已取消（统一区段管理），collectMode 入参
+   * 忽略不再落库。
    */
   @Post('config')
   @AnyPermissions('iam:write', 'metering:write')
-  putConfig(@Body() body: { collectMode?: string; reserveDays?: unknown }) {
+  putConfig(@Body() body: { reserveDays?: unknown }) {
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
-      if (body?.collectMode !== undefined) {
-        if (body.collectMode !== 'READER_DIRECT' && body.collectMode !== 'ZONE_SEGMENT') {
-          throw new BadRequestException({ code: 'COLLECT_MODE_INVALID' });
-        }
-        await tx.tenantParam.upsert({
-          where: { tenantId_key: { tenantId: ctx.tenantId, key: PARAM_COLLECT_MODE } },
-          create: {
-            tenantId: ctx.tenantId,
-            key: PARAM_COLLECT_MODE,
-            value: body.collectMode,
-            createdBy: ctx.staffId,
-            updatedBy: ctx.staffId,
-          },
-          update: { value: body.collectMode, updatedBy: ctx.staffId },
-        });
-      }
       if (body?.reserveDays !== undefined) {
         const n = Number(body.reserveDays);
         if (n !== 6 && n !== 7) {

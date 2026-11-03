@@ -6,7 +6,7 @@ import {
 } from '@ant-design/icons';
 import {
   App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber,
-  Modal, Radio, Space, Tag, Typography,
+  Modal, Space, Tag, Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { type Dayjs } from 'dayjs';
@@ -28,8 +28,6 @@ interface ZoneRow {
 interface CalendarResp {
   period: string;
   reserveDays: number;
-  collectMode: 'READER_DIRECT' | 'ZONE_SEGMENT';
-  collectModeLabel: string;
   exceptions: { day: string; kind: 'HOLIDAY' | 'WORKDAY' }[];
   segments: { segNo: string; date: string }[];
 }
@@ -224,19 +222,9 @@ export default function ReaderZones() {
 
       <Card title={<Space><SettingOutlined />抄表参数（租户）</Space>} size="small">
         <Space direction="vertical" size={8}>
-          <Space>
-            <Typography.Text>抄表归集模式：</Typography.Text>
-            <Radio.Group
-              value={cal?.collectMode ?? 'ZONE_SEGMENT'}
-              disabled={!canWrite}
-              onChange={(e) => void saveConfig({ collectMode: e.target.value })}
-              options={[
-                { value: 'READER_DIRECT', label: '抄表员直管' },
-                { value: 'ZONE_SEGMENT', label: '区段管理' },
-              ]}
-              optionType="button"
-            />
-          </Space>
+          <Typography.Text type="secondary">
+            归集模式：统一「区段管理」——每个用户必有「区号 + 段号」；一抄表员一册的小公司用区内 1 段（段号 01）即可。
+          </Typography.Text>
           <Space>
             <Typography.Text>月末预留工作日（不排抄表）：</Typography.Text>
             <InputNumber

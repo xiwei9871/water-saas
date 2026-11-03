@@ -31,7 +31,7 @@ const ENTRY_TYPE_OPTIONS = [
 ];
 
 /**
- * 预存管理（RC1-6/F7）：按客户 / 用水户号 / 结算户定位预存账户，
+ * 预存管理（RC1-6/F7）：按客户 / 用户档案号 / 结算户定位预存账户，
  * 查余额 + 流水（充值 / 抵扣 / 退款）。充值动作仍在收费台完成。
  */
 export default function Prepayments() {
@@ -177,7 +177,7 @@ export default function Prepayments() {
             onSelect={(a) => {
               if (a) setSettleAccountId(a.settleAccountId);
             }}
-            placeholder="按户号/地址/表号查"
+            placeholder="按用户档案号/地址/表号查"
           />
           {settleOpts.length > 1 ? (
             <Select
@@ -224,7 +224,7 @@ export default function Prepayments() {
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="选择客户、用水户号或结算户后可查看预存余额；流水默认展示本租户全部预存记录。"
+          message="选择客户、用户档案号或结算户后可查看预存余额；流水默认展示本租户全部预存记录。"
         />
       )}
       <Table<PrepaymentEntry> scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}

@@ -5,7 +5,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
-import { cleanBody, fmtDate, newIdemKey, USAGE_CATEGORY_OPTIONS } from '../common';
+import { cleanBody, fmtDate, newIdemKey, USAGE_CATEGORY_OPTIONS, CALIBER_OPTIONS } from '../common';
 import { StaffSelect } from '../pickers';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -58,18 +58,52 @@ interface Apply {
   createdAt: string;
 }
 
-/** R11 口径明细文本解析："DN15×2, DN20×1" → [{caliber,qty}]；非法返回 null。 */
-const parseCaliberDetails = (text?: string): { caliber: string; qty: number }[] | null => {
-  if (!text?.trim()) return null;
-  const out: { caliber: string; qty: number }[] = [];
-  for (const part of text.split(/[,，、]/)) {
-    const m = part.trim().match(/^(.+?)[×xX*](\d+)$/);
-    if (!m) return null;
-    const qty = parseInt(m[2], 10);
-    if (!qty || qty < 1 || !m[1].trim()) return null;
-    out.push({ caliber: m[1].trim(), qty });
-  }
-  return out.length ? out : null;
+/** 1103 项1/2.2：口径分栏清单——每栏「口径下拉 + 数量」两列，默认两栏，
+ *  「增加一栏」续加、可删除。替代文本格式录入（防错、符合下拉填报习惯）。 */
+const CaliberDetailsInput = ({ value, onChange }: {
+  value?: { caliber?: string; qty?: number }[];
+  onChange?: (v: { caliber?: string; qty?: number }[]) => void;
+}) => {
+  const rows = value?.length ? value : [{}, {}];
+  const set = (i: number, patch: { caliber?: string; qty?: number }) =>
+    onChange?.(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+      {rows.map((r, i) => (
+        <Space key={i} size={6}>
+          <Select
+            showSearch optionFilterProp="label" allowClear
+            placeholder="口径" style={{ width: 120 }}
+            options={CALIBER_OPTIONS} value={r.caliber}
+            onChange={(v) => set(i, { caliber: v })}
+          />
+          <InputNumber
+            min={1} max={9999} precision={0} placeholder="数量"
+            style={{ width: 110 }} value={r.qty}
+            onChange={(v) => set(i, { qty: v ?? undefined })}
+          />
+          {rows.length > 1 && (
+            <Button size="small" type="text" danger icon={<CloseOutlined />}
+              onClick={() => onChange?.(rows.filter((_, j) => j !== i))} />
+          )}
+        </Space>
+      ))}
+      <Button size="small" type="dashed" icon={<PlusOutlined />} style={{ width: 110 }}
+        onClick={() => onChange?.([...rows, {}])}>
+        增加一栏
+      </Button>
+    </Space>
+  );
+};
+
+/** 分栏清单 → 有效明细（剔空栏）；不完整栏（只填一项）返回 'INCOMPLETE'。 */
+const normalizeCaliberDetails = (
+  rows?: { caliber?: string; qty?: number }[],
+): { caliber: string; qty: number }[] | 'INCOMPLETE' | null => {
+  const r = (rows ?? []).filter((x) => x && (x.caliber || x.qty));
+  if (!r.length) return null;
+  if (r.some((x) => !x.caliber || !x.qty || x.qty < 1)) return 'INCOMPLETE';
+  return r as { caliber: string; qty: number }[];
 };
 
 const STATUS_LABELS: Record<ApplyStatus, string> = {
@@ -170,11 +204,10 @@ export default function InstallApplications() {
 
   const create = async () => {
     const v = await form.validateFields();
-    // R11：口径明细文本解析 "DN15×2, DN20×1"（×/* 均可），
-    // 合计须等于申请数量，否则明确中文报错不提交。
-    const details = parseCaliberDetails(v.caliberDetailsText);
-    if (v.caliberDetailsText && !details) {
-      message.error('口径明细格式有误，请按「DN15×2, DN20×1」填写');
+    // 1103 分栏清单：口径下拉+数量，合计须等于申请数量。
+    const details = normalizeCaliberDetails(v.caliberDetails);
+    if (details === 'INCOMPLETE') {
+      message.error('口径明细不完整：每栏需同时选口径并填数量');
       return;
     }
     if (details && v.meterQty && details.reduce((s, d) => s + d.qty, 0) !== v.meterQty) {
@@ -288,17 +321,13 @@ export default function InstallApplications() {
     nav(`/customer/onboard?applyNo=${encodeURIComponent(app.applyNo)}`);
   };
 
-  // ---- 1028v2 放号：INSTALLING 申请 → 生成「待上号」预占户 + 档案号 + 指派上号任务 ----
+  // ---- 1103 修订放号：INSTALLING 申请 → 生成「待上号」预占户（用户档案号）
+  // + 指派上号任务。职责纯粹：数量 + 口径明细 + 指派抄表员（区号自动带入）。
   const [allocFor, setAllocFor] = useState<Apply | null>(null);
   const [allocForm] = Form.useForm<{
     meterQty: number;
-    caliber?: string;
     readerId: string;
-    segNo?: string;
-    zoneNo?: string;
-    cadence?: string;
-    caliberDetailsText?: string;
-    archiveStart?: string;
+    caliberDetails?: { caliber?: string; qty?: number }[];
   }>();
   const [zoneOptions, setZoneOptions] = useState<{ value: string; label: string; readerId?: string | null }[]>([]);
   useEffect(() => {
@@ -306,24 +335,25 @@ export default function InstallApplications() {
       .then((r) => setZoneOptions(r.data.map((z) => ({ value: z.zoneNo, label: z.label, readerId: z.readerId }))))
       .catch(() => undefined);
   }, []);
+  const allocReaderId = Form.useWatch('readerId', allocForm);
+  // 1103 项4：选抄表员 → 其绑定区号自动带入（只读回显）。
+  const allocZone = allocReaderId
+    ? zoneOptions.find((z) => z.readerId === allocReaderId)?.label ?? null
+    : null;
   const [allocSaving, setAllocSaving] = useState(false);
   const [allocResult, setAllocResult] = useState<{
     applyNo: string;
     reader: { name: string };
-    accounts: { accountNo: string; archiveNo: string }[];
+    accounts: { accountNo: string }[];
   } | null>(null);
 
   const openAlloc = (app: Apply) => {
     allocForm.setFieldsValue({
       meterQty: app.meterQty ?? 1,
-      caliber: app.installCaliber ?? app.caliberReq ?? undefined,
-      segNo: '01',
-      cadence: 'MONTHLY',
-      caliberDetailsText: Array.isArray(app.caliberDetails)
-        ? app.caliberDetails.map((d: { caliber: string; qty: number }) => `${d.caliber}×${d.qty}`).join(', ')
-        : undefined,
+      caliberDetails: Array.isArray(app.caliberDetails) && app.caliberDetails.length
+        ? app.caliberDetails.map((d: { caliber: string; qty: number }) => ({ caliber: d.caliber, qty: d.qty }))
+        : [{}, {}],
       readerId: undefined,
-      archiveStart: undefined,
     });
     setAllocResult(null);
     setAllocFor(app);
@@ -337,9 +367,9 @@ export default function InstallApplications() {
       return;
     }
     if (!allocFor) return;
-    const details = parseCaliberDetails(values.caliberDetailsText);
-    if (values.caliberDetailsText && !details) {
-      message.error('口径明细格式有误，请按「DN15×2, DN20×1」填写');
+    const details = normalizeCaliberDetails(values.caliberDetails);
+    if (details === 'INCOMPLETE') {
+      message.error('口径明细不完整：每栏需同时选口径并填数量');
       return;
     }
     if (details && details.reduce((s, d) => s + d.qty, 0) !== values.meterQty) {
@@ -352,18 +382,13 @@ export default function InstallApplications() {
         applyNo: string;
         reader: { id: string; name: string };
         count: number;
-        accounts: { accountNo: string; archiveNo: string }[];
+        accounts: { accountNo: string }[];
       }>(
         `/install/applications/${allocFor.id}/allocate`,
         cleanBody({
           meterQty: values.meterQty,
-          caliber: values.caliber,
           readerId: values.readerId,
-          segNo: values.segNo,
-          zoneNo: values.zoneNo,
-          cadence: values.cadence,
           caliberDetails: details ?? undefined,
-          archiveStart: values.archiveStart,
         }),
         { headers: { 'Idempotency-Key': newIdemKey() } },
       );
@@ -385,7 +410,7 @@ export default function InstallApplications() {
     const rows = allocResult.accounts
       .map(
         (a) =>
-          `<tr><td>${a.archiveNo}</td><td>${a.accountNo}</td><td>${allocFor.applicantName}</td><td>${allocFor.addr}</td><td>${allocFor.contactPhone ?? '—'}</td></tr>`,
+          `<tr><td>${a.accountNo}</td><td>${allocFor.applicantName}</td><td>${allocFor.addr}</td><td>${allocFor.contactPhone ?? '—'}</td></tr>`,
       )
       .join('');
     w.document.write(
@@ -395,7 +420,7 @@ export default function InstallApplications() {
         `</style></head><body>` +
         `<h2>放号上号清单</h2>` +
         `<p>报装单号：${allocResult.applyNo}　指派抄表员：${allocResult.reader.name}　打印时间：${new Date().toLocaleString()}</p>` +
-        `<table><thead><tr><th>档案号</th><th>户号</th><th>申请人</th><th>地址</th><th>电话</th></tr></thead><tbody>${rows}</tbody></table>` +
+        `<table><thead><tr><th>用户档案号</th><th>申请人</th><th>地址</th><th>电话</th></tr></thead><tbody>${rows}</tbody></table>` +
         `</body></html>`,
     );
     w.document.close();
@@ -568,13 +593,13 @@ export default function InstallApplications() {
             <Form.Item name="meterQty" label="申请水表数量" extra="1–9999，放号不得超过此数量">
             <InputNumber min={1} max={9999} precision={0} style={{ width: '100%' }} placeholder="如 152" />
           </Form.Item>
-          <Form.Item name="caliberDetailsText" label="多口径明细" extra="格式：DN15×100, DN20×50, DN100×2；合计须等于申请数量">
-            <Input placeholder="DN15×100, DN20×50" />
-          </Form.Item>
           <Form.Item name="caliberReq" label="申请口径">
-              <Select allowClear style={{ width: 140 }} options={['DN15', 'DN20', 'DN25', 'DN40', 'DN50', 'DN100'].map((v) => ({ value: v, label: v }))} />
+              <Select allowClear showSearch optionFilterProp="label" style={{ width: 140 }} options={CALIBER_OPTIONS} />
             </Form.Item>
           </Space>
+          <Form.Item name="caliberDetails" label="多口径明细" extra="每栏「口径 + 数量」；合计须等于申请数量">
+            <CaliberDetailsInput />
+          </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={2} maxLength={300} />
           </Form.Item>
@@ -599,7 +624,7 @@ export default function InstallApplications() {
                   <Input style={{ width: 160 }} placeholder="装上的表号" maxLength={40} />
                 </Form.Item>
                 <Form.Item name="installCaliber" label="实际口径">
-                  <Select allowClear style={{ width: 120 }} options={['DN15', 'DN20', 'DN25', 'DN40', 'DN50', 'DN100'].map((v) => ({ value: v, label: v }))} />
+                  <Select allowClear showSearch optionFilterProp="label" style={{ width: 120 }} options={CALIBER_OPTIONS} />
                 </Form.Item>
                 <Form.Item name="installCompletedAt" label="装表完成日期">
                   <DatePicker style={{ width: 150 }} />
@@ -801,35 +826,21 @@ export default function InstallApplications() {
             >
               <InputNumber min={1} max={9999} precision={0} style={{ width: '100%' }} />
             </Form.Item>
-            <Form.Item name="caliberDetailsText" label="多口径明细" extra="格式 DN15×100, DN20×50；合计须等于放号数量">
-              <Input placeholder="DN15×100, DN20×50" />
+            <Form.Item
+              name="caliberDetails"
+              label="口径明细"
+              extra="每栏「口径 + 数量」；合计须等于放号数量"
+            >
+              <CaliberDetailsInput />
             </Form.Item>
             <Form.Item name="readerId" label="指派抄表员（上号任务执行人）" rules={[{ required: true, message: '请选择抄表员' }]}>
               <StaffSelect placeholder="选择上号任务执行人" />
             </Form.Item>
-            <Space wrap>
-              <Form.Item name="caliber" label="表计口径" style={{ width: 160 }}>
-                <Input placeholder="DN15" />
-              </Form.Item>
-              <Form.Item name="zoneNo" label="区号" style={{ width: 180 }}>
-                <Select allowClear showSearch optionFilterProp="label" options={zoneOptions}
-                  placeholder="选区号" />
-              </Form.Item>
-              <Form.Item name="segNo" label="抄表段号(01–16)" style={{ width: 150 }}>
-                <Input placeholder="01" maxLength={2} />
-              </Form.Item>
-              <Form.Item name="cadence" label="抄表频次" style={{ width: 130 }}>
-                <Select options={[
-                  { value: 'MONTHLY', label: '每月' },
-                  { value: 'ODD_MONTH', label: '单月' },
-                  { value: 'EVEN_MONTH', label: '双月' },
-                  { value: 'QUARTERLY', label: '季度' },
-                ]} />
-              </Form.Item>
-              <Form.Item name="archiveStart" label="起始档案号（选填）" style={{ width: 200 }}>
-                <Input placeholder="缺省自动续号" />
-              </Form.Item>
-            </Space>
+            {allocZone && (
+              <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
+                区号自动带入：{allocZone}（段号/频次在上号环节填报）
+              </Typography.Paragraph>
+            )}
           </Form>
         ) : (
           <>
@@ -839,8 +850,7 @@ export default function InstallApplications() {
                 rowKey="accountNo"
                 pagination={false}
                 columns={[
-                  { title: '档案号', dataIndex: 'archiveNo', width: 140 },
-                  { title: '户号', dataIndex: 'accountNo', width: 160 },
+                  { title: '用户档案号', dataIndex: 'accountNo', width: 180 },
                 ]}
                 dataSource={allocResult.accounts}
               />

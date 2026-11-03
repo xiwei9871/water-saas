@@ -381,7 +381,7 @@ export default function Meters() {
   const meterColumns: ColumnsType<Meter> = [
     { title: '表号', dataIndex: 'meterNo', key: 'meterNo', width: 150 },
     {
-      title: '在装户号',
+      title: '在装用户档案号',
       dataIndex: 'currentAccountNo',
       key: 'currentAccountNo',
       width: 140,
@@ -585,7 +585,7 @@ export default function Meters() {
           <Space wrap>
             <Input.Search
               allowClear
-              placeholder="搜表号/户号/客户名"
+              placeholder="搜表号/用户档案号/客户名"
               style={{ width: 200 }}
               onSearch={(v) => {
                 setSearch(v.trim());

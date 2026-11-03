@@ -188,7 +188,7 @@ export default function CollectionNotices() {
   ];
 
   const arrearsCols: ColumnsType<ArrearRow> = [
-    { title: '户号', dataIndex: 'accountNo', width: 130 },
+    { title: '用户档案号', dataIndex: 'accountNo', width: 130 },
     { title: '户名', dataIndex: 'customerName', width: 150 },
     { title: '联系电话', dataIndex: 'phone', width: 130, render: (v) => v ?? '—' },
     { title: '用水地址', dataIndex: 'addr', ellipsis: true },
@@ -246,7 +246,7 @@ export default function CollectionNotices() {
                       style={{ width: 110 }}
                     />
                     <Input.Search
-                      placeholder="户号/户名/地址"
+                      placeholder="用户档案号/户名/地址"
                       allowClear
                       style={{ width: 220 }}
                       onSearch={(v) => setArrearsQ(v)}
@@ -285,7 +285,7 @@ export default function CollectionNotices() {
                     <WaterAccountSearchSelect
                       value={accountId}
                       onChange={setAccountId}
-                      placeholder="搜索户号/户名/地址"
+                      placeholder="搜索用户档案号/户名/地址"
                     />
                     <Button type="primary" onClick={() => void create()}>
                       生成通知单

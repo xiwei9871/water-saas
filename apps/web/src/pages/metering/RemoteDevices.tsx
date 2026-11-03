@@ -53,7 +53,7 @@ function InstallationSelect({
       allowClear
       value={value}
       onChange={onChange}
-      placeholder="选择安装位置（表号 / 户号过滤）"
+      placeholder="选择安装位置（表号 / 用户档案号过滤）"
       optionFilterProp="label"
       options={opts.map((i) => ({
         value: i.id,

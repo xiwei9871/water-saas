@@ -408,12 +408,12 @@ interface WaterAccountSelectProps extends PickerProps {
 }
 
 /**
- * 用水户选择：户号过滤是精确匹配，不适合远程搜索 —— 改为级联：先选客户，
+ * 用水户选择：用户档案号过滤是精确匹配，不适合远程搜索 —— 改为级联：先选客户，
  * 再拉取其名下全部用水户（?customerId=）本地过滤。
  *
  * RC1-7 (Human Pilot F12)：选客户后 —
  *   0 户 → "无可用用水户"；1 户 → 自动选中，不需第二次点击；
- *   N 户 → 选项展示 户号/地址/当前表号（RC1-4）。
+ *   N 户 → 选项展示 用户档案号/地址/当前表号（RC1-4）。
  * 客户切换后旧值若不在新选项内 → 清空，避免残留他户。
  * RC1-6: 选项里的用水类别走中文标签，不透内部枚举码。
  */
@@ -460,7 +460,7 @@ export function WaterAccountSelect({
             enumLabel(USAGE_CATEGORY_LABELS, a.usageCategory),
           ].join(' · '),
           fields: [
-            { name: '户号', text: a.accountNo },
+            { name: '用户档案号', text: a.accountNo },
             ...(a.addr ? [{ name: '地址', text: a.addr }] : []),
           ],
         }));
@@ -527,7 +527,7 @@ interface WaterAccountSearchSelectProps extends PickerProps {
 }
 
 /**
- * 用水户远程搜索（RC1-4）：?q= 统一匹配 户号/客户名称/客户号/电话/地址/
+ * 用水户远程搜索（RC1-4）：?q= 统一匹配 用户档案号/客户名称/客用户档案号/电话/地址/
  * 当前表号 —— 与级联版 WaterAccountSelect 互补：不知道客户时直接用。
  */
 export function WaterAccountSearchSelect({
@@ -562,7 +562,7 @@ export function WaterAccountSearchSelect({
               a.currentMeterNo ? `表 ${a.currentMeterNo}` : '无在装表',
             ].join(' · '),
             fields: [
-              { name: '户号', text: a.accountNo },
+              { name: '用户档案号', text: a.accountNo },
               ...(a.addr ? [{ name: '地址', text: a.addr }] : []),
             ],
           })),
@@ -587,7 +587,7 @@ export function WaterAccountSearchSelect({
       showSearch
       allowClear
       filterOption={false}
-      placeholder={placeholder ?? '户号 / 客户 / 地址 / 表号'}
+      placeholder={placeholder ?? '用户档案号 / 客户 / 地址 / 表号'}
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}
@@ -613,7 +613,7 @@ export function WaterAccountSearchSelect({
 /**
  * 业务侧用水户搜索（Round-2 §8）：GET /reconciliations/account-lookup 走
  * billing/metering 业务权限而非 customer:read —— 账务/复核角色也能按
- * 户号或客户名选户，不再手填 uuid。返回行仅 id/户号/客户名。
+ * 用户档案号或客户名选户，不再手填 uuid。返回行仅 id/用户档案号/客户名。
  */
 export function BillingAccountSelect({
   value,
@@ -666,7 +666,7 @@ export function BillingAccountSelect({
       showSearch
       allowClear
       filterOption={false}
-      placeholder={placeholder ?? '搜索户号/客户名称'}
+      placeholder={placeholder ?? '搜索用户档案号/客户名称'}
       disabled={disabled}
       loading={fetching}
       options={withSelected(options, value, labelCache)}

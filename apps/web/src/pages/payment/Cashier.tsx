@@ -70,7 +70,7 @@ export default function Cashier() {
   const [outstanding, setOutstanding] = useState<AccountOutstanding | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // 水合当前户的 户号·客户名称 / 结算户号·名称 —— 收费时操作员必须
+  // 水合当前户的 用户档案号·客户名称 / 结算户号·名称 —— 收费时操作员必须
   // 一眼确认"收的是谁的钱"，短 uuid 不行。
   const { accountInfo } = useWaterAccountLabels([outstanding?.waterAccountId]);
   const settleLabel = useSettleAccountLabels([outstanding?.settleAccountId]);
@@ -457,7 +457,7 @@ export default function Cashier() {
             <BillingAccountSelect
               value={waterAccountId}
               onChange={(v) => setWaterAccountId(v)}
-              placeholder="搜索户号/客户名"
+              placeholder="搜索用户档案号/客户名"
             />
           </span>
         )}

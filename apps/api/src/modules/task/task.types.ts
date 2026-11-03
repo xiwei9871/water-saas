@@ -35,8 +35,8 @@ export const TASK_TYPES: TaskTypeDef[] = [
     name: '立户上号',
     fallbackPerm: 'customer:read',
     bizRoute: '/customer/water-accounts?focusId={bizId}',
-    requiredContext: ['archiveNo', 'accountNo', 'addr'],
-    guide: '请到 客户管理→用水户，对待上号户 {archiveNo} 现场复核四项一致（表号/档案号/地址/用户名），录入表号后点「上号」。',
+    requiredContext: ['accountNo', 'addr'],
+    guide: '请到 客户管理→用水户，对待上号户 {accountNo} 现场复核四项一致（用户档案号/口径/地址/用户名），录入表号后点「上号」。',
     evidenceRequired: false,
   },
   {
@@ -45,8 +45,8 @@ export const TASK_TYPES: TaskTypeDef[] = [
     name: '立户信息补录',
     fallbackPerm: 'customer:write',
     bizRoute: '/customer/onboard?completeId={bizId}',
-    requiredContext: ['archiveNo', 'accountNo'],
-    guide: '请到 客户管理→立户向导，对待补全户 {accountNo}（档案号 {archiveNo}）补齐客户/结算户/合同信息并提交补录。',
+    requiredContext: ['accountNo'],
+    guide: '请到 客户管理→立户向导，对待补全户 {accountNo} 补齐客户/结算户/合同信息并提交补录。',
     evidenceRequired: false,
   },
   {

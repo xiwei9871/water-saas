@@ -211,7 +211,7 @@ export default function BillingRuns() {
       render: (p: string) => fmtPeriod(p),
     },
     {
-      title: '户号',
+      title: '用户档案号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,

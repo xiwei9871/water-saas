@@ -82,7 +82,7 @@ interface WizardValues {
 const CONTENT_STEPS = [
   { content: 0, title: '客户', description: '新建或选择已有客户' },
   { content: 1, title: '结算户', description: '默认同户主 / 新建 / 已有' },
-  { content: 2, title: '用水户', description: '用水地址与户号' },
+  { content: 2, title: '用水户', description: '用水地址与用户档案号' },
   { content: 3, title: '水表安装', description: '挂表与初始读数' },
 ];
 /** 监控表：无客户/结算户步骤 —— 服务端自动挂靠系统客户，永不计费。 */
@@ -104,7 +104,6 @@ export default function Onboard() {
   /** 1028v2 补录完成态（complete-info 的返回不含客户/表明细，单独成态）。 */
   const [completeResult, setCompleteResult] = useState<{
     accountNo: string;
-    archiveNo: string | null;
     customerName: string;
     settleName: string;
     meterNo: string | null;
@@ -112,7 +111,7 @@ export default function Onboard() {
   const [form] = Form.useForm<WizardValues>();
   const [params] = useSearchParams();
   /** 报装纳入（C1）：来源报装单——选中后带入申请人/地址/口径/表号/初始读数，
-      立户成功同时办结该申请（同事务回写 户号/结算户/表号）。 */
+      立户成功同时办结该申请（同事务回写 用户档案号/结算户/表号）。 */
   const [applyOptions, setApplyOptions] = useState<{ value: string; label: string; raw: ApplyLite }[]>([]);
   const [sourceApply, setSourceApply] = useState<ApplyLite | null>(null);
   /** R2：报装跳转进入时来源单锁定不可清除（sourceApplyNo 必带）。 */
@@ -131,15 +130,11 @@ export default function Onboard() {
   const meterMode = Form.useWatch('meterMode', form) ?? 'new';
   const usageCategory = Form.useWatch('acctUsageCategory', form);
   const isMonitoring = usageCategory === 'MONITORING';
-  // R2/R13：区号/段号/频次选项（区号带绑定抄表员；归集模式定段号必填性）。
+  // R2/R13/1103：区号/段号/频次选项（区号带绑定抄表员；统一区段管理段号必填）。
   const [zoneOptions, setZoneOptions] = useState<{ value: string; label: string }[]>([]);
-  const [collectMode, setCollectMode] = useState<'READER_DIRECT' | 'ZONE_SEGMENT'>('ZONE_SEGMENT');
   useEffect(() => {
     api.get<{ zoneNo: string; readerName: string | null; isRemote: boolean; label: string }[]>('/reading-zones/options')
       .then((r) => setZoneOptions(r.data.map((z) => ({ value: z.zoneNo, label: z.label }))))
-      .catch(() => undefined);
-    api.get<{ collectMode: 'READER_DIRECT' | 'ZONE_SEGMENT' }>('/metering/calendar')
-      .then((r) => setCollectMode(r.data.collectMode ?? 'ZONE_SEGMENT'))
       .catch(() => undefined);
   }, []);
   const segOptions = Array.from({ length: 16 }, (_, i) => ({
@@ -192,7 +187,7 @@ export default function Onboard() {
 
   const currentContent = visibleSteps[safeStep].content;
 
-  // 1028v2 场景①：?completeId= → 拉待补全户并预填（户号/类别/地址/合同）。
+  // 1028v2 场景①：?completeId= → 拉待补全户并预填（用户档案号/类别/地址/合同）。
   useEffect(() => {
     if (!completeId) return;
     let alive = true;
@@ -408,7 +403,6 @@ export default function Onboard() {
         const d = await api.get<WaterAccountDetail>(`/water-accounts/${pendingAccount.id}`);
         setCompleteResult({
           accountNo: d.data.accountNo,
-          archiveNo: d.data.archiveNo ?? null,
           customerName: d.data.customer?.name ?? '—',
           settleName: d.data.settleAccount?.name ?? '—',
           meterNo: d.data.meterInstallations?.[0]?.meter?.meterNo ?? null,
@@ -531,8 +525,8 @@ export default function Onboard() {
           size="small"
           column={{ xs: 1, md: 2 }}
           items={[
-            { key: 'acct', label: '户号', children: completeResult.accountNo },
-            { key: 'arch', label: '档案号', children: completeResult.archiveNo ?? '—' },
+            { key: 'acct', label: '用户档案号', children: completeResult.accountNo },
+            { key: 'arch', label: '用户档案号', children: completeResult.accountNo },
             { key: 'cust', label: '客户', children: completeResult.customerName },
             { key: 'settle', label: '结算户', children: completeResult.settleName },
             { key: 'meter', label: '表号', children: completeResult.meterNo ?? '—' },
@@ -584,7 +578,7 @@ export default function Onboard() {
               label: '结算户',
               children: `${result.settleAccount.name}（${result.settleAccount.settleNo}）`,
             },
-            { key: 'acct', label: '户号', children: result.waterAccount.accountNo },
+            { key: 'acct', label: '用户档案号', children: result.waterAccount.accountNo },
             { key: 'meter', label: '表号', children: result.meter.meterNo },
             {
               key: 'reading',
@@ -644,7 +638,7 @@ export default function Onboard() {
           type="warning"
           showIcon
           style={{ marginBottom: 16 }}
-          message={`上号后补录 — 户号 ${pendingAccount.accountNo}（档案号 ${pendingAccount.archiveNo ?? '—'}）`}
+          message={`上号后补录 — 用户档案号 ${pendingAccount.accountNo}`}
           description="该户已现场上号并完成装表。请补齐正式客户与结算户信息；提交后转为「正常」户进入抄表计费。水表已在挂装，无需再录。"
         />
       )}
@@ -792,7 +786,7 @@ export default function Onboard() {
           </Form.Item>
           <Form.Item
             name="acctAccountNo"
-            label="户号"
+            label="用户档案号"
             extra={isCompleteMode ? '放号时已分配，不可修改' : '留空则由系统自动生成'}
           >
             <Input disabled={isCompleteMode} />
@@ -830,7 +824,7 @@ export default function Onboard() {
                 />
               </Form.Item>
               <Form.Item name="acctSegNo" label="段号" style={{ minWidth: 110 }}
-                extra={collectMode === 'ZONE_SEGMENT' ? '区段管理模式必填' : '直管模式可空'}>
+                extra="统一区段管理，默认 01">
                 <Select allowClear options={segOptions} placeholder="段" />
               </Form.Item>
               <Form.Item name="acctCadence" label="抄表频次" style={{ minWidth: 110 }} initialValue="MONTHLY">

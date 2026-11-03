@@ -228,7 +228,7 @@ export default function Customers() {
 
   const accountColumns: ColumnsType<WaterAccountRef> = [
     {
-      title: '户号',
+      title: '用户档案号',
       dataIndex: 'accountNo',
       key: 'accountNo',
       render: (no: string) => (

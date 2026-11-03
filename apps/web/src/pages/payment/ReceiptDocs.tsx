@@ -232,7 +232,7 @@ export default function ReceiptDocs() {
             <Input maxLength={30} />
           </Form.Item>
           <Form.Item name="waterAccountId" label="关联用水户（可选）">
-            <WaterAccountSearchSelect placeholder="搜索户号/户名" />
+            <WaterAccountSearchSelect placeholder="搜索用户档案号/户名" />
           </Form.Item>
           <Form.Item name="amountYuan" label="金额（元）" rules={[{ required: true }]}>
             <InputNumber min={0} precision={2} style={{ width: 200 }} />

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   Param,
   Post,
   Req,
@@ -23,6 +24,15 @@ export class WaterAccountActivateController {
 
   private static perms(req: Request): string[] {
     return ((req as Request & { user?: { perms?: string[] } }).user?.perms ?? []) as string[];
+  }
+
+  /** 1103：上号水表号下拉候选 = 出库未装水表 + 本来源报装单填报的安装水表，
+   *  选中自动带入口径/品牌/出厂编号/最大读数；仍可人工填写。 */
+  @Get(':id/meter-candidates')
+  @Permissions('customer:read')
+  meterCandidates(@Param('id') id: string) {
+    const ctx = currentTenant();
+    return this.alloc.meterCandidates(ctx, assertUuid(id, 'id'));
   }
 
   /** B2 上号：抄表员现场复核四项一致 + 录表号 → 激活为已上号（待补全），

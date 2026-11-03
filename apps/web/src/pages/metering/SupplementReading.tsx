@@ -154,7 +154,7 @@ export default function SupplementReading() {
       >
         <Form.Item label="目标用水户" required>
           <WaterAccountSearchSelect
-            placeholder="输入户号 / 客户名 / 地址搜索"
+            placeholder="输入用户档案号 / 客户名 / 地址搜索"
             onSelect={(a) => void onAccount(a)}
           />
         </Form.Item>
@@ -165,7 +165,7 @@ export default function SupplementReading() {
             bordered
             style={{ marginBottom: 16 }}
             items={[
-              { key: 'no', label: '户号', children: account.accountNo },
+              { key: 'no', label: '用户档案号', children: account.accountNo },
               {
                 key: 'cust',
                 label: '户名',

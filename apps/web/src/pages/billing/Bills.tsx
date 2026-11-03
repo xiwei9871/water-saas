@@ -276,7 +276,7 @@ export default function Bills() {
   const columns: ColumnsType<Bill> = [
     { title: '账期', dataIndex: 'period', key: 'period', width: 90, render: fmtPeriod },
     {
-      title: '户号',
+      title: '用户档案号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
@@ -466,7 +466,7 @@ export default function Bills() {
               setPage(1);
             }}
           />
-          {/* 10/8 报告 §1：全部走搜索选择器（户号/名称模糊），不再出现
+          {/* 10/8 报告 §1：全部走搜索选择器（用户档案号/名称模糊），不再出现
               uuid 输入框；includeClosed 让已销户的历史账单也能筛到。 */}
           <span style={{ width: 230, display: 'inline-block' }}>
             <BillingAccountSelect
@@ -476,7 +476,7 @@ export default function Bills() {
                 setWaterAccountId(v);
                 setPage(1);
               }}
-              placeholder="按户号/客户名称过滤"
+              placeholder="按用户档案号/客户名称过滤"
             />
           </span>
           <span style={{ width: 210, display: 'inline-block' }}>

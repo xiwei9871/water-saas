@@ -32,25 +32,24 @@ const PENDING_SETTLE_NO = 'SYS-PENDING';
 
 export interface AllocateInput {
   meterQty: number;
-  caliber?: string;
   /** R11 按口径明细放号：[{caliber, qty}]，合计 = 放号总数。 */
   caliberDetails?: { caliber: string; qty: number }[];
   readerId: string;
-  /** 人工修订起始档案号（缺省按 区域码+段号+流水 自动续号）。 */
-  archiveStart?: string;
-  /** 抄表段号 01..16（缺省 01；R4 段号=月内抄表批次）。 */
-  segNo?: string;
-  /** R2：区号（缺省取指定抄表员绑定的区号）。 */
-  zoneNo?: string;
-  /** R13：放号户的抄表频次（默认每月）。 */
-  cadence?: string;
   anchorPeriod?: string;
+  /** 1103 修订：放号只剩「数量 + 口径明细 + 指派抄表员」——
+   *  区号由抄表员绑定自动带入；段号/频次属真实户确立后的归集属性，
+   *  移到「上号」填报；单一「表计口径」字段删除（与明细冗余）；
+   *  两号合一后不再生成 archiveNo。 */
 }
 
 export interface ActivateInput {
   meterNo: string;
-  /** 四项一致复核：水表号/档案号/地址/用户名。 */
-  review: { meterNoOk: boolean; archiveNoOk: boolean; addrOk: boolean; nameOk: boolean };
+  /** 1103 修订：复核四项 = 用户档案号一致 + 口径一致 + 地址一致 + 用户名一致
+   *  （删两号时代的「水表号与档案一致」「档案号与用户档案一致」）。 */
+  review: { accountNoOk: boolean; caliberOk: boolean; addrOk: boolean; nameOk: boolean };
+  /** 上号时确定归集属性（R13/1103）：段号 01–16 缺省 01，频次缺省每月。 */
+  segNo?: string;
+  cadence?: string;
   /** 上号时表计未建档的补建要素（采购入库已录信息带入）。 */
   meterInfo?: {
     serialNo?: string; brand?: string; model?: string;
@@ -120,39 +119,6 @@ export class AllocationService {
     return { customerId: customer.id, settleAccountId: settle.id };
   }
 
-  /** 区域码：指定抄表员所属组织在租户组织序中的两位序号（R01..）。 */
-  private async areaCode(tx: Tx, ctx: TenantCtx, readerOrgId: string) {
-    const orgs = await tx.orgUnit.findMany({
-      where: { tenantId: ctx.tenantId, status: 'ACTIVE' },
-      orderBy: { createdAt: 'asc' },
-      select: { id: true },
-    });
-    const idx = orgs.findIndex((o) => o.id === readerOrgId);
-    return `R${String((idx < 0 ? orgs.length : idx) + 1).padStart(2, '0')}`;
-  }
-
-  /** 生成连续档案号：区域码-段号-流水（流水=同前缀现有最大+1）。 */
-  private async nextArchiveNos(
-    tx: Tx, ctx: TenantCtx, area: string, seg: string, count: number, start?: string,
-  ) {
-    const prefix = `${area}-${seg}-`;
-    let next = 1;
-    if (start) {
-      const m = start.match(new RegExp(`^${area}-${seg}-(\\d+)$`));
-      if (m) next = parseInt(m[1], 10);
-      else if (/^\d+$/.test(start)) next = parseInt(start, 10);
-      else throw new BadRequestException({ code: 'ARCHIVE_START_INVALID', start });
-    } else {
-      const rows = await tx.$queryRaw<{ a: string }[]>`
-        SELECT archive_no AS a FROM water_account
-        WHERE tenant_id = ${ctx.tenantId}::uuid AND archive_no LIKE ${prefix + '%'}
-        ORDER BY archive_no DESC LIMIT 1`;
-      const tail = rows[0]?.a?.slice(prefix.length);
-      if (tail && /^\d+$/.test(tail)) next = parseInt(tail, 10) + 1;
-    }
-    return Array.from({ length: count }, (_, i) => `${prefix}${String(next + i).padStart(3, '0')}`);
-  }
-
   // ------------------------------------------------------------------
   // B1 放号
   // ------------------------------------------------------------------
@@ -218,10 +184,6 @@ export class AllocationService {
         select: { id: true, name: true, orgUnitId: true },
       });
       if (!reader) throw new BadRequestException({ code: 'READER_NOT_FOUND' });
-      const seg = (input.segNo ?? '01').padStart(2, '0');
-      if (!/^\d{2}$/.test(seg) || +seg < 1 || +seg > 16) {
-        throw new BadRequestException({ code: 'SEG_NO_INVALID', seg });
-      }
       // R11 口径明细校验：逐口径放号，合计必须 = 放号总数。
       const details = (input.caliberDetails ?? []).filter((d) => d && d.qty > 0);
       if (details.length) {
@@ -234,30 +196,21 @@ export class AllocationService {
           });
         }
       }
-      const area = await this.areaCode(tx, ctx, reader.orgUnitId);
-      const archiveNos = await this.nextArchiveNos(
-        tx, ctx, area, seg, qty, input.archiveStart,
-      );
       const principal = await this.pendingPrincipal(tx, ctx);
-      const fallbackCaliber =
-        input.caliber ?? app.installCaliber ?? app.caliberReq ?? null;
+      const fallbackCaliber = app.installCaliber ?? app.caliberReq ?? null;
       // R11：口径明细展开成逐户口径序列（DN15×100 → 100 个 'DN15'…）。
       const caliberSeq: (string | null)[] = details.length
         ? details.flatMap((d) => Array(Math.floor(d.qty)).fill(d.caliber))
-        : archiveNos.map(() => fallbackCaliber);
-      // R2 区号：显式入参优先 → 抄表员绑定区号兜底。
-      let zoneNo = input.zoneNo?.trim() || null;
-      if (!zoneNo) {
-        const z = await tx.readerZone.findFirst({
-          where: { tenantId: ctx.tenantId, readerId: reader.id, status: 'ACTIVE' },
-          select: { zoneNo: true },
-        });
-        zoneNo = z?.zoneNo ?? null;
-      }
-      const cadence = input.cadence ?? 'MONTHLY';
+        : Array.from({ length: qty }, () => fallbackCaliber);
+      // 1103：区号由指派抄表员的绑定区号自动带入（放号不填区/段/频次）。
+      const z = await tx.readerZone.findFirst({
+        where: { tenantId: ctx.tenantId, readerId: reader.id, status: 'ACTIVE' },
+        select: { zoneNo: true },
+      });
+      const zoneNo = z?.zoneNo ?? null;
 
-      const accounts: { id: string; accountNo: string; archiveNo: string; taskId: string }[] = [];
-      for (const [idx, archiveNo] of archiveNos.entries()) {
+      const accounts: { id: string; accountNo: string; taskId: string }[] = [];
+      for (const idx of Array.from({ length: qty }, (_, i) => i)) {
         const caliber = caliberSeq[idx] ?? fallbackCaliber;
         const accountNo = await this.seq.nextFormatted(
           tx, ctx.tenantId, 'account_no', 'A', ctx.staffId);
@@ -271,12 +224,11 @@ export class AllocationService {
             addr: app.addr,
             status: 'PENDING_ASSIGN',
             billable: false,
-            archiveNo,
             assignReaderId: reader.id,
             pendingCaliber: caliber,
             zoneNo,
-            segNo: seg,
-            cadence,
+            segNo: '01',
+            cadence: 'MONTHLY',
             anchorPeriod: input.anchorPeriod ?? null,
             sourceApplyNo: app.applyNo,
             contractNo: app.contractNo ?? null,
@@ -284,18 +236,17 @@ export class AllocationService {
             createdBy: ctx.staffId,
             updatedBy: ctx.staffId,
           },
-          select: { id: true, accountNo: true, archiveNo: true },
+          select: { id: true, accountNo: true },
         });
         // 立户上号任务：直接指派指定抄表员进其待办（无需领取，V5）。
         const task = await this.tasks.createTask(tx, ctx, {
           type: 'ACCOUNT_ACTIVATE',
-          title: `立户上号 ${archiveNo} · ${app.applicantName}`,
+          title: `立户上号 ${wa.accountNo} · ${app.applicantName}`,
           bizType: 'WATER_ACCOUNT',
           bizId: wa.id,
-          bizLabel: `${archiveNo}（${app.applicantName} · ${app.addr}）`,
+          bizLabel: `${wa.accountNo}（${app.applicantName} · ${app.addr}）`,
           reason: `报装申请 ${app.applyNo} 放号待现场上号`,
           context: {
-            archiveNo,
             accountNo: wa.accountNo,
             addr: app.addr,
             applicantName: app.applicantName,
@@ -304,7 +255,7 @@ export class AllocationService {
           assigneeId: reader.id,
           orgUnitId: app.orgUnitId ?? undefined,
         });
-        accounts.push({ id: wa.id, accountNo: wa.accountNo, archiveNo, taskId: task.id });
+        accounts.push({ id: wa.id, accountNo: wa.accountNo, taskId: task.id });
       }
       return {
         applyNo: app.applyNo,
@@ -333,7 +284,7 @@ export class AllocationService {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const rows = await tx.waterAccount.findMany({
         where: { tenantId: ctx.tenantId, id: { in: input.accountIds } },
-        select: { id: true, archiveNo: true, status: true },
+        select: { id: true, accountNo: true, status: true },
       });
       if (rows.length !== input.accountIds.length) {
         throw new NotFoundException({ code: 'ACCOUNT_NOT_FOUND' });
@@ -343,7 +294,7 @@ export class AllocationService {
           // 已上号/已补全/已退号的户禁止退号。
           throw new ConflictException({
             code: 'RETURN_NOT_ALLOWED',
-            archiveNo: r.archiveNo,
+            accountNo: r.accountNo,
             status: r.status,
           });
         }
@@ -391,7 +342,59 @@ export class AllocationService {
           },
         });
       }
-      return { returned: rows.map((r) => ({ id: r.id, archiveNo: r.archiveNo })) };
+      return { returned: rows.map((r) => ({ id: r.id, accountNo: r.accountNo })) };
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // 上号水表候选（1103）：本来源报装单填报的安装水表 + 出库未装水表。
+  // ------------------------------------------------------------------
+  async meterCandidates(ctx: TenantCtx, accountId: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const wa = await tx.waterAccount.findFirst({
+        where: { tenantId: ctx.tenantId, id: accountId },
+        select: { id: true, sourceApplyNo: true, pendingCaliber: true },
+      });
+      if (!wa) throw new NotFoundException({ code: 'ACCOUNT_NOT_FOUND' });
+      const app = wa.sourceApplyNo
+        ? await tx.installApplication.findFirst({
+            where: { tenantId: ctx.tenantId, applyNo: wa.sourceApplyNo },
+            select: { installMeters: true },
+          })
+        : null;
+      const applyMeters = (Array.isArray(app?.installMeters) ? app.installMeters : []) as {
+        meterNo?: string; caliber?: string; brand?: string;
+        serialNo?: string; maxDial?: number;
+      }[];
+      // 出库未装水表（ISSUED）+ 本单关联建档表。
+      const stockMeters = await tx.meter.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          status: 'ISSUED',
+          installations: { none: { status: 'ACTIVE' } },
+        },
+        select: { meterNo: true, caliber: true, brand: true, serialNo: true, maxDial: true },
+        take: 200,
+      });
+      // 合并去重：来源单填报优先（其要素为现场实录）。
+      const map = new Map<string, {
+        meterNo: string; caliber?: string | null; brand?: string | null;
+        serialNo?: string | null; maxDial?: unknown; source: 'APPLY' | 'ISSUED';
+      }>();
+      for (const m of stockMeters) {
+        if (m.meterNo) {
+          map.set(m.meterNo, { meterNo: m.meterNo, caliber: m.caliber, brand: m.brand, serialNo: m.serialNo, maxDial: m.maxDial, source: 'ISSUED' });
+        }
+      }
+      for (const m of applyMeters) {
+        if (m.meterNo) {
+          map.set(m.meterNo, { meterNo: m.meterNo, caliber: m.caliber ?? null, brand: m.brand ?? null, serialNo: m.serialNo ?? null, maxDial: m.maxDial ?? null, source: 'APPLY' });
+        }
+      }
+      return {
+        pendingCaliber: wa.pendingCaliber,
+        candidates: [...map.values()],
+      };
     });
   }
 
@@ -414,14 +417,20 @@ export class AllocationService {
         throw new ForbiddenException({ code: 'ACTIVATE_NOT_ASSIGNEE' });
       }
       const r = input.review;
-      if (!r?.meterNoOk || !r.archiveNoOk || !r.addrOk || !r.nameOk) {
+      if (!r?.accountNoOk || !r.caliberOk || !r.addrOk || !r.nameOk) {
         throw new BadRequestException({
           code: 'REVIEW_INCOMPLETE',
-          message: '水表号/档案号/地址/用户名四项须逐一复核一致后方可上号',
+          message: '用户档案号/口径/地址/用户名四项须逐一复核一致后方可上号',
         });
       }
       const meterNo = input.meterNo?.trim();
       if (!meterNo) throw new BadRequestException({ code: 'METER_NO_REQUIRED' });
+      // 1103：段号/频次在上号环节确定（真实户确立后的归集属性）。
+      const segNo = input.segNo ? input.segNo.padStart(2, '0') : null;
+      if (segNo && !/^(0[1-9]|1[0-6])$/.test(segNo)) {
+        throw new BadRequestException({ code: 'SEG_NO_INVALID', segNo });
+      }
+      const cadence = input.cadence ?? undefined;
 
       // C4：表号须与水表档案一致；未建档允许按采购入库要素补建。
       let meter = await tx.meter.findFirst({
@@ -482,6 +491,8 @@ export class AllocationService {
         data: {
           status: 'PENDING_COMPLETE',
           activateReview: { ...r, meterNo },
+          segNo: segNo ?? wa.segNo ?? '01',
+          cadence: cadence ?? wa.cadence ?? 'MONTHLY',
           activatedAt: new Date(),
           updatedBy: ctx.staffId,
         },

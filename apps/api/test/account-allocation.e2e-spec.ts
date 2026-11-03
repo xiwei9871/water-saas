@@ -129,9 +129,9 @@ describe('1028v2 放号-上号-补录', () => {
     expect(bad.body.code).toBe('APPLY_NOT_ACCEPTED');
   });
 
-  it('放号 → 2 个待上号户 + 连续档案号 + 上号任务指派抄表员', async () => {
+  it('放号 → 2 个待上号户 + 连续用户档案号 + 上号任务指派抄表员', async () => {
     const res = await post(`/install/applications/${appId}/allocate`, {
-      meterQty: 2, caliber: 'DN15', readerId: STAFF_ADMIN, segNo: '07',
+      meterQty: 2, caliberDetails: [{ caliber: 'DN15', qty: 2 }], readerId: STAFF_ADMIN,
     }).expect(201);
     expect(res.body.count).toBe(2);
     expect(res.body.accounts).toHaveLength(2);
@@ -139,12 +139,11 @@ describe('1028v2 放号-上号-补录', () => {
     const [a1, a2] = res.body.accounts;
     acct1 = a1.id;
     acct2 = a2.id;
-    expect(a1.archiveNo).toMatch(/^R\d{2}-07-\d{3}$/);
-    expect(a2.archiveNo).toMatch(/^R\d{2}-07-\d{3}$/);
-    // 户详情：PENDING_ASSIGN + 档案号/抄表员/口径/来源单号
+    expect(a1.accountNo).toMatch(/^A/);
+    expect(a1.archiveNo).toBeUndefined();
+    // 户详情：PENDING_ASSIGN + 用户档案号/抄表员/口径/来源单号
     const wa = (await get(`/water-accounts/${acct1}`)).body;
     expect(wa.status).toBe('PENDING_ASSIGN');
-    expect(wa.archiveNo).toBe(a1.archiveNo);
     expect(wa.assignReaderId).toBe(STAFF_ADMIN);
     expect(wa.pendingCaliber).toBe('DN15');
     expect(wa.sourceApplyNo).toBe(applyNo);
@@ -170,7 +169,7 @@ describe('1028v2 放号-上号-补录', () => {
   it('上号：复核不全被拒 → 四项一致 + 表号 → PENDING_COMPLETE + 申请办结', async () => {
     const incomplete = await post(`/water-accounts/${acct1}/activate`, {
       meterNo: 'ACT-M-001',
-      review: { meterNoOk: true, archiveNoOk: true, addrOk: true, nameOk: false },
+      review: { accountNoOk: true, caliberOk: true, addrOk: true, nameOk: false },
     });
     expect(incomplete.status).toBe(400);
     expect(incomplete.body.code).toBe('REVIEW_INCOMPLETE');
@@ -178,7 +177,8 @@ describe('1028v2 放号-上号-补录', () => {
     const ok = await post(`/water-accounts/${acct1}/activate`, {
       meterNo: 'ACT-M-001',
       initialReading: 3,
-      review: { meterNoOk: true, archiveNoOk: true, addrOk: true, nameOk: true },
+      review: { accountNoOk: true, caliberOk: true, addrOk: true, nameOk: true },
+      segNo: '07', cadence: 'ODD_MONTH',
       meterInfo: { brand: '上号牌', caliber: 'DN15' },
     }).expect(201);
     expect(ok.body.status).toBe('PENDING_COMPLETE');
@@ -202,7 +202,7 @@ describe('1028v2 放号-上号-补录', () => {
   it('状态机：PENDING_COMPLETE 不可再上号 / 不可重复 activate', async () => {
     const again = await post(`/water-accounts/${acct1}/activate`, {
       meterNo: 'ACT-M-999',
-      review: { meterNoOk: true, archiveNoOk: true, addrOk: true, nameOk: true },
+      review: { accountNoOk: true, caliberOk: true, addrOk: true, nameOk: true },
     });
     expect(again.status).toBe(409);
     expect(again.body.code).toBe('ACCOUNT_NOT_PENDING');
@@ -211,13 +211,13 @@ describe('1028v2 放号-上号-补录', () => {
   it('表号冲突：同表号已在他户有效安装 → 拒', async () => {
     const conflict = await post(`/water-accounts/${acct2}/activate`, {
       meterNo: 'ACT-M-001',
-      review: { meterNoOk: true, archiveNoOk: true, addrOk: true, nameOk: true },
+      review: { accountNoOk: true, caliberOk: true, addrOk: true, nameOk: true },
     });
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe('METER_ALREADY_INSTALLED');
     const ok = await post(`/water-accounts/${acct2}/activate`, {
       meterNo: 'ACT-M-002',
-      review: { meterNoOk: true, archiveNoOk: true, addrOk: true, nameOk: true },
+      review: { accountNoOk: true, caliberOk: true, addrOk: true, nameOk: true },
     }).expect(201);
     expect(ok.body.status).toBe('PENDING_COMPLETE');
   });

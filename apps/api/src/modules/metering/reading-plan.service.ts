@@ -14,7 +14,6 @@ import {
   monthEndReserveOf,
   segmentCalendar,
   workdayIndex,
-  collectModeOf,
   bizDayStr,
   parseBizDay,
   addBizDays,
@@ -449,7 +448,6 @@ export class ReadingPlanService {
         zoneNo: true,
         routeKey: true,
         addr: true,
-        archiveNo: true,
         accountNo: true,
       },
     });
@@ -466,7 +464,7 @@ export class ReadingPlanService {
     if (dueMembers.length === 0) {
       throw new BadRequestException({ code: 'EMPTY_BOOK' });
     }
-    // R15 冷启动：无 routeKey 的户按「地址 → 档案号/户号」初始赋键，
+    // R15 冷启动：无 routeKey 的户按「地址 → 用户档案号」初始赋键，
     // 从当前最大键续排；已有键不动（跨频次稳定）。
     const keyed = dueMembers
       .map((m) => acctById.get(m.waterAccountId)!)
@@ -479,8 +477,8 @@ export class ReadingPlanService {
       .map((m) => acctById.get(m.waterAccountId)!)
       .filter((a) => a.routeKey === null)
       .sort((x, y) =>
-        `${x.addr ?? ''}|${x.archiveNo ?? x.accountNo}`.localeCompare(
-          `${y.addr ?? ''}|${y.archiveNo ?? y.accountNo}`,
+        `${x.addr ?? ''}|${x.accountNo}`.localeCompare(
+          `${y.addr ?? ''}|${y.accountNo}`,
         ),
       );
     for (let i = 0; i < unkeyed.length; i++) {

@@ -6,24 +6,13 @@
 import type { Prisma } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
-// 归集模式（R2）：租户参数 metering.collectMode
-// 存储值：READER_DIRECT 抄表员直管 / ZONE_SEGMENT 区段管理 —— 仅内部存储，
-// 展示层必须用中文名，禁止英文落地。
+// 归集模式（R2 修订-1103）：取消「抄表员直管/区段管理」两模式开关，全系统
+// 统一「区段管理」——每个用户必有「区号+段号」；小公司（一抄表员一册）用
+// 「区内 1 段」（段号固定 01）替代直管，无需独立分支逻辑。
+// 旧参数 metering.collectMode 不再读取，存量行无害保留。
 // ---------------------------------------------------------------------------
-export const PARAM_COLLECT_MODE = 'metering.collectMode';
 /** R3：月末预留不排抄表的工作日数（参数可配 6 或 7）。 */
 export const PARAM_MONTH_END_RESERVE = 'metering.monthEndReserveDays';
-
-export type CollectMode = 'READER_DIRECT' | 'ZONE_SEGMENT';
-export const COLLECT_MODES: readonly CollectMode[] = [
-  'READER_DIRECT',
-  'ZONE_SEGMENT',
-];
-/** 展示层中文名映射（唯一出处）。 */
-export const COLLECT_MODE_LABELS: Record<CollectMode, string> = {
-  READER_DIRECT: '抄表员直管',
-  ZONE_SEGMENT: '区段管理',
-};
 
 /** R4 远传水表特殊区号：不派人工抄表任务，单独走远传采集。 */
 export const REMOTE_ZONE_NO = '111';
@@ -39,7 +28,7 @@ export const ZONE_NO_RE = /^(\d{2,3}|YC)$/;
 export const isValidZoneNo = (v: string): boolean =>
   ZONE_NO_RE.test(v) && (v === 'YC' || (parseInt(v, 10) >= 1 && parseInt(v, 10) <= 199));
 
-/** 区段号编码（R7）：区号 + 段号 → '0116'；直管模式无段号只留区号。 */
+/** 区段号编码（R7）：区号 + 段号 → '0116'（统一区段管理，段号必有）。 */
 export const zoneSegCode = (zoneNo: string, segNo?: string | null): string =>
   `${zoneNo}${segNo ?? ''}`;
 
@@ -52,15 +41,6 @@ export async function readParam<T>(
     where: { tenantId_key: { tenantId, key } },
   });
   return (row?.value as T | undefined) ?? null;
-}
-
-/** 当前租户归集模式（缺省 区段管理——与既有抄表册模型一致）。 */
-export async function collectModeOf(
-  tx: Prisma.TransactionClient,
-  tenantId: string,
-): Promise<CollectMode> {
-  const v = await readParam<string>(tx, tenantId, PARAM_COLLECT_MODE);
-  return v === 'READER_DIRECT' ? 'READER_DIRECT' : 'ZONE_SEGMENT';
 }
 
 /** 月末预留工作日数（默认 6，可配 6 或 7；越界值回退 6）。 */

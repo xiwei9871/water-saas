@@ -230,7 +230,7 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
         rowKey="accountNo"
         pagination={false}
         columns={[
-          { key: 'accountNo', dataIndex: 'accountNo', title: '户号' },
+          { key: 'accountNo', dataIndex: 'accountNo', title: '用户档案号' },
           { key: 'customerName', dataIndex: 'customerName', title: '户名' },
           { key: 'arrears', dataIndex: 'arrears', title: '欠费(元)', align: 'right', render: yuan },
         ]}
@@ -385,7 +385,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         title={() => '欠费清单 TOP50'}
         rowKey="accountNo"
         columns={[
-          { key: 'accountNo', dataIndex: 'accountNo', title: '户号' },
+          { key: 'accountNo', dataIndex: 'accountNo', title: '用户档案号' },
           { key: 'customerName', dataIndex: 'customerName', title: '户名' },
           { key: 'arrears', dataIndex: 'arrears', title: '欠费(元)', align: 'right', render: yuan },
           {
@@ -426,7 +426,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         rowKey={(_r, i) => String(i)}
         pagination={false}
         columns={[
-          { key: 'accountNo', dataIndex: 'accountNo', title: '户号' },
+          { key: 'accountNo', dataIndex: 'accountNo', title: '用户档案号' },
           { key: 'customerName', dataIndex: 'customerName', title: '户名' },
           { key: 'period', dataIndex: 'period', title: '账期', render: fmtPeriod },
           { key: 'amount', dataIndex: 'amount', title: '调整额(元)', align: 'right', render: yuan },
@@ -447,7 +447,7 @@ function Monthly({ data, queried }: { data: Row | null; queried: boolean }) {
         rowKey={(_r, i) => String(i)}
         pagination={false}
         columns={[
-          { key: 'accountNo', dataIndex: 'accountNo', title: '户号' },
+          { key: 'accountNo', dataIndex: 'accountNo', title: '用户档案号' },
           { key: 'period', dataIndex: 'period', title: '账期', render: fmtPeriod },
           {
             key: 'qc',
@@ -502,7 +502,7 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
         rowKey="accountNo"
         pagination={false}
         columns={[
-          { key: 'accountNo', dataIndex: 'accountNo', title: '户号' },
+          { key: 'accountNo', dataIndex: 'accountNo', title: '用户档案号' },
           { key: 'customerName', dataIndex: 'customerName', title: '户名' },
           { key: 'arrears', dataIndex: 'arrears', title: '欠费(元)', align: 'right', render: yuan },
           { key: 'oldestPeriod', dataIndex: 'oldestPeriod', title: '欠费起始', render: fmtPeriod },
@@ -563,7 +563,7 @@ function Yearly({ data, queried }: { data: Row | null; queried: boolean }) {
         rowKey="accountNo"
         pagination={false}
         columns={[
-          { key: 'accountNo', dataIndex: 'accountNo', title: '户号' },
+          { key: 'accountNo', dataIndex: 'accountNo', title: '用户档案号' },
           { key: 'customerName', dataIndex: 'customerName', title: '户名' },
           { key: 'closedAt', dataIndex: 'closedAt', title: '销户日期', render: fmtDate },
         ]}

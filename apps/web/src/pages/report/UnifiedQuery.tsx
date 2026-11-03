@@ -107,7 +107,7 @@ function WaterAccountMultiSelect({
       mode="multiple"
       showSearch
       filterOption={false}
-      placeholder="户号 / 客户 / 地址"
+      placeholder="用户档案号 / 客户 / 地址"
       loading={fetching}
       options={options}
       value={value}
@@ -692,7 +692,7 @@ function DetailQuery() {
             </div>
           )}
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            户号、户名始终显示；账期级字段按账期横向展开（最多 {spanMax} 期）；欠费类为截至「账期止」的累计值。
+            用户档案号、户名始终显示；账期级字段按账期横向展开（最多 {spanMax} 期）；欠费类为截至「账期止」的累计值。
           </Typography.Text>
         </Space>
       </Card>

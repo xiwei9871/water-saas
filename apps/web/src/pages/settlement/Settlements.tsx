@@ -386,7 +386,7 @@ export default function Settlements() {
   };
 
   const batchItemColumns: ColumnsType<SettlementBatchItem> = [
-    { title: '户号', dataIndex: 'accountNo', key: 'accountNo', width: 150 },
+    { title: '用户档案号', dataIndex: 'accountNo', key: 'accountNo', width: 150 },
     {
       title: '客户名称',
       key: 'customerName',
@@ -424,7 +424,7 @@ export default function Settlements() {
       render: fmtPeriod,
     },
     {
-      title: '户号',
+      title: '用户档案号',
       dataIndex: 'waterAccountId',
       key: 'waterAccountId',
       width: 150,
@@ -631,7 +631,7 @@ export default function Settlements() {
                   setAccountIdInput(v);
                   setPage(1);
                 }}
-                placeholder="搜索户号/客户名称过滤"
+                placeholder="搜索用户档案号/客户名称过滤"
               />
             </span>
           )}
@@ -880,7 +880,7 @@ export default function Settlements() {
               label="用水户"
               rules={[{ required: true, message: '请选择用水户' }]}
             >
-              <BillingAccountSelect placeholder="搜索户号/客户名称" />
+              <BillingAccountSelect placeholder="搜索用户档案号/客户名称" />
             </Form.Item>
           )}
           <Form.Item

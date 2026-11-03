@@ -14,7 +14,6 @@ import {
   type BookCadence,
 } from '../../common/reading-cadence.js';
 import {
-  collectModeOf,
   isRemoteZone,
   isValidZoneNo,
   zoneSegCode,
@@ -58,7 +57,6 @@ export const WATER_ACCOUNT_SELECT = {
   sourceApplyNo: true,
   contractNo: true,
   contractScan: true,
-  archiveNo: true,
   assignReaderId: true,
   pendingCaliber: true,
   activatedAt: true,
@@ -602,25 +600,16 @@ export class WaterAccountService {
     zoneNo: string | null,
     segNo: string | null,
   ) {
-    const mode = await collectModeOf(tx, ctx.tenantId);
-    const effSeg = mode === 'ZONE_SEGMENT' ? segNo : null;
+    // R2 修订-1103：统一区段管理——每户必有「区号+段号」，段号缺省 01。
+    const effSeg = segNo;
     const wa = await tx.waterAccount.findFirst({
       where: { tenantId: ctx.tenantId, id: waterAccountId },
       select: { id: true, accountNo: true, zoneNo: true, segNo: true },
     });
     if (!wa) return;
-    // A3：区/段被清空或区段模式缺段号 → 旧册成员必须同步解除
+    // A3：区/段被清空或缺段号 → 旧册成员必须同步解除
     // （已生成计划的 plan_item 是历史快照，不触碰）。
-    if (!zoneNo) {
-      await tx.bookMeter.deleteMany({
-        where: { tenantId: ctx.tenantId, waterAccountId },
-      });
-      if (mode === 'ZONE_SEGMENT') {
-        await this.ensureSegAssignTask(tx, ctx, waterAccountId, wa.accountNo);
-      }
-      return;
-    }
-    if (mode === 'ZONE_SEGMENT' && !effSeg) {
+    if (!zoneNo || !effSeg) {
       await tx.bookMeter.deleteMany({
         where: { tenantId: ctx.tenantId, waterAccountId },
       });

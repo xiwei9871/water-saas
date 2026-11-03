@@ -125,23 +125,9 @@ const STATUS_TAG: Record<PlanItem['status'], { color: string; text: string }> = 
   SKIPPED: { color: 'default', text: '已跳过' },
 };
 
-/** 现场异常 → 自动建对应表务工单（20261020 核查 T5）；"疑是违章"转稽查核实（B2）。 */
-const ANOMALY_TYPES = [
-  { value: 'FAULT', label: '水表损坏/停走 → 故障换表工单' },
-  { value: 'METER_GROUP_CLEANING', label: '表盘污浊不清 → 表组清洁工单' },
-  { value: 'FACILITY_MAINTENANCE', label: '表井积水/设施损坏 → 表位维护工单' },
-  { value: 'SITE_RECTIFICATION', label: '表位安装不当 → 表位整改工单' },
-  { value: 'SUSPECTED_VIOLATION', label: '疑是违章用水 → 转稽查核实' },
-];
 
-/** B2 疑似违章子类型：与 sys_dict VIOLATION_TYPE 及 Web 端同一枚举。 */
-const VIOLATION_TYPES = [
-  { value: 'THEFT', label: '盗窃用水' },
-  { value: 'PRIVATE_CONN', label: '私自接水' },
-  { value: 'TAMPER', label: '破坏表计' },
-  { value: 'SEAL_BROKEN', label: '破坏铅封' },
-  { value: 'CATEGORY_MISUSE', label: '擅自改变用水性质' },
-];
+
+
 
 /**
  * 抄表工作台（H5）— 现场抄表员移动入口，挂 AdminLayout 外裸路由 /m/reading。
@@ -178,9 +164,8 @@ export default function MobileReading() {
   const ocrReq = useRef(0);
   const [noReadOpen, setNoReadOpen] = useState(false);
   const [noReadForm] = Form.useForm<{ exceptionCode: string; estimateQty?: string; remark?: string }>();
-  const [anomalyOpen, setAnomalyOpen] = useState(false);
-  const [anomalyForm] = Form.useForm<{ serviceType: string; violationType?: string; desc?: string }>();
-  const anomalyType = Form.useWatch('serviceType', anomalyForm);
+  // 1103 项7：异常上报不弹窗——直跳「问题上报」分段并带入当前用户档案号。
+  const [reportAccountNo, setReportAccountNo] = useState('');
   const [infoOpen, setInfoOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
   const [reread, setReread] = useState<PlanItem | null>(null);
@@ -438,84 +423,6 @@ export default function MobileReading() {
     }
   };
 
-  /** 现场异常上报 → 自动生成对应表务工单（挂当前表位/照片，
-   *  离线入队联网随读数一起上传）。 */
-  const submitAnomaly = async () => {
-    if (!current) return;
-    const v = await anomalyForm.validateFields();
-    // B2：疑是违章 → 违章核实链路（同 Web 端 report-violation / FIELD 来源，须照片）。
-    if (v.serviceType === 'SUSPECTED_VIOLATION') {
-      if (!photo) {
-        message.warning('疑似违章须附现场照片，请先拍照再上报');
-        return;
-      }
-      const vBody = cleanBody({
-        waterAccountId: current.waterAccountId,
-        violationType: v.violationType,
-        description: v.desc,
-        photoRefs: [photo],
-        sourceType: 'FIELD',
-      });
-      const vPath = current.completedReadingId
-        ? `/meter-readings/${current.completedReadingId}/report-violation`
-        : '/violations';
-      setSubmitting(true);
-      try {
-        if (navigator.onLine === false) throw new Error('OFFLINE');
-        await api.post(vPath, vBody, { headers: { 'Idempotency-Key': newIdemKey() } });
-        message.success('疑似违章已上报，稽查岗将现场核实');
-        setAnomalyOpen(false);
-        anomalyForm.resetFields();
-      } catch (err) {
-        const status = (err as { response?: { status?: number } }).response?.status;
-        if (!status || (err as Error).message === 'OFFLINE') {
-          enqueue(current, vBody, vPath);
-          message.warning('已离线保存上报，联网后随读数一起上传');
-          setAnomalyOpen(false);
-          anomalyForm.resetFields();
-        } else {
-          message.error(apiErrorText(err));
-        }
-      } finally {
-        setSubmitting(false);
-      }
-      return;
-    }
-    const label = ANOMALY_TYPES.find((a) => a.value === v.serviceType)?.label ?? '';
-    const body = {
-      waterAccountId: current.waterAccountId,
-      serviceType: v.serviceType,
-      reason: `[抄表上报·${label.split(' ')[0]}] ${v.desc ?? ''}`.trim(),
-      sourceType: 'READING_REPORT',
-      sourceReadingId: current.completedReadingId ?? undefined,
-      photoRefs: photo ? [photo] : [],
-    };
-    setSubmitting(true);
-    try {
-      if (navigator.onLine === false) throw new Error('OFFLINE');
-      const res = await api.post<{ orderNo: string }>(
-        '/service-orders',
-        cleanBody(body),
-        { headers: { 'Idempotency-Key': newIdemKey() } },
-      );
-      message.success(`异常已上报，表务工单 ${res.data.orderNo} 已生成`);
-      setAnomalyOpen(false);
-      anomalyForm.resetFields();
-    } catch (err) {
-      const status = (err as { response?: { status?: number } }).response?.status;
-      if (!status || (err as Error).message === 'OFFLINE') {
-        enqueue(current, body, '/service-orders');
-        message.warning('已离线保存上报，联网后随读数一起上传');
-        setAnomalyOpen(false);
-        anomalyForm.resetFields();
-      } else {
-        message.error(apiErrorText(err));
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const skipCurrent = () => {
     if (!current) return;
     const idx = pending.findIndex((i) => i.id === current.id);
@@ -624,7 +531,7 @@ export default function MobileReading() {
           { value: 'activate', label: '装表上户' },
         ]}
       />
-      {mode === 'report' && <MobileReport />}
+      {mode === 'report' && <MobileReport initialAccountNo={reportAccountNo} />}
       {mode === 'activate' && <MobileActivate />}
       {mode === 'reading' && (
       <>
@@ -876,10 +783,13 @@ export default function MobileReading() {
               size="small"
               type="dashed"
               icon={<WarningOutlined />}
-              onClick={() => setAnomalyOpen(true)}
+              onClick={() => {
+                setReportAccountNo(current?.accountNo ?? '');
+                setMode('report');
+              }}
               block
             >
-              现场异常上报（损坏/污浊/积水 → 自动建工单）
+              现场异常上报（跳「问题上报」，用户档案号已带入）
             </Button>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               顺序查表：提交后自动跳下一只；跳过可稍后回抄。
@@ -910,7 +820,7 @@ export default function MobileReading() {
               allowClear
               size="small"
               prefix={<SearchOutlined />}
-              placeholder="户号 / 客户名 / 地址 / 电话 / 表号"
+              placeholder="用户档案号 / 客户名 / 地址 / 电话 / 表号"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -1072,90 +982,6 @@ export default function MobileReading() {
         </Form>
       </Modal>
 
-      {/* 现场异常上报 → 自动建表务工单（T5） */}
-      <Modal
-        title="现场异常上报"
-        open={anomalyOpen}
-        onOk={submitAnomaly}
-        okText={anomalyType === 'SUSPECTED_VIOLATION' ? '上报稽查核实' : '上报并建工单'}
-        confirmLoading={submitting}
-        onCancel={() => setAnomalyOpen(false)}
-        destroyOnHidden
-      >
-        <Form form={anomalyForm} layout="vertical">
-          <Form.Item
-            name="serviceType"
-            label="异常类型"
-            rules={[{ required: true, message: '请选择异常类型' }]}
-          >
-            <Select size="large" options={ANOMALY_TYPES} />
-          </Form.Item>
-          {anomalyType === 'SUSPECTED_VIOLATION' && (
-            <Form.Item
-              name="violationType"
-              label="疑似违章类型"
-              rules={[{ required: true, message: '请选择疑似违章类型' }]}
-            >
-              <Select size="large" options={VIOLATION_TYPES} />
-            </Form.Item>
-          )}
-          <Form.Item
-            name="desc"
-            label="现场情况说明"
-            rules={
-              anomalyType === 'SUSPECTED_VIOLATION'
-                ? [{ required: true, message: '疑似违章须填写现场描述' }]
-                : []
-            }
-          >
-            <Input.TextArea rows={3} maxLength={200} placeholder="如：表玻璃碎裂、指针停走、表井被水淹没" />
-          </Form.Item>
-          {/* X3-1：拍照按钮直接在填报页内，拍完即回填预览 */}
-          <Form.Item
-            label={
-              anomalyType === 'SUSPECTED_VIOLATION' ? '现场照片（必填）' : '现场照片（选填）'
-            }
-            required={anomalyType === 'SUSPECTED_VIOLATION'}
-          >
-            <Upload
-              accept="image/*"
-              showUploadList={false}
-              beforeUpload={(file) => {
-                void compressPhoto(file)
-                  .then((dataUrl) => setPhoto(dataUrl))
-                  .catch(() => message.error('照片读取失败'));
-                return false;
-              }}
-            >
-              <Button
-                icon={<CameraOutlined />}
-                danger={anomalyType === 'SUSPECTED_VIOLATION' && !photo}
-                type={photo ? 'primary' : 'default'}
-                ghost={!!photo}
-                block
-              >
-                {photo ? '已拍照（点击重拍）' : '拍照'}
-              </Button>
-            </Upload>
-            {photo && (
-              <img
-                src={photo}
-                alt="现场照片"
-                style={{ width: '100%', borderRadius: 6, maxHeight: 160, objectFit: 'cover', marginTop: 8 }}
-              />
-            )}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {photo
-                ? anomalyType === 'SUSPECTED_VIOLATION'
-                  ? '照片将随上报留证。'
-                  : '照片将随工单留证。'
-                : anomalyType === 'SUSPECTED_VIOLATION'
-                  ? '疑似违章必须拍照后方能上报。'
-                  : '未拍照也可上报，照片可作留证。'}
-            </Typography.Text>
-          </Form.Item>
-        </Form>
-      </Modal>
       </>
       )}
     </div>
@@ -1177,7 +1003,7 @@ function FieldContactForm({
     <Space direction="vertical" style={{ width: '100%' }} size={12}>
       <Card size="small">
         <Space direction="vertical" size={4}>
-          <Typography.Text>户号：<Typography.Text strong>{item.accountNo}</Typography.Text></Typography.Text>
+          <Typography.Text>用户档案号：<Typography.Text strong>{item.accountNo}</Typography.Text></Typography.Text>
           <Typography.Text>客户：{item.customerName ?? '—'}</Typography.Text>
           <Typography.Text>表号：{item.meterNo ?? '—'}　口径：{item.caliber ?? '—'}</Typography.Text>
           <Typography.Text>用水类别：{USAGE_CATEGORY_LABELS[item.usageCategory ?? ''] ?? item.usageCategory ?? '—'}</Typography.Text>
@@ -1231,9 +1057,13 @@ function FieldContactForm({
 }
 
 /** R8 独立「问题上报」模块：四类问题——表务工单（注册类型）或违章核查。 */
-function MobileReport() {
+function MobileReport({ initialAccountNo }: { initialAccountNo?: string }) {
   const { message } = AntdApp.useApp();
   const [form] = Form.useForm<{ accountNo: string; reportType: string; violationType?: string; desc?: string }>();
+  // 1103 项7：从抄表作业跳入时自动带入当前用户档案号，无需重新选择。
+  useEffect(() => {
+    if (initialAccountNo) form.setFieldsValue({ accountNo: initialAccountNo });
+  }, [initialAccountNo, form]);
   const [photo, setPhoto] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // 上报类型 → 后端通道：真实 SERVICE_TYPES 建工单；VIOLATION 走违章核查流程
@@ -1250,7 +1080,7 @@ function MobileReport() {
       const wa = await api.get<{ id: string; accountNo: string }[]>('/water-accounts', {
         params: { accountNo: v.accountNo.trim(), take: 1 },
       });
-      if (!wa.data.length) { message.error('户号不存在'); return; }
+      if (!wa.data.length) { message.error('用户档案号不存在'); return; }
       const waId = wa.data[0].id;
       if (v.reportType === 'VIOLATION') {
         // 疑似违章→既有违章核查流程（sourceType=FIELD 抄表员上报）
@@ -1283,8 +1113,8 @@ function MobileReport() {
   return (
     <Card size="small" title="现场问题上报">
       <Form form={form} layout="vertical">
-        <Form.Item name="accountNo" label="关联户号" rules={[{ required: true, message: '请输入户号' }]}>
-          <Input placeholder="输入用水户号" />
+        <Form.Item name="accountNo" label="关联用户档案号" rules={[{ required: true, message: '请输入用户档案号' }]}>
+          <Input placeholder="输入用户档案号" />
         </Form.Item>
         <Form.Item name="reportType" label="问题类型" rules={[{ required: true, message: '请选择类型' }]}>
           <Select options={[...REPORT_TYPES]} />
