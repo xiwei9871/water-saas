@@ -41,6 +41,8 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/watersaas_test
           MIGRATION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/watersaas_test
         run: pnpm exec prisma migrate deploy
+      - name: Workspace packages build (@ws/types, billing-core)
+        run: pnpm --filter "@ws/*" build
       - name: API build
         run: pnpm --filter api build
       - name: Web build
