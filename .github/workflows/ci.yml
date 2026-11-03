@@ -26,6 +26,9 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: pnpm }
       - run: pnpm install --frozen-lockfile
+      - name: Generate Prisma client (CI 无本地 node_modules 缓存必须显式生成)
+        working-directory: apps/api
+        run: pnpm exec prisma generate
       - name: Create ws_app role (owner for migrate, runtime user for tests)
         run: |
           psql "postgresql://postgres:postgres@localhost:5432/watersaas_test" \
