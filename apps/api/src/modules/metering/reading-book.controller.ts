@@ -31,17 +31,6 @@ const pageArgs = (take?: string, skip?: string) => ({
   skip: Math.max(parseInt(skip ?? '0', 10) || 0, 0),
 });
 
-const scheduleDayOf = (v: unknown): number | null | undefined => {
-  if (v === undefined) return undefined;
-  if (v === null) return null;
-  // Strings must be pure digits — parseInt would silently truncate '5abc'/'5.9'.
-  const n = typeof v === 'string' ? (/^\d{1,2}$/.test(v) ? parseInt(v, 10) : NaN) : v;
-  if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 31) {
-    throw new BadRequestException({ code: 'SCHEDULE_DAY_INVALID' });
-  }
-  return n;
-};
-
 @Controller('reading-books')
 export class ReadingBookController {
   constructor(
@@ -59,7 +48,6 @@ export class ReadingBookController {
     @Query('q') q?: string,
     @Query('orgUnitId') orgUnitId?: string,
     @Query('waterAccountId') waterAccountId?: string,
-    @Query('cadence') cadence?: string,
     @Query('status') status?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
@@ -73,7 +61,6 @@ export class ReadingBookController {
       q,
       orgUnitId,
       waterAccountId,
-      cadence,
       status,
     });
   }
@@ -107,10 +94,11 @@ export class ReadingBookController {
         body.readerId === undefined || body.readerId === null
           ? null
           : assertUuid(body.readerId, 'readerId'),
-      scheduleDay: scheduleDayOf(body.scheduleDay),
-      cadence: body.cadence,
-      anchorPeriod: body.anchorPeriod,
       meterChannel: body.meterChannel,
+      // 1104 遗留核查：控制器此前把 zoneNo/segNo 过滤掉——R7 区段号编码
+      // 因字段丢失从未生效（service 早已支持），恢复透传。
+      zoneNo: body.zoneNo,
+      segNo: body.segNo,
     };
     const ctx = currentTenant();
     return withOptionalIdem(
@@ -139,9 +127,6 @@ export class ReadingBookController {
       name: body.name,
       orgUnitId: body.orgUnitId,
       readerId: body.readerId,
-      scheduleDay: scheduleDayOf(body.scheduleDay),
-      cadence: body.cadence,
-      anchorPeriod: body.anchorPeriod,
       meterChannel: body.meterChannel,
       status: body.status,
     };

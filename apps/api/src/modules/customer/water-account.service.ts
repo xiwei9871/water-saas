@@ -660,7 +660,6 @@ export class WaterAccountService {
             readerId: zone?.readerId ?? null,
             zoneNo,
             segNo: effSeg,
-            cadence: 'MONTHLY',
             meterChannel: isRemoteZone(zoneNo) ? 'REMOTE_AUTO' : 'MECHANICAL',
             createdBy: ctx.staffId,
             updatedBy: ctx.staffId,

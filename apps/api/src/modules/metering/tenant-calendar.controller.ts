@@ -127,6 +127,62 @@ export class TenantCalendarController {
     );
   }
 
+  /**
+   * POST /metering/calendar/import — 1104 遗留核查：法定节假日批量导入。
+   * body: { days: { day: 'YYYY-MM-DD', kind: 'HOLIDAY'|'WORKDAY', name? }[],
+   *         clearYear?: number }
+   * clearYear 给出年份时先清空该年手动例外（内置法定日历不受影响）；
+   * 手动例外 &gt; 法定日历 &gt; 周一~五（calendarOverrides 已保证）。
+   * 返回 { imported, cleared, errors } 供前端回显校验结果。
+   */
+  @Post('import')
+  @AnyPermissions('iam:write', 'metering:write')
+  importDays(@Body() body: { days?: { day?: string; kind?: string; name?: string }[]; clearYear?: number }) {
+    const rows = body?.days ?? [];
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new BadRequestException({ code: 'IMPORT_EMPTY' });
+    }
+    if (rows.length > 2000) throw new BadRequestException({ code: 'IMPORT_TOO_LARGE' });
+    const errors: { index: number; day: string | undefined; reason: string }[] = [];
+    const valid: { day: Date; dayStr: string; kind: string; name: string | null }[] = [];
+    rows.forEach((r, i) => {
+      if (!r?.day || !DAY_RE.test(r.day)) {
+        errors.push({ index: i, day: r?.day, reason: '日期格式须 YYYY-MM-DD' });
+        return;
+      }
+      if (r.kind !== 'HOLIDAY' && r.kind !== 'WORKDAY') {
+        errors.push({ index: i, day: r.day, reason: '类型须 HOLIDAY 或 WORKDAY' });
+        return;
+      }
+      valid.push({ day: new Date(`${r.day}T00:00:00Z`), dayStr: r.day, kind: r.kind, name: r.name?.trim() || null });
+    });
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      let cleared = 0;
+      if (body?.clearYear && Number.isInteger(body.clearYear)) {
+        const from = new Date(`${body.clearYear}-01-01T00:00:00Z`);
+        const to = new Date(`${body.clearYear}-12-31T00:00:00Z`);
+        const r = await tx.tenantCalendarDay.deleteMany({
+          where: { tenantId: ctx.tenantId, day: { gte: from, lte: to } },
+        });
+        cleared = r.count;
+      }
+      let imported = 0;
+      for (const v of valid) {
+        await tx.tenantCalendarDay.upsert({
+          where: { tenantId_day: { tenantId: ctx.tenantId, day: v.day } },
+          create: {
+            tenantId: ctx.tenantId, day: v.day, kind: v.kind, name: v.name,
+            createdBy: ctx.staffId, updatedBy: ctx.staffId,
+          },
+          update: { kind: v.kind, name: v.name, updatedBy: ctx.staffId },
+        });
+        imported++;
+      }
+      return { imported, cleared, errors };
+    });
+  }
+
   @Delete(':day')
   @AnyPermissions('iam:write', 'metering:write')
   remove(@Param('day') day: string, @Req() req: Request) {

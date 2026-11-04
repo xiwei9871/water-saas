@@ -523,7 +523,7 @@ export const useSettleAccountLabels = (ids: (string | null | undefined)[]) => {
 /** 1103 项9：口径字典统一（单一出处）——全部口径下拉共用，
  *  配 showSearch + optionFilterProp 支持关键字录入模糊查询（原则三）。 */
 export const CALIBER_OPTIONS = [
-  'DN15', 'DN20', 'DN25', 'DN40', 'DN50', 'DN80', 'DN100', 'DN150', 'DN200',
+  'DN15', 'DN20', 'DN25', 'DN32', 'DN40', 'DN50', 'DN80', 'DN100', 'DN150', 'DN200',
 ].map((v) => ({ value: v, label: v }));
 
 /** 1104-W8：口径按「DN 后数字」数值比较（DN15 < DN100，非文本序）。

@@ -11,9 +11,7 @@ import type { Request } from 'express';
 import { conflictOnUnique } from '../../common/prisma-errors.js';
 import {
   isValidPeriod,
-  BOOK_CADENCES,
   METER_CHANNELS,
-  type BookCadence,
   type MeterChannel,
 } from '../../common/reading-cadence.js';
 import {
@@ -38,9 +36,6 @@ export const READING_BOOK_SELECT = {
   name: true,
   orgUnitId: true,
   readerId: true,
-  scheduleDay: true,
-  cadence: true,
-  anchorPeriod: true,
   zoneNo: true,
   segNo: true,
   meterChannel: true,
@@ -63,9 +58,6 @@ export interface ReadingBookBody {
   name?: string;
   orgUnitId?: string;
   readerId?: string | null;
-  scheduleDay?: number | null;
-  cadence?: BookCadence;
-  anchorPeriod?: string | null;
   meterChannel?: MeterChannel;
   /** 1102 R7：区号 + 段号（区段号编码；直管模式 segNo 为空）。 */
   zoneNo?: string;
@@ -76,9 +68,6 @@ export interface ReadingBookPatchBody {
   name?: string;
   orgUnitId?: string;
   readerId?: string | null;
-  scheduleDay?: number | null;
-  cadence?: BookCadence;
-  anchorPeriod?: string | null;
   meterChannel?: MeterChannel;
   status?: string;
 }
@@ -130,7 +119,6 @@ export class ReadingBookService {
       q?: string;
       orgUnitId?: string;
       waterAccountId?: string;
-      cadence?: string;
       status?: string;
     },
   ) {
@@ -160,7 +148,6 @@ export class ReadingBookService {
           bookNo: q.bookNo,
           orgUnitId:
             ctx.scope === 'ALL' ? q.orgUnitId : { in: ctx.orgScope },
-          cadence: q.cadence,
           status: q.status,
           name: q.name ? { contains: q.name } : undefined,
           ...(q.q
@@ -266,33 +253,10 @@ export class ReadingBookService {
     }
   }
 
-  /**
-   * Cadence/meterChannel/anchorPeriod wire validation — mirrors the DB
-   * CHECKs so bad input is a 422 here, never a 500 from the constraint.
-   * For PATCH the caller passes the MERGED cadence/anchor (patch value
-   * falling back to the stored row) so switching MONTHLY→QUARTERLY
-   * without an anchor is refused too.
-   */
-  private validateCadence(
-    cadence: BookCadence | undefined,
-    anchorPeriod: string | null | undefined,
-    meterChannel: MeterChannel | undefined,
-  ) {
-    if (cadence !== undefined && !BOOK_CADENCES.includes(cadence)) {
-      throw new UnprocessableEntityException({ code: 'INVALID_CADENCE' });
-    }
+  /** meterChannel wire validation（R13 后册不再有 cadence/anchor/scheduleDay）。 */
+  private validateMeterChannel(meterChannel: MeterChannel | undefined) {
     if (meterChannel !== undefined && !METER_CHANNELS.includes(meterChannel)) {
       throw new UnprocessableEntityException({ code: 'INVALID_METER_CHANNEL' });
-    }
-    if (
-      anchorPeriod !== undefined &&
-      anchorPeriod !== null &&
-      !isValidPeriod(anchorPeriod)
-    ) {
-      throw new UnprocessableEntityException({ code: 'INVALID_ANCHOR_PERIOD' });
-    }
-    if (cadence === 'QUARTERLY' && (anchorPeriod ?? null) === null) {
-      throw new UnprocessableEntityException({ code: 'QUARTERLY_ANCHOR_REQUIRED' });
     }
   }
 
@@ -301,7 +265,7 @@ export class ReadingBookService {
     if (!body.name || !body.orgUnitId) {
       throw new BadRequestException({ code: 'BOOK_FIELDS_REQUIRED' });
     }
-    this.validateCadence(body.cadence, body.anchorPeriod, body.meterChannel);
+    this.validateMeterChannel(body.meterChannel);
     await this.assertRefs(tx, ctx, body);
     // R7 区段号编码：给了区号（+段号）→ bookNo = 区号+段号（如 0116）。
     if (body.zoneNo !== undefined && !isValidZoneNo(body.zoneNo)) {
@@ -331,9 +295,6 @@ export class ReadingBookService {
           name: body.name,
           orgUnitId: body.orgUnitId,
           readerId,
-          scheduleDay: body.scheduleDay ?? null,
-          cadence: body.cadence ?? 'MONTHLY',
-          anchorPeriod: body.anchorPeriod ?? null,
           zoneNo: body.zoneNo ?? null,
           segNo: body.segNo ?? null,
           meterChannel: body.meterChannel ?? (isRemoteZone(body.zoneNo) ? 'REMOTE_AUTO' : 'MECHANICAL'),
@@ -357,11 +318,7 @@ export class ReadingBookService {
     if (body.status !== undefined && !['ACTIVE', 'DISABLED'].includes(body.status)) {
       throw new BadRequestException({ code: 'BOOK_STATUS_INVALID' });
     }
-    this.validateCadence(
-      body.cadence ?? (existing.cadence as BookCadence),
-      body.anchorPeriod === undefined ? existing.anchorPeriod : body.anchorPeriod,
-      body.meterChannel,
-    );
+    this.validateMeterChannel(body.meterChannel);
     await this.assertRefs(tx, ctx, body);
     req.auditBefore = existing;
     return tx.readingBook.update({
@@ -370,9 +327,6 @@ export class ReadingBookService {
         name: body.name,
         orgUnitId: body.orgUnitId,
         readerId: body.readerId === undefined ? undefined : body.readerId,
-        scheduleDay: body.scheduleDay === undefined ? undefined : body.scheduleDay,
-        cadence: body.cadence,
-        anchorPeriod: body.anchorPeriod === undefined ? undefined : body.anchorPeriod,
         meterChannel: body.meterChannel,
         status: body.status,
         updatedBy: ctx.staffId,

@@ -6,14 +6,13 @@ import {
   ReloadOutlined,
   TeamOutlined,
 } from '@ant-design/icons';
-import {App as AntdApp, Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Space, Spin, Tag, Typography} from 'antd';
+import {App as AntdApp, Button, Card, Drawer, Form, Input, Modal, Popconfirm, Space, Spin, Tag, Typography} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, fetchAll, apiErrorText, errorCode, toApiError } from '../../api/client';
 import type {
-  BookCadence,
   BookMember,
   MeterChannel,
   ReadingBook,
@@ -44,8 +43,6 @@ interface BookFormValues {
   name: string;
   orgUnitId: string;
   readerId?: string;
-  scheduleDay?: number | null;
-  cadence?: BookCadence;
   anchorMonth?: dayjs.Dayjs | null;
   meterChannel: MeterChannel;
   /** 1102 R7/R2：区号 + 段号（区段号编码）。 */
@@ -53,23 +50,17 @@ interface BookFormValues {
   segNo?: string;
 }
 
-const CADENCE_LABELS: Record<BookCadence, string> = {
-  MONTHLY: '每月',
-  ODD_MONTH: '单月（1/3/5/7/9/11月）',
-  EVEN_MONTH: '双月（2/4/6/8/10/12月）',
-  QUARTERLY: '季度（每3个月）',
-};
-const CHANNEL_LABELS: Record<MeterChannel, string> = {
-  MECHANICAL: '机械表·人工',
-  REMOTE_MANUAL: '远传·人工补录',
-  REMOTE_AUTO: '远传·自动（仅登记）',
-};
-
 interface MemberFormValues {
   customerId?: string; // 仅用于级联过滤用水户，不提交
   waterAccountId: string;
 }
 
+
+const CHANNEL_LABELS: Record<MeterChannel, string> = {
+  MECHANICAL: '机械表·人工',
+  REMOTE_MANUAL: '远传·人工补录',
+  REMOTE_AUTO: '远传·自动（仅登记）',
+};
 
 type ModalState =
   | { kind: 'create' }
@@ -95,7 +86,6 @@ export default function ReadingBooks() {
   const [bookNoInput, setBookNoInput] = useState('');
   const [bookNo, setBookNo] = useState('');
   const [orgFilter, setOrgFilter] = useState<string | undefined>(undefined);
-  const [cadenceFilter, setCadenceFilter] = useState<string | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -129,7 +119,6 @@ export default function ReadingBooks() {
         const res = { data: await fetchAll<ReadingBook>('/reading-books', {            ...(name.trim() ? { name: name.trim() } : {}),
             ...(bookNo.trim() ? { bookNo: bookNo.trim() } : {}),
             ...(orgFilter ? { orgUnitId: orgFilter } : {}),
-            ...(cadenceFilter ? { cadence: cadenceFilter } : {}),
             ...(statusFilter ? { status: statusFilter } : {}),
             ...(focusWa ? { waterAccountId: focusWa } : {}),
           }) };
@@ -140,7 +129,7 @@ export default function ReadingBooks() {
         setLoading(false);
       }
     },
-    [bookNo, message, name, orgFilter, cadenceFilter, statusFilter, focusWa],
+    [bookNo, message, name, orgFilter, statusFilter, focusWa],
   );
 
   useEffect(() => {
@@ -176,7 +165,6 @@ export default function ReadingBooks() {
       name: book.name,
       orgUnitId: book.orgUnitId,
       readerId: book.readerId ?? undefined,
-      scheduleDay: book.scheduleDay,
       zoneNo: book.zoneNo ?? undefined,
       segNo: book.segNo ?? undefined,
       meterChannel: book.meterChannel ?? 'MECHANICAL',
@@ -202,7 +190,6 @@ export default function ReadingBooks() {
             // 无 iam:read 时 TreeSelect 未渲染 —— 取用户本组织兜底。
             orgUnitId: canIamRead ? values.orgUnitId : (values.orgUnitId ?? user?.orgUnitId),
             readerId: canIamRead ? values.readerId : undefined,
-            scheduleDay: values.scheduleDay ?? undefined,
             zoneNo: values.zoneNo,
             segNo: values.segNo ?? null,
             meterChannel: values.meterChannel,
@@ -219,7 +206,6 @@ export default function ReadingBooks() {
             ...(canIamRead
               ? { orgUnitId: values.orgUnitId, readerId: values.readerId ?? null }
               : {}),
-            scheduleDay: values.scheduleDay ?? null,
             zoneNo: values.zoneNo ?? null,
             segNo: values.segNo ?? null,
             meterChannel: values.meterChannel,
@@ -368,27 +354,11 @@ export default function ReadingBooks() {
         r.readerName ?? staffName(r.readerId),
     },
     {
-      title: '抄表日',
-      dataIndex: 'scheduleDay',
-      key: 'scheduleDay',
-      width: 90,
-      render: (d: number | null) => (d ? `每月 ${d} 日` : '—'),
-    },
-    {
-      title: '周期 / 方式',
-      key: 'cadence',
-      width: 170,
-      render: (_: unknown, r: ReadingBook) => (
-        <Space size={4} wrap>
-          <Tag>
-            {enumLabel(CADENCE_LABELS, r.cadence ?? 'MONTHLY')}
-            {r.cadence === 'QUARTERLY' && r.anchorPeriod
-              ? ` · 锚 ${r.anchorPeriod.slice(0, 4)}-${r.anchorPeriod.slice(4)}`
-              : ''}
-          </Tag>
-          <Tag color="geekblue">{enumLabel(CHANNEL_LABELS, r.meterChannel ?? 'MECHANICAL')}</Tag>
-        </Space>
-      ),
+      title: '抄表方式',
+      key: 'meterChannel',
+      width: 110,
+      render: (_: unknown, r: ReadingBook) =>
+        <Tag color="geekblue">{enumLabel(CHANNEL_LABELS, r.meterChannel ?? 'MECHANICAL')}</Tag>,
     },
     {
       title: '状态',
@@ -550,21 +520,6 @@ export default function ReadingBooks() {
             allowClear
             showSearch
             optionFilterProp="label"
-            placeholder="抄表周期"
-            style={{ width: 170 }}
-            value={cadenceFilter}
-            onChange={(v) => {
-              setCadenceFilter(v);
-              setPage(1);
-            }}
-            options={(Object.keys(CADENCE_LABELS) as BookCadence[]).map(
-              (c) => ({ value: c, label: enumLabel(CADENCE_LABELS, c) }),
-            )}
-          />
-          <Select
-            allowClear
-            showSearch
-            optionFilterProp="label"
             placeholder="状态"
             style={{ width: 110 }}
             value={statusFilter}
@@ -694,9 +649,6 @@ export default function ReadingBooks() {
           </Form.Item>
           <Form.Item name="segNo" label="段号（月内抄表批次）" extra="01–16，对应当月第 N 个工作日">
             <Select allowClear options={segOptions} placeholder="选择段号" />
-          </Form.Item>
-          <Form.Item name="scheduleDay" label="计划抄表日（旧字段，可空）">
-            <InputNumber min={1} max={31} precision={0} style={{ width: '100%' }} placeholder="1-31，可空" />
           </Form.Item>
           <Form.Item
             name="meterChannel"

@@ -393,12 +393,10 @@ export class ReadingPlanService {
         id: string;
         org_unit_id: string;
         reader_id: string | null;
-        cadence: string;
-        anchor_period: string | null;
         status: string;
       }[]
     >`
-      SELECT id, org_unit_id, reader_id, cadence, anchor_period, status FROM reading_book
+      SELECT id, org_unit_id, reader_id, status FROM reading_book
       WHERE tenant_id = ${ctx.tenantId}::uuid AND id = ${body.bookId}::uuid
       FOR UPDATE`;
     if (locked.length === 0) {
@@ -560,18 +558,10 @@ export class ReadingPlanService {
       select: PLAN_ITEM_SELECT,
       orderBy: { seqNo: 'asc' },
     });
-    // 1102：频次已归属用户——计划项只含本月该抄的户；book.cadence 为
-    // 历史兼容列不再参与归集，但旧册仍保留册级告警供展示层提示。
+    // 1102/1104-R13：频次只归属用户——计划项只含本月该抄的户；
+    // 册级 cadence/anchor 字段已删除，跳过告警简化为成员未到抄期提示。
     const skipped = members.length - liveMembers.length;
-    const cadenceWarning = !isBookDue(
-      book.cadence as BookCadence,
-      book.anchor_period,
-      body.period,
-    )
-      ? 'BOOK_NOT_DUE_THIS_PERIOD'
-      : skipped > 0
-        ? 'SOME_MEMBERS_NOT_DUE'
-        : null;
+    const cadenceWarning = skipped > 0 ? 'SOME_MEMBERS_NOT_DUE' : null;
     return { ...plan, items, cadenceWarning, skippedNotDue: skipped };
   }
 
@@ -757,7 +747,6 @@ export class ReadingPlanService {
           bookNo: sysBookNo,
           name: '追加抄表册（系统）',
           orgUnitId: fallbackOrg,
-          cadence: 'MONTHLY',
           meterChannel: 'MECHANICAL',
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,

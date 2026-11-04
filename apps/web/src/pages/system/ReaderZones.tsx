@@ -6,7 +6,7 @@ import {
 } from '@ant-design/icons';
 import {
   App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber,
-  Modal, Space, Tag, Typography,
+  Modal, Space, Tag, Typography, Upload,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { type Dayjs } from 'dayjs';
@@ -244,7 +244,7 @@ export default function ReaderZones() {
       <Card title="工作日历例外（节假日 / 调休上班日）" size="small">
         <Space direction="vertical" size={8}>
           {canWrite && (
-            <Space>
+            <Space wrap>
               <DatePicker
                 placeholder="选择日期登记节假日"
                 onChange={(d) => void addException(d, 'HOLIDAY')}
@@ -253,6 +253,40 @@ export default function ReaderZones() {
                 placeholder="选择日期登记调休上班日"
                 onChange={(d) => void addException(d, 'WORKDAY')}
               />
+              {/* 1104 遗留核查：法定节假日批量导入（CSV 两列 日期,类型）。
+                  手动例外 > 内置法定日历 > 周一~五；clearYear 可清空该年手动例外重导。 */}
+              <Upload accept=".csv,.txt" maxCount={1} showUploadList={false}
+                customRequest={async ({ file, onSuccess, onError }) => {
+                  try {
+                    const text = await (file as File).text();
+                    const days = text.split(/\r?\n/)
+                      .map((l) => l.trim())
+                      .filter((l) => l && !/^日期/i.test(l))
+                      .map((l) => {
+                        const [day, kind, name] = l.split(/[\t,，]/).map((x) => x.trim());
+                        return { day, kind, name };
+                      });
+                    if (!days.length) { message.error('CSV 无有效行（格式：YYYY-MM-DD,HOLIDAY|WORKDAY）'); return; }
+                    const clearYear = /clearYear=(\d{4})/.exec(location.hash)?.[1];
+                    const res = await api.post<{ imported: number; cleared: number; errors: { index: number; day?: string; reason: string }[] }>(
+                      '/metering/calendar/import',
+                      { days, ...(clearYear ? { clearYear: Number(clearYear) } : {}) },
+                    );
+                    const { imported, cleared, errors } = res.data;
+                    message.success(`导入 ${imported} 条${cleared ? `，清空 ${cleared}` : ''}${errors.length ? `，格式错误 ${errors.length} 行` : ''}`);
+                    if (errors.length) {
+                      Modal.warning({
+                        title: '部分行未导入',
+                        content: errors.slice(0, 10).map((e) => `第 ${e.index + 1} 行（${e.day ?? '空'}）：${e.reason}`).join('\n'),
+                      });
+                    }
+                    void load();
+                    onSuccess?.({});
+                  } catch (err) { onError?.(err as Error); message.error(apiErrorText(err)); }
+                }}
+              >
+                <Button size="small">导入节假日 CSV</Button>
+              </Upload>
             </Space>
           )}
           <Space wrap>
