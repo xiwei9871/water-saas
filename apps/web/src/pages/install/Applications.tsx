@@ -327,6 +327,7 @@ export default function InstallApplications() {
   const [allocForm] = Form.useForm<{
     meterQty: number;
     readerId: string;
+    zoneNo?: string;
     caliberDetails?: { caliber?: string; qty?: number }[];
   }>();
   const [zoneOptions, setZoneOptions] = useState<{ value: string; label: string; readerId?: string | null }[]>([]);
@@ -336,10 +337,11 @@ export default function InstallApplications() {
       .catch(() => undefined);
   }, []);
   const allocReaderId = Form.useWatch('readerId', allocForm);
-  // 1103 项4：选抄表员 → 其绑定区号自动带入（只读回显）。
-  const allocZone = allocReaderId
-    ? zoneOptions.find((z) => z.readerId === allocReaderId)?.label ?? null
-    : null;
+  // 1103 项4/P0-2：抄表员唯一区号→自动带入只读；多区号→显式选择。
+  const readerZones = allocReaderId
+    ? zoneOptions.filter((z) => z.readerId === allocReaderId)
+    : [];
+  const allocZone = readerZones.length === 1 ? readerZones[0].label : null;
   const [allocSaving, setAllocSaving] = useState(false);
   const [allocResult, setAllocResult] = useState<{
     applyNo: string;
@@ -388,6 +390,7 @@ export default function InstallApplications() {
         cleanBody({
           meterQty: values.meterQty,
           readerId: values.readerId,
+          zoneNo: values.zoneNo,
           caliberDetails: details ?? undefined,
         }),
         { headers: { 'Idempotency-Key': newIdemKey() } },
@@ -840,6 +843,13 @@ export default function InstallApplications() {
               <Typography.Paragraph type="secondary" style={{ marginTop: -8 }}>
                 区号自动带入：{allocZone}（段号/频次在上号环节填报）
               </Typography.Paragraph>
+            )}
+            {readerZones.length > 1 && (
+              <Form.Item name="zoneNo" label="目标区号（该抄表员绑定多区，必选）"
+                rules={[{ required: true, message: '请选择目标区号' }]}>
+                <Select showSearch optionFilterProp="label" placeholder="选择区号"
+                  options={readerZones.map((z) => ({ value: z.value, label: z.label }))} />
+              </Form.Item>
             )}
           </Form>
         ) : (

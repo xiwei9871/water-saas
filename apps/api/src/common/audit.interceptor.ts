@@ -1,7 +1,7 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Request } from 'express';
-import { Observable, tap } from 'rxjs';
+import { Observable, mergeMap } from 'rxjs';
 import { toJsonSafe } from './json-safe.js';
 import { TenantPrismaService } from './tenant-prisma.js';
 
@@ -46,7 +46,9 @@ const entityOf = (route: string): string => {
  * without a loaded row — creates — leave before NULL), after=mutated row
  * (the handler's return value, falling back to the request body when the
  * handler returns nothing meaningful like {ok:true}), and the client IP.
- * Best-effort — audit failures are logged, never thrown into the response.
+ * Awaited before the response completes (1103 P1-4)：请求返回成功时审计
+ * 行已落库——营收关键写操作的可追溯性要求，且消除进程关闭时在途
+ * 写入的「Engine 空响应」噪声。审计失败仍只记日志不阻断业务响应。
  *
  * NOTE: ws_app has INSERT+SELECT only on audit_log (UPDATE/DELETE revoked).
  */
@@ -62,7 +64,7 @@ export class AuditInterceptor implements NestInterceptor {
     }
 
     return next.handle().pipe(
-      tap((result) => {
+      mergeMap(async (result) => {
         const route = (req.route?.path as string | undefined) ?? req.path;
         const entity = entityOf(route);
         const resultId =
@@ -85,7 +87,7 @@ export class AuditInterceptor implements NestInterceptor {
           stripSecrets(meaningful ? result : { body: req.body, resultId }),
         ) as Prisma.InputJsonValue;
 
-        this.prisma
+        await this.prisma
           .runAsTenant(user.tenantId, (tx) =>
             tx.auditLog.create({
               data: {
@@ -106,6 +108,7 @@ export class AuditInterceptor implements NestInterceptor {
             // Append-only audit must never break the business response.
             console.error('audit_log write failed', err);
           });
+        return result;
       }),
     );
   }

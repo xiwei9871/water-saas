@@ -17,14 +17,14 @@
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| 开户→装表→入册→抄表→QC→结算→开账→收款→预存→日结→报表 | **PASS** | stage-2.1 真实服务 UAT（报建→放号→上号→入册→计划→抄表→DONE）+ 工单 EXECUTED + 违章建档 + 浏览器真实提单 SG27；账单/收款/日结由 e2e 集覆盖 |
+| 开户→装表→入册→抄表→QC→结算→开账→收款→预存→日结→报表 | **PARTIAL** | 各段分散验证（stage-2.1 真实服务 UAT 报建→上号→抄表→DONE + e2e 覆盖账单/收款/日结）——复审纠偏：无一份「开户到报表核对」完整单次执行证据 |
 | 异常场景（估水/补抄/更正/换表/部分付款/红冲/幂等/断网） | **PARTIAL** | e2e 集覆盖 meter-reading supersede/replace/partial-alloc/reversal/idem；断网重试 NOT_VERIFIED |
 
 ## G3 性能与数据迁移
 
 | 项 | 状态 | 证据 |
 |---|---|---|
-| 1,000 户开账 | **NOT_VERIFIED** | `scripts/perf/billing-volume-test.sh` 已提供，未跑完 |
+| 1,000 户开账 | **NOT_VERIFIED** | `scripts/perf/billing-volume-test.sh` 仅含计数查询、无 N 户造数逻辑，尚不能作性能验收证据 |
 | 4,000 户开账 | **NOT_VERIFIED** | 同上 |
 | 多角色并发 | **PARTIAL** | reorder 行锁+e2e 并发负测；全并发压测未跑 |
 | 脱敏迁移演练 | **NOT_VERIFIED** | 未做 |

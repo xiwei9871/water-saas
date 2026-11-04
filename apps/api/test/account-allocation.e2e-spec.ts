@@ -187,11 +187,9 @@ describe('1028v2 放号-上号-补录', () => {
     const meter = (await get('/meters?q=ACT-M-001')).body;
     expect(meter[0].status).toBe('INSTALLED');
     expect(meter[0].brand).toBe('上号牌');
-    // 报装申请办结 + 回写户号/表号
+    // P0-1 修订：多户申请——首户上号后申请不办结（acct2 仍待上号）。
     const ap = (await get(`/install/applications/${appId}`)).body;
-    expect(ap.status).toBe('COMPLETED');
-    expect(ap.waterAccountId).toBe(acct1);
-    expect(ap.meterNo).toBe('ACT-M-001');
+    expect(ap.status).toBe('INSTALLING');
     // 上号任务办结
     const done = ((await get('/tasks?type=ACCOUNT_ACTIVATE&box=done')).body as {
       items: { bizId: string; status: string }[];
@@ -220,6 +218,10 @@ describe('1028v2 放号-上号-补录', () => {
       review: { accountNoOk: true, caliberOk: true, addrOk: true, nameOk: true },
     }).expect(201);
     expect(ok.body.status).toBe('PENDING_COMPLETE');
+    // P0-1 修订：全部放号户办结 → 申请才 COMPLETED。
+    const ap = (await get(`/install/applications/${appId}`)).body;
+    expect(ap.status).toBe('COMPLETED');
+    expect(ap.meterNo).toBe('ACT-M-002');
   });
 
   it('补录：缺主体 400 → 补齐客户/结算户/合同 → NORMAL + billable', async () => {
@@ -273,5 +275,63 @@ describe('1028v2 放号-上号-补录', () => {
       customerId: cust.id, settleAccountId: settle.id,
     }).expect(201);
     expect(done.body.status).toBe('NORMAL');
+  });
+
+  it('P0-2：抄表员绑定多区号时放号必须显式选区', async () => {
+    // 专用多区读表员（不污染 STAFF_ADMIN 的区绑定）。
+    const reader = 'ee17ee17-0000-4000-8000-0000000ff019';
+    await owner.query(
+      `INSERT INTO staff (id, tenant_id, org_unit_id, login, password_hash, name, status, created_at, updated_at)
+       VALUES ($1,$2,$3,'tg-multi-reader',$4,'多区读表员','ACTIVE',now(),now())
+       ON CONFLICT (id) DO NOTHING`,
+      [reader, TG, ORG_G, (await bcrypt.hash('x', 10))],
+    );
+    await owner.query(
+      `INSERT INTO reader_zone (id, tenant_id, zone_no, reader_id, status, created_at, updated_at)
+       SELECT gen_random_uuid(), $1, z, $2, 'ACTIVE', now(), now()
+       FROM (VALUES ('81'), ('82')) AS t(z)
+       ON CONFLICT (tenant_id, zone_no) DO UPDATE SET reader_id = EXCLUDED.reader_id`,
+      [TG, reader],
+    );
+    const res3 = await post('/install/applications', {
+      applicantName: '多区户', addr: 'TG19 多区 1 号', usageCategory: 'RES_METERED',
+    }).expect(201);
+    for (const to of ['SURVEYED', 'APPROVED']) {
+      await post(`/install/applications/${res3.body.id}/transition`, { to }).expect(201);
+    }
+    await post(`/install/applications/${res3.body.id}/transition`, {
+      to: 'INSTALLING', installCompletedAt: '2026-11-01',
+    }).expect(201);
+    // 不选区号 → 400 ZONE_NO_REQUIRED；选合法区号 → 201 且落到所选区。
+    const noZone = await post(`/install/applications/${res3.body.id}/allocate`, {
+      meterQty: 1, readerId: reader,
+    });
+    expect(noZone.status).toBe(400);
+    expect(noZone.body.code).toBe('ZONE_NO_REQUIRED');
+    const ok = await post(`/install/applications/${res3.body.id}/allocate`, {
+      meterQty: 1, readerId: reader, zoneNo: '82',
+    }).expect(201);
+    const wa = (await get(`/water-accounts/${ok.body.accounts[0].id}`)).body;
+    expect(wa.zoneNo).toBe('82');
+  });
+
+  it('P1-1/P1-2：上号水表候选端点返回本单填报水表', async () => {
+    const res4 = await post('/install/applications', {
+      applicantName: '候选户', addr: 'TG19 候选 2 号', usageCategory: 'RES_METERED',
+    }).expect(201);
+    for (const to of ['SURVEYED', 'APPROVED']) {
+      await post(`/install/applications/${res4.body.id}/transition`, { to }).expect(201);
+    }
+    await post(`/install/applications/${res4.body.id}/transition`, {
+      to: 'INSTALLING', installCompletedAt: '2026-11-01',
+    }).expect(201);
+    await post(`/install/applications/${res4.body.id}/install-meters`, {
+      meters: [{ meterNo: `CAND-${Date.now()}`, caliber: 'DN20' }],
+    }).expect(201);
+    const alloc = (await post(`/install/applications/${res4.body.id}/allocate`, {
+      meterQty: 1, readerId: STAFF_ADMIN,
+    }).expect(201)).body;
+    const cand = (await get(`/water-accounts/${alloc.accounts[0].id}/meter-candidates`)).body;
+    expect(cand.candidates.some((c: { meterNo: string }) => c.meterNo.startsWith('CAND-'))).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   App as AntdApp,
+  AutoComplete,
   Button,
   Card,
   Checkbox,
@@ -9,6 +10,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Select,
   Space,
   Spin,
   Tag,
@@ -17,7 +19,7 @@ import {
 import { EnvironmentOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
-import { cleanBody } from '../common';
+import { cleanBody, CALIBER_OPTIONS } from '../common';
 import type { WaterAccount } from '../../api/types';
 
 /** crypto.randomUUID 仅在安全上下文可用 —— 内网 http 部署需回退。 */
@@ -33,6 +35,8 @@ interface ActivateFormValues {
   caliberOk: boolean;
   addrOk: boolean;
   nameOk: boolean;
+  segNo?: string;
+  cadence?: string;
   serialNo?: string;
   brand?: string;
   model?: string;
@@ -54,6 +58,32 @@ export default function MobileActivate() {
   const [activateFor, setActivateFor] = useState<WaterAccount | null>(null);
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm<ActivateFormValues>();
+  const [meterCands, setMeterCands] = useState<
+    { meterNo: string; caliber?: string | null; brand?: string | null; serialNo?: string | null; maxDial?: number | string | null; source: string }[]
+  >([]);
+  // P1-1/1103：与桌面端一致——候选水表下拉（出库+本单），选中自动带入要素。
+  const openActivate = (r: WaterAccount) => {
+    form.resetFields();
+    setActivateFor(r);
+    setMeterCands([]);
+    api
+      .get<{ pendingCaliber: string | null; candidates: typeof meterCands }>(
+        `/water-accounts/${r.id}/meter-candidates`,
+      )
+      .then((res) => setMeterCands(res.data.candidates ?? []))
+      .catch(() => undefined);
+  };
+  const onPickMeter = (meterNo: string) => {
+    const m = meterCands.find((c) => c.meterNo === meterNo);
+    if (m) {
+      form.setFieldsValue({
+        caliber: m.caliber ?? undefined,
+        brand: m.brand ?? undefined,
+        serialNo: m.serialNo ?? undefined,
+        maxDial: m.maxDial != null ? Number(m.maxDial) : undefined,
+      });
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -99,6 +129,8 @@ export default function MobileActivate() {
             addrOk: values.addrOk === true,
             nameOk: values.nameOk === true,
           },
+          segNo: values.segNo,
+          cadence: values.cadence,
           meterInfo: cleanBody({
             serialNo: values.serialNo,
             brand: values.brand,
@@ -147,7 +179,7 @@ export default function MobileActivate() {
               </Space>
             }
             extra={
-              <Button size="small" type="primary" onClick={() => { form.resetFields(); setActivateFor(r); }}>
+              <Button size="small" type="primary" onClick={() => openActivate(r)}>
                 上号
               </Button>
             }
@@ -180,9 +212,19 @@ export default function MobileActivate() {
           <Form.Item
             name="meterNo"
             label="现场安装水表表号"
-            rules={[{ required: true, message: '请输入表号' }]}
+            rules={[{ required: true, message: '请选择或输入表号' }]}
+            extra="下拉为本单/出库候选，选中自动带入要素；也可人工输入"
           >
-            <Input placeholder="物理表号" size="large" />
+            <AutoComplete
+              placeholder="选择候选水表或输入物理表号"
+              size="large"
+              options={meterCands.map((c) => ({
+                value: c.meterNo,
+                label: `${c.meterNo}${c.caliber ? ` · ${c.caliber}` : ''}${c.source === 'APPLY' ? ' · 本单' : ''}`,
+              }))}
+              filterOption={(v, o) => (o?.value ?? '').toLowerCase().includes(v.toLowerCase())}
+              onSelect={onPickMeter}
+            />
           </Form.Item>
           <Form.Item
             name="initialReading"
@@ -191,6 +233,20 @@ export default function MobileActivate() {
           >
             <Input placeholder="默认 0" size="large" inputMode="decimal" />
           </Form.Item>
+          <Space wrap>
+            <Form.Item name="segNo" label="抄表段号(01–16)" style={{ width: 150 }}>
+              <Select allowClear showSearch optionFilterProp="label" placeholder="01"
+                options={Array.from({ length: 16 }, (_, i) => ({ value: String(i + 1).padStart(2, '0'), label: String(i + 1).padStart(2, '0') }))} />
+            </Form.Item>
+            <Form.Item name="cadence" label="抄表频次" style={{ width: 140 }} initialValue="MONTHLY">
+              <Select options={[
+                { value: 'MONTHLY', label: '每月' },
+                { value: 'ODD_MONTH', label: '单月' },
+                { value: 'EVEN_MONTH', label: '双月' },
+                { value: 'QUARTERLY', label: '季度' },
+              ]} />
+            </Form.Item>
+          </Space>
           <Card size="small" title="四项一致复核" style={{ marginBottom: 12 }}>
             {(
               [
@@ -230,7 +286,8 @@ export default function MobileActivate() {
               <Input style={{ width: 100 }} />
             </Form.Item>
             <Form.Item name="caliber" label="口径" style={{ marginBottom: 4 }}>
-              <Input style={{ width: 80 }} placeholder={activateFor?.pendingCaliber ?? 'DN15'} />
+              <Select allowClear showSearch optionFilterProp="label" style={{ width: 110 }}
+                placeholder={activateFor?.pendingCaliber ?? 'DN15'} options={CALIBER_OPTIONS} />
             </Form.Item>
             <Form.Item name="maxDial" label="最大读数" style={{ marginBottom: 4 }}>
               <InputNumber min={0} style={{ width: 110 }} />

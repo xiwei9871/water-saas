@@ -35,9 +35,11 @@ export interface AllocateInput {
   /** R11 按口径明细放号：[{caliber, qty}]，合计 = 放号总数。 */
   caliberDetails?: { caliber: string; qty: number }[];
   readerId: string;
+  /** 1103 修订 P0-2：抄表员绑定多个 ACTIVE 区号时必传（一区号自动带入）。 */
+  zoneNo?: string;
   anchorPeriod?: string;
-  /** 1103 修订：放号只剩「数量 + 口径明细 + 指派抄表员」——
-   *  区号由抄表员绑定自动带入；段号/频次属真实户确立后的归集属性，
+  /** 1103 修订：放号只剩「数量 + 口径明细 + 指派抄表员（+多区号时选区）」——
+   *  区号按抄表员绑定带入/选择；段号/频次属真实户确立后的归集属性，
    *  移到「上号」填报；单一「表计口径」字段删除（与明细冗余）；
    *  两号合一后不再生成 archiveNo。 */
 }
@@ -202,12 +204,28 @@ export class AllocationService {
       const caliberSeq: (string | null)[] = details.length
         ? details.flatMap((d) => Array(Math.floor(d.qty)).fill(d.caliber))
         : Array.from({ length: qty }, () => fallbackCaliber);
-      // 1103：区号由指派抄表员的绑定区号自动带入（放号不填区/段/频次）。
-      const z = await tx.readerZone.findFirst({
+      // 1103/P0-2：区号由抄表员绑定带入——唯一绑定自动带入；
+      // 多区号必须显式选择（杜绝 findFirst 随机归区）；零绑定则留空。
+      const readerZones = await tx.readerZone.findMany({
         where: { tenantId: ctx.tenantId, readerId: reader.id, status: 'ACTIVE' },
         select: { zoneNo: true },
       });
-      const zoneNo = z?.zoneNo ?? null;
+      let zoneNo: string | null;
+      if (readerZones.length > 1) {
+        const picked = input.zoneNo?.trim();
+        if (!picked || !readerZones.some((z) => z.zoneNo === picked)) {
+          throw new BadRequestException({
+            code: 'ZONE_NO_REQUIRED',
+            message: '该抄表员绑定多个区号，请显式选择目标区号',
+            zones: readerZones.map((z) => z.zoneNo),
+          });
+        }
+        zoneNo = picked;
+      } else if (readerZones.length === 1) {
+        zoneNo = readerZones[0].zoneNo;
+      } else {
+        zoneNo = input.zoneNo?.trim() || null;
+      }
 
       const accounts: { id: string; accountNo: string; taskId: string }[] = [];
       for (const idx of Array.from({ length: qty }, (_, i) => i)) {
@@ -359,9 +377,29 @@ export class AllocationService {
       const app = wa.sourceApplyNo
         ? await tx.installApplication.findFirst({
             where: { tenantId: ctx.tenantId, applyNo: wa.sourceApplyNo },
-            select: { installMeters: true },
+            select: { installMeters: true, orgUnitId: true },
           })
         : null;
+      // P1-2：组织数据范围——来源单组织 或 册成员组织 任一处须在操作员子树内；
+      // 受限角色且两锚点皆无（未归集户）→ 拒，防跨组织直读候选水表。
+      if (ctx.scope !== 'ALL') {
+        const anchors: (string | null | undefined)[] = [app?.orgUnitId];
+        const membership = await tx.bookMeter.findFirst({
+          where: { tenantId: ctx.tenantId, waterAccountId: wa.id },
+          select: { bookId: true },
+        });
+        if (membership) {
+          const book = await tx.readingBook.findFirst({
+            where: { tenantId: ctx.tenantId, id: membership.bookId },
+            select: { orgUnitId: true },
+          });
+          anchors.push(book?.orgUnitId);
+        }
+        const valid = anchors.filter((a): a is string => !!a);
+        if (!valid.length || !valid.some((a) => orgInScope(ctx, a))) {
+          throw new ForbiddenException({ code: 'ORG_OUT_OF_SCOPE' });
+        }
+      }
       const applyMeters = (Array.isArray(app?.installMeters) ? app.installMeters : []) as {
         meterNo?: string; caliber?: string; brand?: string;
         serialNo?: string; maxDial?: number;
@@ -498,23 +536,33 @@ export class AllocationService {
         },
       });
 
-      // R2 反写时机改「上号成功」：报装申请办结归档 + INSTALL_REVIEW 完结。
+      // R2 反写时机改「上号成功」；1103 修订 P0-1：多户申请仅当全部
+      // 放号户办结（无 PENDING_ASSIGN 残留，含退号/已上号）才可 COMPLETED。
       if (wa.sourceApplyNo) {
         const app = await tx.installApplication.findFirst({
           where: { tenantId: ctx.tenantId, applyNo: wa.sourceApplyNo },
         });
         if (app && app.status !== 'COMPLETED') {
-          await tx.installApplication.update({
-            where: { id: app.id },
-            data: {
-              status: 'COMPLETED',
-              waterAccountId: wa.id,
-              meterNo,
-              updatedBy: ctx.staffId,
+          const pending = await tx.waterAccount.count({
+            where: {
+              tenantId: ctx.tenantId,
+              sourceApplyNo: wa.sourceApplyNo,
+              status: 'PENDING_ASSIGN',
             },
           });
-          await this.tasks.autoCompleteByBiz(
-            tx, ctx, 'INSTALL_REVIEW', 'INSTALL_APPLICATION', app.id, '上号完成归档');
+          if (pending === 0) {
+            await tx.installApplication.update({
+              where: { id: app.id },
+              data: {
+                status: 'COMPLETED',
+                waterAccountId: wa.id,
+                meterNo,
+                updatedBy: ctx.staffId,
+              },
+            });
+            await this.tasks.autoCompleteByBiz(
+              tx, ctx, 'INSTALL_REVIEW', 'INSTALL_APPLICATION', app.id, '上号完成归档');
+          }
         }
       }
       // 上号任务按完成标准自动办结（回填复核结果）。
