@@ -77,6 +77,15 @@ const onboard = async (label: string, account?: Record<string, unknown>) => {
   return res.body.waterAccount.id as string;
 };
 
+/** P0-2 修复后：多区号读表员放号须显式选区——取其任一 ACTIVE 绑定区号。 */
+const anyReaderZone = async (): Promise<string | undefined> => {
+  const zones = (await get('/reading-zones')).body.filter(
+    (z: { readerId: string; status: string }) =>
+      z.readerId === STAFF_READER_A && z.status === 'ACTIVE',
+  );
+  return zones[0]?.zoneNo as string | undefined;
+};
+
 /** 区号绑定 find-or-create（同名区号跨运行残留时复用并确保启用）。 */
 const ensureZone = async (zoneNo: string) => {
   const existing = (await get('/reading-zones')).body.find(
@@ -406,16 +415,16 @@ describe('A4 allocate guard + deallocate', () => {
     appId = await mkApp(3);
     for (const q of [0, 1.5, 10000, -3]) {
       const r = await post(`/install/applications/${appId}/allocate`,
-        { meterQty: q, readerId: STAFF_READER_A });
+        { meterQty: q, readerId: STAFF_READER_A, zoneNo: await anyReaderZone() });
       expect(r.status).toBe(400);
       expect(r.body.code).toBe('METER_QTY_INVALID');
     }
     const over = await post(`/install/applications/${appId}/allocate`,
-      { meterQty: 5, readerId: STAFF_READER_A });
+      { meterQty: 5, readerId: STAFF_READER_A, zoneNo: await anyReaderZone() });
     expect(over.status).toBe(409);
     expect(over.body.code).toBe('QTY_EXCEEDS_APPROVED');
     const mm = await post(`/install/applications/${appId}/allocate`, {
-      meterQty: 3, readerId: STAFF_READER_A,
+      meterQty: 3, readerId: STAFF_READER_A, zoneNo: await anyReaderZone(),
       caliberDetails: [{ caliber: 'DN15', qty: 2 }, { caliber: 'DN20', qty: 2 }],
     });
     expect(mm.status).toBe(400);
@@ -424,7 +433,7 @@ describe('A4 allocate guard + deallocate', () => {
 
   it('口径明细放号 + 退号闭环（档案号不复用）', async () => {
     const ok = await post(`/install/applications/${appId}/allocate`, {
-      meterQty: 3, readerId: STAFF_READER_A, segNo: '05',
+      meterQty: 3, readerId: STAFF_READER_A, zoneNo: await anyReaderZone(),
       caliberDetails: [{ caliber: 'DN15', qty: 2 }, { caliber: 'DN20', qty: 1 }],
     }).expect(201);
     expect(ok.body.count).toBe(3);
@@ -462,11 +471,11 @@ describe('A4 allocate guard + deallocate', () => {
       meters: [{ meterNo: `T9M-${RUN}-1` }],
     }).expect(201);
     const r = await post(`/install/applications/${appId2}/allocate`,
-      { meterQty: 2, readerId: STAFF_READER_A });
+      { meterQty: 2, readerId: STAFF_READER_A, zoneNo: await anyReaderZone() });
     expect(r.status).toBe(409);
     expect(r.body.code).toBe('QTY_EXCEEDS_INSTALLED');
     const ok = await post(`/install/applications/${appId2}/allocate`,
-      { meterQty: 1, readerId: STAFF_READER_A }).expect(201);
+      { meterQty: 1, readerId: STAFF_READER_A, zoneNo: await anyReaderZone() }).expect(201);
     expect(ok.body.count).toBe(1);
   });
 });
@@ -636,7 +645,7 @@ describe('P0-4 billable 状态一致', () => {
     await post(`/install/applications/${appRes.body.id}/transition`,
       { to: 'INSTALLING', installCompletedAt: '2026-11-01' }).expect(201);
     const alloc = await post(`/install/applications/${appRes.body.id}/allocate`,
-      { meterQty: 1, readerId: STAFF_READER_A }).expect(201);
+      { meterQty: 1, readerId: STAFF_READER_A, zoneNo: await anyReaderZone() }).expect(201);
     const waId = alloc.body.accounts[0].id;
     const pa = (await owner.query(`SELECT status,billable FROM water_account WHERE id=$1`, [waId])).rows[0];
     expect(pa.status).toBe('PENDING_ASSIGN');
