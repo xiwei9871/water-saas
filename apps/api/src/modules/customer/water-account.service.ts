@@ -58,7 +58,7 @@ export const WATER_ACCOUNT_SELECT = {
   contractNo: true,
   contractScan: true,
   assignReaderId: true,
-  pendingCaliber: true,
+  useAddr: true,
   activatedAt: true,
   zoneNo: true,
   segNo: true,

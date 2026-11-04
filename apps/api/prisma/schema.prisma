@@ -614,8 +614,8 @@ model WaterAccount {
   contractScan    Json?         @map("contract_scan") @db.JsonB
   /** 放号时指定的抄表员（上号任务指派人）。 */
   assignReaderId  String?       @map("assign_reader_id") @db.Uuid
-  /** 放号登记的表计口径（上号复核参考）。 */
-  pendingCaliber  String?       @map("pending_caliber")
+  /** 用水地址（1104-W5：实际抄表/计费地址；默认=安装地址，上号可修订）。 */
+  useAddr         String?       @map("use_addr")
   /** 上号现场复核结果（四项一致确认：档案号/口径/地址/用户名）。 */
   activateReview  Json?         @map("activate_review") @db.JsonB
   /** 上号时间。 */

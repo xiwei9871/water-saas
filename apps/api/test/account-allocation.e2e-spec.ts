@@ -145,11 +145,11 @@ describe('1028v2 放号-上号-补录', () => {
     const wa = (await get(`/water-accounts/${acct1}`)).body;
     expect(wa.status).toBe('PENDING_ASSIGN');
     expect(wa.assignReaderId).toBe(STAFF_ADMIN);
-    expect(wa.pendingCaliber).toBe('DN15');
     expect(wa.sourceApplyNo).toBe(applyNo);
     expect(wa.billable).toBe(false);
     // 列表可筛 PENDING_ASSIGN
-    const list = (await get('/water-accounts?status=PENDING_ASSIGN')).body;
+    const listBody = (await get('/water-accounts?status=PENDING_ASSIGN')).body;
+    const list = Array.isArray(listBody) ? listBody : (listBody as { items?: { id: string }[] }).items ?? [];
     expect(list.some((r: { id: string }) => r.id === acct1)).toBe(true);
     // 上号任务已派给抄表员
     const tasks = ((await get('/tasks?type=ACCOUNT_ACTIVATE')).body as {

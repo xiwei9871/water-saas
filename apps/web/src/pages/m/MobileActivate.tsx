@@ -37,6 +37,7 @@ interface ActivateFormValues {
   nameOk: boolean;
   segNo?: string;
   cadence?: string;
+  useAddr?: string;
   serialNo?: string;
   brand?: string;
   model?: string;
@@ -67,10 +68,13 @@ export default function MobileActivate() {
     setActivateFor(r);
     setMeterCands([]);
     api
-      .get<{ pendingCaliber: string | null; candidates: typeof meterCands }>(
+      .get<{ applyName: string | null; applyAddr: string | null; candidates: typeof meterCands }>(
         `/water-accounts/${r.id}/meter-candidates`,
       )
-      .then((res) => setMeterCands(res.data.candidates ?? []))
+      .then((res) => {
+        setMeterCands(res.data.candidates ?? []);
+        form.setFieldsValue({ useAddr: res.data.applyAddr ?? undefined });
+      })
       .catch(() => undefined);
   };
   const onPickMeter = (meterNo: string) => {
@@ -131,6 +135,7 @@ export default function MobileActivate() {
           },
           segNo: values.segNo,
           cadence: values.cadence,
+          useAddr: values.useAddr,
           meterInfo: cleanBody({
             serialNo: values.serialNo,
             brand: values.brand,
@@ -189,7 +194,6 @@ export default function MobileActivate() {
               <div>
                 <EnvironmentOutlined /> {r.addr}
               </div>
-              <div>预占口径：{r.pendingCaliber ?? '—'}</div>
             </div>
           </Card>
         ))
@@ -246,12 +250,15 @@ export default function MobileActivate() {
                 { value: 'QUARTERLY', label: '季度' },
               ]} />
             </Form.Item>
+            <Form.Item name="useAddr" label="用水地址（默认=安装地址，可修订）" style={{ minWidth: 240 }}>
+              <Input placeholder="实际用水地址" />
+            </Form.Item>
           </Space>
           <Card size="small" title="四项一致复核" style={{ marginBottom: 12 }}>
             {(
               [
                 ['accountNoOk', `用户档案号一致（${activateFor?.accountNo ?? '—'}）`],
-                ['caliberOk', `水表口径一致（${activateFor?.pendingCaliber ?? '—'}）`],
+                ['caliberOk', '水表口径一致（以所选水表档案为准）'],
                 ['addrOk', '安装地址一致'],
                 ['nameOk', '用户名称一致'],
               ] as const
@@ -287,7 +294,7 @@ export default function MobileActivate() {
             </Form.Item>
             <Form.Item name="caliber" label="口径" style={{ marginBottom: 4 }}>
               <Select allowClear showSearch optionFilterProp="label" style={{ width: 110 }}
-                placeholder={activateFor?.pendingCaliber ?? 'DN15'} options={CALIBER_OPTIONS} />
+                placeholder="选表号自动带出" options={CALIBER_OPTIONS} />
             </Form.Item>
             <Form.Item name="maxDial" label="最大读数" style={{ marginBottom: 4 }}>
               <InputNumber min={0} style={{ width: 110 }} />

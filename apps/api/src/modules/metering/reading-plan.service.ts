@@ -879,6 +879,21 @@ export class ReadingPlanService {
     });
   }
 
+  /** R5 可视化：最近一次自动生成运行记录（含 SKIPPED/FAILED 补偿依据）。 */
+  async listGenRuns(ctx: TenantCtx, take = 20) {
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      tx.planGenRun.findMany({
+        where: { tenantId: ctx.tenantId },
+        orderBy: { createdAt: 'desc' },
+        take,
+        select: {
+          id: true, runDate: true, planDate: true, segNo: true,
+          status: true, generated: true, error: true, createdAt: true,
+        },
+      }),
+    );
+  }
+
   /**
    * R6 超段均分：任选 N 段（sourceSegs），其本月未抄任务均分到
    * ≤ 总段数−N 的目标段（targetSegs）。计划项级迁移（本月临时调整，

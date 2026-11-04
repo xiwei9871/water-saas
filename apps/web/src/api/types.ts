@@ -249,7 +249,8 @@ export interface WaterAccount {
   /** 1028v2 放号-上号：档案号 / 指派抄表员 / 预占口径 / 上号完成时间。 */
   /** 1103 两号合一：archiveNo 已下线，accountNo 即「用户档案号」。 */
   assignReaderId?: string | null;
-  pendingCaliber?: string | null;
+  /** 1104-W5：用水地址（默认=安装地址，上号可修订）。 */
+  useAddr?: string | null;
   activatedAt?: string | null;
   /** 1102 R13/R2/R15：频次/区号/段号/路线键/退号留痕。 */
   cadence?: string;

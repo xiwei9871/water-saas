@@ -21,6 +21,7 @@ import {
   fmtPeriod,
   USAGE_CATEGORY_LABELS,
   USAGE_CATEGORY_OPTIONS,
+  smartSorter,
 } from '../common';
 import { columnScale } from '../../utils/numfmt';
 import {
@@ -416,6 +417,8 @@ function DetailQuery() {
     if (!MONEY_KEYS.has(f.key)) {
       return {
         title, key: f.key, width: 110,
+        sorter: (a: Record<string, unknown>, b: Record<string, unknown>) =>
+          smartSorter(getVal(a), getVal(b), f.key),
         render: (_: unknown, row: Record<string, unknown>) => renderCell(f.key, getVal(row)),
         ...extra,
       };
@@ -424,6 +427,8 @@ function DetailQuery() {
     return {
       title: `${title}${sc.label === '元' ? '' : `（${sc.label}）`}`,
       key: f.key, width: 110,
+      sorter: (a: Record<string, unknown>, b: Record<string, unknown>) =>
+        smartSorter(getVal(a), getVal(b), f.key),
       render: (_: unknown, row: Record<string, unknown>) => {
         const v = getVal(row);
         return v === null || v === undefined || v === ''
@@ -441,6 +446,8 @@ function DetailQuery() {
       key: f.key,
       fixed: (i < 2 ? 'left' : undefined) as 'left' | undefined,
       width: f.key === 'addr' ? 200 : 110,
+      sorter: (a: Record<string, unknown>, b: Record<string, unknown>) =>
+        smartSorter(a[f.key], b[f.key], f.key),
       render: (v: unknown) => renderCell(f.key, v),
     })),
     ...respPeriods.flatMap((p) =>

@@ -86,6 +86,13 @@ export class ReadingPlanController {
     });
   }
 
+  /** GET /reading-plans/gen-runs — R5 自动生成运行记录（OK/SKIPPED/FAILED）。 */
+  @Get('gen-runs')
+  @Permissions('metering:read')
+  genRuns(@Query('take') take?: string) {
+    return this.svc.listGenRuns(currentTenant(), Math.min(Number(take) || 20, 100));
+  }
+
   /** GET /reading-plans/:id — plan + snapshot items (seq_no ordered). */
   @Get(':id')
   @Permissions('metering:read')

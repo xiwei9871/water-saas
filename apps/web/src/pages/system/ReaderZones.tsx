@@ -47,6 +47,7 @@ export default function ReaderZones() {
   const [rows, setRows] = useState<ZoneRow[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
   const [cal, setCal] = useState<CalendarResp | null>(null);
+  const [genRuns, setGenRuns] = useState<{ id: string; runDate: string; planDate: string | null; segNo: string | null; status: string; generated: number; error: string | null; createdAt: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState<{ mode: 'create' } | { mode: 'edit'; zone: ZoneRow } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -55,12 +56,14 @@ export default function ReaderZones() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [z, c] = await Promise.all([
+      const [z, c, g] = await Promise.all([
         api.get<ZoneRow[]>('/reading-zones'),
         api.get<CalendarResp>('/metering/calendar'),
+        api.get<typeof genRuns>('/reading-plans/gen-runs', { params: { take: 10 } }).catch(() => ({ data: [] as typeof genRuns })),
       ]);
       setRows(z.data);
       setCal(c.data);
+      setGenRuns(g.data);
     } catch (err) {
       message.error(apiErrorText(err));
     } finally {
@@ -261,10 +264,30 @@ export default function ReaderZones() {
               </Tag>
             ))}
             {(cal?.exceptions.length ?? 0) === 0 && (
-              <Typography.Text type="secondary">无例外登记，默认周一至周五为工作日</Typography.Text>
+              <Typography.Text type="secondary">无手动例外——默认按国家法定工作日历（节假日不排/调休上班日排），例外未覆盖的日期按周一至周五</Typography.Text>
             )}
           </Space>
         </Space>
+      </Card>
+
+      {/* 1104-W6/R5：前一工作日 18–24 自动生成次日计划——运行记录可视化。 */}
+      <Card title="自动生成运行记录（前一工作日 18–24 生成次日计划）" size="small">
+        {genRuns.length === 0 ? (
+          <Typography.Text type="secondary">
+            暂无运行记录——需在服务配置 CRON_TENANT_IDS 启用定时生成；亦可手动「生成计划」兜底
+          </Typography.Text>
+        ) : (
+          <Space wrap size={6}>
+            {genRuns.map((r) => (
+              <Tag key={r.id}
+                color={r.status === 'OK' ? 'green' : r.status === 'FAILED' ? 'red' : 'default'}
+                title={r.error ?? undefined}>
+                {(r.runDate ?? '').slice(0, 10)} {r.planDate ? `→${r.planDate.slice(0, 10)}` : ''}
+                {r.segNo ? ` 段${r.segNo}` : ''} {r.status}{r.generated ? ` ×${r.generated}` : ''}
+              </Tag>
+            ))}
+          </Space>
+        )}
       </Card>
 
       <Modal

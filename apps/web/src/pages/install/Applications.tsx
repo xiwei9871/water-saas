@@ -375,7 +375,7 @@ export default function InstallApplications() {
       return;
     }
     if (details && details.reduce((s, d) => s + d.qty, 0) !== values.meterQty) {
-      message.error(`口径明细合计 ${details.reduce((s, d) => s + d.qty, 0)} 与放号数量 ${values.meterQty} 不一致`);
+      message.warning(`口径明细合计 ${details.reduce((s, d) => s + d.qty, 0)} 与放号数量 ${values.meterQty} 不一致（仅作备料参考）`);
       return;
     }
     setAllocSaving(true);
@@ -832,7 +832,7 @@ export default function InstallApplications() {
             <Form.Item
               name="caliberDetails"
               label="口径明细"
-              extra="每栏「口径 + 数量」；合计须等于放号数量"
+              extra="每栏「口径 + 数量」，合计与放号数量仅作备料参考（不等亦可放号）"
             >
               <CaliberDetailsInput />
             </Form.Item>

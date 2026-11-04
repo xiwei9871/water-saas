@@ -80,7 +80,48 @@ export const addBizDays = (s: string, n: number): string => {
 
 const weekdayOf = (s: string): number => parseBizDay(s).getUTCDay();
 
-/** 拉取租户日历例外 → Map<YYYY-MM-DD, 'HOLIDAY'|'WORKDAY'>（指定年月窗口）。 */
+/**
+ * 1104-W2：国家法定工作日历（国务院每年发布；本表按《2026年部分节假日
+ * 安排的通知》国办发明电〔2025〕7号预置 2025–2026）。
+ * 优先级：手动例外 > 法定日历 > 周一~周五默认。运维每年按新通知追加。
+ */
+const STATUTORY_CALENDAR: Record<string, 'HOLIDAY' | 'WORKDAY'> = {
+  // 2025
+  '2025-01-01': 'HOLIDAY',
+  '2025-01-26': 'WORKDAY',
+  '2025-01-28': 'HOLIDAY', '2025-01-29': 'HOLIDAY', '2025-01-30': 'HOLIDAY',
+  '2025-01-31': 'HOLIDAY', '2025-02-01': 'HOLIDAY', '2025-02-02': 'HOLIDAY',
+  '2025-02-03': 'HOLIDAY', '2025-02-04': 'HOLIDAY', '2025-02-08': 'WORKDAY',
+  '2025-04-04': 'HOLIDAY', '2025-04-05': 'HOLIDAY', '2025-04-06': 'HOLIDAY',
+  '2025-04-27': 'WORKDAY',
+  '2025-05-01': 'HOLIDAY', '2025-05-02': 'HOLIDAY', '2025-05-03': 'HOLIDAY',
+  '2025-05-04': 'HOLIDAY', '2025-05-05': 'HOLIDAY',
+  '2025-05-31': 'HOLIDAY', '2025-06-01': 'HOLIDAY', '2025-06-02': 'HOLIDAY',
+  '2025-09-28': 'WORKDAY',
+  '2025-10-01': 'HOLIDAY', '2025-10-02': 'HOLIDAY', '2025-10-03': 'HOLIDAY',
+  '2025-10-04': 'HOLIDAY', '2025-10-05': 'HOLIDAY', '2025-10-06': 'HOLIDAY',
+  '2025-10-07': 'HOLIDAY', '2025-10-08': 'HOLIDAY', '2025-10-11': 'WORKDAY',
+  // 2026（国办发明电〔2025〕7号）
+  '2026-01-01': 'HOLIDAY', '2026-01-02': 'HOLIDAY', '2026-01-03': 'HOLIDAY',
+  '2026-01-04': 'WORKDAY',
+  '2026-02-14': 'WORKDAY',
+  '2026-02-15': 'HOLIDAY', '2026-02-16': 'HOLIDAY', '2026-02-17': 'HOLIDAY',
+  '2026-02-18': 'HOLIDAY', '2026-02-19': 'HOLIDAY', '2026-02-20': 'HOLIDAY',
+  '2026-02-21': 'HOLIDAY', '2026-02-22': 'HOLIDAY', '2026-02-23': 'HOLIDAY',
+  '2026-02-28': 'WORKDAY',
+  '2026-04-04': 'HOLIDAY', '2026-04-05': 'HOLIDAY', '2026-04-06': 'HOLIDAY',
+  '2026-05-01': 'HOLIDAY', '2026-05-02': 'HOLIDAY', '2026-05-03': 'HOLIDAY',
+  '2026-05-04': 'HOLIDAY', '2026-05-05': 'HOLIDAY', '2026-05-09': 'WORKDAY',
+  '2026-06-19': 'HOLIDAY', '2026-06-20': 'HOLIDAY', '2026-06-21': 'HOLIDAY',
+  '2026-09-20': 'WORKDAY',
+  '2026-09-25': 'HOLIDAY', '2026-09-26': 'HOLIDAY', '2026-09-27': 'HOLIDAY',
+  '2026-10-01': 'HOLIDAY', '2026-10-02': 'HOLIDAY', '2026-10-03': 'HOLIDAY',
+  '2026-10-04': 'HOLIDAY', '2026-10-05': 'HOLIDAY', '2026-10-06': 'HOLIDAY',
+  '2026-10-07': 'HOLIDAY', '2026-10-10': 'WORKDAY',
+};
+
+/** 拉取租户日历例外 → Map<YYYY-MM-DD, 'HOLIDAY'|'WORKDAY'>（指定年月窗口）。
+ *  1104-W2：先注入法定工作日历，再由租户手动例外覆盖（手动 > 法定 > 默认）。 */
 export async function calendarOverrides(
   tx: Tx,
   tenantId: string,
@@ -91,7 +132,7 @@ export async function calendarOverrides(
     where: { tenantId, day: { gte: fromDay, lte: toDay } },
     select: { day: true, kind: true },
   });
-  const map = new Map<string, 'HOLIDAY' | 'WORKDAY'>();
+  const map = new Map<string, 'HOLIDAY' | 'WORKDAY'>(Object.entries(STATUTORY_CALENDAR));
   // 存储语义=UTC 零点的业务日 → 取 ISO 前 10 位，与服务器本地时区无关。
   for (const r of rows) {
     map.set(r.day.toISOString().slice(0, 10), r.kind as 'HOLIDAY' | 'WORKDAY');

@@ -52,6 +52,8 @@ export interface ActivateInput {
   /** 上号时确定归集属性（R13/1103）：段号 01–16 缺省 01，频次缺省每月。 */
   segNo?: string;
   cadence?: string;
+  /** 1104-W5：用水地址（默认=安装地址，可修订为实际用水地址）。 */
+  useAddr?: string;
   /** 上号时表计未建档的补建要素（采购入库已录信息带入）。 */
   meterInfo?: {
     serialNo?: string; brand?: string; model?: string;
@@ -186,24 +188,10 @@ export class AllocationService {
         select: { id: true, name: true, orgUnitId: true },
       });
       if (!reader) throw new BadRequestException({ code: 'READER_NOT_FOUND' });
-      // R11 口径明细校验：逐口径放号，合计必须 = 放号总数。
-      const details = (input.caliberDetails ?? []).filter((d) => d && d.qty > 0);
-      if (details.length) {
-        const sum = details.reduce((s, d) => s + Math.floor(d.qty), 0);
-        if (sum !== qty) {
-          throw new BadRequestException({
-            code: 'CALIBER_DETAILS_MISMATCH',
-            total: qty,
-            sum,
-          });
-        }
-      }
+      // 1104-W4：放号只按「水表数量」生成空号——不再按口径明细预分配
+      // （口径明细仅作备料参考，前端软提示合计差异；口径在上号链接
+      //  真实表号时由水表档案带出）。
       const principal = await this.pendingPrincipal(tx, ctx);
-      const fallbackCaliber = app.installCaliber ?? app.caliberReq ?? null;
-      // R11：口径明细展开成逐户口径序列（DN15×100 → 100 个 'DN15'…）。
-      const caliberSeq: (string | null)[] = details.length
-        ? details.flatMap((d) => Array(Math.floor(d.qty)).fill(d.caliber))
-        : Array.from({ length: qty }, () => fallbackCaliber);
       // 1103/P0-2：区号由抄表员绑定带入——唯一绑定自动带入；
       // 多区号必须显式选择（杜绝 findFirst 随机归区）；零绑定则留空。
       const readerZones = await tx.readerZone.findMany({
@@ -229,7 +217,6 @@ export class AllocationService {
 
       const accounts: { id: string; accountNo: string; taskId: string }[] = [];
       for (const idx of Array.from({ length: qty }, (_, i) => i)) {
-        const caliber = caliberSeq[idx] ?? fallbackCaliber;
         const accountNo = await this.seq.nextFormatted(
           tx, ctx.tenantId, 'account_no', 'A', ctx.staffId);
         const wa = await tx.waterAccount.create({
@@ -243,7 +230,6 @@ export class AllocationService {
             status: 'PENDING_ASSIGN',
             billable: false,
             assignReaderId: reader.id,
-            pendingCaliber: caliber,
             zoneNo,
             segNo: '01',
             cadence: 'MONTHLY',
@@ -268,7 +254,6 @@ export class AllocationService {
             accountNo: wa.accountNo,
             addr: app.addr,
             applicantName: app.applicantName,
-            caliber,
           },
           assigneeId: reader.id,
           orgUnitId: app.orgUnitId ?? undefined,
@@ -371,13 +356,13 @@ export class AllocationService {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const wa = await tx.waterAccount.findFirst({
         where: { tenantId: ctx.tenantId, id: accountId },
-        select: { id: true, sourceApplyNo: true, pendingCaliber: true },
+        select: { id: true, sourceApplyNo: true, addr: true },
       });
       if (!wa) throw new NotFoundException({ code: 'ACCOUNT_NOT_FOUND' });
       const app = wa.sourceApplyNo
         ? await tx.installApplication.findFirst({
             where: { tenantId: ctx.tenantId, applyNo: wa.sourceApplyNo },
-            select: { installMeters: true, orgUnitId: true },
+            select: { installMeters: true, orgUnitId: true, applicantName: true, addr: true },
           })
         : null;
       // P1-2：组织数据范围——来源单组织 或 册成员组织 任一处须在操作员子树内；
@@ -430,7 +415,10 @@ export class AllocationService {
         }
       }
       return {
-        pendingCaliber: wa.pendingCaliber,
+        // 1104-W5：上号带出三要素的来源——水表口径来自表档案，
+        // 用户名/安装地址来自报装申请（非放号预分配）。
+        applyName: app?.applicantName ?? null,
+        applyAddr: app?.addr ?? wa.addr ?? null,
         candidates: [...map.values()],
       };
     });
@@ -483,7 +471,7 @@ export class AllocationService {
             serialNo: info.serialNo ?? null,
             brand: info.brand ?? null,
             model: info.model ?? null,
-            caliber: info.caliber ?? wa.pendingCaliber,
+            caliber: info.caliber ?? null,
             maxDial: info.maxDial ?? null,
             status: 'INSTALLED',
             createdBy: ctx.staffId,
@@ -531,6 +519,8 @@ export class AllocationService {
           activateReview: { ...r, meterNo },
           segNo: segNo ?? wa.segNo ?? '01',
           cadence: cadence ?? wa.cadence ?? 'MONTHLY',
+          // 1104-W5：用水地址默认=安装地址，允许上号时修订为实际用水地址。
+          useAddr: input.useAddr?.trim() || wa.addr,
           activatedAt: new Date(),
           updatedBy: ctx.staffId,
         },

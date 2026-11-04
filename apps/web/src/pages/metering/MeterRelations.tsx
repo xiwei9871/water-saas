@@ -35,7 +35,7 @@ const MODE_LABEL: Record<string, string> = {
   SUB: '按分表计费',
 };
 
-/** 20261021 整改 任务C：总分表关系维护 + 漏损差额分析。 */
+/** 20261021 整改 任务C：总分表关系维护 + 产销差分析。 */
 export default function MeterRelations() {
   const { message } = AntdApp.useApp();
   const [rows, setRows] = useState<MeterRelation[]>([]);
@@ -177,7 +177,7 @@ export default function MeterRelations() {
         />
       </Card>
 
-      <Card title="漏损分析（总表用量 − 分表合计）" size="small">
+      <Card title="产销差分析（供水量 − 售水量）" size="small">
         <Form form={lossForm} layout="inline">
           <Form.Item name="masterMeterId" label="总表" rules={[{ required: true }]}>
             <MeterSelect placeholder="选择总表" />
@@ -195,14 +195,14 @@ export default function MeterRelations() {
           <Descriptions style={{ marginTop: 16 }} size="small" column={4}>
             <Descriptions.Item label="总表用量">{loss.masterUsage.toFixed(2)} m³</Descriptions.Item>
             <Descriptions.Item label="分表合计">{loss.subTotal.toFixed(2)} m³</Descriptions.Item>
-            <Descriptions.Item label="差额（漏损）">
+            <Descriptions.Item label="差额（产销差）">
               <Statistic
                 value={loss.lossQty.toFixed(2)}
                 suffix="m³"
                 valueStyle={{ color: loss.lossQty > 0 ? '#cf1322' : undefined, fontSize: 16 }}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="漏损率">
+            <Descriptions.Item label="产销差率">
               {loss.lossRate == null ? '—' : `${(loss.lossRate * 100).toFixed(1)}%`}
             </Descriptions.Item>
           </Descriptions>

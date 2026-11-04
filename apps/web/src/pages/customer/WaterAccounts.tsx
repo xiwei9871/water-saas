@@ -212,6 +212,7 @@ export default function WaterAccounts() {
     nameOk: boolean;
     segNo?: string;
     cadence?: string;
+    useAddr?: string;
     serialNo?: string;
     brand?: string;
     model?: string;
@@ -223,10 +224,13 @@ export default function WaterAccounts() {
     setActivateFor(account);
     setMeterCands([]);
     api
-      .get<{ pendingCaliber: string | null; candidates: typeof meterCands }>(
+      .get<{ applyName: string | null; applyAddr: string | null; candidates: typeof meterCands }>(
         `/water-accounts/${account.id}/meter-candidates`,
       )
-      .then((r) => setMeterCands(r.data.candidates ?? []))
+      .then((r) => {
+        setMeterCands(r.data.candidates ?? []);
+        activateForm.setFieldsValue({ useAddr: r.data.applyAddr ?? undefined });
+      })
       .catch(() => undefined);
   };
   const onPickMeter = (meterNo: string) => {
@@ -670,6 +674,7 @@ export default function WaterAccounts() {
           },
           segNo: values.segNo,
           cadence: values.cadence,
+          useAddr: values.useAddr,
           meterInfo: cleanBody({
             serialNo: values.serialNo,
             brand: values.brand,
@@ -1696,7 +1701,7 @@ export default function WaterAccounts() {
           <Card size="small" title={`四项一致复核（全部确认后方可上号）`} style={{ marginBottom: 12 }}>
             {([
               ['accountNoOk', `用户档案号一致（${activateFor?.accountNo ?? '—'}）`],
-              ['caliberOk', `水表口径一致（登记 ${activateFor?.pendingCaliber ?? '—'}）`],
+              ['caliberOk', '水表口径一致（以所选水表档案为准）'],
               ['addrOk', '安装地址一致'],
               ['nameOk', '用户名称一致'],
             ] as const).map(([name, label]) => (
@@ -1721,7 +1726,7 @@ export default function WaterAccounts() {
               <Form.Item name="model" label="型号" style={{ marginBottom: 8 }}><Input style={{ width: 110 }} /></Form.Item>
               <Form.Item name="caliber" label="口径" style={{ marginBottom: 8 }}>
                 <Select allowClear showSearch optionFilterProp="label" style={{ width: 110 }}
-                  placeholder={activateFor?.pendingCaliber ?? 'DN15'} options={CALIBER_OPTIONS} />
+                  placeholder="选表号自动带出" options={CALIBER_OPTIONS} />
               </Form.Item>
               <Form.Item name="maxDial" label="最大读数" style={{ marginBottom: 8 }}>
                 <InputNumber min={0} style={{ width: 110 }} />

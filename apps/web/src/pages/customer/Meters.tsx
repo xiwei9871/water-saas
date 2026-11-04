@@ -28,6 +28,7 @@ import {
   INSTALLATION_STATUS_LABELS,
   INSTALL_REASON_LABELS,
   METER_STATUS_LABELS,
+  caliberSorter,
   cleanBody,
   cleanPatch,
   fmtDate,
@@ -413,6 +414,9 @@ export default function Meters() {
       dataIndex: 'caliber',
       key: 'caliber',
       width: 90,
+      // 1104-W8：口径按 DN 数值排序（DN15 < DN100），不走文本序。
+      sorter: (a: { caliber: string | null }, b: { caliber: string | null }) =>
+        caliberSorter(a.caliber, b.caliber),
       render: (v: string | null) => v ?? '—',
     },
     {

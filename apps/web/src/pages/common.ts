@@ -35,9 +35,12 @@ export const USAGE_CATEGORY_LABELS: Record<string, string> = {
   NON_RESIDENTIAL: '非居民',
 };
 
-export const USAGE_CATEGORY_OPTIONS = Object.entries(USAGE_CATEGORY_LABELS).map(
-  ([value, label]) => ({ value, label }),
-);
+/** 1104-W1：下拉仅 5 个受控值——旧档别名仅用于渲染回落，不出现在填报选项。 */
+const CONTROLLED_USAGE = ['RES_METERED', 'RES_SHARED', 'NON_RES', 'SPECIAL', 'MONITORING'] as const;
+export const USAGE_CATEGORY_OPTIONS = CONTROLLED_USAGE.map((v) => ({
+  value: v,
+  label: USAGE_CATEGORY_LABELS[v],
+}));
 
 export const ACCOUNT_STATUS_LABELS: Record<AccountStatus, string> = {
   NORMAL: '正常',
@@ -522,3 +525,26 @@ export const useSettleAccountLabels = (ids: (string | null | undefined)[]) => {
 export const CALIBER_OPTIONS = [
   'DN15', 'DN20', 'DN25', 'DN40', 'DN50', 'DN80', 'DN100', 'DN150', 'DN200',
 ].map((v) => ({ value: v, label: v }));
+
+/** 1104-W8：口径按「DN 后数字」数值比较（DN15 < DN100，非文本序）。
+ *  下拉选项、表格口径列 sorter、字典排序共用。 */
+export const caliberNum = (c: unknown): number =>
+  parseInt(String(c ?? '').match(/\d+/)?.[0] ?? '0', 10);
+export const caliberSorter = (a: unknown, b: unknown): number =>
+  caliberNum(a) - caliberNum(b);
+
+/** 1104-W7：统一查询动态列智能排序——数值/金额按数值、ISO 日期按时间、
+ *  其余按中文 localeCompare；口径列走 caliberSorter。 */
+export const smartSorter = (a: unknown, b: unknown, key?: string): number => {
+  if (key && /caliber/i.test(key)) return caliberSorter(a, b);
+  if (a == null && b == null) return 0;
+  if (a == null) return -1;
+  if (b == null) return 1;
+  const an = typeof a === 'number' ? a : Number(String(a).replace(/,/g, ''));
+  const bn = typeof b === 'number' ? b : Number(String(b).replace(/,/g, ''));
+  if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+  const ad = Date.parse(String(a));
+  const bd = Date.parse(String(b));
+  if (!Number.isNaN(ad) && !Number.isNaN(bd) && /[-/:T]/.test(String(a))) return ad - bd;
+  return String(a).localeCompare(String(b), 'zh-CN');
+};

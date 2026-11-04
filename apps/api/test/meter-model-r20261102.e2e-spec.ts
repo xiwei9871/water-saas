@@ -423,12 +423,13 @@ describe('A4 allocate guard + deallocate', () => {
       { meterQty: 5, readerId: STAFF_READER_A, zoneNo: await anyReaderZone() });
     expect(over.status).toBe(409);
     expect(over.body.code).toBe('QTY_EXCEEDS_APPROVED');
-    const mm = await post(`/install/applications/${appId}/allocate`, {
-      meterQty: 3, readerId: STAFF_READER_A, zoneNo: await anyReaderZone(),
+    // 1104-W4：口径明细改为参考校验——合计不符不再阻断放号（口径由上号带出）。
+    const appIdMm = await mkApp(1);
+    const mm = await post(`/install/applications/${appIdMm}/allocate`, {
+      meterQty: 1, readerId: STAFF_READER_A, zoneNo: await anyReaderZone(),
       caliberDetails: [{ caliber: 'DN15', qty: 2 }, { caliber: 'DN20', qty: 2 }],
     });
-    expect(mm.status).toBe(400);
-    expect(mm.body.code).toBe('CALIBER_DETAILS_MISMATCH');
+    expect(mm.status).toBe(201);
   });
 
   it('口径明细放号 + 退号闭环（档案号不复用）', async () => {
@@ -438,10 +439,8 @@ describe('A4 allocate guard + deallocate', () => {
     }).expect(201);
     expect(ok.body.count).toBe(3);
     const acctIds = ok.body.accounts.map((a: { id: string }) => a.id);
-    const calibers = (await owner.query(
-      `SELECT pending_caliber FROM water_account WHERE id=ANY($1::uuid[]) ORDER BY pending_caliber`,
-      [acctIds])).rows.map((r) => r.pending_caliber);
-    expect(calibers).toEqual(['DN15', 'DN15', 'DN20']);
+    // 1104-W4：放号不再预分配口径（列已下线）——上号时由水表档案带出。
+    expect(ok.body.accounts[0].pendingCaliber).toBeUndefined();
 
     const ret = await post('/install/applications/deallocate',
       { accountIds: [acctIds[0]], reason: 'test return' }).expect(201);
