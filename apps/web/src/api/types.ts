@@ -346,6 +346,8 @@ export interface Meter {
   caliber: string | null;
   /** Decimal column — serialized as a string on the wire. */
   maxDial: string | null;
+  /** 检定周期（年）：国标两档 ≤DN25=6 / >DN25=2，建档可人工修订。 */
+  checkPeriodYears?: number | null;
   /** NORMAL普通/MASTER总表/SUB分表（监控表以用水户用水类别判定）。 */
   meterRole?: string;
   parentMeterId: string | null;

@@ -68,6 +68,7 @@ export default function Prepayments() {
   useEffect(() => {
     const sid = searchParams.get('settleAccountId');
     if (sid) setSettleAccountId(sid);
+    if (sid && searchParams.get('action') === 'refund') setRefundOpen(true);
   }, [searchParams]);
 
   // X9：结算户预存总览（余额/阈值/是否不足/关联档案号），支持仅看不足。

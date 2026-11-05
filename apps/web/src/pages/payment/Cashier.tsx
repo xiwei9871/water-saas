@@ -5,7 +5,7 @@ import {
   PrinterOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
-import {Alert, App as AntdApp, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Statistic, Tag, Tooltip} from 'antd';
+import {Alert, App as AntdApp, Button, Card, Descriptions, Drawer, Form, InputNumber, Space, Statistic, Tag, Tooltip} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -18,8 +18,6 @@ import type {
   PrepaymentEntriesPage,
   PrepaymentEntry,
   Receipt,
-  RefundResult,
-  TopUpResult,
 } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import {
@@ -58,7 +56,6 @@ export default function Cashier() {
   const nav = useNavigate();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('payment:write');
-  const canPrepayReverse = hasPerm('prepayment:reverse');
   const canCustomerRead = hasPerm('customer:read');
 
   const [customerId, setCustomerId] = useState<string | undefined>(undefined);
@@ -87,18 +84,7 @@ export default function Cashier() {
   const [lastPayment, setLastPayment] = useState<PaymentDetail | null>(null);
 
   // E6 预存：充值 / 退款 / 流水。
-  const [topUpOpen, setTopUpOpen] = useState(false);
-  const [topUpAmount, setTopUpAmount] = useState<number | null>(null);
-  const [topUpChannel, setTopUpChannel] = useState<PayChannel>('CASH');
-  const [topUpKey, setTopUpKey] = useState('');
-  const [topUpBusy, setTopUpBusy] = useState(false);
 
-  const [refundOpen, setRefundOpen] = useState(false);
-  const [refundAmount, setRefundAmount] = useState<number | null>(null);
-  const [refundChannel, setRefundChannel] = useState<PayChannel>('CASH');
-  const [refundReason, setRefundReason] = useState('');
-  const [refundKey, setRefundKey] = useState('');
-  const [refundBusy, setRefundBusy] = useState(false);
 
   const [ledgerOpen, setLedgerOpen] = useState(false);
   const [ledger, setLedger] = useState<PrepaymentEntry[]>([]);
@@ -119,13 +105,10 @@ export default function Cashier() {
         );
         if (seq !== fetchSeq.current) return;
         setOutstanding(res.data);
-        // 直达入口：?action=refund 自动打开预存退款弹窗（销户退费联动）
+        // v3-X10：?action=refund 深链改跳预存业务中心办理（销户退费联动保留）
         if (seedAction === 'refund' && !seededRefund.current) {
           seededRefund.current = true;
-          setRefundAmount(null);
-          setRefundReason('');
-          setRefundKey(newIdemKey());
-          setRefundOpen(true);
+          nav(`/payment/prepayments?settleAccountId=${res.data.settleAccountId}&action=refund`);
         }
         // 默认每张可缴账单全额分摊 —— 柜台最常见动作；可逐行改。
         const fill: Record<string, number> = {};
@@ -255,85 +238,6 @@ export default function Cashier() {
       message.error(apiErrorText(err));
     } finally {
       setPaying(false);
-    }
-  };
-
-  const openTopUp = () => {
-    setTopUpAmount(null);
-    setTopUpChannel('CASH');
-    setTopUpKey(newIdemKey());
-    setTopUpOpen(true);
-  };
-
-  const submitTopUp = async () => {
-    if (!outstanding) return;
-    const cent = yuanToCent(topUpAmount);
-    if (cent === null || cent <= 0) {
-      message.warning('请输入充值金额');
-      return;
-    }
-    setTopUpBusy(true);
-    try {
-      const res = await api.post<TopUpResult>(
-        '/prepayments/top-ups',
-        {
-          settleAccountId: outstanding.settleAccountId,
-          channel: topUpChannel,
-          amount: String(cent),
-        },
-        { headers: { 'Idempotency-Key': topUpKey } },
-      );
-      const cleared = res.data.billAllocs.reduce((s, a) => s + Number(a.amount), 0);
-      message.success(
-        `收款成功 ${fmtCent(res.data.payment.amount)}：清欠 ${fmtCent(cleared)}，预存 ${fmtCent(res.data.topUp)}`,
-      );
-      setTopUpOpen(false);
-      await loadOutstanding(outstanding.waterAccountId);
-    } catch (err) {
-      message.error(apiErrorText(err));
-    } finally {
-      setTopUpBusy(false);
-    }
-  };
-
-  const openRefund = () => {
-    setRefundAmount(null);
-    setRefundChannel('CASH');
-    setRefundReason('');
-    setRefundKey(newIdemKey());
-    setRefundOpen(true);
-  };
-
-  const submitRefund = async () => {
-    if (!outstanding) return;
-    const cent = yuanToCent(refundAmount);
-    if (cent === null || cent <= 0) {
-      message.warning('请输入退款金额');
-      return;
-    }
-    if (!refundReason.trim()) {
-      message.warning('请填写退款原因');
-      return;
-    }
-    setRefundBusy(true);
-    try {
-      const res = await api.post<RefundResult>(
-        '/prepayments/refunds',
-        {
-          settleAccountId: outstanding.settleAccountId,
-          channel: refundChannel,
-          amount: String(cent),
-          reason: refundReason.trim(),
-        },
-        { headers: { 'Idempotency-Key': refundKey } },
-      );
-      message.success(`退款完成 ${fmtCent(res.data.payment.amount)}，余额 ${fmtCent(res.data.balance)}`);
-      setRefundOpen(false);
-      await loadOutstanding(outstanding.waterAccountId);
-    } catch (err) {
-      message.error(apiErrorText(err));
-    } finally {
-      setRefundBusy(false);
     }
   };
 
@@ -658,96 +562,6 @@ export default function Cashier() {
           }
         />
       )}
-
-      <Modal maskClosable={false}
-        title="预存充值"
-        open={topUpOpen}
-        onCancel={() => setTopUpOpen(false)}
-        onOk={() => void submitTopUp()}
-        confirmLoading={topUpBusy}
-        okText="确认收款"
-        destroyOnHidden
-      >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="收款先清欠费（按到期先后），余额自动存入预存。一次收款 = 一笔资金 + 一张收据。"
-        />
-        <Form layout="vertical">
-          <Form.Item label="收款金额（元）" required>
-            <InputNumber
-              min={0}
-              precision={2}
-              style={{ width: 200 }}
-              value={topUpAmount}
-              onChange={(v) => setTopUpAmount(v)}
-              autoFocus
-            />
-          </Form.Item>
-          <Form.Item label="收款渠道" required>
-            <Select
-              style={{ width: 200 }}
-              value={topUpChannel}
-              onChange={setTopUpChannel}
-              options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
-                value: c,
-                label: enumLabel(PAY_CHANNEL_LABELS, c),
-              }))}
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      <Modal maskClosable={false}
-        title="预存退款"
-        open={refundOpen}
-        onCancel={() => setRefundOpen(false)}
-        onOk={() => void submitRefund()}
-        confirmLoading={refundBusy}
-        okText="确认退款"
-        okButtonProps={{ danger: true }}
-        destroyOnHidden
-      >
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message={`当前预存余额 ${outstanding ? fmtCent(outstanding.prepaymentBalance ?? '0') : '—'}。退款按充值批次 FIFO 拆行，产生一笔负收款进入当日日结。`}
-        />
-        <Form layout="vertical">
-          <Form.Item label="退款金额（元）" required>
-            <InputNumber
-              min={0}
-              precision={2}
-              style={{ width: 200 }}
-              value={refundAmount}
-              onChange={(v) => setRefundAmount(v)}
-              autoFocus
-            />
-          </Form.Item>
-          <Form.Item label="退款渠道" required>
-            <Select
-              style={{ width: 200 }}
-              value={refundChannel}
-              onChange={setRefundChannel}
-              options={(['CASH', 'POS', 'TRANSFER', 'ONLINE', 'BANK_DEDUCT'] as const).map((c) => ({
-                value: c,
-                label: enumLabel(PAY_CHANNEL_LABELS, c),
-              }))}
-            />
-          </Form.Item>
-          <Form.Item label="退款原因" required>
-            <Input
-              style={{ width: 320 }}
-              value={refundReason}
-              onChange={(e) => setRefundReason(e.target.value)}
-              maxLength={200}
-              placeholder="必填 —— 写入流水 reason"
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
 
       <Drawer
         title="预存流水（append-only）"
