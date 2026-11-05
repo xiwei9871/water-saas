@@ -725,9 +725,12 @@ export class PrepaymentService {
       // ORG_SUBTREE/SELF cashier must not read another branch's funds.
       await this.assertSettleScope(tx, ctx, settleAccountId);
       const lots = await this.lotsTx(tx, ctx, settleAccountId);
+      const bal = lots.reduce((s, l) => s + l.remaining, 0n);
+      const warn = await this.warnInfoTx(tx, ctx, settleAccountId, bal);
       return {
         settleAccount: settle,
-        balance: lots.reduce((s, l) => s + l.remaining, 0n).toString(),
+        balance: bal.toString(),
+        warn,
         lots: lots.map((l) => ({
           topUpEntryId: l.id,
           amount: l.amount.toString(),
@@ -735,6 +738,107 @@ export class PrepaymentService {
           createdAt: l.createdAt,
         })),
       };
+    });
+  }
+
+  /**
+   * v3-X9 预存阈值解析：结算户 prepayWarnCent 覆盖 > 租户参数
+   * prepay.warn.mode（LAST_BILL=余额<上一账期应收；FIXED=固定金额分）；
+   * 无账单新户回退租户固定金额 prepay.warn.amountCent。
+   */
+  private async warnInfoTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    settleAccountId: string,
+    balance: bigint,
+  ) {
+    const sa = await tx.settleAccount.findFirst({
+      where: { id: settleAccountId, tenantId: ctx.tenantId },
+      select: { prepayWarnCent: true },
+    });
+    const params = await tx.tenantParam.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        key: { in: ['prepay.warn.mode', 'prepay.warn.amountCent'] },
+      },
+      select: { key: true, value: true },
+    });
+    const pv: Record<string, unknown> = Object.fromEntries(
+      params.map((p: { key: string; value: unknown }) => [p.key, p.value]),
+    );
+    const fixedCent = BigInt(
+      typeof pv['prepay.warn.amountCent'] === 'number' ||
+        typeof pv['prepay.warn.amountCent'] === 'string'
+        ? (pv['prepay.warn.amountCent'] as number | string)
+        : 0,
+    );
+    let mode = sa?.prepayWarnCent != null ? 'FIXED' : ((pv['prepay.warn.mode'] as string) ?? 'LAST_BILL');
+    let thresholdCent: bigint;
+    let lastBillCent: bigint | null = null;
+    if (sa?.prepayWarnCent != null) {
+      thresholdCent = sa.prepayWarnCent;
+    } else if (mode === 'LAST_BILL') {
+      const last = await tx.bill.findFirst({
+        where: { tenantId: ctx.tenantId, settleAccountId },
+        orderBy: { period: 'desc' },
+        select: { totalAmount: true, period: true },
+      });
+      lastBillCent = last?.totalAmount ?? null;
+      thresholdCent = last?.totalAmount ?? fixedCent;
+      if (!last) mode = 'FIXED';
+    } else {
+      thresholdCent = fixedCent;
+    }
+    return {
+      mode,
+      thresholdCent: thresholdCent.toString(),
+      lastBillCent: lastBillCent?.toString() ?? null,
+      lowBalance: balance < thresholdCent,
+    };
+  }
+
+  /** GET /prepayments/accounts — 结算户预存概览 + 预警（lowOnly 筛低余额）。 */
+  async accounts(ctx: TenantCtx, lowOnly: boolean) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const sas = await tx.settleAccount.findMany({
+        where: { tenantId: ctx.tenantId },
+        select: { id: true, settleNo: true, name: true, prepayWarnCent: true },
+        orderBy: { settleNo: 'asc' },
+        take: 500,
+      });
+      const out = [] as Record<string, unknown>[];
+      for (const sa of sas) {
+        const lots = await this.lotsTx(tx, ctx, sa.id);
+        const bal = lots.reduce((s, l) => s + l.remaining, 0n);
+        const warn = await this.warnInfoTx(tx, ctx, sa.id, bal);
+        if (lowOnly && !warn.lowBalance) continue;
+        const was = await tx.waterAccount.findMany({
+          where: { tenantId: ctx.tenantId, settleAccountId: sa.id },
+          select: { accountNo: true },
+          orderBy: { accountNo: 'asc' },
+          take: 50,
+        });
+        out.push({
+          settleAccount: { id: sa.id, settleNo: sa.settleNo, name: sa.name },
+          balance: bal.toString(),
+          warn,
+          accountNos: was.map((w) => w.accountNo),
+        });
+      }
+      return out;
+    });
+  }
+
+  /** PATCH /prepayments/accounts/:id/warn — 结算户级固定阈值覆盖（分，null 清除回租户规则）。 */
+  async setWarnOverride(ctx: TenantCtx, id: string, amountCent: bigint | null) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      await this.assertSettleScope(tx, ctx, id);
+      const r = await tx.settleAccount.update({
+        where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+        data: { prepayWarnCent: amountCent },
+        select: { id: true, settleNo: true, prepayWarnCent: true },
+      });
+      return { ...r, prepayWarnCent: r.prepayWarnCent?.toString() ?? null };
     });
   }
 

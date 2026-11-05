@@ -579,6 +579,8 @@ model SettleAccount {
   name      String
   phone     String?
   status    AccountStatus @default(NORMAL)
+  /** 预存不足提醒：结算户级固定金额阈值（分）覆盖租户默认规则；null=走租户规则。 */
+  prepayWarnCent BigInt?  @map("prepay_warn_cent")
   createdAt DateTime      @default(now()) @map("created_at")
   createdBy String?       @map("created_by") @db.Uuid
   updatedAt DateTime      @updatedAt @map("updated_at")

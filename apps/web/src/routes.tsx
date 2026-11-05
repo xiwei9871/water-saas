@@ -402,6 +402,8 @@ export const APP_ROUTES: AppRoute[] = [
         key: 'payment-prepayments',
         path: '/payment/prepayments',
         label: '预存管理',
+        // v3-X10：预存业务中心菜单仅对收费岗可见（payment:write）。
+        menuPerms: ['payment:write'],
         element: <Prepayments />,
       },
       {

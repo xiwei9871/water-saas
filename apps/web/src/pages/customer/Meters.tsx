@@ -64,6 +64,7 @@ interface MeterFormValues {
   brand?: string;
   model?: string;
   caliber?: string;
+  checkPeriodYears?: number | null;
   maxDial?: string;
   meterRole?: string;
   status?: MeterStatus;
@@ -221,6 +222,7 @@ export default function Meters() {
       brand: meter.brand ?? undefined,
       model: meter.model ?? undefined,
       caliber: meter.caliber ?? undefined,
+      checkPeriodYears: meter.checkPeriodYears ?? undefined,
       maxDial: meter.maxDial ?? undefined,
       meterRole: meter.meterRole ?? 'NORMAL',
       status: meter.status,
@@ -252,6 +254,7 @@ export default function Meters() {
             brand: values.brand,
             model: values.model,
             caliber: values.caliber,
+            checkPeriodYears: values.checkPeriodYears ?? null,
             maxDial: values.maxDial,
             meterRole: values.meterRole,
             status: values.status,
@@ -809,6 +812,14 @@ export default function Meters() {
                 'DN200',
               ].map((v) => ({ value: v }))}
             />
+          </Form.Item>
+          {/* v3-X8：检定周期人工可修订；留空按口径国标默认（≤DN25=6 年，>DN25=2 年）。 */}
+          <Form.Item
+            name="checkPeriodYears"
+            label="检定周期（年）"
+            extra="留空按国标默认：DN25 及以下 6 年，DN32 及以上 2 年；可人工修订"
+          >
+            <InputNumber min={1} max={20} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item
             name="maxDial"

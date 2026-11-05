@@ -1065,15 +1065,30 @@ export interface CashierDayCloseDetail extends CashierDayClose {
 /* ------------------------------------------------------------------ */
 
 /** GET /prepayments/balance — balance + FIFO top-up lots. */
+export interface PrepaymentWarn {
+  mode: string;
+  thresholdCent: string;
+  lastBillCent: string | null;
+  lowBalance: boolean;
+}
 export interface PrepaymentBalance {
   settleAccount: { id: string; settleNo: string; name: string };
   balance: string;
+  warn?: PrepaymentWarn;
   lots: {
     topUpEntryId: string;
     amount: string;
     remaining: string;
     createdAt: string;
   }[];
+}
+
+/** GET /prepayments/accounts — 结算户预存概览行（X9 预警清单）。 */
+export interface PrepaymentAccountRow {
+  settleAccount: { id: string; settleNo: string; name: string };
+  balance: string;
+  warn: PrepaymentWarn;
+  accountNos: string[];
 }
 
 /** GET /prepayments/entries — paged ledger rows. */

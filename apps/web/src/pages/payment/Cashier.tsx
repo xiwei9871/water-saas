@@ -8,7 +8,7 @@ import {
 import {Alert, App as AntdApp, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Statistic, Tag, Tooltip} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, apiErrorText } from '../../api/client';
 import type {
   AccountOutstanding,
@@ -55,6 +55,7 @@ const centToYuan = (cent: string): number => Number(cent) / 100;
  */
 export default function Cashier() {
   const { message } = AntdApp.useApp();
+  const nav = useNavigate();
   const { hasPerm } = useAuth();
   const canWrite = hasPerm('payment:write');
   const canPrepayReverse = hasPerm('prepayment:reverse');
@@ -510,12 +511,15 @@ export default function Cashier() {
               valueStyle={{ fontSize: 16 }}
             />
             <Space>
+              {/* v3-X10：预存业务一键跳转预存业务中心，收费台不再维护第二套预存逻辑 */}
               {canWrite && (
-                <Button onClick={openTopUp}>预存充值</Button>
-              )}
-              {canPrepayReverse && Number(outstanding.prepaymentBalance ?? 0) > 0 && (
-                <Button danger onClick={openRefund}>
-                  预存退款
+                <Button
+                  type="primary"
+                  onClick={() =>
+                    nav(`/payment/prepayments?settleAccountId=${outstanding.settleAccountId}`)
+                  }
+                >
+                  预存业务
                 </Button>
               )}
               <Button

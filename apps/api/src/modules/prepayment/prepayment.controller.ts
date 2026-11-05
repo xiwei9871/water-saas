@@ -4,6 +4,8 @@ import {
   Controller,
   Get,
   Headers,
+  Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -85,6 +87,31 @@ export class PrepaymentController {
     return this.svc.balance(
       currentTenant(),
       assertUuid(settleAccountId, 'settleAccountId'),
+    );
+  }
+
+  /**
+   * GET /prepayments/accounts?lowOnly=1 — v3-X9 结算户预存概览：
+   * 余额 / 阈值（租户规则或户级覆盖）/ 是否不足 / 关联档案号。
+   */
+  @Get('accounts')
+  @Permissions('payment:read')
+  accounts(@Query('lowOnly') lowOnly?: string) {
+    return this.svc.accounts(currentTenant(), lowOnly === '1' || lowOnly === 'true');
+  }
+
+  /**
+   * PATCH /prepayments/accounts/:id/warn — 户级固定阈值覆盖：
+   * {amountCent: 分 | null}；null 清除覆盖回租户规则。
+   */
+  @Patch('accounts/:id/warn')
+  @Permissions('payment:write')
+  setWarn(@Param('id') id: string, @Body() body: { amountCent?: unknown }) {
+    const v = body?.amountCent;
+    return this.svc.setWarnOverride(
+      currentTenant(),
+      assertUuid(id, 'id'),
+      v === null || v === undefined ? null : assertCents(v, 'amountCent', { min: 0n }),
     );
   }
 

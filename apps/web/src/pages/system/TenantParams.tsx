@@ -73,6 +73,14 @@ const KNOWN_PARAMS: Record<string, { name: string; desc: string }> = {
     name: '自检·单户用量异常倍数',
     desc: '报表数据自检 R12：本期用量超过近 3 期均值该倍数的户列入异常清单。默认 3。',
   },
+  'prepay.warn.mode': {
+    name: '预存不足提醒·规则模式',
+    desc: '"LAST_BILL"=余额低于上一账期应收即提醒（无账单新户回退固定金额）；"FIXED"=余额低于固定金额即提醒。默认 LAST_BILL。',
+  },
+  'prepay.warn.amountCent': {
+    name: '预存不足提醒·固定金额(分)',
+    desc: 'FIXED 模式或新户兜底用的固定阈值，单位分（如 100 元填 10000）。结算户可在预存管理页单独覆盖。',
+  },
   'report.check.bigPayment': {
     name: '自检·大额收款阈值(元)',
     desc: '报表数据自检 R13：单笔收款超过该金额列入大额清单。默认 100000。',
