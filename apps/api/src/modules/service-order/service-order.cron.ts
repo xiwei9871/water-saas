@@ -23,10 +23,18 @@ export class ServiceOrderCron {
 
   @Cron(CronExpression.EVERY_DAY_AT_2AM, { timeZone: 'Asia/Shanghai' })
   async scanCheckDueDaily(): Promise<void> {
-    const ids = (process.env.CRON_TENANT_IDS ?? '')
+    let ids = (process.env.CRON_TENANT_IDS ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+    // 1105v2-X7：未配置时兜底枚举全部 ACTIVE 租户——新租户（如 cs-water）
+    // 无需改配置即纳入到期检定扫描；ws_app 登录本就需读 tenant 表。
+    if (ids.length === 0) {
+      ids = await this.prisma.runAsTenant(ids[0] ?? '00000000-0000-0000-0000-000000000000', async (tx) =>
+        (await tx.tenant.findMany({ where: { status: 'ACTIVE' }, select: { id: true } }))
+          .map((t) => t.id),
+      ).catch(() => [] as string[]);
+    }
     for (const tenantId of ids) {
       const ctx: TenantCtx = {
         tenantId,

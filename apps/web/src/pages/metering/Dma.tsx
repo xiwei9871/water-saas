@@ -330,7 +330,7 @@ export default function Dma() {
     { title: '挂接总水量 (m³)', dataIndex: 'linkedQty', align: 'right', width: 140 },
     { title: '未计量水量 (m³)', dataIndex: 'unmeasuredQty', align: 'right', width: 140 },
     {
-      title: '漏损率',
+      title: '产销差率',
       dataIndex: 'leakageRate',
       align: 'right',
       width: 100,
@@ -348,7 +348,7 @@ export default function Dma() {
     },
   ];
 
-  // 趋势：近 3 期漏损率对比（列=期，行=DMA）
+  // 趋势：近 3 期产销差率对比（列=期，行=DMA）
   const trendCols = useMemo(() => {
     const periods = trend.map((t) => t.period);
     const byDma = new Map<string, { name: string; rates: (string | null)[] }>();
@@ -368,7 +368,7 @@ export default function Dma() {
     const cols: ColumnsType<(typeof rows)[number]> = [
       { title: 'DMA 分区', dataIndex: 'name', width: 200 },
       ...periods.map((p) => ({
-        title: `${p.slice(0, 4)}-${p.slice(4)} 漏损率`,
+        title: `${p.slice(0, 4)}-${p.slice(4)} 产销差率`,
         dataIndex: `p${p}`,
         align: 'right' as const,
         render: (v: string | null) =>
@@ -446,7 +446,7 @@ export default function Dma() {
                   pagination={false}
                 />
                 <Typography.Title level={5} style={{ marginTop: 20 }}>
-                  漏损率趋势（近 3 期）
+                  产销差率趋势（近 3 期）
                 </Typography.Title>
                 <Table scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
                   size="small"

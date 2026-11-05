@@ -14,13 +14,14 @@ type Tx = Prisma.TransactionClient;
 const bad = (code: string, extra?: Record<string, unknown>) =>
   new BadRequestException({ code, ...extra });
 
-/** 检定周期按口径（DN≤25→6年 / 25–50→4 / >50→2，20261020 T4 规则）。 */
+/** 检定周期按口径（1105v2-X8：JJG 162-2019 两档——
+ *  ≤DN25→6年；>DN25 一律→2年，不得出现「4 年」中间档）。 */
 const checkPeriodYearsOf = (caliber: string | null): number | null => {
   const m = /(\d+(?:\.\d+)?)/.exec(caliber ?? '');
   if (!m) return null;
   const dn = Number(m[1]);
   if (!Number.isFinite(dn)) return null;
-  return dn <= 25 ? 6 : dn <= 50 ? 4 : 2;
+  return dn <= 25 ? 6 : 2;
 };
 
 export const MOVEMENT_TYPES = [

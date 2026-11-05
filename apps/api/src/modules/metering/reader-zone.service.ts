@@ -100,9 +100,8 @@ export class ReaderZoneService {
     if (!zoneNo || !isValidZoneNo(zoneNo)) {
       throw new BadRequestException({ code: 'ZONE_NO_INVALID', zoneNo });
     }
-    if (!isRemoteZone(zoneNo) && !body.readerId) {
-      throw new BadRequestException({ code: 'ZONE_READER_REQUIRED' });
-    }
+    // 1105v2-X6：抄表员可留空——空绑区号不派人工任务，
+    // 配 REMOTE_AUTO 册即远传采集；111/YC 为保留远传区号。
     if (body.readerId) await this.assertReader(tx, ctx, body.readerId);
     return conflictOnUnique(
       tx.readerZone.create({

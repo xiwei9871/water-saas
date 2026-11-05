@@ -72,9 +72,9 @@ export interface MeterBody {
 }
 
 /**
- * 检定周期年限（20261020 核查 T4 / CJ/T 检定规程档位）：
- * 口径 ≤25mm → 6 年；25–50mm → 4 年；>50mm → 2 年。
- * 25mm 边界归小口径档（当地规程可另定，建档时可人工修正）。
+ * 检定周期年限（1105v2-X8：JJG 162-2019 国标两档）：
+ * 口径 ≤25mm → 6 年；>25mm → 2 年（无 4 年中间档）。
+ * 25mm 边界归小口径档（个别表具可建档时人工修正）。
  */
 export function deriveCheckPeriodYears(caliber?: string | null): number | null {
   if (!caliber) return null;
@@ -82,7 +82,7 @@ export function deriveCheckPeriodYears(caliber?: string | null): number | null {
   if (!m) return null;
   const mm = Number(m[1]);
   if (!Number.isFinite(mm) || mm <= 0) return null;
-  return mm <= 25 ? 6 : mm <= 50 ? 4 : 2;
+  return mm <= 25 ? 6 : 2;
 }
 
 export interface MeterPatchBody extends MeterBody {

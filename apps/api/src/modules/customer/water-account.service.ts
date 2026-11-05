@@ -618,8 +618,14 @@ export class WaterAccountService {
     }
     const bookNo = zoneSegCode(zoneNo, effSeg);
     const segLabel = effSeg ? `·段${effSeg}` : '';
+    // 1105v2-X3：先按唯一键 bookNo 兜底复用——原只按 zone/seg 查找，
+    // book_no 冲突的 P2002 在 Postgres 事务内无法靠兜底查询恢复
+    // （事务已中止 → 25P02 → PATCH 500）。
     let book = await tx.readingBook.findFirst({
-      where: { tenantId: ctx.tenantId, zoneNo, segNo: effSeg },
+      where: {
+        tenantId: ctx.tenantId,
+        OR: [{ zoneNo, segNo: effSeg }, { bookNo }],
+      },
       select: { id: true, bookNo: true, name: true, orgUnitId: true },
     });
     if (!book) {
