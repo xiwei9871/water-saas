@@ -21,3 +21,9 @@
 - 部署 SHA: `f0f9ab58d7328dd80f0604a708433772f7c4c80e`；备份 `pre-1106-*.dump`
 - 迁移: 无新迁移（字典为数据回填）；sys_dict 已在线补 VIOLATION_TYPE/BANK_CODE/METER_CALIBER（三租户）
 - 实测: `?usageCategory=MONITORING`→0（过滤生效）；meterRole=MASTER 持久化+DN100→2年；ops-yearly 行含 openingArrears；POST /violations THEFT→201
+
+# 185 部署记录 — r1106v4（866fec8）
+
+- 部署 SHA: `866fec8a991244cc7a340a651a8d07f5dfd9500d`；备份 pre-1106v4-*.dump
+- D23 实测: /tasks?status=CLAIMED→1 / PENDING→76 / DONE→16，过滤生效
+- v4 复核: D20 家庭人口按钮/弹窗已存在；D21 /tasks/events SSE 已实现；D22 收费台档案号直搜已存在
