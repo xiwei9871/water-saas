@@ -28,6 +28,7 @@ import {
   INSTALLATION_STATUS_LABELS,
   INSTALL_REASON_LABELS,
   METER_STATUS_LABELS,
+  caliberNum,
   caliberSorter,
   CALIBER_OPTIONS,
   cleanBody,
@@ -805,13 +806,21 @@ export default function Meters() {
               options={CALIBER_OPTIONS}
             />
           </Form.Item>
-          {/* v3-X8：检定周期人工可修订；留空按口径国标默认（≤DN25=6 年，>DN25=2 年）。 */}
-          <Form.Item
-            name="checkPeriodYears"
-            label="检定周期（年）"
-            extra="留空按国标默认：DN25 及以下 6 年，DN32 及以上 2 年；可人工修订"
-          >
-            <InputNumber min={1} max={20} style={{ width: '100%' }} />
+          {/* v3-X8/M16：检定周期人工可修订；提示随口径实时显示国标默认值。 */}
+          <Form.Item noStyle shouldUpdate={(a, b) => a.caliber !== b.caliber}>
+            {({ getFieldValue }) => {
+              const num = caliberNum(getFieldValue('caliber'));
+              const defYears = num > 0 ? (num <= 25 ? 6 : 2) : null;
+              return (
+                <Form.Item
+                  name="checkPeriodYears"
+                  label="检定周期（年）"
+                  extra={defYears ? `按口径默认 ${defYears} 年（JJG162 国标）；可人工修订` : '留空按国标默认：DN25 及以下 6 年，DN32 及以上 2 年；可人工修订'}
+                >
+                  <InputNumber min={1} max={20} style={{ width: '100%' }} />
+                </Form.Item>
+              );
+            }}
           </Form.Item>
           <Form.Item
             name="maxDial"

@@ -3,6 +3,7 @@ import { CloseOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
 import {App as AntdApp, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Space, Steps, Tag, Typography, Upload} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
+import { useLiveRefresh } from '../../hooks/useLiveRefresh';
 import { api, apiErrorText } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { cleanBody, fmtDate, newIdemKey, USAGE_CATEGORY_OPTIONS, CALIBER_OPTIONS } from '../common';
@@ -186,6 +187,8 @@ export default function InstallApplications() {
     { extraRecord: focusRecord },
   );
   const shownRows = focusList.shown;
+
+  useLiveRefresh(['install', 'task'], () => void load());
 
   const load = useCallback(async () => {
     setLoading(true);

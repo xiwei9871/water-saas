@@ -9,6 +9,7 @@ import {
 import {Alert, App as AntdApp, AutoComplete, Button, Card, Checkbox, DatePicker, Drawer, Form, Input, InputNumber, Modal, Space, Tag, Typography} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
+import { useLiveRefresh } from '../../hooks/useLiveRefresh';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, fetchAll, apiErrorText } from '../../api/client';
@@ -321,6 +322,8 @@ export default function WaterAccounts() {
   useEffect(() => {
     queueMicrotask(() => void load());
   }, [load]);
+
+  useLiveRefresh(['water-account', 'install', 'meter'], () => void load());
 
   // The endpoint returns a page, not a total — allow "next page" exactly
   // when the current page came back full.

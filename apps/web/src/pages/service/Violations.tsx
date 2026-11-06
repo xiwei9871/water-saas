@@ -3,6 +3,7 @@ import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Space, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
+import { useLiveRefresh } from '../../hooks/useLiveRefresh';
 import {
   FOCUS_ROW_CLASS,
   FocusTaskBar,
@@ -64,6 +65,8 @@ export default function Violations() {
   const [action, setAction] = useState<'create' | 'verify' | 'process' | 'archive' | null>(null);
   const [cur, setCur] = useState<Violation | null>(null);
   const [form] = Form.useForm();
+
+  useLiveRefresh(['violation', 'task'], () => void load());
 
   const load = useCallback(async () => {
     setLoading(true);

@@ -48,6 +48,13 @@ export class ViolationController {
     });
   }
 
+  /** GET /violations/:id — M14 详情（任务直达/列表 focusId 定位用）。 */
+  @Get('violations/:id')
+  @Permissions('metering:service', 'metering:read')
+  get(@Param('id') id: string) {
+    return this.svc.getById(currentTenant(), assertUuid(id, 'id'));
+  }
+
   /** 稽查登记（INSPECT 直接进入待处理，仅稽查岗）/ 现场上报（FIELD → 待核实，抄表岗可报）。 */
   @Post('violations')
   @AnyPermissions('metering:service', 'metering:write')

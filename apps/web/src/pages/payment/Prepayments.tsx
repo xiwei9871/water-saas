@@ -4,6 +4,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
 import { useSearchParams } from 'react-router-dom';
+import { useLiveRefresh } from '../../hooks/useLiveRefresh';
 import type {
   PrepaymentAccountRow,
   PrepaymentBalance,
@@ -92,6 +93,8 @@ export default function Prepayments() {
   useEffect(() => {
     queueMicrotask(() => void loadAccounts(lowOnly));
   }, [loadAccounts, lowOnly]);
+
+  useLiveRefresh(['prepayment', 'payment'], () => { void loadAccounts(lowOnly); void load(page, pageSize); });
 
   const submitMoney = async (
     kind: 'top-ups' | 'refunds',

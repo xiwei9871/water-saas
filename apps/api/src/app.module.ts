@@ -6,6 +6,9 @@ import { AppService } from './app.service.js';
 import { AuditInterceptor } from './common/audit.interceptor.js';
 import { JwtAuthGuard } from './common/auth.guard.js';
 import { BigIntInterceptor } from './common/bigint.interceptor.js';
+import { LiveEventInterceptor } from './common/live-event.interceptor.js';
+import { DomainEventsService } from './common/domain-events.service.js';
+import { EventsController } from './common/events.controller.js';
 import { CommonModule } from './common/common.module.js';
 import { PermissionsGuard } from './common/permissions.guard.js';
 import { TenantInterceptor } from './common/tenant.interceptor.js';
@@ -43,7 +46,7 @@ import { ServiceOrderModule } from './modules/service-order/service-order.module
     InstallModule,
     ServiceOrderModule,
   ],
-  controllers: [AppController],
+  controllers: [AppController, EventsController],
   providers: [
     AppService,
     // Guard order: authenticate (JWT → req.user) then authorize (@Permissions).
@@ -54,6 +57,8 @@ import { ServiceOrderModule } from './modules/service-order/service-order.module
     { provide: APP_INTERCEPTOR, useClass: TenantInterceptor },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
     { provide: APP_INTERCEPTOR, useClass: BigIntInterceptor },
+    DomainEventsService,
+    { provide: APP_INTERCEPTOR, useClass: LiveEventInterceptor },
   ],
 })
 export class AppModule {}

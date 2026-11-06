@@ -10,6 +10,7 @@ import {Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Form, Input, Mo
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLiveRefresh } from '../../hooks/useLiveRefresh';
 import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   BookMember,
@@ -150,6 +151,8 @@ export default function ReadingPlans() {
   const [batchIdemKey, setBatchIdemKey] = useState('');
   const [batchRows, setBatchRows] = useState<Map<string, BatchRowState>>(new Map());
   const [batchSaving, setBatchSaving] = useState(false);
+
+  useLiveRefresh(['reading-plan', 'meter-reading', 'task'], () => void load());
 
   const load = useCallback(
     async () => {

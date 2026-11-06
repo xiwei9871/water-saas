@@ -13,6 +13,7 @@ import {Alert, App as AntdApp, Button, Card, DatePicker, Descriptions, Drawer, F
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useLiveRefresh } from '../../hooks/useLiveRefresh';
 import {
   FOCUS_ROW_CLASS,
   FocusTaskBar,
@@ -178,6 +179,9 @@ export default function ServiceOrders() {
     `表 ${i.meter?.meterNo ?? '?'}${i.installedAt ? ` · 装于 ${fmtDate(i.installedAt)}` : ''}`;
   const [form] = Form.useForm();
   const [execForm] = Form.useForm();
+
+  // M8 实时置顶：工单/任务变更即时刷新
+  useLiveRefresh(['service-order', 'task'], () => void load());
 
   const load = useCallback(
     async () => {

@@ -65,6 +65,25 @@ export class ViolationService {
     });
   }
 
+  /** GET /violations/:id — M14 详情（任务 bizId 直达）。 */
+  async getById(ctx: TenantCtx, id: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const row = await tx.waterViolation.findFirst({
+        where: { tenantId: ctx.tenantId, id },
+        include: {
+          waterAccount: {
+            select: {
+              accountNo: true,
+              customer: { select: { customerNo: true, name: true } },
+            },
+          },
+        },
+      });
+      if (!row) throw new NotFoundException({ code: 'VIOLATION_NOT_FOUND', id });
+      return row;
+    });
+  }
+
   /** 登记（INSPECT 直接进处理中；READING 经 meterReading 上报走待核实）。 */
   async createTx(
     tx: Tx,

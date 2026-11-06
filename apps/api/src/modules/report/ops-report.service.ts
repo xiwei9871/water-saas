@@ -565,6 +565,7 @@ export class OpsReportService {
         prepayBal: Number(m.prepayBalance) / 100,
         prepayRate: pctBig(m.prepayBalance, m.cumAr),
         arrearsTotal: Number(m.arrearsTotal) / 100,
+        arrearsStart: Number(m.arrearsStart) / 100,
         arrearsRate: pctBig(m.arrearsTotal, m.cumAr),
         arrearsRecRate: pctBig(m.arrearsCollected, m.arrearsStart),
         readAcc: pct(m.qcPassed, m.qcTotal),
@@ -615,6 +616,7 @@ export class OpsReportService {
         {
           name: '三、欠费',
           rows: [
+            row('ARREARS_OPENING', '期初欠费余额', '元', (f) => f.arrearsStart, { stock: true }),
             row('ARREARS_TOTAL', '期末欠费余额', '元', (f) => f.arrearsTotal, { stock: true }),
             row('ARREARS_RATE', '欠费率', '%', (f) => f.arrearsRate, { stock: true }),
             row('ARREARS_RECOVERY_RATE', '欠费回收率（陈欠）', '%', (f) => f.arrearsRecRate, { stock: true }),
@@ -1145,6 +1147,7 @@ export class OpsReportService {
       case 'RECOVERY_RATE': return pct(Number(w.currentCollected), Number(w.arAmount));
       case 'ARREARS_RECOVERY_RATE': return pctBig(w.arrearsCollected, w.arrearsStart);
       case 'ARREARS_TOTAL': return Number(w.arrearsTotal) / 100;
+      case 'ARREARS_OPENING': return Number(w.arrearsStart) / 100;
       case 'ARREARS_RATE': return pctBig(w.arrearsTotal, w.cumAr);
       case 'COMPOSITE_PRICE':
         return num(w.soldQty) > 0 ? Number(w.waterFee) / num(w.soldQty) : null;

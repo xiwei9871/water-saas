@@ -7,6 +7,7 @@ import {
 import {App as AntdApp, Button, Card, Descriptions, Drawer, Popconfirm, Space, Spin, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLiveRefresh } from '../../hooks/useLiveRefresh';
 import { api, fetchAll, apiErrorText } from '../../api/client';
 import type {
   PayChannel,
@@ -70,6 +71,8 @@ export default function Payments() {
 
   const effectiveSettleId = settleAccountId;
   const effectiveCashierId = cashierId;
+
+  useLiveRefresh(['payment', 'prepayment', 'day-close'], () => void load());
 
   const load = useCallback(
     async () => {

@@ -54,7 +54,7 @@ export class SettleAccountService {
       // out-of-scope hides the whole settle account.
       const hidden =
         ctx.scope === 'ALL' ? [] : await outOfScopeSettleAccountIds(tx, ctx);
-      return tx.settleAccount.findMany({
+      const rows = await tx.settleAccount.findMany({
         where: {
           tenantId: ctx.tenantId,
           name: q.name ? { contains: q.name } : undefined,
@@ -65,6 +65,48 @@ export class SettleAccountService {
         orderBy: { settleNo: 'asc' },
         take: q.take,
         skip: q.skip,
+      });
+      // M4：三口径余额——prepayBalance=预存 lot 剩余合计；
+      // arrearsBalance=未清账单（total-已分摊）合计；balance=预存-欠费净额。
+      const ids = rows.map((r) => r.id);
+      const prepayRows = ids.length
+        ? await tx.$queryRaw<{ settle_account_id: string; bal: bigint | null }[]>`
+            SELECT e.settle_account_id, SUM(e.amount + COALESCE(c.used,0))::bigint AS bal
+            FROM prepayment_ledger_entry e
+            LEFT JOIN LATERAL (
+              SELECT SUM(c2.amount) AS used FROM prepayment_ledger_entry c2
+              WHERE c2.tenant_id = e.tenant_id AND c2.origin_top_up_id = e.id
+            ) c ON true
+            WHERE e.tenant_id = ${ctx.tenantId}::uuid
+              AND e.settle_account_id = ANY(${ids}::uuid[])
+              AND e.type = 'TOP_UP' AND e.reversal_of_entry_id IS NULL
+            GROUP BY e.settle_account_id`
+        : [];
+      const arrearsRows = ids.length
+        ? await tx.$queryRaw<{ settle_account_id: string; bal: bigint | null }[]>`
+            SELECT b.settle_account_id,
+                   SUM(b.total_amount - COALESCE(a.paid,0))::bigint AS bal
+            FROM bill b
+            LEFT JOIN LATERAL (
+              SELECT SUM(amount) AS paid FROM payment_alloc pa
+              WHERE pa.tenant_id = b.tenant_id AND pa.bill_id = b.id
+            ) a ON true
+            WHERE b.tenant_id = ${ctx.tenantId}::uuid
+              AND b.settle_account_id = ANY(${ids}::uuid[])
+              AND b.status IN ('POSTED','PARTIAL_PAID')
+            GROUP BY b.settle_account_id`
+        : [];
+      const prepay = new Map(prepayRows.map((r) => [r.settle_account_id, r.bal ?? 0n]));
+      const arrears = new Map(arrearsRows.map((r) => [r.settle_account_id, r.bal ?? 0n]));
+      return rows.map((r) => {
+        const pb = prepay.get(r.id) ?? 0n;
+        const ab = arrears.get(r.id) ?? 0n;
+        return {
+          ...r,
+          prepayBalance: pb.toString(),
+          arrearsBalance: ab.toString(),
+          balance: (pb - ab).toString(),
+        };
       });
     });
   }
