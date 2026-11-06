@@ -15,3 +15,9 @@
 - 冒烟: cs-water 登录 OK；`GET /prepayments/accounts` 200；租户参数 prepay.warn.* 写入成功；`?lowOnly=1` 返回不足户（warn+accountNos 档案号）
 - X8 实测: 新建 DN50 → checkPeriodYears=2；X6 实测: 区号07 PATCH readerId=null → 200
 - X7 说明: service-order.cron scanCheckDueDaily 每日02:00扫 lastCheckDate+checkPeriodYears 到期建 PERIODIC_CHECK 工单；未配 CRON_TENANT_IDS 时枚举全部 ACTIVE 租户
+
+# 185 部署记录 — r1106（f0f9ab5）
+
+- 部署 SHA: `f0f9ab58d7328dd80f0604a708433772f7c4c80e`；备份 `pre-1106-*.dump`
+- 迁移: 无新迁移（字典为数据回填）；sys_dict 已在线补 VIOLATION_TYPE/BANK_CODE/METER_CALIBER（三租户）
+- 实测: `?usageCategory=MONITORING`→0（过滤生效）；meterRole=MASTER 持久化+DN100→2年；ops-yearly 行含 openingArrears；POST /violations THEFT→201
