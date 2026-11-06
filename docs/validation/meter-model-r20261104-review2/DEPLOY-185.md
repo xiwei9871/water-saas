@@ -27,3 +27,9 @@
 - 部署 SHA: `866fec8a991244cc7a340a651a8d07f5dfd9500d`；备份 pre-1106v4-*.dump
 - D23 实测: /tasks?status=CLAIMED→1 / PENDING→76 / DONE→16，过滤生效
 - v4 复核: D20 家庭人口按钮/弹窗已存在；D21 /tasks/events SSE 已实现；D22 收费台档案号直搜已存在
+
+# 185 部署记录 — r1106v5（c684ab0，M1~M18 一次性提交）
+
+- 部署 SHA: `c684ab0176a773267d45be0ae62aa1690aaef808`；备份 pre-1106v5-*.dump
+- 实测: settle-accounts 三口径余额返回；GET /violations/:id → 200；/events/stream SSE 连通
+- 在线配置: approver/meter_mgr 角色补绑 metering:service（shenpi01/biaowu01 生效）
