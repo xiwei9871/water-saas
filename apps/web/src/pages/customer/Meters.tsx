@@ -29,6 +29,7 @@ import {
   INSTALL_REASON_LABELS,
   METER_STATUS_LABELS,
   caliberSorter,
+  CALIBER_OPTIONS,
   cleanBody,
   cleanPatch,
   fmtDate,
@@ -801,16 +802,7 @@ export default function Meters() {
             {/* 10/8 报告 §4：常用口径下拉可选，未列举的可手工录入。 */}
             <AutoComplete
               placeholder="选择或输入口径，如 DN15"
-              options={[
-                'DN15',
-                'DN20',
-                'DN25',
-                'DN40',
-                'DN50',
-                'DN100',
-                'DN150',
-                'DN200',
-              ].map((v) => ({ value: v }))}
+              options={CALIBER_OPTIONS}
             />
           </Form.Item>
           {/* v3-X8：检定周期人工可修订；留空按口径国标默认（≤DN25=6 年，>DN25=2 年）。 */}

@@ -6,7 +6,7 @@ import {
   SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import {Alert, App as AntdApp, AutoComplete, Button, Card, Checkbox, DatePicker, Drawer, Form, Input, InputNumber, Modal, Space, Tag} from 'antd';
+import {Alert, App as AntdApp, AutoComplete, Button, Card, Checkbox, DatePicker, Drawer, Form, Input, InputNumber, Modal, Space, Tag, Typography} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useState } from 'react';
@@ -200,6 +200,7 @@ export default function WaterAccounts() {
 
   // ---- 1028v2 上号弹窗（PENDING_ASSIGN → PENDING_COMPLETE） ----
   const [activateFor, setActivateFor] = useState<WaterAccount | null>(null);
+  const [activateApplyName, setActivateApplyName] = useState<string | null>(null);
   const [meterCands, setMeterCands] = useState<
     { meterNo: string; caliber?: string | null; brand?: string | null; serialNo?: string | null; maxDial?: number | string | null; source: string }[]
   >([]);
@@ -229,6 +230,7 @@ export default function WaterAccounts() {
       )
       .then((r) => {
         setMeterCands(r.data.candidates ?? []);
+        setActivateApplyName(r.data.applyName ?? null);
         activateForm.setFieldsValue({ useAddr: r.data.applyAddr ?? undefined });
       })
       .catch(() => undefined);
@@ -293,6 +295,10 @@ export default function WaterAccounts() {
     };
   }, [searchParams]);
 
+  // D8：未赋段号户提醒——段号空的户不会进入区段抄表计划。
+  const [noSegCount, setNoSegCount] = useState(0);
+  const [noSegOnly, setNoSegOnly] = useState(false);
+
   const load = useCallback(
     async () => {
       setLoading(true);
@@ -300,6 +306,7 @@ export default function WaterAccounts() {
         const res = { data: await fetchAll<WaterAccount>('/water-accounts', {            ...(q.trim() ? { q: q.trim() } : {}),
             ...(status ? { status } : {}),
             ...(customerId ? { customerId } : {}),
+            ...(noSegOnly ? { noSeg: '1' } : {}),
           }) };
         setRows(res.data);
       } catch (err) {
@@ -308,7 +315,7 @@ export default function WaterAccounts() {
         setLoading(false);
       }
     },
-    [customerId, message, q, status],
+    [customerId, message, noSegOnly, q, status],
   );
 
   useEffect(() => {
@@ -318,6 +325,15 @@ export default function WaterAccounts() {
   // The endpoint returns a page, not a total — allow "next page" exactly
   // when the current page came back full.
   const total = rows.length;
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<WaterAccount[]>('/water-accounts', { params: { noSeg: '1', take: 500 } })
+      .then((r) => { if (!cancelled) setNoSegCount(r.data.length); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [rows]);
 
   const openModal = (m: NonNullable<ModalState>) => {
     setIdemKey(newIdemKey()); // 每次打开表单生成一次幂等键
@@ -1049,6 +1065,19 @@ export default function WaterAccounts() {
           </Tag>
         </div>
       )}
+      {noSegCount > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`${noSegCount}${noSegCount >= 500 ? '+' : ''} 户未赋段号，无法纳入区段抄表计划`}
+          action={
+            <Button size="small" type={noSegOnly ? 'primary' : 'default'} onClick={() => setNoSegOnly(!noSegOnly)}>
+              {noSegOnly ? '查看全部' : '仅看未赋段号'}
+            </Button>
+          }
+        />
+      )}
       <Table<WaterAccount>
         rowKey="id"
         size="middle"
@@ -1699,11 +1728,21 @@ export default function WaterAccounts() {
             </Form.Item>
           </Space>
           <Card size="small" title={`四项一致复核（全部确认后方可上号）`} style={{ marginBottom: 12 }}>
+            {/* D7：复核项展示系统值供现场逐项比对，不一致不得勾选 */}
+            <Form.Item noStyle shouldUpdate={(a, b) => a.caliber !== b.caliber || a.useAddr !== b.useAddr}>
+              {({ getFieldValue }) => (
+                <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+                  系统值：档案号={activateFor?.accountNo ?? '—'}；口径={getFieldValue('caliber') ?? '—'}；
+                  地址={getFieldValue('useAddr') ?? activateFor?.useAddr ?? activateFor?.addr ?? '—'}；
+                  用户名={activateApplyName ?? '—'}
+                </Typography.Text>
+              )}
+            </Form.Item>
             {([
-              ['accountNoOk', `用户档案号一致（${activateFor?.accountNo ?? '—'}）`],
-              ['caliberOk', '水表口径一致（以所选水表档案为准）'],
-              ['addrOk', '安装地址一致'],
-              ['nameOk', '用户名称一致'],
+              ['accountNoOk', `用户档案号一致（系统值 ${activateFor?.accountNo ?? '—'}）`],
+              ['caliberOk', '水表口径一致（以所选水表档案为准，见上方系统值）'],
+              ['addrOk', '安装地址一致（见上方系统值）'],
+              ['nameOk', '用户名称一致（见上方系统值）'],
             ] as const).map(([name, label]) => (
               <Form.Item
                 key={name}

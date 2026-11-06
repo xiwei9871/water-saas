@@ -220,6 +220,10 @@ export class WaterAccountService {
       settleAccountId?: string;
       status?: AccountStatus;
       accountNo?: string;
+      /** D6：用水类别过滤（MONITORING 等受控值）。 */
+      usageCategory?: string;
+      /** D8：仅看未赋段号的户（段号空 → 不入抄表计划）。 */
+      noSeg?: boolean;
       q?: string;
     },
   ) {
@@ -249,6 +253,8 @@ export class WaterAccountService {
           settleAccountId: q.settleAccountId,
           status: q.status,
           accountNo: q.accountNo,
+          ...(q.usageCategory ? { usageCategory: q.usageCategory } : {}),
+          ...(q.noSeg ? { segNo: null } : {}),
           ...(needle
             ? {
                 OR: [

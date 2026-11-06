@@ -739,6 +739,8 @@ export class OpsReportService {
           recoveryRate: pct(Number(w.currentCollected), Number(w.arAmount)),
           compositePrice: num(w.soldQty) > 0 ? Number(w.waterFee) / 100 / num(w.soldQty) : null,
           arrearsTotal: Number(w.arrearsTotal) / 100,
+          // D5：期初欠费列（上月末欠费结转）。
+          openingArrears: Number(w.arrearsStart) / 100,
         });
       }
       const sum = (k: 'soldQty' | 'waterFee' | 'collected') =>
@@ -754,6 +756,8 @@ export class OpsReportService {
         ),
         compositePrice: sum('soldQty') > 0 ? sum('waterFee') / sum('soldQty') : null,
         arrearsTotal: rows[11]?.arrearsTotal ?? null,
+        // 全年初欠费 = 1 月期初。
+        openingArrears: rows[0]?.openingArrears ?? null,
       };
 
       // 1028 v3 数据自检（年报口径）：年度窗口 + Σ各月 + 缺失月。

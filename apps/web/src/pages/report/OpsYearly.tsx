@@ -27,9 +27,10 @@ const COL_LABELS: Record<string, string> = {
   recoveryRate: '水费回收率 (%)',
   compositePrice: '综合单价 (元/m³)',
   arrearsTotal: '欠费余额 (元)',
+  openingArrears: '期初欠费 (元)',
 };
 /** 金额列 —— 存档报表固定单位（元/万元）换算作用于这些列。 */
-const MONEY_COLS = new Set(['waterFee', 'collected', 'arrearsTotal']);
+const MONEY_COLS = new Set(['waterFee', 'collected', 'arrearsTotal', 'openingArrears']);
 const ALL_COLS = Object.keys(COL_LABELS);
 const DEFAULT_COLS = ['soldQty', 'waterFee', 'collected', 'recoveryRate'];
 

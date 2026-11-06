@@ -72,6 +72,8 @@ export class WaterAccountController {
     @Query('settleAccountId') settleAccountId?: string,
     @Query('status') status?: string,
     @Query('accountNo') accountNo?: string,
+    @Query('usageCategory') usageCategory?: string,
+    @Query('noSeg') noSeg?: string,
     @Query('q') q?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
@@ -87,6 +89,8 @@ export class WaterAccountController {
       settleAccountId,
       status: status as 'NORMAL' | 'SUSPENDED' | 'CLOSED' | 'PENDING_ASSIGN' | 'PENDING_COMPLETE' | undefined,
       accountNo,
+      usageCategory,
+      noSeg: noSeg === '1' || noSeg === 'true',
       q,
     });
   }
