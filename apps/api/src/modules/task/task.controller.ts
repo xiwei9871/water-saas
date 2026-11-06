@@ -38,6 +38,7 @@ export class TaskController {
     @Req() req: Request,
     @Query('box') box = 'todo',
     @Query('type') type?: string,
+    @Query('status') status?: string,
     @Query('take', new DefaultValuePipe(50), ParseIntPipe) take = 50,
     @Query('skip', new DefaultValuePipe(0), ParseIntPipe) skip = 0,
     @Query('sort') sort?: string,
@@ -51,11 +52,17 @@ export class TaskController {
     if (type && !TASK_TYPE_CODES.includes(type)) {
       throw new BadRequestException({ code: 'INVALID_TASK_TYPE', type });
     }
+    // D23：status 直查（PENDING/ASSIGNED/CLAIMED/DONE/CANCELLED）。
+    const TASK_STATUSES = new Set(['PENDING', 'ASSIGNED', 'CLAIMED', 'DONE', 'CANCELLED']);
+    if (status && !TASK_STATUSES.has(status)) {
+      throw new BadRequestException({ code: 'INVALID_TASK_STATUS', status });
+    }
     if (take < 1 || take > 200 || skip < 0) {
       throw new BadRequestException({ code: 'INVALID_PAGING' });
     }
     return this.svc.list(currentTenant(), TaskController.perms(req), {
       box: box as 'todo' | 'done' | 'alert',
+      status,
       type,
       take,
       skip,

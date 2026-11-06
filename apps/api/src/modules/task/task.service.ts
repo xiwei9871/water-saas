@@ -280,12 +280,14 @@ export class TaskService {
   async list(
     ctx: TenantCtx,
     perms: string[] | undefined,
-    q: { box: 'todo' | 'done' | 'alert'; type?: string; take: number; skip: number },
+    q: { box: 'todo' | 'done' | 'alert'; status?: string; type?: string; take: number; skip: number },
   ) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       await this.escalateOverdue(tx, ctx);
       const where: Prisma.TaskWhereInput =
-        q.box === 'done'
+        q.status
+          ? { tenantId: ctx.tenantId, status: q.status as Prisma.TaskWhereInput['status'], ...(q.type ? { type: q.type } : {}) }
+          : q.box === 'done'
           ? { tenantId: ctx.tenantId, status: { in: ['DONE', 'CANCELLED'] }, ...(q.type ? { type: q.type } : {}) }
           : q.box === 'alert'
             ? { tenantId: ctx.tenantId, status: 'PENDING', candidateCount: 0, ...(q.type ? { type: q.type } : {}) }
