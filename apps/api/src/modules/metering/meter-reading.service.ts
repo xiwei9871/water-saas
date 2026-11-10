@@ -540,6 +540,56 @@ export class MeterReadingService {
    * append-only: only qc_status/qc_by/qc_at/updated_by are written, and the
    * plan item is deliberately untouched (item.status = "the read happened").
    */
+  /**
+   * X3 估抄修订：NO_READ 记录在 QC 通过/结算生成前可修订
+   * estimateQty/exceptionCode/remark；留痕 revisionLog（≤3 次），
+   * 修订后 QC 状态回 PENDING 重新质检。
+   */
+  async reviseEstimateTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+    body: { estimateQty?: number; exceptionCode?: string; remark?: string; reason: string },
+  ) {
+    const r = await tx.meterReading.findFirst({ where: { tenantId: ctx.tenantId, id } });
+    if (!r) throw new NotFoundException({ code: 'READING_NOT_FOUND' });
+    if (r.resultType !== 'NO_READ') {
+      throw new ConflictException({ code: 'REVISE_NOT_NO_READ' });
+    }
+    if (r.qcStatus !== 'PENDING') {
+      throw new ConflictException({ code: 'REVISE_QC_DONE', qcStatus: r.qcStatus });
+    }
+    const log = (r.revisionLog as { reason: string }[] | null) ?? [];
+    if (log.length >= 3) throw new ConflictException({ code: 'REVISE_LIMIT' });
+    const diff: Record<string, [unknown, unknown]> = {};
+    if (body.estimateQty !== undefined && Number(body.estimateQty) !== Number(r.estimateQty)) {
+      diff.estimateQty = [r.estimateQty ? Number(r.estimateQty) : null, body.estimateQty];
+    }
+    if (body.exceptionCode !== undefined && body.exceptionCode !== r.exceptionCode) {
+      diff.exceptionCode = [r.exceptionCode, body.exceptionCode];
+    }
+    if (body.remark !== undefined && body.remark !== r.remark) {
+      diff.remark = [r.remark, body.remark];
+    }
+    if (Object.keys(diff).length === 0) {
+      throw new BadRequestException({ code: 'REVISE_NO_CHANGE' });
+    }
+    return tx.meterReading.update({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      data: {
+        ...(diff.estimateQty ? { estimateQty: body.estimateQty } : {}),
+        ...(diff.exceptionCode ? { exceptionCode: body.exceptionCode as never } : {}),
+        ...(diff.remark ? { remark: body.remark } : {}),
+        qcStatus: 'PENDING',
+        revisionLog: [
+          ...log,
+          { at: new Date().toISOString(), by: ctx.staffId, reason: body.reason, fields: diff },
+        ],
+        updatedBy: ctx.staffId,
+      },
+    });
+  }
+
   async qcTx(tx: Prisma.TransactionClient, ctx: TenantCtx, id: string, action: QcAction, req: Request) {
     const existing = await tx.meterReading.findFirst({
       where: { tenantId: ctx.tenantId, id },

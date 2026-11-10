@@ -20,12 +20,16 @@ export class WebhookService {
 
   private async trySend(tenantId: string, payload: Record<string, unknown>, attempt: number) {
     try {
-      const params = await this.prisma.tenantParam.findMany({
-        where: { tenantId, key: { in: ['webhook.install.url', 'webhook.install.secret'] } },
-        select: { key: true, value: true },
-      });
-      const url = params.find((p) => p.key === 'webhook.install.url')?.value;
-      const secret = (params.find((p) => p.key === 'webhook.install.secret')?.value as string) ?? '';
+      const params = await this.prisma.runAsTenant(tenantId, (tx) =>
+        tx.tenantParam.findMany({
+          where: { tenantId, key: { in: ['webhook.install.url', 'webhook.install.secret'] } },
+          select: { key: true, value: true },
+        }),
+      );
+      const url = params.find((p: { key: string }) => p.key === 'webhook.install.url')?.value;
+      const secret =
+        (params.find((p: { key: string }) => p.key === 'webhook.install.secret')
+          ?.value as string) ?? '';
       if (typeof url !== 'string' || !url) return;
       const body = JSON.stringify(payload);
       const sig = createHmac('sha256', secret || 'water-saas').update(body).digest('hex');

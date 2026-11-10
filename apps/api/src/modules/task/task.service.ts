@@ -327,19 +327,18 @@ export class TaskService {
       if (!['PENDING', 'ASSIGNED'].includes(t.status)) {
         throw new ConflictException({ code: 'RECALL_NOT_PENDING', from: t.status });
       }
-      const recalls = Number((t.payload as Record<string, unknown> | null)?.recallCount ?? 0);
+      const recalls = Number((t.context as Record<string, unknown> | null)?.recallCount ?? 0);
       if (recalls >= 5) throw new ConflictException({ code: 'RECALL_LIMIT' });
       const updated = await tx.task.update({
-        where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+        where: { id },
         data: {
           status: 'PENDING',
           assigneeId: null,
-          assignedAt: null,
-          payload: {
-            ...((t.payload as Record<string, unknown>) ?? {}),
+          context: {
+            ...((t.context as Record<string, unknown>) ?? {}),
             recallCount: recalls + 1,
             recallLog: [
-              ...(((t.payload as Record<string, unknown> | null)?.recallLog as unknown[]) ?? []),
+              ...(((t.context as Record<string, unknown> | null)?.recallLog as unknown[]) ?? []),
               { at: new Date().toISOString(), by: ctx.staffId, reason },
             ].slice(-10),
           } as Prisma.InputJsonValue,
