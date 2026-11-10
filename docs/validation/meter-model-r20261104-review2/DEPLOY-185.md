@@ -33,3 +33,9 @@
 - 部署 SHA: `c684ab0176a773267d45be0ae62aa1690aaef808`；备份 pre-1106v5-*.dump
 - 实测: settle-accounts 三口径余额返回；GET /violations/:id → 200；/events/stream SSE 连通
 - 在线配置: approver/meter_mgr 角色补绑 metering:service（shenpi01/biaowu01 生效）
+
+# 185 部署记录 — r1109 v3（50ff1f5）
+
+- 部署 SHA: `50ff1f55a555b58fc5741df47e6bd77132b795ac`；分支 HEAD 含迁移表名修正
+- 备份: pre-1109-*.dump；迁移 `20261110000000_x123_l3`（属主执行：reader_zone.is_remote / install_application 外部回推+双合同+状态历史 / meter_reading.revision_log / meter_service_order 外派字段；修正 service_order→meter_service_order 表名）+ resolve 登记
+- 冒烟: water-accounts/install-applications/reading-plans/prepayments/accounts 全 200；external-complete 端点可达（APPLY_NOT_FOUND=路由通）；ops-daily ?period= 200
