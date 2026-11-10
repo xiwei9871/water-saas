@@ -94,6 +94,16 @@ export default function Tasks() {
     }
   };
 
+  const recall = async (id: string) => {
+    const reason = window.prompt('请输入撤回原因（必填）');
+    if (!reason?.trim()) return;
+    try {
+      await api.post(`/tasks/${id}/recall`, { reason: reason.trim() });
+      message.success('已撤回到待分配池');
+      void load(box, page, pageSize);
+    } catch (err) { message.error(apiErrorText(err)); }
+  };
+
   const claim = async (id: string) => {
     try {
       await api.post(`/tasks/${id}/claim`);
@@ -286,6 +296,9 @@ export default function Tasks() {
             <Button size="small" type="primary" icon={<UserAddOutlined />} onClick={() => void claim(r.id)}>
               领取
             </Button>
+          )}
+          {box === 'todo' && (r.status === 'PENDING' || r.status === 'ASSIGNED') && (
+            <Button size="small" danger onClick={() => void recall(r.id)}>撤回</Button>
           )}
           {box === 'todo' && r.status === 'CLAIMED' && (
             <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => openComplete(r)}>

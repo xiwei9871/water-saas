@@ -104,6 +104,20 @@ export class TaskController {
     return this.svc.getById(currentTenant(), TaskController.perms(req), id);
   }
 
+  /** POST /tasks/:id/recall — X5 撤回未领取任务回待分配池（reason 必填）。 */
+  @Post(':id/recall')
+  recall(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Body() body: { reason?: string },
+  ) {
+    assertUuid(id, 'id');
+    if (!body?.reason?.trim()) {
+      throw new BadRequestException({ code: 'RECALL_REASON_REQUIRED' });
+    }
+    return this.svc.recall(currentTenant(), TaskController.perms(req), id, body.reason!.trim());
+  }
+
   /** POST /tasks/:id/claim — 领取式：先领先得。 */
   @Post(':id/claim')
   claim(@Req() req: Request, @Param('id') id: string) {

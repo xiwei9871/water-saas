@@ -3,6 +3,7 @@ import { CustomerModule } from '../customer/customer.module.js';
 import { TaskModule } from '../task/task.module.js';
 import { CommonModule } from '../../common/common.module.js';
 import { InstallController } from './install.controller.js';
+import { WebhookService } from '../../common/webhook.service.js';
 import { InstallService } from './install.service.js';
 import { AllocationService } from './allocation.service.js';
 import { WaterAccountActivateController } from './water-account-activate.controller.js';
@@ -15,6 +16,6 @@ import { WaterAccountActivateController } from './water-account-activate.control
 @Module({
   imports: [CustomerModule, TaskModule, CommonModule],
   controllers: [InstallController, WaterAccountActivateController],
-  providers: [InstallService, AllocationService],
+  providers: [InstallService, AllocationService, WebhookService],
 })
 export class InstallModule {}

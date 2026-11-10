@@ -660,6 +660,16 @@ export default function ServiceOrders() {
                   归档
                 </Button>
               )}
+              {['DISPATCHED', 'EXECUTED'].includes(detail.status) && (
+                <Button onClick={async () => {
+                  const reason = window.prompt('回退原因（必填）');
+                  if (!reason?.trim()) return;
+                  try {
+                    await api.post(`/service-orders/${detail.id}/revert`, { reason: reason.trim() });
+                    message.success('已回退一步'); void openDetail(detail.id);
+                  } catch (e) { message.error(apiErrorText(e)); }
+                }}>回退上一步</Button>
+              )}
               {['PENDING_APPROVAL', 'APPROVED', 'DISPATCHED'].includes(detail.status) && (
                 <Button danger icon={<StopOutlined />} onClick={() => setAction('cancel')}>
                   撤销
@@ -725,9 +735,15 @@ export default function ServiceOrders() {
       >
         <Form form={form} layout="vertical">
           {action === 'dispatch' && (
-            <Form.Item name="assigneeId" label="指派给">
-              <StaffSelect placeholder="执行人（可选）" />
-            </Form.Item>
+            <>
+              <Form.Item name="assigneeId" label="指派给">
+                <StaffSelect placeholder="执行人（可选）" />
+              </Form.Item>
+              {/* X4：外派外部工单系统——提交 assigneeId=EXTERNAL 标记 externalDispatch */}
+              <Button size="small" type="dashed" onClick={() => form.setFieldsValue({ assigneeId: 'EXTERNAL' })}>
+                派往工单系统（外部）
+              </Button>
+            </>
           )}
           {action === 'archive' && detail && (
             <>

@@ -9,6 +9,7 @@ import { BigIntInterceptor } from './common/bigint.interceptor.js';
 import { LiveEventInterceptor } from './common/live-event.interceptor.js';
 import { DomainEventsService } from './common/domain-events.service.js';
 import { EventsController } from './common/events.controller.js';
+import { WebhookService } from './common/webhook.service.js';
 import { CommonModule } from './common/common.module.js';
 import { PermissionsGuard } from './common/permissions.guard.js';
 import { TenantInterceptor } from './common/tenant.interceptor.js';
@@ -58,6 +59,7 @@ import { ServiceOrderModule } from './modules/service-order/service-order.module
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
     { provide: APP_INTERCEPTOR, useClass: BigIntInterceptor },
     DomainEventsService,
+    WebhookService,
     { provide: APP_INTERCEPTOR, useClass: LiveEventInterceptor },
   ],
 })

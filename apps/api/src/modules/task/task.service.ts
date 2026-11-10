@@ -319,6 +319,39 @@ export class TaskService {
     });
   }
 
+  /** X5：任务撤回——PENDING/ASSIGNED 未领取前可撤回回池（≤5 次，原因必填）。 */
+  async recall(ctx: TenantCtx, perms: string[] | undefined, id: string, reason: string) {
+    return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      const t = await tx.task.findFirst({ where: { tenantId: ctx.tenantId, id } });
+      if (!t) throw new NotFoundException({ code: 'TASK_NOT_FOUND', id });
+      if (!['PENDING', 'ASSIGNED'].includes(t.status)) {
+        throw new ConflictException({ code: 'RECALL_NOT_PENDING', from: t.status });
+      }
+      const recalls = Number((t.payload as Record<string, unknown> | null)?.recallCount ?? 0);
+      if (recalls >= 5) throw new ConflictException({ code: 'RECALL_LIMIT' });
+      const updated = await tx.task.update({
+        where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+        data: {
+          status: 'PENDING',
+          assigneeId: null,
+          assignedAt: null,
+          payload: {
+            ...((t.payload as Record<string, unknown>) ?? {}),
+            recallCount: recalls + 1,
+            recallLog: [
+              ...(((t.payload as Record<string, unknown> | null)?.recallLog as unknown[]) ?? []),
+              { at: new Date().toISOString(), by: ctx.staffId, reason },
+            ].slice(-10),
+          } as Prisma.InputJsonValue,
+          updatedBy: ctx.staffId,
+        },
+        select: TASK_SELECT,
+      });
+      this.emitChange(ctx.tenantId);
+      return updated;
+    });
+  }
+
   async badge(ctx: TenantCtx, perms: string[] | undefined) {
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       await this.escalateOverdue(tx, ctx);

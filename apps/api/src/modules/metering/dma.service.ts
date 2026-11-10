@@ -224,7 +224,10 @@ export class DmaService {
     // D1：考核表 = 用水户用水类别 MONITORING 的户所挂水表（经在装
     // 安装反查），不再看 meter_role。一只表非监控表即整批拒。
     const cat = await this.usageCategoryByMeter(tx, ctx.tenantId, meterIds);
-    const notMonitoring = meters.find((m) => cat.get(m.id) !== 'MONITORING');
+    // L1：表级 meterRole=MONITORING 与户级 usageCategory=MONITORING 任一即算监控表。
+    const notMonitoring = meters.find(
+      (m) => cat.get(m.id) !== 'MONITORING' && (m as { meterRole?: string }).meterRole !== 'MONITORING',
+    );
     if (notMonitoring) {
       throw bad('DMA_METER_NOT_MONITORING', { meterNo: notMonitoring.meterNo });
     }

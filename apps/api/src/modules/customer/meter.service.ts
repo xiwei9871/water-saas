@@ -17,7 +17,7 @@ export type MeterStatus = 'AVAILABLE' | 'INSTALLED' | 'MAINTENANCE' | 'RETIRED';
  * 唯一判定 = 用水户用水类别 MONITORING，不再走 meter_role。
  * MASTER/SUB 由 meter_relation 自动维护，人工建档/改档仅可标 NORMAL。
  */
-const METER_ROLE_SET = new Set(['NORMAL', 'MASTER', 'SUB']);
+const METER_ROLE_SET = new Set(['NORMAL', 'MASTER', 'SUB', 'MONITORING']);
 
 export const METER_SELECT = {
   id: true,

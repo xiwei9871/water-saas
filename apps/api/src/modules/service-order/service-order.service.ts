@@ -772,6 +772,78 @@ export class ServiceOrderService {
     });
   }
 
+  /**
+   * X4 外部工单系统"完成+必填信息"回推：按 serviceType 校验必填清单，
+   * 齐备 → payload 落地 + EXECUTED（待归档）；缺项返回 EXTERNAL_MISSING_FIELDS。
+   */
+  private static readonly EXT_REQUIRED: Record<string, string[]> = {
+    PERIODIC_CHECK: ['checkOrg', 'checkDate', 'checkResult', 'checkError', 'certNo', 'nextCheckDate'],
+    FAULT: ['faultDesc', 'repairContent'],
+    STOP: ['stoppedAt'],
+    RESUME: ['resumedAt'],
+    SUSPEND: ['suspendAt'],
+    CLOSE: ['closedAt', 'meterSealed'],
+    FLOW_LIMIT: ['limitMethod', 'limitValue', 'effectiveDate'],
+    FACILITY_MAINTENANCE: ['content'],
+    SITE_RECTIFICATION: ['rectifyContent', 'rectifyResult'],
+    METER_GROUP_CLEANING: ['cleanedCount'],
+    DISPUTE_CHECK: ['checkConclusion'],
+  };
+
+  async externalCompleteTx(tx: Tx, ctx: TenantCtx, id: string, body: Record<string, unknown>) {
+    const so = await tx.meterServiceOrder.findFirst({ where: { tenantId: ctx.tenantId, id } });
+    if (!so) throw new NotFoundException({ code: 'SVC_ORDER_NOT_FOUND' });
+    const missing = ['externalOrderNo', 'finishedAt', 'executor', 'resultNote', 'photoRefs']
+      .filter((f) => body[f] === undefined || body[f] === null || body[f] === '');
+    for (const f of ServiceOrderService.EXT_REQUIRED[so.serviceType] ?? []) {
+      if (body[f] === undefined || body[f] === null || body[f] === '') missing.push(f);
+    }
+    if (missing.length) {
+      throw new BadRequestException({ code: 'EXTERNAL_MISSING_FIELDS', missing });
+    }
+    if (!['DISPATCHED', 'APPROVED'].includes(so.status)) {
+      throw new ConflictException({ code: 'EXTERNAL_STATE_INVALID', from: so.status });
+    }
+    const hist = [
+      { status: so.status, at: new Date().toISOString(), by: ctx.staffId, to: 'EXECUTED', via: 'external' },
+      ...((so.statusHistory as { status: string }[] | null) ?? []),
+    ].slice(0, 6);
+    return tx.meterServiceOrder.update({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      data: {
+        status: 'EXECUTED',
+        statusHistory: hist,
+        externalOrderNo: String(body.externalOrderNo),
+        externalPayload: body as Prisma.InputJsonValue,
+        payload: { ...((so.payload as Record<string, unknown>) ?? {}), ...body } as Prisma.InputJsonValue,
+        updatedBy: ctx.staffId,
+      },
+    });
+  }
+
+  /** X7 工单撤销回退（DISPATCHED→APPROVED、EXECUTED→DISPATCHED，≤3 次）。 */
+  async revertTx(tx: Tx, ctx: TenantCtx, id: string, reason: string) {
+    const so = await tx.meterServiceOrder.findFirst({ where: { tenantId: ctx.tenantId, id } });
+    if (!so) throw new NotFoundException({ code: 'SVC_ORDER_NOT_FOUND' });
+    const BACK: Record<string, string> = { DISPATCHED: 'APPROVED', EXECUTED: 'DISPATCHED' };
+    const prev = BACK[so.status];
+    if (!prev) throw new ConflictException({ code: 'REVERT_NOT_ALLOWED', from: so.status });
+    const hist = (so.statusHistory as { status: string }[] | null) ?? [];
+    const reverts = hist.filter((h) => (h as { reverted?: boolean }).reverted).length;
+    if (reverts >= 3) throw new ConflictException({ code: 'REVERT_LIMIT' });
+    return tx.meterServiceOrder.update({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      data: {
+        status: prev as never,
+        statusHistory: [
+          ...hist,
+          { status: prev, at: new Date().toISOString(), by: ctx.staffId, to: so.status, reverted: true, reason },
+        ].slice(0, 6),
+        updatedBy: ctx.staffId,
+      },
+    });
+  }
+
   async cancelTx(tx: Tx, ctx: TenantCtx, id: string, body: { reason?: string }, req: Request) {
     {
       const order = await tx.meterServiceOrder.findFirst({

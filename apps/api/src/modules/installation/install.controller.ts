@@ -26,13 +26,19 @@ export class InstallController {
 
   @Get()
   @Permissions('install:read')
-  list(@Query('status') status?: string, @Query('take') take?: string) {
+  list(
+    @Query('status') status?: string,
+    @Query('take') take?: string,
+    // X1-B 兜底拉取：外部系统按更新时间轮询补数。
+    @Query('updatedSince') updatedSince?: string,
+  ) {
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const rows = await tx.installApplication.findMany({
         where: {
           tenantId: ctx.tenantId,
           ...(status && STATUSES.has(status) ? { status: status as InstallApplyStatus } : {}),
+          ...(updatedSince ? { updatedAt: { gte: new Date(updatedSince) } } : {}),
         },
         orderBy: { createdAt: 'desc' },
         take: Math.min(parseInt(take ?? '50', 10) || 50, 200),
@@ -57,6 +63,40 @@ export class InstallController {
         settleNo: r.settleAccountId ? (settleOf.get(r.settleAccountId) ?? null) : null,
       }));
     });
+  }
+
+  /**
+   * POST /install/applications/:id/external-complete — X1 外部工程系统
+   * 回推"安装完成"。幂等键=externalOrderNo；缺字段返回缺项清单；
+   * 落库并推进至 INSTALLING（待放号）。
+   */
+  @Post(':id/external-complete')
+  @Permissions('install:write')
+  externalComplete(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.externalCompleteTx(tx, ctx, assertUuid(id, 'id'), body));
+  }
+
+  /** POST .../external-confirm — X1 人工核对确认（修订字段走 PATCH 接口留痕）。 */
+  @Post(':id/external-confirm')
+  @Permissions('install:write')
+  externalConfirm(@Param('id') id: string) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.confirmExternalTx(tx, ctx, assertUuid(id, 'id')));
+  }
+
+  /** POST .../revert — X7 撤销回退上一步（reason 必填，留痕 statusHistory）。 */
+  @Post(':id/revert')
+  @Permissions('install:write')
+  revert(@Param('id') id: string, @Body() body: { reason?: string }) {
+    if (!body?.reason?.trim()) {
+      throw new BadRequestException({ code: 'REVERT_REASON_REQUIRED' });
+    }
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.revertTx(tx, ctx, assertUuid(id, 'id'), body.reason!.trim()));
   }
 
   @Get(':id')
@@ -178,11 +218,14 @@ export class InstallController {
   /** Q5/R6 合同编号录入：装表完成后（INSTALLING）、归档立户前可编辑。 */
   @Patch(':id/contract')
   @Permissions('install:write')
-  contract(@Param('id') id: string, @Body() body: { contractNo?: unknown }) {
-    const contractNo =
-      typeof body?.contractNo === 'string' && body.contractNo.trim()
-        ? body.contractNo.trim().slice(0, 64)
+  contract(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    // X2 双合同：供用水合同 supplyContractNo（兼容旧 contractNo）+ 施工合同 constructionContractNo。
+    const pick = (k: string) =>
+      typeof body?.[k] === 'string' && (body[k] as string).trim()
+        ? (body[k] as string).trim().slice(0, 64)
         : null;
+    const contractNo = pick('contractNo') ?? pick('supplyContractNo');
+    const constructionContractNo = pick('constructionContractNo');
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
       const app = await tx.installApplication.findFirst({
@@ -198,7 +241,14 @@ export class InstallController {
       }
       return tx.installApplication.update({
         where: { id: app.id },
-        data: { contractNo, updatedBy: ctx.staffId },
+        data: {
+          contractNo,
+          supplyContractNo: contractNo,
+          ...(body?.constructionContractNo !== undefined ? { constructionContractNo } : {}),
+          ...(body?.supplyContractScan !== undefined ? { supplyContractScan: body.supplyContractScan as never } : {}),
+          ...(body?.constructionContractScan !== undefined ? { constructionContractScan: body.constructionContractScan as never } : {}),
+          updatedBy: ctx.staffId,
+        },
       });
     });
   }

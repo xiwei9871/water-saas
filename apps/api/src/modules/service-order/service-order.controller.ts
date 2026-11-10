@@ -175,6 +175,7 @@ export class ServiceOrderController {
   @Permissions('metering:service')
   dispatch(
     @Param('id') id: string,
+    // X4：assigneeId='EXTERNAL' 派往外部工单系统（externalDispatch 标记）。
     @Body() body: { assigneeId?: string; note?: string },
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
@@ -187,6 +188,27 @@ export class ServiceOrderController {
       { key, method: 'POST', route: req.path, body },
       (tx) => this.svc.dispatchTx(tx, ctx, assertUuid(id), body ?? {}, req),
     );
+  }
+
+  /** POST /service-orders/:id/external-complete — X4 外部回推完成+必填清单。 */
+  @Post(':id/external-complete')
+  @Permissions('metering:service')
+  externalComplete(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.externalCompleteTx(tx, ctx, assertUuid(id), body ?? {}));
+  }
+
+  /** POST /service-orders/:id/revert — X7 回退一步（reason 必填，≤3 次）。 */
+  @Post(':id/revert')
+  @Permissions('metering:service')
+  revert(@Param('id') id: string, @Body() body: { reason?: string }) {
+    if (!body?.reason?.trim()) {
+      throw new BadRequestException({ code: 'REVERT_REASON_REQUIRED' });
+    }
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.revertTx(tx, ctx, assertUuid(id), body.reason!.trim()));
   }
 
   @Post(':id/execute')

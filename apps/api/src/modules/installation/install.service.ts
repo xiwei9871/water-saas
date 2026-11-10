@@ -4,6 +4,7 @@ import type { TenantCtx } from '../../common/tenant-context.js';
 import { SequenceService } from '../../common/sequence.service.js';
 import { TaskService } from '../task/task.service.js';
 import { WaterAccountService, type OnboardBody } from '../customer/water-account.service.js';
+import { WebhookService } from '../../common/webhook.service.js';
 
 /**
  * S1 报装申请（docs/GAP_ANALYSIS_2026-10.md，独立于营销主链的域）。
@@ -48,6 +49,7 @@ export class InstallService {
     private readonly seq: SequenceService,
     private readonly tasks: TaskService,
     private readonly accounts: WaterAccountService,
+    private readonly webhook: WebhookService,
   ) {}
 
   async createTx(tx: Prisma.TransactionClient, ctx: TenantCtx, body: CreateApplyBody) {
@@ -133,8 +135,20 @@ export class InstallService {
     if (!NEXT[app.status].includes(to)) {
       throw new ConflictException({ code: 'INVALID_APPLY_TRANSITION', from: app.status, to });
     }
+    // X1-A：状态变更即推送工程系统（配置了 webhook.install.url 才发）。
+    this.webhook.pushInstall(ctx.tenantId, {
+      applyId: app.id, applyNo: app.applyNo, status: to,
+      applicantName: app.applicantName, addr: app.addr,
+      caliberDetails: app.caliberDetails, changedAt: new Date().toISOString(),
+    });
+    // X7：状态历史栈（最近在前，封顶 6 条；revert 弹栈回退）。
+    const hist = [
+      { status: app.status, at: new Date().toISOString(), by: ctx.staffId, to },
+      ...((app.statusHistory as { status: string }[] | null) ?? []),
+    ].slice(0, 6);
     const patch: Prisma.InstallApplicationUpdateInput = {
       status: to,
+      statusHistory: hist,
       updatedBy: ctx.staffId,
       ...(to === 'SURVEYED' && note !== undefined ? { surveyNote: note } : {}),
       ...(to === 'INSTALLING' && note !== undefined ? { installNote: note } : {}),
@@ -202,6 +216,112 @@ export class InstallService {
       });
     }
     return app;
+  }
+
+  /**
+   * X1 外部系统"安装完成"回推：校验字段齐备 → 存回推原文+字段 →
+   * 状态推进至 INSTALLING（待放号）；缺字段返回 EXTERNAL_MISSING_FIELDS
+   * 清单不写半成品。幂等键=externalOrderNo：重复回推同键→标记
+   * externalConfirmed=false 等人工确认，不覆盖人工修订字段。
+   */
+  async externalCompleteTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+    body: Record<string, unknown>,
+  ) {
+    const app = await tx.installApplication.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+    });
+    if (!app) throw new NotFoundException({ code: 'APPLY_NOT_FOUND' });
+    if (body.applyNo && body.applyNo !== app.applyNo) {
+      throw new BadRequestException({ code: 'EXTERNAL_APPLYNO_MISMATCH' });
+    }
+    const missing: string[] = [];
+    for (const f of ['externalOrderNo', 'installCompletedAt', 'installInitialReading']) {
+      if (body[f] === undefined || body[f] === null || body[f] === '') missing.push(f);
+    }
+    const meters = body.installMeters as { meterNo?: string }[] | undefined;
+    if (!Array.isArray(meters) || meters.length === 0 || meters.some((m) => !m?.meterNo)) {
+      missing.push('installMeters[].meterNo');
+    }
+    if (missing.length) {
+      throw new BadRequestException({ code: 'EXTERNAL_MISSING_FIELDS', missing });
+    }
+    if (!['SUBMITTED', 'SURVEYED', 'APPROVED', 'INSTALLING'].includes(app.status)) {
+      throw new ConflictException({ code: 'EXTERNAL_STATE_INVALID', from: app.status });
+    }
+    const isRepeat =
+      app.externalOrderNo === String(body.externalOrderNo) && app.externalOrderNo !== null;
+    const hist = [
+      { status: app.status, at: new Date().toISOString(), by: ctx.staffId, to: 'INSTALLING', via: 'external' },
+      ...((app.statusHistory as { status: string }[] | null) ?? []),
+    ].slice(0, 6);
+    return tx.installApplication.update({
+      where: { id: app.id },
+      data: {
+        status: app.status === 'INSTALLING' ? 'INSTALLING' : 'INSTALLING',
+        statusHistory: hist,
+        externalSource: String(body.sourceSystem ?? 'EXTERNAL'),
+        externalOrderNo: String(body.externalOrderNo),
+        externalPushedAt: new Date(),
+        externalPayload: body as Prisma.InputJsonValue,
+        // 重复回推：数据落地但需人工再确认（人工修订不被自动覆盖的标记位）。
+        externalConfirmed: isRepeat ? false : false,
+        installCompletedAt: new Date(String(body.installCompletedAt)),
+        installInitialReading: Number(body.installInitialReading),
+        installMeters: meters as Prisma.InputJsonValue,
+        installMeterNo: String(body.installMeterNo ?? meters![0].meterNo),
+        installCaliber: String(body.installCaliber ?? (meters![0] as { caliber?: string }).caliber ?? '') || null,
+        ...(body.feeRequired !== undefined ? { feeRequired: Number(body.feeRequired) } : {}),
+        ...(body.feeReceived !== undefined ? { feeReceived: Number(body.feeReceived) } : {}),
+        ...(body.feeNote !== undefined ? { feeNote: String(body.feeNote) } : {}),
+        ...(body.constructionContractNo !== undefined
+          ? { constructionContractNo: String(body.constructionContractNo) }
+          : {}),
+        ...(body.surveyNote !== undefined ? { surveyNote: String(body.surveyNote) } : {}),
+        ...(body.installNote !== undefined ? { installNote: String(body.installNote) } : {}),
+        updatedBy: ctx.staffId,
+      },
+    });
+  }
+
+  /** X1 人工确认外部回推（修订字段走 PATCH 留 audit）。 */
+  async confirmExternalTx(tx: Prisma.TransactionClient, ctx: TenantCtx, id: string) {
+    return tx.installApplication.update({
+      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      data: { externalConfirmed: true, updatedBy: ctx.staffId },
+    });
+  }
+
+  /**
+   * X7 撤销回退：弹状态历史栈回上一步（≤3 次/步骤，终态不可撤）。
+   * 已填数据保留（本方法只回退 status 字段）。
+   */
+  async revertTx(tx: Prisma.TransactionClient, ctx: TenantCtx, id: string, reason: string) {
+    const app = await tx.installApplication.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+    });
+    if (!app) throw new NotFoundException({ code: 'APPLY_NOT_FOUND' });
+    if (['COMPLETED', 'CANCELLED', 'REJECTED'].includes(app.status)) {
+      throw new ConflictException({ code: 'REVERT_NOT_ALLOWED', from: app.status });
+    }
+    const hist = (app.statusHistory as { status: string; to?: string }[] | null) ?? [];
+    const prev = hist[0];
+    if (!prev) throw new ConflictException({ code: 'REVERT_NO_HISTORY' });
+    const reverts = hist.filter((h) => h.to === app.status).length;
+    if (reverts >= 3) throw new ConflictException({ code: 'REVERT_LIMIT' });
+    return tx.installApplication.update({
+      where: { id: app.id },
+      data: {
+        status: prev.status as InstallApplyStatus,
+        statusHistory: [
+          ...hist.slice(1),
+          { status: prev.status, at: new Date().toISOString(), by: ctx.staffId, to: app.status, reverted: true, reason },
+        ].slice(0, 6),
+        updatedBy: ctx.staffId,
+      },
+    });
   }
 
   /**

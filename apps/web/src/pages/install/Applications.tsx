@@ -134,7 +134,7 @@ const NEXT_ACTIONS: Partial<Record<ApplyStatus, { to: ApplyStatus; label: string
     { to: 'INSTALLING', label: '开始装表', noteField: 'install' },
     { to: 'REJECTED', label: '驳回' },
   ],
-  INSTALLING: [{ to: 'CANCELLED', label: '取消' }],
+  INSTALLING: [{ to: 'CANCELLED', label: '终止申请' }],
 };
 
 /** S1 报装管理（独立域）：申请→勘察→审批→装表→归档立户。 */
@@ -680,7 +680,7 @@ export default function InstallApplications() {
             />
             {['REJECTED', 'CANCELLED'].includes(detail.status) && (
               <Typography.Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
-                流程已{detail.status === 'REJECTED' ? '驳回' : '取消'}
+                流程已{detail.status === 'REJECTED' ? '驳回' : '终止'}
                 {detail.rejectReason ? `：${detail.rejectReason}` : ''}
               </Typography.Text>
             )}

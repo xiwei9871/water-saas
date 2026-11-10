@@ -396,6 +396,30 @@ export class MeterReadingController {
    * correcting fact row pointing at this one. Original must be ACTUAL/REMOTE
    * and not already superseded (→ 409 ALREADY_SUPERSEDED).
    */
+  /**
+   * POST /meter-readings/:id/revise — X3 估抄修订（NO_READ+QC 前，≤3 次留痕）。
+   */
+  @Post(':id/revise')
+  @Permissions('metering:write')
+  revise(
+    @Param('id') id: string,
+    @Body() body: { estimateQty?: number; exceptionCode?: string; remark?: string; reason?: string },
+  ) {
+    assertUuid(id, 'id');
+    if (!body?.reason?.trim()) {
+      throw new BadRequestException({ code: 'REVISE_REASON_REQUIRED' });
+    }
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.reviseEstimateTx(tx, ctx, id, {
+        estimateQty: body.estimateQty,
+        exceptionCode: body.exceptionCode,
+        remark: body.remark,
+        reason: body.reason!.trim(),
+      }),
+    );
+  }
+
   @Post(':id/supersede')
   @Permissions('metering:write')
   supersede(

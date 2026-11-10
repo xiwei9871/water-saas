@@ -25,12 +25,14 @@ export const READER_ZONE_SELECT = {
   readerId: true,
   status: true,
   remark: true,
+  isRemote: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.ReaderZoneSelect;
 
 export interface ReaderZoneBody {
   zoneNo?: string;
+  isRemote?: boolean;
   readerId?: string | null;
   remark?: string | null;
 }
@@ -38,6 +40,7 @@ export interface ReaderZoneBody {
 export interface ReaderZonePatchBody {
   readerId?: string | null;
   status?: string;
+  isRemote?: boolean;
   remark?: string | null;
 }
 
@@ -74,8 +77,8 @@ export class ReaderZoneService {
         zoneNo: r.zoneNo,
         readerId: r.readerId,
         readerName,
-        isRemote: isRemoteZone(r.zoneNo),
-        label: isRemoteZone(r.zoneNo)
+        isRemote: r.isRemote === true || isRemoteZone(r.zoneNo),
+        label: r.isRemote === true || isRemoteZone(r.zoneNo)
           ? `${r.zoneNo} · 远传`
           : `${r.zoneNo}${readerName ? ` · ${readerName}` : ''}`,
       };
@@ -109,6 +112,7 @@ export class ReaderZoneService {
           tenantId: ctx.tenantId,
           zoneNo,
           readerId: body.readerId ?? null,
+          isRemote: body.isRemote === true || isRemoteZone(zoneNo),
           remark: body.remark ?? null,
           createdBy: ctx.staffId,
           updatedBy: ctx.staffId,
@@ -148,6 +152,7 @@ export class ReaderZoneService {
       where: { id },
       data: {
         readerId: body.readerId === undefined ? undefined : body.readerId,
+        ...(body.isRemote !== undefined ? { isRemote: body.isRemote === true } : {}),
         status: body.status,
         remark: body.remark === undefined ? undefined : body.remark,
         updatedBy: ctx.staffId,

@@ -1085,6 +1085,8 @@ model MeterReading {
   exceptionCode       ExceptionCode? @map("exception_code")
   supersedesReadingId String?        @map("supersedes_reading_id") @db.Uuid
   qcStatus            QcStatus       @default(PENDING) @map("qc_status")
+  /** X3 估抄修订留痕：QC/结算前允许修订，[{at,by,reason,fields:{k:[old,new]}}]。 */
+  revisionLog         Json?          @map("revision_log") @db.JsonB
   qcBy                String?        @map("qc_by") @db.Uuid
   qcAt                DateTime?      @map("qc_at")
   source              ReadSource
@@ -2113,6 +2115,20 @@ model InstallApplication {
   /** R12 水表安装明细（安装完成后、放号前填报）：
       [{meterNo, caliber, brand, serialNo, maxDial, initialReading, installedAt}]。 */
   installMeters  Json?              @map("install_meters") @db.JsonB
+  /** X1 外部系统回推：来源系统/外部工单号/回推时间/回推载荷原文/人工修订标记。
+      人工修订字段留痕走 audit_log（before→after）。 */
+  externalSource    String?        @map("external_source")
+  externalOrderNo   String?        @map("external_order_no")
+  externalPushedAt  DateTime?      @map("external_pushed_at")
+  externalPayload   Json?          @map("external_payload") @db.JsonB
+  externalConfirmed Boolean        @default(false) @map("external_confirmed")
+  /** X2 双合同：安装施工合同号/扫描件 + 供用水合同号/扫描件（contractNo/contractScan 保留兼容=供用水合同）。 */
+  constructionContractNo   String? @map("construction_contract_no")
+  constructionContractScan Json?   @map("construction_contract_scan") @db.JsonB
+  supplyContractNo         String? @map("supply_contract_no")
+  supplyContractScan       Json?   @map("supply_contract_scan") @db.JsonB
+  /** X7 撤销回退：状态历史栈（最近在前，≤3 次）。 */
+  statusHistory Json?              @map("status_history") @db.JsonB
   rejectReason   String?            @map("reject_reason")
   waterAccountId String?            @map("water_account_id") @db.Uuid
   createdAt      DateTime           @default(now()) @map("created_at")
@@ -2172,6 +2188,11 @@ model MeterServiceOrder {
   dispatcherId        String?            @map("dispatcher_id") @db.Uuid
   assigneeId          String?            @map("assignee_id") @db.Uuid
   dispatchedAt        DateTime?          @map("dispatched_at")
+  /** X4 外派工单系统：外派标记/外部单号/回推载荷；X7 撤销回退状态历史。 */
+  externalDispatch    Boolean            @default(false) @map("external_dispatch")
+  externalOrderNo     String?            @map("external_order_no")
+  externalPayload     Json?              @map("external_payload") @db.JsonB
+  statusHistory       Json?              @map("status_history") @db.JsonB
   taskId              String?            @map("task_id") @db.Uuid
   executedBy          String?            @map("executed_by") @db.Uuid
   executedAt          DateTime?          @map("executed_at")
@@ -2278,6 +2299,8 @@ model ReaderZone {
   zoneNo    String   @map("zone_no")
   /** 当前绑定的抄表员（staff.id）；远传/已解绑为空。 */
   readerId  String?  @map("reader_id") @db.Uuid
+  /** L3/X6：远传区号标识——true 时允许空绑抄表员、不派人工抄表任务、走远传采集。 */
+  isRemote  Boolean  @default(false) @map("is_remote")
   /** ACTIVE | DISABLED — 停用后区号释放可重新分配。 */
   status    String   @default("ACTIVE")
   remark    String?

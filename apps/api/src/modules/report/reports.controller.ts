@@ -203,7 +203,8 @@ export class ReportsController {
    */
   @Get('ops-daily')
   @Permissions('report:read')
-  opsDaily(@Query('date') date?: string) {
+  opsDaily(@Query('date') date?: string, @Query('period') period?: string) {
+    date = date ?? period;
     return this.analysis.opsDaily(currentTenant(), {
       date: assertDate(required(date, 'date')),
     });
