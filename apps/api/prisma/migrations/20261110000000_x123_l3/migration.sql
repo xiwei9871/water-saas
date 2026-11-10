@@ -12,7 +12,7 @@ ALTER TABLE install_application
   ADD COLUMN IF NOT EXISTS supply_contract_scan JSONB,
   ADD COLUMN IF NOT EXISTS status_history JSONB;
 ALTER TABLE meter_reading ADD COLUMN IF NOT EXISTS revision_log JSONB;
-ALTER TABLE service_order ADD COLUMN IF NOT EXISTS external_dispatch BOOLEAN NOT NULL DEFAULT false,
+ALTER TABLE meter_service_order ADD COLUMN IF NOT EXISTS external_dispatch BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS external_order_no TEXT,
   ADD COLUMN IF NOT EXISTS external_payload JSONB,
   ADD COLUMN IF NOT EXISTS status_history JSONB;
