@@ -61,7 +61,10 @@ export class SettleAccountService {
           status: q.status,
           ...(hidden.length ? { id: { notIn: hidden } } : {}),
         },
-        select: SETTLE_ACCOUNT_SELECT,
+        select: {
+          ...SETTLE_ACCOUNT_SELECT,
+          _count: { select: { waterAccounts: true } },
+        },
         orderBy: { settleNo: 'asc' },
         take: q.take,
         skip: q.skip,
@@ -103,6 +106,7 @@ export class SettleAccountService {
         const ab = arrears.get(r.id) ?? 0n;
         return {
           ...r,
+          waterAccountCount: (r as { _count?: { waterAccounts: number } })._count?.waterAccounts ?? 0,
           prepayBalance: pb.toString(),
           arrearsBalance: ab.toString(),
           balance: (pb - ab).toString(),

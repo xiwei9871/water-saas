@@ -81,6 +81,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(() => {
+    // W9：换账号登录不复用旧角色/菜单/缓存——清空全部本地用户状态。
+    try { localStorage.clear(); sessionStorage.clear(); } catch { /* ignore */ }
     session.clear();
     setUser(null);
     setTenantCode(null);

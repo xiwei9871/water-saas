@@ -44,6 +44,7 @@ export class SettleAccountController {
   @Permissions('customer:read')
   list(
     @Query('name') name?: string,
+    @Query('keyword') keyword?: string,
     @Query('status') status?: string,
     @Query('take') take?: string,
     @Query('skip') skip?: string,
@@ -53,7 +54,7 @@ export class SettleAccountController {
     }
     return this.svc.list(currentTenant(), {
       ...pageArgs(take, skip),
-      name,
+      name: name ?? keyword,
       status: status as 'NORMAL' | 'SUSPENDED' | 'CLOSED' | undefined,
     });
   }

@@ -37,6 +37,10 @@ export const DICT_CATEGORIES = [
   { code: 'ADJUST_TYPE', name: '调整/减免类型' },
   { code: 'TASK_TYPE_PERM', name: '任务类型权限映射' },
   { code: 'TASK_RULE', name: '任务触发规则' },
+  { code: 'SERVICE_TYPE', name: '工单类型' },
+  { code: 'VIOLATION_TYPE', name: '违章类型' },
+  { code: 'BANK_CODE', name: '银行代码' },
+  { code: 'METER_CALIBER', name: '水表口径' },
 ] as const;
 
 const CATEGORY_CODES = new Set<string>(DICT_CATEGORIES.map((c) => c.code));

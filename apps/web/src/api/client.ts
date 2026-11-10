@@ -104,6 +104,22 @@ export const errorCode = (err: unknown): string => toApiError(err).code;
 
 /** Known server codes → Chinese labels for the UI. */
 const CODE_LABELS: Record<string, string> = {
+  // 1110-N2：流程/状态机错误中文映射（未命中项走服务端 message 中文兜底）。
+  INVALID_APPLY_TRANSITION: '当前状态不允许该操作，请按流程顺序处理或先「撤销上一步」',
+  APPLY_TARGET_INVALID: '目标状态不存在，请联系管理员',
+  REVERT_NOT_ALLOWED: '当前状态不可回退（终态或初始态）',
+  REVERT_NO_HISTORY: '无历史状态可回退',
+  REVERT_LIMIT: '同一步骤撤销次数已达上限',
+  RECALL_NOT_PENDING: '任务已被领取或处理，不可撤回',
+  RECALL_LIMIT: '撤回次数已达上限',
+  REVISE_NOT_NO_READ: '仅估抄记录可修订，实抄请走冲正',
+  REVISE_QC_DONE: '质检已完成，修订已锁定（请走结算更正）',
+  REVISE_LIMIT: '修订次数已达上限',
+  REVISE_NO_CHANGE: '无变更内容',
+  EXTERNAL_MISSING_FIELDS: '外部回推数据缺必填项，详见提示清单',
+  EXTERNAL_STATE_INVALID: '当前状态不允许外部回推写入',
+  DICT_CATEGORY_INVALID: '字典类别不存在或不允许维护',
+
   INVALID_CREDENTIALS: '租户代码、账号或密码错误',
   LOGIN_FIELDS_REQUIRED: '请填写租户代码、账号与密码',
   REFRESH_TOKEN_REQUIRED: '登录状态不完整，请重新登录',
