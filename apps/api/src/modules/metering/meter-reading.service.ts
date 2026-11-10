@@ -575,7 +575,7 @@ export class MeterReadingService {
       throw new BadRequestException({ code: 'REVISE_NO_CHANGE' });
     }
     return tx.meterReading.update({
-      where: { tenantId_id: { tenantId: ctx.tenantId, id } },
+      where: { id },
       data: {
         ...(diff.estimateQty ? { estimateQty: body.estimateQty } : {}),
         ...(diff.exceptionCode ? { exceptionCode: body.exceptionCode as never } : {}),
@@ -584,7 +584,7 @@ export class MeterReadingService {
         revisionLog: [
           ...log,
           { at: new Date().toISOString(), by: ctx.staffId, reason: body.reason, fields: diff },
-        ],
+        ] as Prisma.InputJsonValue,
         updatedBy: ctx.staffId,
       },
     });

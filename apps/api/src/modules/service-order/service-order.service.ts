@@ -812,7 +812,7 @@ export class ServiceOrderService {
       where: { tenantId_id: { tenantId: ctx.tenantId, id } },
       data: {
         status: 'EXECUTED',
-        statusHistory: hist,
+        statusHistory: hist as Prisma.InputJsonValue,
         externalOrderNo: String(body.externalOrderNo),
         externalPayload: body as Prisma.InputJsonValue,
         payload: { ...((so.payload as Record<string, unknown>) ?? {}), ...body } as Prisma.InputJsonValue,
@@ -838,7 +838,7 @@ export class ServiceOrderService {
         statusHistory: [
           ...hist,
           { status: prev, at: new Date().toISOString(), by: ctx.staffId, to: so.status, reverted: true, reason },
-        ].slice(0, 6),
+        ].slice(0, 6) as Prisma.InputJsonValue,
         updatedBy: ctx.staffId,
       },
     });

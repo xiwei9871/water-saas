@@ -148,7 +148,7 @@ export class InstallService {
     ].slice(0, 6);
     const patch: Prisma.InstallApplicationUpdateInput = {
       status: to,
-      statusHistory: hist,
+      statusHistory: hist as Prisma.InputJsonValue,
       updatedBy: ctx.staffId,
       ...(to === 'SURVEYED' && note !== undefined ? { surveyNote: note } : {}),
       ...(to === 'INSTALLING' && note !== undefined ? { installNote: note } : {}),
@@ -261,7 +261,7 @@ export class InstallService {
       where: { id: app.id },
       data: {
         status: app.status === 'INSTALLING' ? 'INSTALLING' : 'INSTALLING',
-        statusHistory: hist,
+        statusHistory: hist as Prisma.InputJsonValue,
         externalSource: String(body.sourceSystem ?? 'EXTERNAL'),
         externalOrderNo: String(body.externalOrderNo),
         externalPushedAt: new Date(),
@@ -318,7 +318,7 @@ export class InstallService {
         statusHistory: [
           ...hist.slice(1),
           { status: prev.status, at: new Date().toISOString(), by: ctx.staffId, to: app.status, reverted: true, reason },
-        ].slice(0, 6),
+        ].slice(0, 6) as Prisma.InputJsonValue,
         updatedBy: ctx.staffId,
       },
     });
