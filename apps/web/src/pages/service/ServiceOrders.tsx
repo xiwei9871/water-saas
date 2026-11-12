@@ -904,14 +904,14 @@ export default function ServiceOrders() {
           {detail && IS_FLOW_LIMIT.has(detail.serviceType) && (
             <>
               <Form.Item name="limitMethod" label="限流方式">
-                <Select
-                  allowClear
+                <SmartSelect
                   options={[
                     { value: 'THROTTLE', label: '阀门节流' },
                     { value: 'ORIFICE', label: '限流片' },
                     { value: 'PRESSURE', label: '压力控制' },
                     { value: 'OTHER', label: '其他' },
                   ]}
+                  otherFieldName="otherText"
                 />
               </Form.Item>
               <Form.Item name="limitValue" label="限流值">
