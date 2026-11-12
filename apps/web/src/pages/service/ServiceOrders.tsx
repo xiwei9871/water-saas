@@ -158,6 +158,8 @@ export default function ServiceOrders() {
   const [createOpen, setCreateOpen] = useState(false);
   const [detail, setDetail] = useState<ServiceOrder | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [revertOpen, setRevertOpen] = useState(false);
+  const [revertReason, setRevertReason] = useState('');
   const [lifecycle, setLifecycle] = useState<LifecycleItem[] | null>(null);
   const [action, setAction] = useState<
     null | 'approve' | 'reject' | 'dispatch' | 'execute' | 'cancel' | 'archive'
@@ -661,14 +663,7 @@ export default function ServiceOrders() {
                 </Button>
               )}
               {['DISPATCHED', 'EXECUTED'].includes(detail.status) && (
-                <Button onClick={async () => {
-                  const reason = window.prompt('回退原因（必填）');
-                  if (!reason?.trim()) return;
-                  try {
-                    await api.post(`/service-orders/${detail.id}/revert`, { reason: reason.trim() });
-                    message.success('已回退一步'); void openDetail(detail.id);
-                  } catch (e) { message.error(apiErrorText(e)); }
-                }}>回退上一步</Button>
+                <Button onClick={() => setRevertOpen(true)}>回退上一步</Button>
               )}
               {['PENDING_APPROVAL', 'APPROVED', 'DISPATCHED'].includes(detail.status) && (
                 <Button danger icon={<StopOutlined />} onClick={() => setAction('cancel')}>
@@ -974,6 +969,23 @@ export default function ServiceOrders() {
             <Input.TextArea rows={2} placeholder="现场处置情况" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 1112v8-S4：回退上一步 Modal 收 reason（替换原生 prompt） */}
+      <Modal
+        title="回退上一步"
+        open={revertOpen}
+        onCancel={() => setRevertOpen(false)}
+        okText="确认回退"
+        onOk={async () => {
+          if (!revertReason.trim()) { message.warning('请填写回退原因'); return; }
+          try {
+            await api.post(`/service-orders/${detail!.id}/revert`, { reason: revertReason.trim() });
+            message.success('已回退一步'); setRevertOpen(false); void openDetail(detail!.id);
+          } catch (e) { message.error(apiErrorText(e)); }
+        }}
+      >
+        <Input.TextArea rows={3} placeholder="回退原因（必填）" value={revertReason} onChange={(e) => setRevertReason(e.target.value)} />
       </Modal>
     </Card>
   );

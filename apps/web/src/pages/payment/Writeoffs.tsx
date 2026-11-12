@@ -1,4 +1,5 @@
 import Select from '../../components/CopySelect';
+import SmartSelect, { renderOther } from '../../components/SmartSelect';
 import { PlusOutlined, UndoOutlined } from '@ant-design/icons';
 import {App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Popconfirm, Space, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -115,9 +116,6 @@ export default function Writeoffs() {
     }
   };
 
-  const reasonName = (code: string) =>
-    reasons.find((r) => r.code === code)?.name ?? code;
-
   const columns: ColumnsType<Writeoff> = [
     { key: 'settleNo', dataIndex: 'settleNo', title: '结算户号' },
     { key: 'settleName', dataIndex: 'settleName', title: '户名' },
@@ -133,7 +131,7 @@ export default function Writeoffs() {
       key: 'reasonCode',
       dataIndex: 'reasonCode',
       title: '核销原因',
-      render: reasonName,
+      render: (v: string, r: Writeoff) => renderOther(v, (r as { otherText?: string }).otherText ?? r.note ?? undefined),
     },
     { key: 'effectiveDate', dataIndex: 'effectiveDate', title: '生效日期', render: fmtDate },
     { key: 'note', dataIndex: 'note', title: '备注', ellipsis: true },
@@ -248,7 +246,7 @@ export default function Writeoffs() {
             label="核销原因"
             rules={[{ required: true, message: '必选' }]}
           >
-            <Select options={reasons.map((r) => ({ value: r.code, label: r.name }))} />
+            <SmartSelect options={reasons.map((r) => ({ value: r.code, label: r.name }))} otherFieldName="otherText" />
           </Form.Item>
           <Form.Item
             name="effectiveDate"
