@@ -61,3 +61,8 @@
 
 - 部署 SHA: `8fc199193a9c172746f58c31c5069a8974af6c8b`（api+web 全量）
 - 360°合同页签 / movementTypeName / 催缴 selectAll 服务端展开 / 日报本月累计标签 / SmartSelect 核销接入
+
+# 185 部署记录 — r1112v8-第三轮（da6728e）
+
+- 部署 SHA: `da6728e2895cb07c0541d9c140a7266795e6e97d`（web-only）
+- SmartSelect 违章/工单接入 / 统一查询两级字段 Tabs / E8 返回任务按钮
