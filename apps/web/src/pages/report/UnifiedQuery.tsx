@@ -628,7 +628,33 @@ function DetailQuery() {
           </Space>
         }
       >
-        <Space direction="vertical" style={{ width: '100%' }} size={4}>
+        <Tabs
+          size="small"
+          type="card"
+          items={themes.map((t) => {
+            const tabKeys = t.fields
+              .filter((f) => !['accountNo', 'customerName'].includes(f.key))
+              .map((f) => f.key);
+            const checkedIn = tabKeys.filter((k) => checked.includes(k));
+            return {
+              key: t.theme,
+              label: `${t.label}${checkedIn.length ? ` (${checkedIn.length})` : ''}`,
+              children: (
+                <Checkbox.Group
+                  style={{ marginTop: 4 }}
+                  options={t.fields
+                    .filter((f) => !['accountNo', 'customerName'].includes(f.key))
+                    .map((f) => ({ value: f.key, label: f.label ?? f.key }))}
+                  value={checkedIn}
+                  onChange={(vals) =>
+                    setChecked((prev) => [...new Set([...prev.filter((k) => !tabKeys.includes(k)), ...(vals as string[])])])
+                  }
+                />
+              ),
+            };
+          })}
+        />
+        <div style={{ display: 'none' }}>
           {themes.map((t) => {
             const keys = t.fields
               .filter((f) => !['accountNo', 'customerName'].includes(f.key))
@@ -660,6 +686,8 @@ function DetailQuery() {
               </div>
             );
           })}
+        </div>
+        <Space direction="vertical" style={{ width: '100%' }} size={4}>
           {checked.length > 0 && (
             <div>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>

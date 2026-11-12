@@ -1,4 +1,5 @@
 import Select from '../../components/CopySelect';
+import SmartSelect, { renderOther } from '../../components/SmartSelect';
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {App as AntdApp, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Space, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -158,7 +159,8 @@ export default function Violations() {
       title: '类型',
       dataIndex: 'violationType',
       width: 130,
-      render: (v: string) => enumLabel(VIOLATION_TYPE_LABELS, v),
+      render: (v: string, r: Violation) =>
+        v === 'OTHER' ? renderOther(v, (r as { otherText?: string }).otherText) : enumLabel(VIOLATION_TYPE_LABELS, v),
     },
     {
       title: '来源',
@@ -254,11 +256,12 @@ export default function Violations() {
                 <WaterAccountSearchSelect />
               </Form.Item>
               <Form.Item name="violationType" label="违章类型" rules={[{ required: true }]}>
-                <Select
+                <SmartSelect
                   options={Object.entries(VIOLATION_TYPE_LABELS).map(([value, label]) => ({
                     value,
                     label,
                   }))}
+                  otherFieldName="otherText"
                 />
               </Form.Item>
               <Form.Item name="occurredDate" label="发生日期">

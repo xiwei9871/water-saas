@@ -1,4 +1,5 @@
 import Select from '../../components/CopySelect';
+import { useNavigate } from 'react-router-dom';
 import {
   CheckOutlined,
   CloseOutlined,
@@ -21,6 +22,7 @@ import {
   useFocusParams,
   useTaskGroup,
 } from '../../components/TaskFocus';
+import SmartSelect from '../../components/SmartSelect';
 import { api, fetchAll, apiErrorText } from '../../api/client';
 import {
   enumLabel,
@@ -158,6 +160,7 @@ export default function ServiceOrders() {
   const [createOpen, setCreateOpen] = useState(false);
   const [detail, setDetail] = useState<ServiceOrder | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const nav = useNavigate();
   const [revertOpen, setRevertOpen] = useState(false);
   const [revertReason, setRevertReason] = useState('');
   const [lifecycle, setLifecycle] = useState<LifecycleItem[] | null>(null);
@@ -525,9 +528,7 @@ export default function ServiceOrders() {
             label="服务类型"
             rules={[{ required: true, message: '请选择服务类型' }]}
           >
-            <Select
-                    showSearch
-                    optionFilterProp="label" options={TYPE_OPTIONS} placeholder="选择处置类型" />
+            <SmartSelect options={TYPE_OPTIONS} placeholder="选择处置类型" otherFieldName="otherText" />
           </Form.Item>
           <Form.Item
             noStyle
@@ -663,7 +664,10 @@ export default function ServiceOrders() {
                 </Button>
               )}
               {['DISPATCHED', 'EXECUTED'].includes(detail.status) && (
-                <Button onClick={() => setRevertOpen(true)}>回退上一步</Button>
+                <Space>
+                  <Button size="small" onClick={() => nav('/tasks')}>返回任务</Button>
+                  <Button onClick={() => setRevertOpen(true)}>回退上一步</Button>
+                </Space>
               )}
               {['PENDING_APPROVAL', 'APPROVED', 'DISPATCHED'].includes(detail.status) && (
                 <Button danger icon={<StopOutlined />} onClick={() => setAction('cancel')}>
