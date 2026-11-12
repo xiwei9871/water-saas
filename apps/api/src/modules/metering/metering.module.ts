@@ -13,6 +13,7 @@ import { ReadingBookController } from './reading-book.controller.js';
 import { ReadingBookService } from './reading-book.service.js';
 import { ReadingPlanController } from './reading-plan.controller.js';
 import { ReadingPlanService } from './reading-plan.service.js';
+import { HolidayEnsureCron } from './holiday-ensure.cron.js';
 import { ReadingPlanCron } from './reading-plan.cron.js';
 import { ReaderZoneController } from './reader-zone.controller.js';
 import { ReaderZoneService } from './reader-zone.service.js';
@@ -58,7 +59,7 @@ import { SettlementService } from './settlement.service.js';
     DmaService,
     ReaderZoneService,
     RoutePatternService,
-    ReadingPlanCron,
+    ReadingPlanCron, HolidayEnsureCron,
   ],
 })
 export class MeteringModule {}

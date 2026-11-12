@@ -54,6 +54,8 @@ import Writeoffs from './pages/payment/Writeoffs';
 import InstallApplications from './pages/install/Applications';
 import Contracts from './pages/customer/Contracts';
 import ReceiptPrint from './pages/print/ReceiptPrint';
+import ReadingCardPrint from './pages/print/ReadingCard';
+import ExternalCalls from './pages/install/ExternalCalls';
 import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
 import MetricQuery from './pages/report/MetricQuery';
@@ -111,6 +113,20 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <DashboardOutlined />,
     menuPerms: ['report:read'],
     element: <Home />,
+  },
+  {
+    key: 'print-reading-card',
+    path: '/print/reading-card/:id',
+    label: '抄表卡打印',
+    menuHidden: true,
+    element: <ReadingCardPrint />,
+  },
+  {
+    key: 'ext-calls',
+    path: '/install/external-calls',
+    label: '接口留痕',
+    menuPerms: ['install:read'],
+    element: <ExternalCalls />,
   },
   {
     key: 'print-receipt',
