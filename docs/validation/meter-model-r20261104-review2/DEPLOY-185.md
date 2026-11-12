@@ -45,3 +45,9 @@
 - 部署 SHA: `18f8eb19ed882269bef3217f2e7e0bf028f9ad41`；备份 pre-1111-*.dump
 - 迁移 `20261112000000_meter_uc_remote`（属主执行+resolve）：meter.usage_category/is_remote、InstallApplyStatus+WAITING_NUMBER、contract 表、permission.name 回填
 - 冒烟：meter PATCH usageCategory/isRemote 重读 MONITORING/true；zone is_remote 库读 t（无 detail 路由属测试假象）；外派 EXTERNAL_SYSTEM 201；revert INSTALLING→APPROVED；合同 POST 201+列表可见；重复建批 409；权限中文名返回
+
+# 185 部署记录 — r1112v8（990102b）
+
+- 部署 SHA: `990102b5477a329c020fa06589d7415bbe81ad5b`；备份 pre-1112-*.dump
+- 迁移 `20261113000000_v8_s123`（属主执行+resolve）：install_proof_file_refs/field_overrides 列、webhook_subscription+external_call 表、存量 INSTALLING 且有装表信息→WAITING_NUMBER（UPDATE 1）
+- 冒烟：webhook-subscriptions POST 201；external-calls 路由 200[]；WAITING_NUMBER 列表 3 条；serviceTypeName=故障报修；contracts 2 条；存量 INSTALLING 已清零（迁移生效）
