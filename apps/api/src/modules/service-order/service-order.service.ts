@@ -97,7 +97,6 @@ const invalid = (from: string, to: string) =>
  * CloseAccountUseCase（余额/预存校验内置）。所有域动作与工单状态翻转
  * 同事务提交 — 联动失败整体回滚，工单不落 EXECUTED 假完成。
  */
-@Injectable()
 const SVC_TYPE_NAME: Record<string, string> = {
   PERIODIC_CHECK: '周期检定', FAULT: '故障报修', STOP: '停水', RESUME: '复水',
   SUSPEND: '暂停', CLOSE: '销户', FLOW_LIMIT: '限流', FACILITY_MAINTENANCE: '设施维护',
@@ -109,6 +108,7 @@ const SVC_STATUS_NAME: Record<string, string> = {
   EXECUTED: '已执行', ARCHIVED: '已归档', REJECTED: '已驳回', CANCELLED: '已取消',
 };
 
+@Injectable()
 export class ServiceOrderService {
   constructor(
     private readonly prisma: TenantPrismaService,

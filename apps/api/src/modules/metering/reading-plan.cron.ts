@@ -48,11 +48,13 @@ export class ReadingPlanCron implements OnModuleInit {
     const runDay = bizDayStr(new Date());
     for (const tenantId of ids) {
       // 1112v8-N3：租户参数二级开关——autoPlanEnabled=false 时跳过（默认启用兼容旧行为）。
-      const toggle = await this.prisma.tenantParam.findFirst({
-        where: { tenantId, key: 'autoPlanEnabled' },
-        select: { value: true },
-      });
-      if (toggle && (toggle.value === 'false' || toggle.value === '0')) {
+      const toggle = await this.prisma.runAsTenant(tenantId, (tx) =>
+        tx.tenantParam.findFirst({
+          where: { tenantId, key: 'autoPlanEnabled' },
+          select: { value: true },
+        }),
+      );
+      if (toggle && String(toggle.value) === 'false') {
         this.logger.warn(`auto-plan skipped: tenant ${tenantId} autoPlanEnabled=false`);
         continue;
       }

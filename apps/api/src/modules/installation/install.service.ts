@@ -342,7 +342,7 @@ export class InstallService {
           endpoint: 'external-complete',
           payload: body as Prisma.InputJsonValue,
           result: 'WAITING_NUMBER',
-          skippedFields: skippedFields.length ? (skippedFields as Prisma.InputJsonValue) : Prisma.JsonNull,
+          skippedFields: skippedFields as Prisma.InputJsonValue,
         },
       });
       return { ...r, skippedFields };
