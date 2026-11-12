@@ -69,6 +69,9 @@ export interface MeterBody {
   lastCheckDate?: string | null;
   /** NORMAL普通/MASTER总表/SUB分表（MASTER/SUB 由总分表关系自动维护）。 */
   meterRole?: string;
+  /** 1111v6-P0-1：用水类别/远传标识可写可回读。 */
+  usageCategory?: string | null;
+  isRemote?: boolean;
 }
 
 /**
