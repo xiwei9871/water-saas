@@ -39,3 +39,9 @@
 - 部署 SHA: `50ff1f55a555b58fc5741df47e6bd77132b795ac`；分支 HEAD 含迁移表名修正
 - 备份: pre-1109-*.dump；迁移 `20261110000000_x123_l3`（属主执行：reader_zone.is_remote / install_application 外部回推+双合同+状态历史 / meter_reading.revision_log / meter_service_order 外派字段；修正 service_order→meter_service_order 表名）+ resolve 登记
 - 冒烟: water-accounts/install-applications/reading-plans/prepayments/accounts 全 200；external-complete 端点可达（APPLY_NOT_FOUND=路由通）；ops-daily ?period= 200
+
+# 185 部署记录 — r1111v6（18f8eb1）
+
+- 部署 SHA: `18f8eb19ed882269bef3217f2e7e0bf028f9ad41`；备份 pre-1111-*.dump
+- 迁移 `20261112000000_meter_uc_remote`（属主执行+resolve）：meter.usage_category/is_remote、InstallApplyStatus+WAITING_NUMBER、contract 表、permission.name 回填
+- 冒烟：meter PATCH usageCategory/isRemote 重读 MONITORING/true；zone is_remote 库读 t（无 detail 路由属测试假象）；外派 EXTERNAL_SYSTEM 201；revert INSTALLING→APPROVED；合同 POST 201+列表可见；重复建批 409；权限中文名返回
