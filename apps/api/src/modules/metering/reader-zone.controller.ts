@@ -101,6 +101,8 @@ export class ReaderZoneController {
       readerId: body?.readerId,
       status: body?.status,
       remark: body?.remark,
+      // 1111v6-P0-1：isRemote 必须透传——否则接口 200 但字段静默丢弃（假成功）。
+      ...(body?.isRemote !== undefined ? { isRemote: body.isRemote === true } : {}),
     };
     const ctx = currentTenant();
     return this.prisma.runAsTenant(ctx.tenantId, (tx) =>

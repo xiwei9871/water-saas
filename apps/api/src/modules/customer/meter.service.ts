@@ -32,6 +32,8 @@ export const METER_SELECT = {
   checkPeriodYears: true,
   lastCheckDate: true,
   meterRole: true,
+  usageCategory: true,
+  isRemote: true,
   parentMeterId: true,
   status: true,
   createdAt: true,
