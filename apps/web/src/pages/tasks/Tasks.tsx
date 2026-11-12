@@ -215,7 +215,11 @@ export default function Tasks() {
         <Tag color={r.escalatedAt ? 'red' : 'default'}>{enumLabel(TASK_TYPE_LABELS, v)}</Tag>
       ),
     },
-    { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
+    { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true,
+      render: (v: string, r: { dueAt?: string | null; status?: string }) => (
+        <span style={r.dueAt && r.status !== 'DONE' && r.status !== 'CANCELLED' && new Date(r.dueAt) < new Date() ? { color: '#cf1322', fontWeight: 600 } : undefined}>{v}</span>
+      ),
+    },
     {
       title: '业务对象',
       dataIndex: 'bizLabel',

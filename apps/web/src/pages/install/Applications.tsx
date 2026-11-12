@@ -1,6 +1,6 @@
 import Select from '../../components/CopySelect';
 import { CloseOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
-import {Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Space, Steps, Tag, Typography, Upload} from 'antd';
+import {Alert, App as AntdApp, Popconfirm, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Space, Steps, Tag, Typography, Upload} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { useLiveRefresh } from '../../hooks/useLiveRefresh';
@@ -488,6 +488,11 @@ export default function InstallApplications() {
           )}
           {canWrite && ['SUBMITTED','SURVEYED','APPROVED','INSTALLING'].includes(r.status) && (
             <Button size="small" type="primary" onClick={() => setProofFor(r)}>安装完成</Button>
+          )}
+          {canWrite && ['SUBMITTED','SURVEYED','APPROVED','INSTALLING','WAITING_NUMBER'].includes(r.status) && (
+            <Popconfirm title="终止申请不可恢复，确认？" onConfirm={() => setNoteFor({ app: r, to: 'CANCELLED', label: '终止申请' })}>
+              <Button size="small" danger>终止申请</Button>
+            </Popconfirm>
           )}
           {canWrite && r.status === 'APPROVED' && (
             <Button size="small" onClick={() => goOnboard(r)}>直接立户</Button>

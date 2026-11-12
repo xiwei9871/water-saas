@@ -56,6 +56,7 @@ import Contracts from './pages/customer/Contracts';
 import ReceiptPrint from './pages/print/ReceiptPrint';
 import ReadingCardPrint from './pages/print/ReadingCard';
 import ExternalCalls from './pages/install/ExternalCalls';
+import Help from './pages/system/Help';
 import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
 import MetricQuery from './pages/report/MetricQuery';
@@ -120,6 +121,13 @@ export const APP_ROUTES: AppRoute[] = [
     label: '抄表卡打印',
     menuHidden: true,
     element: <ReadingCardPrint />,
+  },
+  {
+    key: 'sys-help',
+    path: '/system/help',
+    label: '帮助中心',
+    menuPerms: [],
+    element: <Help />,
   },
   {
     key: 'ext-calls',
