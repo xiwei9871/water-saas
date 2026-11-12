@@ -1,4 +1,5 @@
 import Select from '../../components/CopySelect';
+import SmartSelect from '../../components/SmartSelect';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {App as AntdApp, Badge, Button, Card, Drawer, Empty, Form, Input, InputNumber, Modal, Progress, Segmented, Space, Spin, Statistic, Tag, Typography, Upload} from 'antd';
 import {
@@ -962,8 +963,9 @@ export default function MobileReading() {
             label="异常原因"
             rules={[{ required: true, message: '请选择异常原因' }]}
           >
-            <Select
+            <SmartSelect
               size="large"
+              otherFieldName="otherText"
               options={EXCEPTION_CODES.map((c) => ({
                 value: c,
                 label: enumLabel(EXCEPTION_CODE_LABELS, c),

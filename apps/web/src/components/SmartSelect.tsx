@@ -7,10 +7,11 @@ interface Props {
   /** 选 OTHER 时必填文本域绑定字段名（提交体 {code:'OTHER',otherText}）。 */
   otherFieldName?: string;
   placeholder?: string;
+  size?: 'large' | 'middle' | 'small';
 }
 
 /** 1112v8-S6：字典下拉统一「其他」交互——选 OTHER 出现必填文本域。 */
-export default function SmartSelect({ options, value, onChange, otherFieldName = 'otherText', placeholder }: Props) {
+export default function SmartSelect({ options, value, onChange, otherFieldName = 'otherText', placeholder, size }: Props) {
   const isOther = value === 'OTHER';
   return (
     <>
@@ -20,6 +21,7 @@ export default function SmartSelect({ options, value, onChange, otherFieldName =
         value={value}
         onChange={onChange}
         placeholder={placeholder}
+        size={size}
       />
       {isOther && (
         <Form.Item name={otherFieldName} noStyle rules={[{ required: true, message: '选「其他」须填写说明' }]}>
