@@ -56,3 +56,8 @@
 
 - 部署 SHA: `3ad062582efda86b7a0b97429ddf57ebdb34a05d`（web-only，api 仍 990102b）
 - SmartSelect「其他+必填文本域」组件+核销接入回显；工单回退 prompt→Modal
+
+# 185 部署记录 — r1112v8-第二轮（8fc1991）
+
+- 部署 SHA: `8fc199193a9c172746f58c31c5069a8974af6c8b`（api+web 全量）
+- 360°合同页签 / movementTypeName / 催缴 selectAll 服务端展开 / 日报本月累计标签 / SmartSelect 核销接入
