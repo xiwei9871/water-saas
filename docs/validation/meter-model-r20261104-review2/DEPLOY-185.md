@@ -51,3 +51,8 @@
 - 部署 SHA: `990102b5477a329c020fa06589d7415bbe81ad5b`；备份 pre-1112-*.dump
 - 迁移 `20261113000000_v8_s123`（属主执行+resolve）：install_proof_file_refs/field_overrides 列、webhook_subscription+external_call 表、存量 INSTALLING 且有装表信息→WAITING_NUMBER（UPDATE 1）
 - 冒烟：webhook-subscriptions POST 201；external-calls 路由 200[]；WAITING_NUMBER 列表 3 条；serviceTypeName=故障报修；contracts 2 条；存量 INSTALLING 已清零（迁移生效）
+
+# 185 部署记录 — r1112v8-收尾（3ad0625）
+
+- 部署 SHA: `3ad062582efda86b7a0b97429ddf57ebdb34a05d`（web-only，api 仍 990102b）
+- SmartSelect「其他+必填文本域」组件+核销接入回显；工单回退 prompt→Modal
