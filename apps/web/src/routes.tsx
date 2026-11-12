@@ -53,6 +53,7 @@ import Recon from './pages/payment/Recon';
 import Writeoffs from './pages/payment/Writeoffs';
 import InstallApplications from './pages/install/Applications';
 import Contracts from './pages/customer/Contracts';
+import ReceiptPrint from './pages/print/ReceiptPrint';
 import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
 import MetricQuery from './pages/report/MetricQuery';
@@ -110,6 +111,13 @@ export const APP_ROUTES: AppRoute[] = [
     icon: <DashboardOutlined />,
     menuPerms: ['report:read'],
     element: <Home />,
+  },
+  {
+    key: 'print-receipt',
+    path: '/print/receipt/:id',
+    label: '收据打印',
+    menuHidden: true,
+    element: <ReceiptPrint />,
   },
   {
     key: 'workbench',
