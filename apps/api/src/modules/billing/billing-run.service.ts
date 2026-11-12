@@ -400,7 +400,7 @@ export class BillingRunService {
       where: {
         tenantId: ctx.tenantId,
         period: body.period,
-        status: { in: ['DRAFT', 'POSTED', 'FINAL', 'GENERATING'] },
+        status: { in: ['DRAFT', 'PROCESSING', 'PARTIAL', 'POSTED'] },
       },
       select: { id: true, status: true },
     });

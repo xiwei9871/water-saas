@@ -723,17 +723,17 @@ export class MeterReadingService {
     await this.assertReadingScope(tx, ctx, original.planItemId);
     // 1111v6-P0-4：账期已 FINAL 的读数不可 supersede（须走调账）。
     // meter_reading 无直接 waterAccountId，经 installationId → 户。
-    const inst = original.installationId
+    const instAcct = original.installationId
       ? await tx.meterInstallation.findFirst({
           where: { tenantId: ctx.tenantId, id: original.installationId },
           select: { waterAccountId: true },
         })
       : null;
-    if (inst?.waterAccountId && original.period) {
+    if (instAcct?.waterAccountId && original.period) {
       const finalized = await tx.consumptionSettlement.findFirst({
         where: {
           tenantId: ctx.tenantId,
-          waterAccountId: inst.waterAccountId,
+          waterAccountId: instAcct.waterAccountId,
           period: original.period,
           status: 'FINAL',
         },
