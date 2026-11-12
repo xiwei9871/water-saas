@@ -53,6 +53,18 @@ async function seedTenant({ code, name }: TenantSeed) {
   // via PUT /iam/roles/:id/permissions (the codes themselves are only enforced
   // as string literals in @Permissions decorators; a missing row here leaves a
   // freshly-seeded tenant's non-admin roles unbindable until hand-minted).
+  const PERM_NAMES: Record<string, string> = {
+    'customer:read': '客户查询', 'customer:write': '客户维护',
+    'metering:read': '抄表查询', 'metering:write': '抄表录入',
+    'metering:qc': '抄表质检', 'metering:remote:manage': '远传管理',
+    'metering:service': '表务工单', 'billing:read': '计费查询',
+    'billing:write': '计费开账', 'payment:read': '收费查询',
+    'payment:write': '收费操作', 'prepayment:reverse': '预存冲正',
+    'install:read': '报装查询', 'install:write': '报装办理',
+    'iam:read': '系统查询', 'iam:write': '系统管理',
+    'report:read': '报表查询', 'exception:read': '异常查看',
+    'exception:manage': '异常处理',
+  };
   const permCodes = [
     'customer:read',
     'customer:write',

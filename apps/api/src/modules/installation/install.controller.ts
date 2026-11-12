@@ -353,7 +353,8 @@ export class InstallController {
           installMeterNo: out[0]?.meterNo ?? app.installMeterNo,
           installCaliber: out[0]?.caliber ?? app.installCaliber,
           installCompletedAt: new Date(),
-          status: app.status === 'APPROVED' ? 'INSTALLING' : app.status,
+          // 1111v6-P1-4：B途径登记完成 → WAITING_NUMBER（待放号）。
+          status: 'WAITING_NUMBER',
           updatedBy: ctx.staffId,
         },
       });

@@ -38,6 +38,7 @@ export const METER_READING_SELECT = {
   sourceEventId: true,
   photoRef: true,
   remark: true,
+  revisionLog: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.MeterReadingSelect;
@@ -60,7 +61,7 @@ const READING_DISPLAY_SELECT = {
 } satisfies Prisma.MeterReadingSelect;
 type DisplayReading = Prisma.MeterReadingGetPayload<{
   select: typeof READING_DISPLAY_SELECT;
-}>;
+}> & { revisions?: unknown };
 
 type ReadResultType = 'ACTUAL' | 'REMOTE' | 'NO_READ';
 type QcStatus = 'PENDING' | 'PASSED' | 'REJECTED' | 'MANUAL_REVIEW';
@@ -329,6 +330,8 @@ export class MeterReadingService {
         addr: installation.waterAccount.addr,
       },
       meterNo: installation.meter.meterNo,
+      // 1111v6-P1-3：修订留痕透出（验收字段名 revisions）。
+      revisions: r.revisionLog ?? [],
       operatorName: r.operatorId ? (names.get(r.operatorId) ?? null) : null,
       qcByName: r.qcBy ? (names.get(r.qcBy) ?? null) : null,
     }));
@@ -718,6 +721,28 @@ export class MeterReadingService {
     });
     if (!original) throw new NotFoundException({ code: 'READING_NOT_FOUND' });
     await this.assertReadingScope(tx, ctx, original.planItemId);
+    // 1111v6-P0-4：账期已 FINAL 的读数不可 supersede（须走调账）。
+    // meter_reading 无直接 waterAccountId，经 installationId → 户。
+    const inst = original.installationId
+      ? await tx.meterInstallation.findFirst({
+          where: { tenantId: ctx.tenantId, id: original.installationId },
+          select: { waterAccountId: true },
+        })
+      : null;
+    if (inst?.waterAccountId && original.period) {
+      const finalized = await tx.consumptionSettlement.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          waterAccountId: inst.waterAccountId,
+          period: original.period,
+          status: 'FINAL',
+        },
+        select: { id: true },
+      });
+      if (finalized) {
+        throw new ConflictException({ code: 'PERIOD_FINALIZED', period: original.period });
+      }
+    }
 
     // Serialize concurrent supersedes of this row (see docblock).
     await tx.$queryRaw`

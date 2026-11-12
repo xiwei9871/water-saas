@@ -438,7 +438,8 @@ export class ServiceOrderService {
     tx: Tx,
     ctx: TenantCtx,
     id: string,
-    body: { assigneeId?: string; note?: string },
+    // 1111v6-P1-1：assigneeType=EXTERNAL_SYSTEM 或 assigneeId='EXTERNAL' → 外派工单系统（不绑员工）。
+    body: { assigneeId?: string; assigneeType?: string; externalOrderNo?: string; note?: string },
     req: Request,
   ) {
     return this.transition(tx, ctx, id, 'APPROVED', 'DISPATCHED', req, async (t) => {
@@ -463,11 +464,15 @@ export class ServiceOrderService {
         reason: body.note ?? '表务派单',
         ...(svcCtx ? { context: svcCtx } : {}),
       });
+      const external =
+        body.assigneeType === 'EXTERNAL_SYSTEM' || body.assigneeId === 'EXTERNAL';
       return t.meterServiceOrder.update({
         where: { tenantId_id: { tenantId: ctx.tenantId, id } },
         data: {
           dispatcherId: ctx.staffId,
-          assigneeId: body.assigneeId ?? null,
+          assigneeId: external ? null : (body.assigneeId ?? null),
+          externalDispatch: external,
+          ...(external && body.externalOrderNo ? { externalOrderNo: body.externalOrderNo } : {}),
           dispatchedAt: new Date(),
           taskId: task.id || null,
         },

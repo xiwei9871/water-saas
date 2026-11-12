@@ -19,7 +19,10 @@ const NEXT: Record<InstallApplyStatus, InstallApplyStatus[]> = {
   SUBMITTED: ['SURVEYED', 'REJECTED', 'CANCELLED'],
   SURVEYED: ['APPROVED', 'REJECTED', 'CANCELLED'],
   APPROVED: ['INSTALLING', 'REJECTED', 'CANCELLED'],
-  INSTALLING: ['CANCELLED'],
+  // 1111v6-P1-4：安装环节完成 → WAITING_NUMBER（待放号）显式状态；
+  // WAITING_NUMBER 可人工回退 INSTALLING（revert 走 statusHistory/兜底边）。
+  INSTALLING: ['WAITING_NUMBER', 'CANCELLED'],
+  WAITING_NUMBER: ['INSTALLING', 'CANCELLED'],
   COMPLETED: [],
   REJECTED: [],
   CANCELLED: [],
@@ -248,7 +251,7 @@ export class InstallService {
     if (missing.length) {
       throw new BadRequestException({ code: 'EXTERNAL_MISSING_FIELDS', missing });
     }
-    if (!['SUBMITTED', 'SURVEYED', 'APPROVED', 'INSTALLING'].includes(app.status)) {
+    if (!['SUBMITTED', 'SURVEYED', 'APPROVED', 'INSTALLING', 'WAITING_NUMBER'].includes(app.status)) {
       throw new ConflictException({ code: 'EXTERNAL_STATE_INVALID', from: app.status });
     }
     const isRepeat =
@@ -260,7 +263,7 @@ export class InstallService {
     return tx.installApplication.update({
       where: { id: app.id },
       data: {
-        status: app.status === 'INSTALLING' ? 'INSTALLING' : 'INSTALLING',
+        status: 'WAITING_NUMBER',
         statusHistory: hist as Prisma.InputJsonValue,
         externalSource: String(body.sourceSystem ?? 'EXTERNAL'),
         externalOrderNo: String(body.externalOrderNo),
@@ -307,7 +310,14 @@ export class InstallService {
       throw new ConflictException({ code: 'REVERT_NOT_ALLOWED', from: app.status });
     }
     const hist = (app.statusHistory as { status: string; to?: string }[] | null) ?? [];
-    const prev = hist[0];
+    // 1111v6-P1-2：历史为空时按注册回退边兜底（外部回推/直接建单无历史场景）。
+    const BACK: Record<string, InstallApplyStatus> = {
+      WAITING_NUMBER: 'INSTALLING',
+      INSTALLING: 'APPROVED',
+      APPROVED: 'SURVEYED',
+      SURVEYED: 'SUBMITTED',
+    };
+    const prev = hist[0] ?? (BACK[app.status] ? { status: BACK[app.status] } : null);
     if (!prev) throw new ConflictException({ code: 'REVERT_NO_HISTORY' });
     const reverts = hist.filter((h) => h.to === app.status).length;
     if (reverts >= 3) throw new ConflictException({ code: 'REVERT_LIMIT' });
@@ -339,6 +349,11 @@ export class InstallService {
     const settleId = (result as { settleAccount?: { id: string } }).settleAccount?.id ?? null;
     const settleNo = (result as { settleAccount?: { settleNo?: string } }).settleAccount?.settleNo ?? null;
     const meterNo = (result as { meter?: { meterNo: string } }).meter?.meterNo ?? null;
+    // P0-2：放号转挂——申请号名下合同批量挂到新生户号（同事务）。
+    await tx.contract.updateMany({
+      where: { tenantId: ctx.tenantId, applyNo: app.applyNo, waterAccountId: null },
+      data: { waterAccountId: waId, updatedBy: ctx.staffId },
+    });
     const updated = await tx.installApplication.update({
       where: { id: app.id },
       data: {

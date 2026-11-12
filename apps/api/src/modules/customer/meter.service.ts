@@ -355,6 +355,11 @@ export class MeterService {
         ...(body.checkPeriodYears !== undefined
           ? { checkPeriodYears: body.checkPeriodYears }
           : {}),
+        ...(body.usageCategory !== undefined
+          ? { usageCategory: body.usageCategory }
+          : {}),
+        ...(body.isRemote !== undefined ? { isRemote: body.isRemote === true }
+          : {}),
         ...(body.lastCheckDate !== undefined
           ? { lastCheckDate: body.lastCheckDate ? new Date(body.lastCheckDate) : null }
           : {}),

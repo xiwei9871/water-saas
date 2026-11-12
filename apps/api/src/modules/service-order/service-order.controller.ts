@@ -176,8 +176,8 @@ export class ServiceOrderController {
   @Permissions('metering:service')
   dispatch(
     @Param('id') id: string,
-    // X4：assigneeId='EXTERNAL' 派往外部工单系统（externalDispatch 标记）。
-    @Body() body: { assigneeId?: string; note?: string },
+    // X4/1111v6：assigneeType=EXTERNAL_SYSTEM 或 assigneeId='EXTERNAL' 外派。
+    @Body() body: { assigneeId?: string; assigneeType?: string; externalOrderNo?: string; note?: string },
     @Req() req: Request,
     @Headers('idempotency-key') key?: string,
   ) {

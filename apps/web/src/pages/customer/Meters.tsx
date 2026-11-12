@@ -6,7 +6,7 @@ import {
   SwapOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import {Alert, App as AntdApp, AutoComplete, Button, Card, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Tabs, Tag} from 'antd';
+import {Alert, App as AntdApp, AutoComplete, Button, Card, Checkbox, DatePicker, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Tabs, Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -69,6 +69,8 @@ interface MeterFormValues {
   checkPeriodYears?: number | null;
   maxDial?: string;
   meterRole?: string;
+  usageCategory?: string | null;
+  isRemote?: boolean;
   status?: MeterStatus;
 }
 
@@ -227,6 +229,8 @@ export default function Meters() {
       checkPeriodYears: meter.checkPeriodYears ?? undefined,
       maxDial: meter.maxDial ?? undefined,
       meterRole: meter.meterRole ?? 'NORMAL',
+      usageCategory: meter.usageCategory ?? undefined,
+      isRemote: meter.isRemote === true,
       status: meter.status,
     });
     setMeterModal({ mode: 'edit', meter });
@@ -259,6 +263,8 @@ export default function Meters() {
             checkPeriodYears: values.checkPeriodYears ?? null,
             maxDial: values.maxDial,
             meterRole: values.meterRole,
+            usageCategory: values.usageCategory ?? null,
+            isRemote: values.isRemote === true,
             status: values.status,
           }),
         );
@@ -832,12 +838,30 @@ export default function Meters() {
           <Form.Item
             name="meterRole"
             label="表具角色"
-            tooltip="总表/分表由「总分表关系」自动维护；监控表（考核表）以用水户「用水类别=监控表」立户判定，此处仅可标普通表"
+            tooltip="总表/分表由「总分表关系」自动维护；监控表（考核表）可在表档案直接标记，亦按用水户用水类别判定"
           >
             <Select
               allowClear
-              options={[{ value: 'NORMAL', label: '普通表' }]}
+              options={[
+                { value: 'NORMAL', label: '普通表' },
+                { value: 'MASTER', label: '总表' },
+                { value: 'SUB', label: '分表' },
+                { value: 'MONITORING', label: '监控表（考核表）' },
+              ]}
             />
+          </Form.Item>
+          <Form.Item name="usageCategory" label="用水类别">
+            <Select
+              allowClear
+              options={[
+                { value: 'RESIDENTIAL', label: '居民' },
+                { value: 'NON_RESIDENTIAL', label: '非居民' },
+                { value: 'MONITORING', label: '监控' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="isRemote" label="是否远传" valuePropName="checked">
+            <Checkbox>远传水表（不参与人工抄表）</Checkbox>
           </Form.Item>
           {meterModal?.mode === 'edit' && editTransitions.length > 0 && (
             <Form.Item name="status" label="状态">

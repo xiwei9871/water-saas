@@ -22,6 +22,7 @@ import Table from '../../components/PageTable';
 type ApplyStatus = 'SUBMITTED' | 'SURVEYED' | 'APPROVED' | 'INSTALLING' | 'COMPLETED' | 'REJECTED' | 'CANCELLED';
 
 interface Apply {
+  statusHistory?: { status: string; to?: string; at?: string; by?: string; reason?: string; reverted?: boolean }[];
   id: string;
   applyNo: string;
   applicantName: string;
@@ -665,7 +666,16 @@ export default function InstallApplications() {
       <Drawer title={`申请详情 ${detail?.applyNo ?? ''}`} open={!!detail} onClose={() => setDetail(null)} width={520}>
         {detail && (
           <>
-            <Steps
+            {(detail.statusHistory?.length ?? 0) > 0 && (
+            <Descriptions size="small" column={1} title="流转记录" bordered style={{ marginBottom: 12 }}>
+              {detail.statusHistory!.map((h: { status: string; to?: string; at?: string; by?: string; reason?: string; reverted?: boolean }, i: number) => (
+                <Descriptions.Item key={i} label={h.at ? String(h.at).replace('T', ' ').slice(0, 19) : '—'}>
+                  {h.reverted ? '↩ 回退：' : ''}{h.to ?? '—'} → {h.status}{h.reason ? `（${h.reason}）` : ''}
+                </Descriptions.Item>
+              ))}
+            </Descriptions>
+          )}
+          <Steps
               size="small"
               style={{ marginBottom: 16 }}
               current={STATUS_STEP[detail.status] ?? 0}

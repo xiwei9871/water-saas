@@ -73,6 +73,7 @@ export class ReaderZoneController {
           ? null
           : assertUuid(body.readerId, 'readerId'),
       remark: body.remark ?? null,
+      isRemote: body.isRemote === true ? true : (body.isRemote === false ? false : undefined),
     };
     const ctx = currentTenant();
     return withOptionalIdem(

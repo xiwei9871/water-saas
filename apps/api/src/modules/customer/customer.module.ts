@@ -1,3 +1,4 @@
+import { ContractController } from './contract.controller.js';
 import { Module } from '@nestjs/common';
 import { BillingModule } from '../billing/billing.module.js';
 import { BillingFinancePort } from '../billing/billing-finance.port.js';
@@ -34,6 +35,7 @@ import { WaterAccountService } from './water-account.service.js';
 @Module({
   imports: [BillingModule, TaskModule],
   controllers: [
+    ContractController,
     CustomerController,
     SettleAccountController,
     WaterAccountController,

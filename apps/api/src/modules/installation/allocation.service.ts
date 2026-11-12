@@ -132,7 +132,7 @@ export class AllocationService {
         where: { tenantId: ctx.tenantId, id: appId },
       });
       if (!app) throw new NotFoundException({ code: 'APPLY_NOT_FOUND' });
-      if (app.status !== 'INSTALLING') {
+      if (!['INSTALLING', 'WAITING_NUMBER'].includes(app.status)) {
         throw new ConflictException({
           code: 'APPLY_NOT_ACCEPTED',
           message: '仅「工程验收完成（装表已登记）」的申请可放号',

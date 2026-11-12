@@ -331,7 +331,7 @@ export default function Roles() {
               <Space direction="vertical" size={4}>
                 {dict.map((p) => (
                   <Checkbox key={p.id} value={p.id}>
-                    {p.code}
+                    {p.name ?? p.code}
                     <span style={{ color: '#999', marginLeft: 8 }}>
                       {p.type === 'MENU' ? '菜单' : p.type === 'ACTION' ? '操作' : '数据'}
                     </span>

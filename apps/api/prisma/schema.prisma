@@ -287,6 +287,7 @@ enum InstallApplyStatus {
   SURVEYED
   APPROVED
   INSTALLING
+  WAITING_NUMBER
   COMPLETED
   REJECTED
   CANCELLED
@@ -451,6 +452,8 @@ model Permission {
   tenantId  String   @map("tenant_id") @db.Uuid
   code      String
   type      PermType
+  /** 1111v6-N4：权限点中文名。 */
+  name      String?
   createdAt DateTime @default(now()) @map("created_at")
   createdBy String?  @map("created_by") @db.Uuid
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -699,6 +702,9 @@ model Meter {
   lastCheckDate   DateTime? @map("last_check_date") @db.Date
   /** 20261021 任务C：NORMAL普通/MASTER总表/SUB分表/CHECK考核表(监控表)。 */
   meterRole     String      @default("NORMAL") @map("meter_role")
+  /** 1111v6-P0-1：表级用水类别/远传标识——验收要求 PATCH 可写并回读。 */
+  usageCategory String?     @map("usage_category")
+  isRemote      Boolean     @default(false) @map("is_remote")
   /** 报装纳入：来源报装单号。 */
   sourceApplyNo String?     @map("source_apply_no")
   parentMeterId String?     @map("parent_meter_id") @db.Uuid
@@ -2140,6 +2146,30 @@ model InstallApplication {
   @@unique([tenantId, id])
   @@index([tenantId, status])
   @@map("install_application")
+}
+
+/// P0-2（1111v6）：独立合同实体——施工合同/供用水合同两类分区管理；
+/// 可挂报装申请号（安装环节签订）或户号；放号后申请号合同自动转挂户号。
+model Contract {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  applyNo        String?  @map("apply_no")
+  waterAccountId String?  @map("water_account_id") @db.Uuid
+  /** CONSTRUCTION=施工合同 | SUPPLY=供用水合同 */
+  contractType   String   @map("contract_type")
+  contractNo     String   @map("contract_no")
+  fileRefs       Json?    @map("file_refs") @db.JsonB
+  signedAt       DateTime? @map("signed_at") @db.Date
+  remark         String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by") @db.Uuid
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by") @db.Uuid
+
+  @@unique([tenantId, contractNo])
+  @@index([tenantId, applyNo])
+  @@index([tenantId, waterAccountId])
+  @@map("contract")
 }
 
 // ---------------------------------------------------------------------------

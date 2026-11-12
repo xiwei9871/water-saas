@@ -395,6 +395,18 @@ export class BillingRunService {
     body: { period: string },
     key: string | null,
   ): Promise<CreateSnapshot> {
+    // 1111v6-P0-4：同期不允许重复建批（POSTED/FINAL/DRAFT 任一存在即拒）。
+    const dup = await tx.billingRun.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        period: body.period,
+        status: { in: ['DRAFT', 'POSTED', 'FINAL', 'GENERATING'] },
+      },
+      select: { id: true, status: true },
+    });
+    if (dup) {
+      throw new ConflictException({ code: 'DUPLICATE_PERIOD_RUN', period: body.period, existingStatus: dup.status });
+    }
     const run = await tx.billingRun.create({
       data: {
         tenantId: ctx.tenantId,

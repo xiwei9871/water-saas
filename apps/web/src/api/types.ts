@@ -153,6 +153,7 @@ export interface Permission {
   id: string;
   tenantId: string;
   code: string;
+  name?: string | null;
   type: PermType;
   createdAt: string;
   updatedAt: string;
@@ -350,6 +351,8 @@ export interface Meter {
   checkPeriodYears?: number | null;
   /** NORMAL普通/MASTER总表/SUB分表（监控表以用水户用水类别判定）。 */
   meterRole?: string;
+  usageCategory?: string | null;
+  isRemote?: boolean;
   parentMeterId: string | null;
   status: MeterStatus;
   /** List-only: account the device is currently mounted on (ACTIVE install). */
