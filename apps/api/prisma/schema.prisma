@@ -2135,6 +2135,10 @@ model InstallApplication {
   supplyContractScan       Json?   @map("supply_contract_scan") @db.JsonB
   /** X7 撤销回退：状态历史栈（最近在前，≤3 次）。 */
   statusHistory Json?              @map("status_history") @db.JsonB
+  /** 1112v8-S2：B途径单步「安装完成」完工凭证（必传≥1）。 */
+  installProofFileRefs Json?       @map("install_proof_file_refs") @db.JsonB
+  /** 1112v8-S3：人工修订字段防覆盖 {field:{by,at}}；external-complete 跳过。 */
+  fieldOverrides    Json?          @map("field_overrides") @db.JsonB
   rejectReason   String?            @map("reject_reason")
   waterAccountId String?            @map("water_account_id") @db.Uuid
   createdAt      DateTime           @default(now()) @map("created_at")
@@ -2146,6 +2150,37 @@ model InstallApplication {
   @@unique([tenantId, id])
   @@index([tenantId, status])
   @@map("install_application")
+}
+
+/// 1112v8-S3：出站推送订阅（本期预留——只落配置+待发记录）。
+model WebhookSubscription {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  url        String
+  eventTypes Json     @map("event_types") @db.JsonB
+  secret     String?
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now()) @map("created_at")
+  createdBy  String?  @map("created_by") @db.Uuid
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  updatedBy  String?  @map("updated_by") @db.Uuid
+  @@map("webhook_subscription")
+}
+
+/// 1112v8-S3：外部调用留痕（方向/载荷/结果/跳过字段）+待发推送记录。
+model ExternalCall {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  direction String   // INBOUND | OUTBOUND | OUTBOUND_PENDING
+  bizType   String   @map("biz_type")
+  bizId     String?  @map("biz_id") @db.Uuid
+  endpoint  String?
+  payload   Json?    @db.JsonB
+  result    String?
+  skippedFields Json? @map("skipped_fields") @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([tenantId, bizType, bizId])
+  @@map("external_call")
 }
 
 /// P0-2（1111v6）：独立合同实体——施工合同/供用水合同两类分区管理；

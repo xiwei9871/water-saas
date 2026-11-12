@@ -1,6 +1,6 @@
 import Select from '../../components/CopySelect';
 import { CloseOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
-import {App as AntdApp, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Space, Steps, Tag, Typography, Upload} from 'antd';
+import {Alert, App as AntdApp, Button, Card, DatePicker, Drawer, Descriptions, Form, Image, Input, InputNumber, Modal, Space, Steps, Tag, Typography, Upload} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { useLiveRefresh } from '../../hooks/useLiveRefresh';
@@ -19,7 +19,7 @@ import {
 import Table from '../../components/PageTable';
 
 
-type ApplyStatus = 'SUBMITTED' | 'SURVEYED' | 'APPROVED' | 'INSTALLING' | 'COMPLETED' | 'REJECTED' | 'CANCELLED';
+type ApplyStatus = 'SUBMITTED' | 'SURVEYED' | 'APPROVED' | 'INSTALLING' | 'WAITING_NUMBER' | 'COMPLETED' | 'REJECTED' | 'CANCELLED';
 
 interface Apply {
   statusHistory?: { status: string; to?: string; at?: string; by?: string; reason?: string; reverted?: boolean }[];
@@ -110,17 +110,17 @@ const normalizeCaliberDetails = (
 
 const STATUS_LABELS: Record<ApplyStatus, string> = {
   SUBMITTED: '已提交', SURVEYED: '已勘察', APPROVED: '已审批',
-  INSTALLING: '装表中', COMPLETED: '已归档', REJECTED: '已驳回', CANCELLED: '已取消',
+  INSTALLING: '装表中', WAITING_NUMBER: '待放号', COMPLETED: '已归档', REJECTED: '已驳回', CANCELLED: '已取消',
 };
 const STATUS_STEP: Record<ApplyStatus, number> = {
-  SUBMITTED: 0, SURVEYED: 1, APPROVED: 2, INSTALLING: 3, COMPLETED: 4,
+  SUBMITTED: 0, SURVEYED: 1, APPROVED: 2, INSTALLING: 3, WAITING_NUMBER: 3, COMPLETED: 4,
   REJECTED: 0, CANCELLED: 0,
 };
 const CERT_TYPE_LABELS: Record<string, string> = { ID_CARD: '居民身份证', BUSINESS_LICENSE: '营业执照', PASSPORT: '护照', OTHER: '其他证件' };
 
 const STATUS_COLORS: Record<ApplyStatus, string> = {
   SUBMITTED: 'processing', SURVEYED: 'cyan', APPROVED: 'geekblue',
-  INSTALLING: 'gold', COMPLETED: 'green', REJECTED: 'red', CANCELLED: 'default',
+  INSTALLING: 'gold', WAITING_NUMBER: 'orange', COMPLETED: 'green', REJECTED: 'red', CANCELLED: 'default',
 };
 const NEXT_ACTIONS: Partial<Record<ApplyStatus, { to: ApplyStatus; label: string; noteField?: 'survey' | 'install' }[]>> = {
   SUBMITTED: [
@@ -136,6 +136,7 @@ const NEXT_ACTIONS: Partial<Record<ApplyStatus, { to: ApplyStatus; label: string
     { to: 'REJECTED', label: '驳回' },
   ],
   INSTALLING: [{ to: 'CANCELLED', label: '终止申请' }],
+  WAITING_NUMBER: [{ to: 'CANCELLED', label: '终止申请' }],
 };
 
 /** S1 报装管理（独立域）：申请→勘察→审批→装表→归档立户。 */
@@ -147,6 +148,12 @@ export default function InstallApplications() {
   const [status, setStatus] = useState<string>();
   const [createOpen, setCreateOpen] = useState(false);
   const [detail, setDetail] = useState<Apply | null>(null);
+  const [proofFor, setProofFor] = useState<Apply | null>(null);
+  const [proofFiles, setProofFiles] = useState<string[]>([]);
+  const [proofNote, setProofNote] = useState('');
+  const [proofBusy, setProofBusy] = useState(false);
+  const [revertFor, setRevertFor] = useState<Apply | null>(null);
+  const [revertReason, setRevertReason] = useState('');
   const [noteFor, setNoteFor] = useState<{ app: Apply; to: ApplyStatus; label: string; noteField?: string } | null>(null);
   /** V6 合同扫描件草稿（详情抽屉内编辑，保存才落库）。 */
   const [scans, setScans] = useState<string[]>([]);
@@ -471,13 +478,16 @@ export default function InstallApplications() {
                 {a.label}
               </Button>
             ))}
-          {canWrite && r.status === 'INSTALLING' && (
+          {canWrite && (r.status === 'INSTALLING' || r.status === 'WAITING_NUMBER') && (
             <Button size="small" onClick={() => openInstallMeters(r)}>
               {r.installCompletedAt ? `水表 ${r.installMeters?.length ?? 0} 只` : '填报水表'}
             </Button>
           )}
-          {canWrite && r.status === 'INSTALLING' && (
+          {canWrite && (r.status === 'INSTALLING' || r.status === 'WAITING_NUMBER') && (
             <Button size="small" type="primary" onClick={() => openAlloc(r)}>放号</Button>
+          )}
+          {canWrite && ['SUBMITTED','SURVEYED','APPROVED','INSTALLING'].includes(r.status) && (
+            <Button size="small" type="primary" onClick={() => setProofFor(r)}>安装完成</Button>
           )}
           {canWrite && r.status === 'APPROVED' && (
             <Button size="small" onClick={() => goOnboard(r)}>直接立户</Button>
@@ -906,6 +916,58 @@ export default function InstallApplications() {
           onChange={(e) => setImText(e.target.value)}
           placeholder={'M202600001·DN15\nM202600002·DN20'}
         />
+      </Modal>
+
+      {/* S2 安装完成单步（B途径）：必传完工凭证 */}
+      <Modal
+        title={`安装完成 — ${proofFor?.applyNo ?? ''}`}
+        open={proofFor !== null}
+        onCancel={() => { setProofFor(null); setProofFiles([]); setProofNote(''); }}
+        okButtonProps={{ loading: proofBusy }}
+        onOk={async () => {
+          if (proofFiles.length < 1) { message.warning('请上传安装完成凭证'); return; }
+          setProofBusy(true);
+          try {
+            await api.post(`/install/applications/${proofFor!.id}/install-complete`, { fileRefs: proofFiles, note: proofNote || undefined });
+            message.success('已登记安装完成，请继续填报装表信息');
+            setProofFor(null); setProofFiles([]); setProofNote('');
+            void load();
+          } catch (e) { message.error(apiErrorText(e)); } finally { setProofBusy(false); }
+        }}
+      >
+        <Alert type="info" showIcon style={{ marginBottom: 12 }} message="须上传至少 1 个完工凭证（现场照片或纸质确认单扫描件）" />
+        <Upload.Dragger
+          multiple
+          accept="image/*,.pdf"
+          beforeUpload={(f) => {
+            const rd = new FileReader();
+            rd.onload = () => setProofFiles((v) => [...v, String(rd.result)].slice(0, 5));
+            rd.readAsDataURL(f);
+            return false;
+          }}
+          onRemove={() => setProofFiles((v) => v.slice(0, -1))}
+        >
+          <p>点击或拖拽上传完工凭证（{proofFiles.length}/5）</p>
+        </Upload.Dragger>
+        <Input.TextArea rows={2} style={{ marginTop: 12 }} placeholder="备注（可选）" value={proofNote} onChange={(e) => setProofNote(e.target.value)} />
+      </Modal>
+
+      {/* S4 回退上一步：Modal 收 reason */}
+      <Modal
+        title={`回退上一步 — ${revertFor?.applyNo ?? ''}`}
+        open={revertFor !== null}
+        onCancel={() => setRevertFor(null)}
+        okText="确认回退"
+        onOk={async () => {
+          if (!revertReason.trim()) { message.warning('请填写回退原因'); return; }
+          try {
+            await api.post(`/install/applications/${revertFor!.id}/revert`, { reason: revertReason.trim() });
+            message.success('已回退一步'); setRevertFor(null);
+            void load();
+          } catch (e) { message.error(apiErrorText(e)); }
+        }}
+      >
+        <Input.TextArea rows={3} placeholder="回退原因（必填）" value={revertReason} onChange={(e) => setRevertReason(e.target.value)} />
       </Modal>
     </Card>
   );

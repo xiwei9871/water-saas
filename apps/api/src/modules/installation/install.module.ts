@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { CustomerModule } from '../customer/customer.module.js';
 import { TaskModule } from '../task/task.module.js';
 import { CommonModule } from '../../common/common.module.js';
+import { WebhookSubscriptionController } from './webhook-subscription.controller.js';
 import { InstallController } from './install.controller.js';
 import { WebhookService } from '../../common/webhook.service.js';
 import { InstallService } from './install.service.js';
@@ -15,7 +16,7 @@ import { WaterAccountActivateController } from './water-account-activate.control
  */
 @Module({
   imports: [CustomerModule, TaskModule, CommonModule],
-  controllers: [InstallController, WaterAccountActivateController],
+  controllers: [InstallController, WaterAccountActivateController, WebhookSubscriptionController],
   providers: [InstallService, AllocationService, WebhookService],
 })
 export class InstallModule {}

@@ -52,6 +52,7 @@ import ReceiptDocs from './pages/payment/ReceiptDocs';
 import Recon from './pages/payment/Recon';
 import Writeoffs from './pages/payment/Writeoffs';
 import InstallApplications from './pages/install/Applications';
+import Contracts from './pages/customer/Contracts';
 import Analysis from './pages/report/Analysis';
 import MetricDict from './pages/report/MetricDict';
 import MetricQuery from './pages/report/MetricQuery';
@@ -176,6 +177,13 @@ export const APP_ROUTES: AppRoute[] = [
         path: '/customer/water-accounts',
         label: '用水户',
         element: <WaterAccounts />,
+      },
+      {
+        key: 'customer-contracts',
+        path: '/customer/contracts',
+        label: '合同管理',
+        menuPerms: ['customer:read'],
+        element: <Contracts />,
       },
       {
         key: 'customer-settle-accounts',

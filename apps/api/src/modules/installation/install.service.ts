@@ -138,6 +138,25 @@ export class InstallService {
     if (!NEXT[app.status].includes(to)) {
       throw new ConflictException({ code: 'INVALID_APPLY_TRANSITION', from: app.status, to });
     }
+    // 1112v8-S3：进入安装环节 → 每个启用订阅产生待发记录（本期不真推）。
+    if (to === 'INSTALLING') {
+      const subs = await tx.webhookSubscription.findMany({
+        where: { tenantId: ctx.tenantId, enabled: true },
+      });
+      for (const sub of subs) {
+        await tx.externalCall.create({
+          data: {
+            tenantId: ctx.tenantId,
+            direction: 'OUTBOUND_PENDING',
+            bizType: 'install_application',
+            bizId: app.id,
+            endpoint: sub.url,
+            payload: { applyNo: app.applyNo, status: to, at: new Date().toISOString() } as Prisma.InputJsonValue,
+            result: 'PENDING_SUBSCRIPTION',
+          },
+        });
+      }
+    }
     // X1-A：状态变更即推送工程系统（配置了 webhook.install.url 才发）。
     this.webhook.pushInstall(ctx.tenantId, {
       applyId: app.id, applyNo: app.applyNo, status: to,
@@ -256,6 +275,23 @@ export class InstallService {
     }
     const isRepeat =
       app.externalOrderNo === String(body.externalOrderNo) && app.externalOrderNo !== null;
+    // 1112v8-S3：人工修订过的字段防覆盖（fieldOverrides 打标，回推跳过并返回清单）。
+    const over = (app.fieldOverrides as Record<string, unknown> | null) ?? {};
+    const FIELD_MAP: Record<string, string> = {
+      installCompletedAt: 'installCompletedAt',
+      installInitialReading: 'installInitialReading',
+      installMeters: 'installMeters',
+      installMeterNo: 'installMeterNo',
+      installCaliber: 'installCaliber',
+      feeRequired: 'feeRequired',
+      feeReceived: 'feeReceived',
+      feeNote: 'feeNote',
+      constructionContractNo: 'constructionContractNo',
+      surveyNote: 'surveyNote',
+      installNote: 'installNote',
+    };
+    const skippedFields = Object.keys(FIELD_MAP).filter((k) => k in over && body[k] !== undefined);
+    const eff = (k: string) => (skippedFields.includes(k) ? undefined : body[k]);
     const hist = [
       { status: app.status, at: new Date().toISOString(), by: ctx.staffId, to: 'INSTALLING', via: 'external' },
       ...((app.statusHistory as { status: string }[] | null) ?? []),
@@ -271,19 +307,80 @@ export class InstallService {
         externalPayload: body as Prisma.InputJsonValue,
         // 重复回推：数据落地但需人工再确认（人工修订不被自动覆盖的标记位）。
         externalConfirmed: isRepeat ? false : false,
-        installCompletedAt: new Date(String(body.installCompletedAt)),
-        installInitialReading: Number(body.installInitialReading),
-        installMeters: meters as Prisma.InputJsonValue,
-        installMeterNo: String(body.installMeterNo ?? meters![0].meterNo),
-        installCaliber: String(body.installCaliber ?? (meters![0] as { caliber?: string }).caliber ?? '') || null,
-        ...(body.feeRequired !== undefined ? { feeRequired: Number(body.feeRequired) } : {}),
-        ...(body.feeReceived !== undefined ? { feeReceived: Number(body.feeReceived) } : {}),
-        ...(body.feeNote !== undefined ? { feeNote: String(body.feeNote) } : {}),
-        ...(body.constructionContractNo !== undefined
+        ...(eff('installCompletedAt') !== undefined
+          ? { installCompletedAt: new Date(String(body.installCompletedAt)) }
+          : {}),
+        ...(eff('installInitialReading') !== undefined
+          ? { installInitialReading: Number(body.installInitialReading) }
+          : {}),
+        ...(eff('installMeters') !== undefined
+          ? {
+              installMeters: meters as Prisma.InputJsonValue,
+              installMeterNo: String(body.installMeterNo ?? meters![0].meterNo),
+              installCaliber:
+                String(body.installCaliber ?? (meters![0] as { caliber?: string }).caliber ?? '') || null,
+            }
+          : {}),
+        ...(eff('feeRequired') !== undefined ? { feeRequired: Number(body.feeRequired) } : {}),
+        ...(eff('feeReceived') !== undefined ? { feeReceived: Number(body.feeReceived) } : {}),
+        ...(eff('feeNote') !== undefined ? { feeNote: String(body.feeNote) } : {}),
+        ...(eff('constructionContractNo') !== undefined
           ? { constructionContractNo: String(body.constructionContractNo) }
           : {}),
-        ...(body.surveyNote !== undefined ? { surveyNote: String(body.surveyNote) } : {}),
-        ...(body.installNote !== undefined ? { installNote: String(body.installNote) } : {}),
+        ...(eff('surveyNote') !== undefined ? { surveyNote: String(body.surveyNote) } : {}),
+        ...(eff('installNote') !== undefined ? { installNote: String(body.installNote) } : {}),
+        updatedBy: ctx.staffId,
+      },
+    }).then(async (r) => {
+      // 外部调用留痕（INBOUND 回推）。
+      await tx.externalCall.create({
+        data: {
+          tenantId: ctx.tenantId,
+          direction: 'INBOUND',
+          bizType: 'install_application',
+          bizId: app.id,
+          endpoint: 'external-complete',
+          payload: body as Prisma.InputJsonValue,
+          result: 'WAITING_NUMBER',
+          skippedFields: skippedFields.length ? (skippedFields as Prisma.InputJsonValue) : Prisma.JsonNull,
+        },
+      });
+      return { ...r, skippedFields };
+    });
+  }
+
+  /**
+   * 1112v8-S2：B途径单步「安装完成」——必传≥1 完工凭证，
+   * 任意非终态一步进入 INSTALLING（后续走装表信息登记→WAITING_NUMBER）。
+   */
+  async installCompleteTx(
+    tx: Prisma.TransactionClient,
+    ctx: TenantCtx,
+    id: string,
+    body: { fileRefs?: unknown; note?: string },
+  ) {
+    const app = await tx.installApplication.findFirst({
+      where: { tenantId: ctx.tenantId, id },
+    });
+    if (!app) throw new NotFoundException({ code: 'APPLY_NOT_FOUND' });
+    if (['COMPLETED', 'CANCELLED', 'REJECTED'].includes(app.status)) {
+      throw new ConflictException({ code: 'APPLY_TERMINAL_STATE', from: app.status });
+    }
+    const refs = Array.isArray(body?.fileRefs) ? body.fileRefs.filter((x) => typeof x === 'string') : [];
+    if (refs.length < 1) {
+      throw new BadRequestException({ code: 'INSTALL_PROOF_REQUIRED', message: '请上传安装完成凭证' });
+    }
+    const hist = [
+      { status: app.status, at: new Date().toISOString(), by: ctx.staffId, to: 'INSTALLING', via: 'install-complete' },
+      ...((app.statusHistory as { status: string }[] | null) ?? []),
+    ].slice(0, 6);
+    return tx.installApplication.update({
+      where: { id: app.id },
+      data: {
+        status: 'INSTALLING',
+        statusHistory: hist as Prisma.InputJsonValue,
+        installProofFileRefs: refs as Prisma.InputJsonValue,
+        ...(body.note ? { installNote: String(body.note).slice(0, 500) } : {}),
         updatedBy: ctx.staffId,
       },
     });

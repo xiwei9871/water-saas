@@ -98,6 +98,17 @@ const invalid = (from: string, to: string) =>
  * 同事务提交 — 联动失败整体回滚，工单不落 EXECUTED 假完成。
  */
 @Injectable()
+const SVC_TYPE_NAME: Record<string, string> = {
+  PERIODIC_CHECK: '周期检定', FAULT: '故障报修', STOP: '停水', RESUME: '复水',
+  SUSPEND: '暂停', CLOSE: '销户', FLOW_LIMIT: '限流', FACILITY_MAINTENANCE: '设施维护',
+  SITE_RECTIFICATION: '现场整改', METER_GROUP_CLEANING: '表组清洗', DISPUTE_CHECK: '争议核查',
+  REPLACE: '换表', REMOVE: '拆表', INSTALL: '装表', OTHER: '其他',
+};
+const SVC_STATUS_NAME: Record<string, string> = {
+  PENDING_APPROVAL: '待审批', APPROVED: '已审批', DISPATCHED: '已派单',
+  EXECUTED: '已执行', ARCHIVED: '已归档', REJECTED: '已驳回', CANCELLED: '已取消',
+};
+
 export class ServiceOrderService {
   constructor(
     private readonly prisma: TenantPrismaService,
@@ -152,7 +163,14 @@ export class ServiceOrderService {
         }),
       ]);
       await this.hydrateNames(tx, items);
-      return { total, items };
+      return {
+          total,
+          items: (items as { serviceType: string; status: string }[]).map((r) => ({
+            ...r,
+            serviceTypeName: SVC_TYPE_NAME[r.serviceType] ?? r.serviceType,
+            statusName: SVC_STATUS_NAME[r.status] ?? r.status,
+          })),
+        };
     });
   }
 

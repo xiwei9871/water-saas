@@ -78,6 +78,31 @@ export class InstallController {
       this.svc.externalCompleteTx(tx, ctx, assertUuid(id, 'id'), body));
   }
 
+  /**
+   * POST /install/applications/:id/install-complete — 1112v8-S2
+   * B途径单步「安装完成」：必传 fileRefs≥1（完工凭证），任意非终态→INSTALLING。
+   */
+  @Post(':id/install-complete')
+  @Permissions('install:write')
+  installComplete(@Param('id') id: string, @Body() body: { fileRefs?: unknown; note?: string }) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      this.svc.installCompleteTx(tx, ctx, assertUuid(id, 'id'), body ?? {}));
+  }
+
+  /** GET /install/external-calls — 外部调用留痕查询（回推/待发记录）。 */
+  @Get('external-calls/list')
+  @Permissions('install:read')
+  externalCalls(@Query('bizId') bizId?: string, @Query('take') take?: string) {
+    const ctx = currentTenant();
+    return this.prisma.runAsTenant(ctx.tenantId, (tx) =>
+      tx.externalCall.findMany({
+        where: { tenantId: ctx.tenantId, ...(bizId ? { bizId } : {}) },
+        orderBy: { createdAt: 'desc' },
+        take: Math.min(parseInt(take ?? '50', 10) || 50, 200),
+      }));
+  }
+
   /** POST .../external-confirm — X1 人工核对确认（修订字段走 PATCH 接口留痕）。 */
   @Post(':id/external-confirm')
   @Permissions('install:write')

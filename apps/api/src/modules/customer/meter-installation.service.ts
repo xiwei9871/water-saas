@@ -189,6 +189,25 @@ export class MeterInstallationService {
       });
     }
 
+    // 1112v8-S8：报装来源户装表日期不得早于报装申请日期（迁移补录户无申请不受限）。
+    {
+      const acct = await tx.waterAccount.findFirst({
+        where: { tenantId: ctx.tenantId, id: body.waterAccountId },
+        select: { sourceApplyNo: true },
+      });
+      if (acct?.sourceApplyNo && body.installedAt) {
+        const src = await tx.installApplication.findFirst({
+          where: { tenantId: ctx.tenantId, applyNo: acct.sourceApplyNo },
+          select: { createdAt: true },
+        });
+        if (src && new Date(body.installedAt) < src.createdAt) {
+          throw new BadRequestException({
+            code: 'INSTALLED_BEFORE_APPLY',
+            message: '装表日期不得早于报装申请日期',
+          });
+        }
+      }
+    }
     const installation = await tx.meterInstallation.create({
       data: {
         tenantId: ctx.tenantId,
