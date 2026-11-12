@@ -75,6 +75,7 @@ type TabKey =
   | 'bills'
   | 'payments'
   | 'prepay'
+  | 'contracts'
   | 'events';
 
 interface TabState {
@@ -90,6 +91,7 @@ interface TabState {
   prepayBalance?: PrepaymentBalance;
   prepayEntries?: PrepaymentEntriesPage['items'];
   events?: AccountEvent[];
+  contracts?: { id: string; contractType: string; contractNo: string; applyNo: string | null }[];
 }
 
 /**
@@ -205,6 +207,11 @@ export function WaterAccount360({
               prepayBalance: balance.data as PrepaymentBalance,
               prepayEntries: entries,
             }));
+            break;
+          }
+          case 'contracts': {
+            const cs = (await api.get('/contracts', { params: { waterAccountId: id, take: 50 } })).data;
+            setData((s2) => ({ ...s2, contracts: Array.isArray(cs) ? cs : [] }));
             break;
           }
           case 'events': {
@@ -722,6 +729,21 @@ export function WaterAccount360({
           },
         ]
       : []),
+    {
+      key: 'contracts',
+      label: '合同',
+      children: (
+        <Table
+          rowKey="id" size="small" dataSource={data.contracts ?? []} loading={loading.contracts}
+          pagination={false}
+          columns={[
+            { title: '类型', dataIndex: 'contractType', width: 110, render: (v: string) => <Tag color={v === 'CONSTRUCTION' ? 'geekblue' : 'green'}>{v === 'CONSTRUCTION' ? '安装施工合同' : '供用水合同'}</Tag> },
+            { title: '合同编号', dataIndex: 'contractNo' },
+            { title: '申请号', dataIndex: 'applyNo', render: (v: string | null) => v ?? '—' },
+          ]}
+        />
+      ),
+    },
     {
       key: 'events',
       label: '事件',

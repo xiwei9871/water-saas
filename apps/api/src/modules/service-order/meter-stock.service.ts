@@ -44,6 +44,7 @@ const OUT_TYPES = new Set<MovementType>(['ISSUE_OUT', 'SCRAP_OUT', 'TRANSFER']);
  * 租户已建库房时，未入库的表禁止安装（METER_NOT_IN_STOCK）。
  */
 @Injectable()
+const MOV_TYPE_NAME: Record<string,string> = { ISSUE_OUT:'出库', INSTALL:'装表', REMOVE:'拆表', RETURN:'退回', CHECK_IN:'入库', PURCHASE:'采购入库', RETURN_STOCK:'退库', OTHER:'其他' };
 export class MeterStockService {
   constructor(private readonly prisma: TenantPrismaService) {}
 
@@ -564,7 +565,7 @@ export class MeterStockService {
         tx.meterStockMovement.findMany({
           where: { tenantId: ctx.tenantId, meterId },
           orderBy: { movedAt: 'asc' },
-        }),
+        }).then((rows: { movementType: string }[]) => rows.map((r) => ({ ...r, movementTypeName: MOV_TYPE_NAME[r.movementType] ?? r.movementType }))),
         tx.meterInstallation.findMany({
           where: { tenantId: ctx.tenantId, meterId },
           select: {

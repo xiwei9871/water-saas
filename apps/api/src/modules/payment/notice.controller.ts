@@ -168,17 +168,28 @@ export class NoticeController {
    */
   @Post('batch')
   @Permissions('payment:write')
-  batch(@Body() body: { waterAccountIds?: unknown }) {
+  batch(@Body() body: { waterAccountIds?: unknown; selectAll?: boolean }) {
     const ctx = currentTenant();
     const ids = Array.isArray(body?.waterAccountIds)
       ? body.waterAccountIds.filter((x): x is string => typeof x === 'string')
       : [];
-    if (!ids.length || ids.length > 200) {
-      throw new BadRequestException({ code: 'BATCH_ACCOUNTS_REQUIRED' });
-    }
     return this.prisma.runAsTenant(ctx.tenantId, async (tx) => {
+      // 1112v8-N1：selectAll 由服务端按欠费户全量展开（避免上千 id 请求体）。
+      let effIds = ids;
+      if (body?.selectAll === true) {
+        const rows = await tx.waterAccount.findMany({
+          where: { tenantId: ctx.tenantId },
+          select: { id: true },
+          take: 500,
+        });
+        effIds = rows.map((r) => r.id);
+      }
+      if (!effIds.length) {
+        throw new BadRequestException({ code: 'BATCH_ACCOUNTS_REQUIRED' });
+      }
+      const finalIds = effIds.slice(0, 500);
       const results: { waterAccountId: string; ok: boolean; noticeNo?: string; error?: string }[] = [];
-      for (const raw of ids) {
+      for (const raw of finalIds) {
         try {
           const waId = assertUuid(raw, 'waterAccountId');
           const notice = await this.createNoticeTx(tx, ctx, waId);

@@ -1,5 +1,5 @@
 import { PrinterOutlined, ReloadOutlined } from '@ant-design/icons';
-import { App as AntdApp, Button, Card, Input, InputNumber, Modal, Space, Tabs, Typography } from 'antd';
+import { App as AntdApp, Button, Card, Input, InputNumber, Modal, Space, Tabs, Typography , Tag} from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiErrorText } from '../../api/client';
@@ -66,6 +66,7 @@ export default function CollectionNotices() {
   const [minDays, setMinDays] = useState<number | null>(null);
   const [arrearsQ, setArrearsQ] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
+  const [selectAll, setSelectAll] = useState(false);
   const [batching, setBatching] = useState(false);
   // A3 任务三态分组：按通知单 id（后端经 context.noticeId 回联催缴任务）。
   const taskGroup = useTaskGroup<Notice>('collectionNotice', rows, (r) => r.id);
@@ -121,7 +122,7 @@ export default function CollectionNotices() {
     try {
       const res = await api.post<{ created: number; results: { ok: boolean; error?: string }[] }>(
         '/payments/collection-notices/batch',
-        { waterAccountIds: selected },
+        selectAll ? { selectAll: true } : { waterAccountIds: selected },
       );
       const failed = res.data.results.filter((r) => !r.ok).length;
       message.success(`已生成 ${res.data.created} 份催缴通知单${failed ? `，${failed} 户失败` : ''}`);
@@ -254,7 +255,7 @@ export default function CollectionNotices() {
                     <Button icon={<ReloadOutlined />} onClick={() => void loadArrears()} />
                     <Button
                       type="primary"
-                      disabled={!selected.length}
+                      disabled={!selectAll && !selected.length}
                       loading={batching}
                       onClick={() => void batchCreate()}
                     >
@@ -282,6 +283,9 @@ export default function CollectionNotices() {
               children: (
                 <>
                   <Space style={{ marginBottom: 12 }}>
+                    <Button onClick={() => { setSelectAll(true); setSelected(arrears.map((a: { waterAccountId: string }) => a.waterAccountId)); }} disabled={selectAll}>全选</Button>
+                    <Button onClick={() => { setSelectAll(false); setSelected([]); }} disabled={!selectAll && !selected.length}>取消全选</Button>
+                    {selectAll && <Tag color="blue">已选全部 {arrears.length} 户</Tag>}
                     <WaterAccountSearchSelect
                       value={accountId}
                       onChange={setAccountId}

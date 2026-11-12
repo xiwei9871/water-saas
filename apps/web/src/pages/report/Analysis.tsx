@@ -148,8 +148,8 @@ function OpsDaily({ data, queried }: { data: Row | null; queried: boolean }) {
     <>
       {empty && <Descriptions column={1}><Descriptions.Item>当日无业务数据</Descriptions.Item></Descriptions>}
       <Space size="large" wrap>
-        <Stat title="当日应收(元)">{yuan(t.billedAmount)}</Stat>
-        <Stat title="当日售水量(m³)">{qty(t.soldQty)}</Stat>
+        <Stat title="本月累计应收(元)">{yuan(t.billedAmount)}</Stat>
+        <Stat title="本月累计售水量(m³)">{qty(t.soldQty)}</Stat>
         <Stat title="当日实收(元)">{yuan(t.collected)}</Stat>
         <Stat title="其中当期实收">{yuan(t.currentCollected)}</Stat>
         <Stat title="其中陈欠回收">{yuan(t.arrearsCollected)}</Stat>
