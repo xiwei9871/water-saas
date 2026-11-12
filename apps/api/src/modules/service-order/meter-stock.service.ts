@@ -565,7 +565,7 @@ export class MeterStockService {
         tx.meterStockMovement.findMany({
           where: { tenantId: ctx.tenantId, meterId },
           orderBy: { movedAt: 'asc' },
-        }).then((rows) => rows.map((r) => ({ ...(r as Record<string, unknown>), movementTypeName: MOV_TYPE_NAME[r.movementType] ?? r.movementType }))),
+        }),
         tx.meterInstallation.findMany({
           where: { tenantId: ctx.tenantId, meterId },
           select: {
@@ -594,6 +594,7 @@ export class MeterStockService {
         meter,
         movements: movements.map((m) => ({
           ...m,
+          movementTypeName: MOV_TYPE_NAME[m.movementType] ?? m.movementType,
           warehouse: m.warehouseId ? (whMap.get(m.warehouseId) ?? null) : null,
         })),
         installations,
